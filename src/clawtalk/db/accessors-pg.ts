@@ -75,6 +75,33 @@ export interface TalkListPage {
   offset: number;
 }
 
+// Note vs sqlite: `llm_policy` is dropped here — talk_llm_policies is
+// chassis-era and gone from the postgres schema. Callers that used to
+// surface a per-talk LLM policy string in the sidebar list need to
+// move that into a registered_agents/agent-config lookup at the row
+// level instead.
+export interface TalkSidebarTalkRecord {
+  id: string;
+  owner_id: string;
+  folder_id: string | null;
+  sort_order: number;
+  topic_title: string | null;
+  status: 'active' | 'paused' | 'archived';
+  version: number;
+  created_at: string;
+  updated_at: string;
+  access_role: TalkAccessLevel;
+  last_message_at: string | null;
+  message_count: number;
+  has_active_run: boolean;
+}
+
+export interface TalkSidebarTreeRecord {
+  folders: TalkFolderRecord[];
+  rootTalks: TalkSidebarTalkRecord[];
+  talksByFolderId: Record<string, TalkSidebarTalkRecord[]>;
+}
+
 export function normalizeTalkListPage(input?: {
   limit?: number;
   offset?: number;
@@ -253,23 +280,99 @@ export async function patchTalkMetadata(input: {
   ownerId: string;
   talkId: string;
   title?: string | null;
+  folderId?: string | null;
   orchestrationMode?: 'ordered' | 'panel';
 }): Promise<TalkRecord | undefined> {
-  // folderId moves deferred to the sidebar slice — that path touches
-  // multiple tables atomically and shares helpers with reorderTalkSidebarItem.
   const db = getDbPg();
-  const rows = await db<TalkRecord[]>`
-    update public.talks
-    set topic_title = case when ${input.title !== undefined}::boolean
-                        then ${input.title ?? null} else topic_title end,
-        orchestration_mode = coalesce(${input.orchestrationMode ?? null},
-                                      orchestration_mode),
-        updated_at = now(),
-        version = version + 1
-    where id = ${input.talkId}::uuid
-    returning ${db.unsafe(TALK_COLUMNS)}
-  `;
-  return rows[0];
+  // Pre-fetch the talk to (a) detect a destination-folder change vs the
+  // current parent and (b) return undefined for RLS-hidden rows before
+  // doing any work.
+  const existing = await getTalkById(input.talkId);
+  if (!existing) return undefined;
+
+  // Validate destination folder belongs to the caller (RLS-scoped read).
+  if (
+    input.folderId !== undefined &&
+    input.folderId !== null &&
+    input.folderId !== existing.folder_id
+  ) {
+    const folder = await getTalkFolderById(input.folderId);
+    if (!folder) return undefined;
+  }
+
+  // Title / orchestration update is unconditional even on folder moves
+  // so the version bump always reflects "something changed" in one place.
+  if (input.title !== undefined || input.orchestrationMode !== undefined) {
+    await db`
+      update public.talks
+      set topic_title = case when ${input.title !== undefined}::boolean
+                          then ${input.title ?? null} else topic_title end,
+          orchestration_mode = coalesce(${input.orchestrationMode ?? null},
+                                        orchestration_mode),
+          updated_at = now(),
+          version = version + 1
+      where id = ${input.talkId}::uuid
+    `;
+  }
+
+  if (
+    input.folderId !== undefined &&
+    input.folderId !== existing.folder_id
+  ) {
+    const sourceFolderId = existing.folder_id;
+    // Compact the source list so deleted-position siblings don't keep
+    // their gap.
+    if (sourceFolderId === null) {
+      const rootItems = (await listOwnedRootSidebarItems()).filter(
+        (item) => !(item.type === 'talk' && item.id === input.talkId),
+      );
+      await writeRootSidebarOrder(
+        rootItems.map((item) => ({ type: item.type, id: item.id })),
+      );
+    } else {
+      const folderTalkIds = (
+        await listOwnedFolderTalkIds(sourceFolderId)
+      ).filter((id) => id !== input.talkId);
+      await writeFolderTalkOrder(sourceFolderId, folderTalkIds);
+    }
+
+    if (input.folderId === null) {
+      // Move to top-level: append to end. Mirrors the sqlite
+      // appendTalksToTopLevel helper inline.
+      const maxRootTalk = await db<{ value: number }[]>`
+        select coalesce(max(sort_order), -1)::int as value
+        from public.talks
+        where folder_id is null
+      `;
+      const maxRootFolder = await db<{ value: number }[]>`
+        select coalesce(max(sort_order), -1)::int as value
+        from public.talk_folders
+      `;
+      const nextSort =
+        Math.max(maxRootTalk[0]?.value ?? -1, maxRootFolder[0]?.value ?? -1) +
+        1;
+      await db`
+        update public.talks
+        set folder_id = null,
+            sort_order = ${nextSort},
+            updated_at = now(),
+            version = version + 1
+        where id = ${input.talkId}::uuid
+      `;
+    } else {
+      const folderTalkIds = await listOwnedFolderTalkIds(input.folderId);
+      await db`
+        update public.talks
+        set folder_id = ${input.folderId}::uuid,
+            sort_order = ${folderTalkIds.length},
+            updated_at = now(),
+            version = version + 1
+        where id = ${input.talkId}::uuid
+      `;
+    }
+  }
+
+  return await getTalkById(input.talkId);
 }
 
 export async function updateTalkProjectPath(input: {
@@ -292,12 +395,27 @@ export async function deleteTalkForOwner(input: {
   talkId: string;
 }): Promise<boolean> {
   const db = getDbPg();
+  // Capture the parent folder before delete so we know which sibling
+  // list to compact afterwards. RLS scopes the SELECT to the caller.
+  const existing = await getTalkById(input.talkId);
+  if (!existing) return false;
+  const oldFolderId = existing.folder_id;
   const rows = await db<{ id: string }[]>`
     delete from public.talks
     where id = ${input.talkId}::uuid
     returning id
   `;
-  return rows.length > 0;
+  if (rows.length === 0) return false;
+  if (oldFolderId === null) {
+    const remaining = await listOwnedRootSidebarItems();
+    await writeRootSidebarOrder(
+      remaining.map((item) => ({ type: item.type, id: item.id })),
+    );
+  } else {
+    const remaining = await listOwnedFolderTalkIds(oldFolderId);
+    await writeFolderTalkOrder(oldFolderId, remaining);
+  }
+  return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -400,6 +518,310 @@ export async function deleteTalkFolderAndMoveTalksToTopLevel(input: {
     returning id
   `;
   return result.length > 0;
+}
+
+// ---------------------------------------------------------------------------
+// Sidebar tree + reorder helpers
+//
+// All of the sidebar surface runs inside withUserContext, so RLS pins
+// every read and write to the caller. The sqlite-era helpers took an
+// ownerId param as an authorization assertion; that's dropped here
+// since RLS makes it both redundant (USING-clause filter) and
+// uneforceable (WITH CHECK matches the user-context auth.uid()).
+// ---------------------------------------------------------------------------
+
+async function getTalkFolderById(
+  folderId: string,
+): Promise<TalkFolderRecord | undefined> {
+  const db = getDbPg();
+  const rows = await db<TalkFolderRecord[]>`
+    select ${db.unsafe(TALK_FOLDER_COLUMNS)}
+    from public.talk_folders
+    where id = ${folderId}::uuid
+    limit 1
+  `;
+  return rows[0];
+}
+
+async function listOwnedRootSidebarItems(): Promise<
+  Array<{ type: 'talk' | 'folder'; id: string; sort_order: number }>
+> {
+  const db = getDbPg();
+  return await db<
+    Array<{ type: 'talk' | 'folder'; id: string; sort_order: number }>
+  >`
+    select 'talk'::text as type, id, sort_order
+    from public.talks
+    where folder_id is null
+    union all
+    select 'folder'::text as type, id, sort_order
+    from public.talk_folders
+    order by sort_order asc, id asc
+  `;
+}
+
+async function listOwnedFolderTalkIds(folderId: string): Promise<string[]> {
+  const db = getDbPg();
+  const rows = await db<{ id: string }[]>`
+    select id from public.talks
+    where folder_id = ${folderId}::uuid
+    order by sort_order asc, created_at asc, id asc
+  `;
+  return rows.map((row) => row.id);
+}
+
+async function writeRootSidebarOrder(
+  items: Array<{ type: 'talk' | 'folder'; id: string }>,
+): Promise<void> {
+  const db = getDbPg();
+  for (let index = 0; index < items.length; index += 1) {
+    const item = items[index];
+    if (item.type === 'talk') {
+      await db`
+        update public.talks
+        set sort_order = ${index}
+        where id = ${item.id}::uuid and folder_id is null
+      `;
+    } else {
+      await db`
+        update public.talk_folders
+        set sort_order = ${index}
+        where id = ${item.id}::uuid
+      `;
+    }
+  }
+}
+
+async function writeFolderTalkOrder(
+  folderId: string,
+  talkIds: string[],
+): Promise<void> {
+  const db = getDbPg();
+  for (let index = 0; index < talkIds.length; index += 1) {
+    await db`
+      update public.talks
+      set sort_order = ${index}
+      where id = ${talkIds[index]}::uuid and folder_id = ${folderId}::uuid
+    `;
+  }
+}
+
+export async function listTalkSidebarTreeForUser(input?: {
+  status?: 'active' | 'paused' | 'archived';
+}): Promise<TalkSidebarTreeRecord> {
+  const folders = await listTalkFoldersForOwner();
+  // Sidebar trees stay intentionally small in v1; this ceiling avoids
+  // pulling an unbounded root list while still covering normal usage.
+  const rawTalks = await listTalksForUser({
+    limit: 1000,
+    offset: 0,
+    status: input?.status ?? 'active',
+  });
+  const talkIds = rawTalks.map((talk) => talk.id);
+
+  const metricsByTalkId = new Map<
+    string,
+    {
+      lastMessageAt: string | null;
+      messageCount: number;
+      hasActiveRun: boolean;
+    }
+  >();
+
+  if (talkIds.length > 0) {
+    const db = getDbPg();
+    const messageRows = await db<
+      Array<{
+        talk_id: string;
+        message_count: number;
+        last_message_at: string | null;
+      }>
+    >`
+      select talk_id, count(*)::int as message_count,
+             max(created_at) as last_message_at
+      from public.talk_messages
+      where talk_id in ${db(talkIds)}
+      group by talk_id
+    `;
+    for (const row of messageRows) {
+      metricsByTalkId.set(row.talk_id, {
+        lastMessageAt: row.last_message_at,
+        messageCount: row.message_count,
+        hasActiveRun: false,
+      });
+    }
+    const runRows = await db<
+      Array<{ talk_id: string; active_run_count: number }>
+    >`
+      select talk_id, count(*)::int as active_run_count
+      from public.talk_runs
+      where talk_id in ${db(talkIds)}
+        and status in ('queued', 'running', 'awaiting_confirmation')
+      group by talk_id
+    `;
+    for (const row of runRows) {
+      const current = metricsByTalkId.get(row.talk_id) ?? {
+        lastMessageAt: null,
+        messageCount: 0,
+        hasActiveRun: false,
+      };
+      metricsByTalkId.set(row.talk_id, {
+        ...current,
+        hasActiveRun: row.active_run_count > 0,
+      });
+    }
+  }
+
+  const talks: TalkSidebarTalkRecord[] = rawTalks.map((talk) => ({
+    id: talk.id,
+    owner_id: talk.owner_id,
+    folder_id: talk.folder_id,
+    sort_order: talk.sort_order,
+    topic_title: talk.topic_title,
+    status: talk.status,
+    version: talk.version,
+    created_at: talk.created_at,
+    updated_at: talk.updated_at,
+    access_role: talk.access_role,
+    last_message_at: metricsByTalkId.get(talk.id)?.lastMessageAt ?? null,
+    message_count: metricsByTalkId.get(talk.id)?.messageCount ?? 0,
+    has_active_run: metricsByTalkId.get(talk.id)?.hasActiveRun ?? false,
+  }));
+  const rootTalks = talks
+    .filter((talk) => talk.folder_id === null)
+    .sort(
+      (a, b) =>
+        a.sort_order - b.sort_order || a.created_at.localeCompare(b.created_at),
+    );
+  const talksByFolderId = folders.reduce<
+    Record<string, TalkSidebarTalkRecord[]>
+  >((acc, folder) => {
+    acc[folder.id] = talks
+      .filter((talk) => talk.folder_id === folder.id)
+      .sort(
+        (a, b) =>
+          a.sort_order - b.sort_order ||
+          a.created_at.localeCompare(b.created_at),
+      );
+    return acc;
+  }, {});
+  return { folders, rootTalks, talksByFolderId };
+}
+
+export async function reorderTalkSidebarItem(input: {
+  itemType: 'talk' | 'folder';
+  itemId: string;
+  destinationFolderId: string | null;
+  destinationIndex: number;
+}): Promise<boolean> {
+  // Folders only live at root — refuse a folder→folder move.
+  if (input.itemType === 'folder' && input.destinationFolderId !== null) {
+    return false;
+  }
+
+  const talk =
+    input.itemType === 'talk' ? await getTalkById(input.itemId) : undefined;
+  const folder =
+    input.itemType === 'folder'
+      ? await getTalkFolderById(input.itemId)
+      : undefined;
+  if (input.itemType === 'talk') {
+    if (!talk) return false;
+    if (
+      input.destinationFolderId !== null &&
+      !(await getTalkFolderById(input.destinationFolderId))
+    ) {
+      return false;
+    }
+  } else if (!folder) {
+    return false;
+  }
+
+  // Folder reorder: only touches the root list.
+  if (input.itemType === 'folder') {
+    const rootItems = (await listOwnedRootSidebarItems())
+      .filter((item) => !(item.type === 'folder' && item.id === input.itemId))
+      .map((item) => ({ type: item.type, id: item.id }));
+    const index = Math.max(
+      0,
+      Math.min(input.destinationIndex, rootItems.length),
+    );
+    rootItems.splice(index, 0, { type: 'folder', id: input.itemId });
+    await writeRootSidebarOrder(rootItems);
+    return true;
+  }
+
+  // Talk move — same-parent reorder is the cheap path.
+  const sourceFolderId = talk!.folder_id;
+  if (sourceFolderId === input.destinationFolderId) {
+    if (sourceFolderId === null) {
+      const rootItems = (await listOwnedRootSidebarItems())
+        .filter((item) => !(item.type === 'talk' && item.id === input.itemId))
+        .map((item) => ({ type: item.type, id: item.id }));
+      const index = Math.max(
+        0,
+        Math.min(input.destinationIndex, rootItems.length),
+      );
+      rootItems.splice(index, 0, { type: 'talk', id: input.itemId });
+      await writeRootSidebarOrder(rootItems);
+    } else {
+      const talkIds = (await listOwnedFolderTalkIds(sourceFolderId)).filter(
+        (id) => id !== input.itemId,
+      );
+      const index = Math.max(0, Math.min(input.destinationIndex, talkIds.length));
+      talkIds.splice(index, 0, input.itemId);
+      await writeFolderTalkOrder(sourceFolderId, talkIds);
+    }
+    return true;
+  }
+
+  // Cross-parent move: compact the source list first, then insert into
+  // the destination at the requested index.
+  if (sourceFolderId === null) {
+    const rootItems = (await listOwnedRootSidebarItems())
+      .filter((item) => !(item.type === 'talk' && item.id === input.itemId))
+      .map((item) => ({ type: item.type, id: item.id }));
+    await writeRootSidebarOrder(rootItems);
+  } else {
+    const sourceTalkIds = (
+      await listOwnedFolderTalkIds(sourceFolderId)
+    ).filter((id) => id !== input.itemId);
+    await writeFolderTalkOrder(sourceFolderId, sourceTalkIds);
+  }
+
+  const db = getDbPg();
+  if (input.destinationFolderId === null) {
+    const rootItems = (await listOwnedRootSidebarItems()).map((item) => ({
+      type: item.type,
+      id: item.id,
+    }));
+    const index = Math.max(
+      0,
+      Math.min(input.destinationIndex, rootItems.length),
+    );
+    rootItems.splice(index, 0, { type: 'talk', id: input.itemId });
+    await db`
+      update public.talks
+      set folder_id = null,
+          updated_at = now(),
+          version = version + 1
+      where id = ${input.itemId}::uuid
+    `;
+    await writeRootSidebarOrder(rootItems);
+  } else {
+    const talkIds = await listOwnedFolderTalkIds(input.destinationFolderId);
+    const index = Math.max(0, Math.min(input.destinationIndex, talkIds.length));
+    talkIds.splice(index, 0, input.itemId);
+    await db`
+      update public.talks
+      set folder_id = ${input.destinationFolderId}::uuid,
+          updated_at = now(),
+          version = version + 1
+      where id = ${input.itemId}::uuid
+    `;
+    await writeFolderTalkOrder(input.destinationFolderId, talkIds);
+  }
+  return true;
 }
 
 // ---------------------------------------------------------------------------

@@ -53,6 +53,7 @@ import {
   listTalkFoldersForOwner,
   listTalkMessages,
   listTalkRunsForTalk,
+  listTalkSidebarTreeForUser,
   listTalksForUser,
   listTalkThreads,
   markTalkRunStatus,
@@ -60,6 +61,7 @@ import {
   pruneEventOutbox,
   pruneIdempotencyCache,
   renameTalkFolder,
+  reorderTalkSidebarItem,
   resolveThreadIdForTalk,
   saveIdempotencyCache,
   searchTalkMessages,
@@ -1109,6 +1111,146 @@ describe('accessors-pg slice 1: talks/folders/members/threads', () => {
     await withUserContext(USER_A_ID, async () => {
       const final = await listTalkRunsForTalk(talkId);
       expect(final.every((r) => r.status === 'cancelled')).toBe(true);
+    });
+  });
+
+  // ── Sidebar tree + reorder ─────────────────────────────────────────
+
+  it('listTalkSidebarTreeForUser: groups talks under folders + emits per-talk metrics', async () => {
+    const AGENT_1 = '0c555555-aaaa-9999-9999-000000000301';
+    await withUserContext(USER_A_ID, async () => {
+      const folder = await createTalkFolder({
+        ownerId: USER_A_ID,
+        title: 'Pinned',
+      });
+      const talkInFolder = await createTalk({
+        ownerId: USER_A_ID,
+        topicTitle: 'In Folder',
+      });
+      const rootTalk = await createTalk({
+        ownerId: USER_A_ID,
+        topicTitle: 'Root',
+      });
+      // Park the folder-resident talk inside the folder.
+      const db = getDbPg();
+      await db`
+        update public.talks set folder_id = ${folder.id}::uuid
+        where id = ${talkInFolder.id}::uuid
+      `;
+      // Seed metrics: 2 messages on rootTalk, an enqueued (queued) run.
+      const rootTid = await getOrCreateDefaultThread({
+        talkId: rootTalk.id,
+        ownerId: USER_A_ID,
+      });
+      await createTalkMessage({
+        ownerId: USER_A_ID,
+        talkId: rootTalk.id,
+        threadId: rootTid,
+        role: 'user',
+        content: 'one',
+      });
+      await createTalkMessage({
+        ownerId: USER_A_ID,
+        talkId: rootTalk.id,
+        threadId: rootTid,
+        role: 'assistant',
+        content: 'two',
+      });
+      await enqueueTalkTurnAtomic({
+        ownerId: USER_A_ID,
+        talkId: rootTalk.id,
+        threadId: rootTid,
+        userId: USER_A_ID,
+        content: 'live?',
+        targetAgentIds: [AGENT_1],
+      });
+
+      const tree = await listTalkSidebarTreeForUser();
+      expect(tree.folders).toHaveLength(1);
+      expect(tree.folders[0].id).toBe(folder.id);
+      // Root list excludes folder-resident talks.
+      expect(tree.rootTalks.map((t) => t.id)).toContain(rootTalk.id);
+      expect(tree.rootTalks.map((t) => t.id)).not.toContain(talkInFolder.id);
+      // Folder map includes the folder-resident talk.
+      expect(tree.talksByFolderId[folder.id].map((t) => t.id)).toContain(
+        talkInFolder.id,
+      );
+
+      const rootTalkEntry = tree.rootTalks.find((t) => t.id === rootTalk.id)!;
+      // enqueueTalkTurnAtomic adds a 3rd user message → message_count = 3.
+      expect(rootTalkEntry.message_count).toBe(3);
+      expect(rootTalkEntry.has_active_run).toBe(true);
+      expect(rootTalkEntry.last_message_at).toBeTruthy();
+    });
+  });
+
+  it('reorderTalkSidebarItem: moves a root talk into a folder + compacts', async () => {
+    await withUserContext(USER_A_ID, async () => {
+      const folder = await createTalkFolder({
+        ownerId: USER_A_ID,
+        title: 'Bucket',
+      });
+      const tA = await createTalk({ ownerId: USER_A_ID, topicTitle: 'A' });
+      const tB = await createTalk({ ownerId: USER_A_ID, topicTitle: 'B' });
+      const tC = await createTalk({ ownerId: USER_A_ID, topicTitle: 'C' });
+
+      // Move tB into the folder at position 0.
+      const ok = await reorderTalkSidebarItem({
+        itemType: 'talk',
+        itemId: tB.id,
+        destinationFolderId: folder.id,
+        destinationIndex: 0,
+      });
+      expect(ok).toBe(true);
+
+      const tree = await listTalkSidebarTreeForUser();
+      // tB is now in the folder.
+      expect(tree.talksByFolderId[folder.id].map((t) => t.id)).toEqual([tB.id]);
+      // Root list has only tA and tC (and the folder).
+      const rootTalkIds = tree.rootTalks.map((t) => t.id);
+      expect(rootTalkIds).toContain(tA.id);
+      expect(rootTalkIds).toContain(tC.id);
+      expect(rootTalkIds).not.toContain(tB.id);
+    });
+  });
+
+  it('reorderTalkSidebarItem: rejects folder→folder destination', async () => {
+    await withUserContext(USER_A_ID, async () => {
+      const f1 = await createTalkFolder({ ownerId: USER_A_ID, title: 'F1' });
+      const f2 = await createTalkFolder({ ownerId: USER_A_ID, title: 'F2' });
+      const ok = await reorderTalkSidebarItem({
+        itemType: 'folder',
+        itemId: f1.id,
+        destinationFolderId: f2.id,
+        destinationIndex: 0,
+      });
+      expect(ok).toBe(false);
+    });
+  });
+
+  it('patchTalkMetadata folderId: moves between folders + updates sort_order', async () => {
+    await withUserContext(USER_A_ID, async () => {
+      const folder = await createTalkFolder({
+        ownerId: USER_A_ID,
+        title: 'Box',
+      });
+      const t = await createTalk({ ownerId: USER_A_ID, topicTitle: 'Solo' });
+
+      const moved = await patchTalkMetadata({
+        ownerId: USER_A_ID,
+        talkId: t.id,
+        folderId: folder.id,
+      });
+      expect(moved?.folder_id).toBe(folder.id);
+      expect(moved?.version).toBeGreaterThan(t.version);
+
+      // Move back to top-level.
+      const movedBack = await patchTalkMetadata({
+        ownerId: USER_A_ID,
+        talkId: t.id,
+        folderId: null,
+      });
+      expect(movedBack?.folder_id).toBeNull();
     });
   });
 
