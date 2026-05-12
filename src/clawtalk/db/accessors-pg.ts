@@ -26,6 +26,7 @@
 //   - talk_threads.owner_id is required (denormalized from talks for RLS).
 
 import { getDbPg } from '../../db-pg.js';
+import { notifyOutboxEvent } from '../talks/outbox-notifier.js';
 import {
   normalizeStoredThreadTitle,
   validateEditableThreadTitle,
@@ -971,9 +972,7 @@ export async function getRunningTalkRun(
   return rows[0] ?? null;
 }
 
-export async function listQueuedTalkRuns(
-  limit = 50,
-): Promise<TalkRunRecord[]> {
+export async function listQueuedTalkRuns(limit = 50): Promise<TalkRunRecord[]> {
   const db = getDbPg();
   return await db<TalkRunRecord[]>`
     select ${db.unsafe(TALK_RUN_COLUMNS)}
@@ -1194,4 +1193,332 @@ export function getTalkRunTimeoutPhase(
   }
   const meta = run.metadata_json ?? {};
   return typeof meta.timeoutPhase === 'string' ? meta.timeoutPhase : null;
+}
+
+// ---------------------------------------------------------------------------
+// Event outbox
+//
+// Migration 0003 grants INSERT + SELECT on event_outbox to the
+// authenticated role. The table itself has no RLS — topic-level
+// authorization happens at the route layer (the SSE subscribe handler
+// verifies the caller can read talk:${talkId}). Payload is jsonb in pg,
+// so accessor accepts/returns objects directly.
+// ---------------------------------------------------------------------------
+
+export interface OutboxEvent {
+  event_id: number;
+  topic: string;
+  event_type: string;
+  payload: Record<string, unknown>;
+  created_at: string;
+}
+
+export async function appendOutboxEvent(input: {
+  topic: string;
+  eventType: string;
+  payload: Record<string, unknown>;
+}): Promise<number> {
+  const db = getDbPg();
+  // event_id is bigserial → postgres.js serializes as string by default
+  // (to avoid JS number-precision loss on >2^53 values). Cast to int so
+  // we get a JS number back. ClawTalk's outbox throughput is nowhere
+  // close to int range; revisit if that changes.
+  const rows = await db<{ event_id: number }[]>`
+    insert into public.event_outbox (topic, event_type, payload)
+    values (${input.topic}, ${input.eventType},
+            ${db.json(input.payload as never)})
+    returning event_id::int as event_id
+  `;
+  const eventId = rows[0].event_id;
+  // Process-local wakeup for in-process SSE consumers. Cloudflare Workers
+  // doesn't share processes across requests, so this is a no-op there;
+  // the Workers cutover (task #18) will replace this with a polling-based
+  // streaming endpoint backed by getOutboxEventsForTopics.
+  queueMicrotask(() => {
+    notifyOutboxEvent({ topic: input.topic, eventId });
+  });
+  return eventId;
+}
+
+export async function getOutboxEventsForTopics(
+  topics: string[],
+  afterEventId: number,
+  limit = 100,
+): Promise<OutboxEvent[]> {
+  if (topics.length === 0) return [];
+  const db = getDbPg();
+  return await db<OutboxEvent[]>`
+    select event_id::int as event_id, topic, event_type, payload, created_at
+    from public.event_outbox
+    where topic in ${db(topics)} and event_id > ${afterEventId}
+    order by event_id asc
+    limit ${limit}
+  `;
+}
+
+export async function getOutboxMinEventIdForTopics(
+  topics: string[],
+): Promise<number | null> {
+  if (topics.length === 0) return null;
+  const db = getDbPg();
+  const rows = await db<{ min_event_id: number | null }[]>`
+    select min(event_id)::int as min_event_id
+    from public.event_outbox
+    where topic in ${db(topics)}
+  `;
+  return rows[0]?.min_event_id ?? null;
+}
+
+export async function getOutboxMaxEventIdForTopics(
+  topics: string[],
+): Promise<number | null> {
+  if (topics.length === 0) return null;
+  const db = getDbPg();
+  const rows = await db<{ max_event_id: number | null }[]>`
+    select max(event_id)::int as max_event_id
+    from public.event_outbox
+    where topic in ${db(topics)}
+  `;
+  return rows[0]?.max_event_id ?? null;
+}
+
+export async function pruneEventOutbox(input?: {
+  nowMs?: number;
+  retentionHours?: number;
+  keepRecentPerTopic?: number;
+}): Promise<number> {
+  const nowMs = input?.nowMs ?? Date.now();
+  const retentionMs = (input?.retentionHours ?? 72) * 60 * 60 * 1000;
+  const keepRecentPerTopic = input?.keepRecentPerTopic ?? 5000;
+  const cutoffIso = new Date(nowMs - retentionMs).toISOString();
+
+  // Per-topic window: delete events older than `cutoffIso` AND older
+  // than the Nth most recent event per topic (so we always keep the tail
+  // even for low-traffic topics). One DELETE per topic; postgres has no
+  // direct equivalent to per-group OFFSET so we run them serially.
+  const db = getDbPg();
+  const topics = await db<{ topic: string }[]>`
+    select distinct topic from public.event_outbox
+  `;
+  let totalDeleted = 0;
+  for (const { topic } of topics) {
+    const threshold = await db<{ event_id: number }[]>`
+      select event_id from public.event_outbox
+      where topic = ${topic}
+      order by event_id desc
+      limit 1 offset ${keepRecentPerTopic - 1}
+    `;
+    const result = threshold[0]
+      ? await db<{ event_id: number }[]>`
+          delete from public.event_outbox
+          where topic = ${topic}
+            and created_at < ${cutoffIso}::timestamptz
+            and event_id < ${threshold[0].event_id}
+          returning event_id
+        `
+      : await db<{ event_id: number }[]>`
+          delete from public.event_outbox
+          where topic = ${topic}
+            and created_at < ${cutoffIso}::timestamptz
+          returning event_id
+        `;
+    totalDeleted += result.length;
+  }
+  return totalDeleted;
+}
+
+// ---------------------------------------------------------------------------
+// Idempotency cache (per-user; RLS via migration 0003)
+// ---------------------------------------------------------------------------
+
+export interface IdempotencyCacheRecord {
+  idempotency_key: string;
+  user_id: string;
+  method: string;
+  path: string;
+  request_hash: string;
+  status_code: number;
+  response_body: string;
+  created_at: string;
+  expires_at: string;
+}
+
+export async function getIdempotencyCache(input: {
+  idempotencyKey: string;
+  method: string;
+  path: string;
+}): Promise<IdempotencyCacheRecord | undefined> {
+  // user_id = auth.uid() is enforced by RLS (migration 0003), no need to
+  // pass userId explicitly. Expired rows are filtered server-side.
+  const db = getDbPg();
+  const rows = await db<IdempotencyCacheRecord[]>`
+    select idempotency_key, user_id, method, path, request_hash,
+           status_code, response_body, created_at, expires_at
+    from public.idempotency_cache
+    where idempotency_key = ${input.idempotencyKey}
+      and method = ${input.method.toUpperCase()}
+      and path = ${input.path}
+      and expires_at > now()
+    limit 1
+  `;
+  return rows[0];
+}
+
+export async function saveIdempotencyCache(input: {
+  userId: string;
+  idempotencyKey: string;
+  method: string;
+  path: string;
+  requestHash: string;
+  statusCode: number;
+  responseBody: string;
+  expiresAt: string;
+}): Promise<void> {
+  const db = getDbPg();
+  await db`
+    insert into public.idempotency_cache
+      (idempotency_key, user_id, method, path, request_hash,
+       status_code, response_body, expires_at)
+    values
+      (${input.idempotencyKey}, ${input.userId}::uuid,
+       ${input.method.toUpperCase()}, ${input.path}, ${input.requestHash},
+       ${input.statusCode}, ${input.responseBody},
+       ${input.expiresAt}::timestamptz)
+    on conflict (idempotency_key, user_id, method, path) do update set
+      request_hash = excluded.request_hash,
+      status_code = excluded.status_code,
+      response_body = excluded.response_body,
+      created_at = now(),
+      expires_at = excluded.expires_at
+  `;
+}
+
+export async function pruneIdempotencyCache(nowMs?: number): Promise<number> {
+  const nowIso = new Date(nowMs ?? Date.now()).toISOString();
+  const db = getDbPg();
+  const rows = await db<{ idempotency_key: string }[]>`
+    delete from public.idempotency_cache
+    where expires_at <= ${nowIso}::timestamptz
+    returning idempotency_key
+  `;
+  return rows.length;
+}
+
+// ---------------------------------------------------------------------------
+// Simple atomic helpers (assistant + outbox events inside withUserContext tx)
+//
+// The caller's withUserContext already opens a postgres tx, so all of
+// these are atomic without a separate begin() — message insert + outbox
+// append either both commit or both roll back.
+// ---------------------------------------------------------------------------
+
+export async function appendAssistantMessageWithOutbox(input: {
+  ownerId: string;
+  talkId: string;
+  threadId: string;
+  runId: string;
+  messageId?: string;
+  content: string;
+  metadata?: Record<string, unknown> | null;
+  agentId?: string | null;
+  agentNickname?: string | null;
+  sequenceInRun?: number | null;
+  createdAt?: string;
+}): Promise<TalkMessageRecord> {
+  const createdAt = input.createdAt ?? new Date().toISOString();
+  const merged: Record<string, unknown> = { ...(input.metadata ?? {}) };
+  if (input.agentId && typeof merged.agentId !== 'string') {
+    merged.agentId = input.agentId;
+  }
+  if (input.agentNickname && typeof merged.agentNickname !== 'string') {
+    merged.agentNickname = input.agentNickname;
+  }
+  const message = await createTalkMessage({
+    ownerId: input.ownerId,
+    id: input.messageId,
+    talkId: input.talkId,
+    threadId: input.threadId,
+    role: 'assistant',
+    content: input.content,
+    createdBy: null,
+    runId: input.runId,
+    metadata: Object.keys(merged).length > 0 ? merged : null,
+    sequenceInRun: input.sequenceInRun ?? null,
+    createdAt,
+  });
+  await touchTalkUpdatedAt(input.talkId, createdAt);
+  await appendOutboxEvent({
+    topic: `talk:${input.talkId}`,
+    eventType: 'message_appended',
+    payload: {
+      talkId: input.talkId,
+      threadId: input.threadId,
+      messageId: message.id,
+      runId: input.runId,
+      role: 'assistant',
+      createdBy: null,
+      content: input.content,
+      createdAt,
+      agentId: input.agentId ?? null,
+      agentNickname: input.agentNickname ?? null,
+      metadata: Object.keys(merged).length > 0 ? merged : null,
+    },
+  });
+  return message;
+}
+
+export async function appendRuntimeTalkMessage(input: {
+  ownerId: string;
+  id?: string;
+  talkId: string;
+  threadId: string;
+  runId: string;
+  role: 'assistant' | 'tool';
+  content: string;
+  metadata?: Record<string, unknown> | null;
+  sequenceInRun: number;
+  createdAt?: string;
+}): Promise<TalkMessageRecord> {
+  const createdAt = input.createdAt ?? new Date().toISOString();
+  const meta = input.metadata ?? null;
+  const agentId =
+    meta && typeof meta.agentId === 'string' ? meta.agentId : null;
+  const agentNickname =
+    meta && typeof meta.agentNickname === 'string'
+      ? meta.agentNickname
+      : meta && typeof meta.agentName === 'string'
+        ? meta.agentName
+        : null;
+  const message = await createTalkMessage({
+    ownerId: input.ownerId,
+    id: input.id,
+    talkId: input.talkId,
+    threadId: input.threadId,
+    role: input.role,
+    content: input.content,
+    createdBy: null,
+    runId: input.runId,
+    metadata: meta,
+    sequenceInRun: input.sequenceInRun,
+    createdAt,
+  });
+  await touchTalkUpdatedAt(input.talkId, createdAt);
+  await appendOutboxEvent({
+    topic: `talk:${input.talkId}`,
+    eventType: 'message_appended',
+    payload: {
+      talkId: input.talkId,
+      threadId: input.threadId,
+      messageId: message.id,
+      runId: input.runId,
+      role: input.role,
+      createdBy: null,
+      content: input.content,
+      createdAt,
+      agentId,
+      agentNickname,
+      metadata: meta,
+    },
+  });
+  return message;
 }

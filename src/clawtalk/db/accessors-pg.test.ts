@@ -12,6 +12,9 @@ import {
   withUserContext,
 } from '../../db-pg.js';
 import {
+  appendAssistantMessageWithOutbox,
+  appendOutboxEvent,
+  appendRuntimeTalkMessage,
   canUserAccessTalk,
   canUserEditTalk,
   countRunningTalkRuns,
@@ -24,7 +27,11 @@ import {
   deleteTalkForOwner,
   deleteTalkMember,
   deleteTalkThread,
+  getIdempotencyCache,
   getOrCreateDefaultThread,
+  getOutboxEventsForTopics,
+  getOutboxMaxEventIdForTopics,
+  getOutboxMinEventIdForTopics,
   getRunningTalkRun,
   getTalkById,
   getTalkForUser,
@@ -43,8 +50,11 @@ import {
   listTalkThreads,
   markTalkRunStatus,
   patchTalkMetadata,
+  pruneEventOutbox,
+  pruneIdempotencyCache,
   renameTalkFolder,
   resolveThreadIdForTalk,
+  saveIdempotencyCache,
   searchTalkMessages,
   setTalkRunExecutorProfile,
   setTalkRunMetadata,
@@ -84,6 +94,14 @@ async function purge(): Promise<void> {
   await db`
     delete from public.talk_folders
     where owner_id in (${USER_A_ID}::uuid, ${USER_B_ID}::uuid)
+  `;
+  await db`
+    delete from public.idempotency_cache
+    where user_id in (${USER_A_ID}::uuid, ${USER_B_ID}::uuid)
+  `;
+  await db`
+    delete from public.event_outbox
+    where topic like 'test-acc-%' or topic like 'talk:%'
   `;
 }
 
@@ -500,9 +518,7 @@ describe('accessors-pg slice 1: talks/folders/members/threads', () => {
 
       expect((await listQueuedTalkRuns()).map((r) => r.id)).toContain(r1.id);
       expect(await countRunningTalkRuns()).toBe(0);
-      expect(
-        await hasActiveTalkRuns({ talkId: talk.id, threadId }),
-      ).toBe(true);
+      expect(await hasActiveTalkRuns({ talkId: talk.id, threadId })).toBe(true);
 
       // Transition queued → running
       const started = await markTalkRunStatus(r1.id, 'running', {
@@ -512,9 +528,7 @@ describe('accessors-pg slice 1: talks/folders/members/threads', () => {
       expect(started?.started_at).toBeTruthy();
       expect(await getRunningTalkRun(talk.id)).not.toBeNull();
       expect(await countRunningTalkRuns()).toBe(1);
-      expect(
-        (await listRunningTalkRuns()).map((r) => r.id),
-      ).toContain(r1.id);
+      expect((await listRunningTalkRuns()).map((r) => r.id)).toContain(r1.id);
 
       // Executor profile + metadata set/merge.
       await setTalkRunExecutorProfile({
@@ -542,9 +556,9 @@ describe('accessors-pg slice 1: talks/folders/members/threads', () => {
       expect(ended?.status).toBe('completed');
       expect(ended?.ended_at).toBeTruthy();
       expect(await countRunningTalkRuns()).toBe(0);
-      expect(
-        await hasActiveTalkRuns({ talkId: talk.id, threadId }),
-      ).toBe(false);
+      expect(await hasActiveTalkRuns({ talkId: talk.id, threadId })).toBe(
+        false,
+      );
 
       // listTalkRunsForTalk returns most-recent first.
       const runs = await listTalkRunsForTalk(talk.id);
@@ -576,6 +590,269 @@ describe('accessors-pg slice 1: talks/folders/members/threads', () => {
       });
       expect(cancelled?.status).toBe('cancelled');
       expect(cancelled?.cancel_reason).toBe('user_requested');
+    });
+  });
+
+  // ── Event outbox ───────────────────────────────────────────────────
+
+  it('outbox: append/list, min/max, prune by retention + per-topic window', async () => {
+    await withUserContext(USER_A_ID, async () => {
+      const id1 = await appendOutboxEvent({
+        topic: 'test-acc-1',
+        eventType: 'tick',
+        payload: { n: 1 },
+      });
+      const id2 = await appendOutboxEvent({
+        topic: 'test-acc-1',
+        eventType: 'tick',
+        payload: { n: 2 },
+      });
+      const id3 = await appendOutboxEvent({
+        topic: 'test-acc-2',
+        eventType: 'tock',
+        payload: { n: 3 },
+      });
+      expect(id2).toBeGreaterThan(id1);
+
+      const events = await getOutboxEventsForTopics(
+        ['test-acc-1', 'test-acc-2'],
+        0,
+      );
+      const myIds = events
+        .filter((e) => e.topic.startsWith('test-acc-'))
+        .map((e) => e.event_id);
+      expect(myIds).toEqual([id1, id2, id3]);
+      expect(events[0].payload).toEqual({ n: 1 });
+
+      const filtered = await getOutboxEventsForTopics(['test-acc-1'], id1);
+      expect(filtered.map((e) => e.event_id)).toEqual([id2]);
+
+      const min = await getOutboxMinEventIdForTopics(['test-acc-1']);
+      const max = await getOutboxMaxEventIdForTopics(['test-acc-1']);
+      expect(min).toBe(id1);
+      expect(max).toBe(id2);
+    });
+
+    // pruneEventOutbox: retention=0 hours, keepRecent=1 → keeps only the
+    // newest per topic, deletes the rest. State: test-acc-1 has 2 events,
+    // test-acc-2 has 1 — exactly one deletion expected (id1 in
+    // test-acc-1; test-acc-2's lone event is its own newest, kept).
+    await withUserContext(USER_A_ID, async () => {
+      const deleted = await pruneEventOutbox({
+        nowMs: Date.now() + 86_400_000, // way in the future, everything is "stale"
+        retentionHours: 0,
+        keepRecentPerTopic: 1,
+      });
+      expect(deleted).toBe(1);
+      const remaining = await getOutboxEventsForTopics(
+        ['test-acc-1', 'test-acc-2'],
+        0,
+      );
+      const accCount = remaining.filter((e) =>
+        e.topic.startsWith('test-acc-'),
+      ).length;
+      expect(accCount).toBe(2); // one per topic
+    });
+  });
+
+  // ── Idempotency cache ──────────────────────────────────────────────
+
+  it('idempotency_cache: save / get with expiry / prune', async () => {
+    await withUserContext(USER_A_ID, async () => {
+      const expiresAt = new Date(Date.now() + 60_000).toISOString();
+      await saveIdempotencyCache({
+        userId: USER_A_ID,
+        idempotencyKey: 'k1',
+        method: 'POST',
+        path: '/api/v1/talks',
+        requestHash: 'hash-1',
+        statusCode: 201,
+        responseBody: '{"ok":true}',
+        expiresAt,
+      });
+      const got = await getIdempotencyCache({
+        idempotencyKey: 'k1',
+        method: 'post',
+        path: '/api/v1/talks',
+      });
+      expect(got?.status_code).toBe(201);
+      expect(got?.method).toBe('POST'); // normalized to upper
+
+      // Overwrite via re-save updates response.
+      await saveIdempotencyCache({
+        userId: USER_A_ID,
+        idempotencyKey: 'k1',
+        method: 'POST',
+        path: '/api/v1/talks',
+        requestHash: 'hash-1',
+        statusCode: 200,
+        responseBody: '{"updated":true}',
+        expiresAt,
+      });
+      const got2 = await getIdempotencyCache({
+        idempotencyKey: 'k1',
+        method: 'POST',
+        path: '/api/v1/talks',
+      });
+      expect(got2?.status_code).toBe(200);
+
+      // Save an expired row, then prune.
+      await saveIdempotencyCache({
+        userId: USER_A_ID,
+        idempotencyKey: 'k2',
+        method: 'POST',
+        path: '/api/v1/talks',
+        requestHash: 'hash-2',
+        statusCode: 200,
+        responseBody: '{}',
+        expiresAt: new Date(Date.now() - 60_000).toISOString(),
+      });
+      // Expired rows are filtered from get().
+      expect(
+        await getIdempotencyCache({
+          idempotencyKey: 'k2',
+          method: 'POST',
+          path: '/api/v1/talks',
+        }),
+      ).toBeUndefined();
+      const pruned = await pruneIdempotencyCache();
+      expect(pruned).toBeGreaterThanOrEqual(1);
+    });
+  });
+
+  it('idempotency_cache: cross-user RLS isolates rows', async () => {
+    await withUserContext(USER_A_ID, async () => {
+      await saveIdempotencyCache({
+        userId: USER_A_ID,
+        idempotencyKey: 'shared-key',
+        method: 'POST',
+        path: '/api/v1/talks',
+        requestHash: 'A',
+        statusCode: 201,
+        responseBody: 'A response',
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      });
+    });
+    await withUserContext(USER_B_ID, async () => {
+      // Same key but different user — RLS hides A's row even though the
+      // idempotency_key matches.
+      expect(
+        await getIdempotencyCache({
+          idempotencyKey: 'shared-key',
+          method: 'POST',
+          path: '/api/v1/talks',
+        }),
+      ).toBeUndefined();
+    });
+  });
+
+  // ── Atomic helpers (append assistant/runtime + outbox in one tx) ──
+
+  it('appendAssistantMessageWithOutbox: writes message + outbox event atomically', async () => {
+    await withUserContext(USER_A_ID, async () => {
+      const talk = await createTalk({
+        ownerId: USER_A_ID,
+        topicTitle: 'Atomic',
+      });
+      const threadId = await getOrCreateDefaultThread({
+        talkId: talk.id,
+        ownerId: USER_A_ID,
+      });
+      const trigger = await createTalkMessage({
+        ownerId: USER_A_ID,
+        talkId: talk.id,
+        threadId,
+        role: 'user',
+        content: 'go',
+      });
+      const run = await createTalkRun({
+        ownerId: USER_A_ID,
+        talkId: talk.id,
+        threadId,
+        requestedBy: USER_A_ID,
+        status: 'running',
+        triggerMessageId: trigger.id,
+      });
+      const beforeMax = await getOutboxMaxEventIdForTopics([
+        `talk:${talk.id}`,
+      ]);
+
+      const msg = await appendAssistantMessageWithOutbox({
+        ownerId: USER_A_ID,
+        talkId: talk.id,
+        threadId,
+        runId: run.id,
+        content: 'thinking...',
+        agentNickname: 'Argus',
+        sequenceInRun: 0,
+      });
+      expect(msg.role).toBe('assistant');
+      expect(msg.metadata_json).toMatchObject({ agentNickname: 'Argus' });
+
+      const afterMax = await getOutboxMaxEventIdForTopics([`talk:${talk.id}`]);
+      expect(afterMax).toBeGreaterThan(beforeMax ?? 0);
+
+      const events = await getOutboxEventsForTopics(
+        [`talk:${talk.id}`],
+        beforeMax ?? 0,
+      );
+      const lastEvent = events[events.length - 1];
+      expect(lastEvent.event_type).toBe('message_appended');
+      expect(lastEvent.payload).toMatchObject({
+        messageId: msg.id,
+        role: 'assistant',
+        agentNickname: 'Argus',
+      });
+    });
+  });
+
+  it('appendRuntimeTalkMessage: pulls actor info from metadata for the outbox event', async () => {
+    await withUserContext(USER_A_ID, async () => {
+      const talk = await createTalk({
+        ownerId: USER_A_ID,
+        topicTitle: 'Runtime',
+      });
+      const threadId = await getOrCreateDefaultThread({
+        talkId: talk.id,
+        ownerId: USER_A_ID,
+      });
+      const trigger = await createTalkMessage({
+        ownerId: USER_A_ID,
+        talkId: talk.id,
+        threadId,
+        role: 'user',
+        content: 'go',
+      });
+      const run = await createTalkRun({
+        ownerId: USER_A_ID,
+        talkId: talk.id,
+        threadId,
+        requestedBy: USER_A_ID,
+        status: 'running',
+        triggerMessageId: trigger.id,
+      });
+      const before = await getOutboxMaxEventIdForTopics([`talk:${talk.id}`]);
+      await appendRuntimeTalkMessage({
+        ownerId: USER_A_ID,
+        talkId: talk.id,
+        threadId,
+        runId: run.id,
+        role: 'tool',
+        content: '{"tool":"web_fetch","result":"ok"}',
+        metadata: { agentId: 'agent-1', agentNickname: 'Argus' },
+        sequenceInRun: 1,
+      });
+      const events = await getOutboxEventsForTopics(
+        [`talk:${talk.id}`],
+        before ?? 0,
+      );
+      const lastEvent = events[events.length - 1];
+      expect(lastEvent.event_type).toBe('message_appended');
+      expect(lastEvent.payload).toMatchObject({
+        role: 'tool',
+        agentId: 'agent-1',
+        agentNickname: 'Argus',
+      });
     });
   });
 
