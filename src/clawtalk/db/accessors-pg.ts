@@ -627,3 +627,571 @@ export async function resolveThreadIdForTalk(input: {
     ownerId: input.ownerId,
   });
 }
+
+// ---------------------------------------------------------------------------
+// Talk messages
+// ---------------------------------------------------------------------------
+
+export type TalkMessageRole = 'user' | 'assistant' | 'system' | 'tool';
+
+export interface TalkMessageRecord {
+  id: string;
+  talk_id: string | null;
+  thread_id: string;
+  owner_id: string;
+  role: TalkMessageRole;
+  content: string;
+  created_by: string | null;
+  created_at: string;
+  run_id: string | null;
+  metadata_json: Record<string, unknown> | null;
+  sequence_in_run: number | null;
+}
+
+const TALK_MESSAGE_COLUMNS = `id, talk_id, thread_id, owner_id, role, content,
+  created_by, created_at, run_id, metadata_json, sequence_in_run`;
+
+export async function createTalkMessage(input: {
+  ownerId: string;
+  id?: string;
+  talkId: string;
+  threadId: string;
+  role: TalkMessageRole;
+  content: string;
+  createdBy?: string | null;
+  runId?: string | null;
+  metadata?: Record<string, unknown> | null;
+  sequenceInRun?: number | null;
+  createdAt?: string;
+}): Promise<TalkMessageRecord> {
+  const db = getDbPg();
+  const metadata =
+    input.metadata && Object.keys(input.metadata).length > 0
+      ? db.json(input.metadata as never)
+      : null;
+  // Always bind created_at as a real timestamptz parameter — postgres.js's
+  // db.unsafe() doesn't inline as raw SQL when nested inside a tagged
+  // template, it gets parameterized as a string literal. Fall back to
+  // client-side now() to match the column default behavior.
+  const createdAt = input.createdAt ?? new Date().toISOString();
+  const rows = input.id
+    ? await db<TalkMessageRecord[]>`
+        insert into public.talk_messages
+          (id, talk_id, thread_id, owner_id, role, content, created_by,
+           run_id, metadata_json, sequence_in_run, created_at)
+        values
+          (${input.id}::uuid, ${input.talkId}::uuid, ${input.threadId}::uuid,
+           ${input.ownerId}::uuid, ${input.role}, ${input.content},
+           ${input.createdBy ?? null}::uuid, ${input.runId ?? null}::uuid,
+           ${metadata}, ${input.sequenceInRun ?? null},
+           ${createdAt}::timestamptz)
+        returning ${db.unsafe(TALK_MESSAGE_COLUMNS)}
+      `
+    : await db<TalkMessageRecord[]>`
+        insert into public.talk_messages
+          (talk_id, thread_id, owner_id, role, content, created_by,
+           run_id, metadata_json, sequence_in_run, created_at)
+        values
+          (${input.talkId}::uuid, ${input.threadId}::uuid,
+           ${input.ownerId}::uuid, ${input.role}, ${input.content},
+           ${input.createdBy ?? null}::uuid, ${input.runId ?? null}::uuid,
+           ${metadata}, ${input.sequenceInRun ?? null},
+           ${createdAt}::timestamptz)
+        returning ${db.unsafe(TALK_MESSAGE_COLUMNS)}
+      `;
+  return rows[0];
+}
+
+export async function listTalkMessages(input: {
+  talkId: string;
+  threadId?: string | null;
+  limit?: number;
+  beforeCreatedAt?: string;
+}): Promise<TalkMessageRecord[]> {
+  const limit =
+    typeof input.limit === 'number'
+      ? Math.min(200, Math.max(1, Math.floor(input.limit)))
+      : 100;
+  const threadId = input.threadId ?? null;
+  const before = input.beforeCreatedAt ?? null;
+  const db = getDbPg();
+  const rows = await db<TalkMessageRecord[]>`
+    select ${db.unsafe(TALK_MESSAGE_COLUMNS)}
+    from public.talk_messages
+    where talk_id = ${input.talkId}::uuid
+      and (${threadId}::uuid is null or thread_id = ${threadId}::uuid)
+      and (${before}::timestamptz is null or created_at < ${before}::timestamptz)
+    order by created_at desc, coalesce(sequence_in_run, 0) desc, id desc
+    limit ${limit}
+  `;
+  rows.reverse();
+  return rows;
+}
+
+export async function searchTalkMessages(input: {
+  talkId: string;
+  query: string;
+  limit?: number;
+}): Promise<
+  Array<{
+    id: string;
+    thread_id: string;
+    thread_title: string | null;
+    role: TalkMessageRole;
+    content: string;
+    created_at: string;
+  }>
+> {
+  const normalizedQuery = input.query.trim();
+  const limit =
+    typeof input.limit === 'number'
+      ? Math.min(50, Math.max(1, Math.floor(input.limit)))
+      : 20;
+  if (normalizedQuery.length === 0) return [];
+
+  const escaped = normalizedQuery.replace(/[\\%_]/g, (c) => `\\${c}`);
+  const likePattern = `%${escaped}%`;
+  const db = getDbPg();
+  return await db<
+    Array<{
+      id: string;
+      thread_id: string;
+      thread_title: string | null;
+      role: TalkMessageRole;
+      content: string;
+      created_at: string;
+    }>
+  >`
+    select m.id, m.thread_id, t.title as thread_title, m.role, m.content,
+           m.created_at
+    from public.talk_messages m
+    left join public.talk_threads t on t.id = m.thread_id
+    where m.talk_id = ${input.talkId}::uuid
+      and m.content like ${likePattern} escape E'\\\\'
+    order by m.created_at desc, coalesce(m.sequence_in_run, 0) desc, m.id desc
+    limit ${limit}
+  `;
+}
+
+export async function getTalkMessageById(
+  messageId: string,
+): Promise<TalkMessageRecord | undefined> {
+  const db = getDbPg();
+  const rows = await db<TalkMessageRecord[]>`
+    select ${db.unsafe(TALK_MESSAGE_COLUMNS)}
+    from public.talk_messages
+    where id = ${messageId}::uuid
+    limit 1
+  `;
+  return rows[0];
+}
+
+// ---------------------------------------------------------------------------
+// Talk runs
+// ---------------------------------------------------------------------------
+
+export type TalkRunStatus =
+  | 'queued'
+  | 'running'
+  | 'awaiting_confirmation'
+  | 'cancelled'
+  | 'completed'
+  | 'failed';
+
+export type TalkRunKind = 'conversation' | 'instruction_review';
+export type TalkRunTaskType = 'chat' | 'browser';
+export type TalkRunSelectedMode = 'api' | 'subscription';
+export type TalkRunTransport = 'direct' | 'subscription';
+
+// Browser-block surface (browser_phase / blocked_reason / browser_session_id)
+// is intentionally dropped — the browser execution chassis was removed in
+// Phase 1. Callers that referenced those fields under sqlite need their
+// own cleanup pass when they swap over.
+
+export interface TalkRunRecord {
+  id: string;
+  talk_id: string | null;
+  owner_id: string;
+  thread_id: string;
+  requested_by: string;
+  status: TalkRunStatus;
+  trigger_message_id: string | null;
+  job_id: string | null;
+  target_agent_id: string | null;
+  agent_id: string | null;
+  idempotency_key: string | null;
+  run_kind: TalkRunKind;
+  response_group_id: string | null;
+  sequence_index: number | null;
+  executor_alias: string | null;
+  executor_model: string | null;
+  source_binding_id: string | null;
+  source_external_message_id: string | null;
+  source_thread_key: string | null;
+  task_type: TalkRunTaskType | null;
+  selected_mode: TalkRunSelectedMode | null;
+  transport: TalkRunTransport | null;
+  timeout_phase: string | null;
+  created_at: string;
+  started_at: string | null;
+  ended_at: string | null;
+  cancel_reason: string | null;
+  metadata_json: Record<string, unknown> | null;
+}
+
+const TALK_RUN_COLUMNS = `id, talk_id, owner_id, thread_id, requested_by,
+  status, trigger_message_id, job_id, target_agent_id, agent_id,
+  idempotency_key, run_kind, response_group_id, sequence_index,
+  executor_alias, executor_model, source_binding_id,
+  source_external_message_id, source_thread_key, task_type, selected_mode,
+  transport, timeout_phase, created_at, started_at, ended_at, cancel_reason,
+  metadata_json`;
+
+export async function createTalkRun(input: {
+  ownerId: string;
+  id?: string;
+  talkId: string | null;
+  threadId: string;
+  requestedBy: string;
+  status: TalkRunStatus;
+  triggerMessageId?: string | null;
+  jobId?: string | null;
+  targetAgentId?: string | null;
+  agentId?: string | null;
+  idempotencyKey?: string | null;
+  runKind?: TalkRunKind;
+  responseGroupId?: string | null;
+  sequenceIndex?: number | null;
+  executorAlias?: string | null;
+  executorModel?: string | null;
+  sourceBindingId?: string | null;
+  sourceExternalMessageId?: string | null;
+  sourceThreadKey?: string | null;
+  taskType?: TalkRunTaskType | null;
+  selectedMode?: TalkRunSelectedMode | null;
+  transport?: TalkRunTransport | null;
+  timeoutPhase?: string | null;
+  metadata?: Record<string, unknown> | null;
+}): Promise<TalkRunRecord> {
+  const db = getDbPg();
+  const metadata = input.metadata ? db.json(input.metadata as never) : null;
+  const rows = input.id
+    ? await db<TalkRunRecord[]>`
+        insert into public.talk_runs
+          (id, talk_id, owner_id, thread_id, requested_by, status,
+           trigger_message_id, job_id, target_agent_id, agent_id,
+           idempotency_key, run_kind, response_group_id, sequence_index,
+           executor_alias, executor_model, source_binding_id,
+           source_external_message_id, source_thread_key, task_type,
+           selected_mode, transport, timeout_phase, metadata_json)
+        values
+          (${input.id}::uuid, ${input.talkId}::uuid, ${input.ownerId}::uuid,
+           ${input.threadId}::uuid, ${input.requestedBy}::uuid,
+           ${input.status},
+           ${input.triggerMessageId ?? null}::uuid,
+           ${input.jobId ?? null}::uuid,
+           ${input.targetAgentId ?? null}::uuid,
+           ${input.agentId ?? null}::uuid,
+           ${input.idempotencyKey ?? null},
+           ${input.runKind ?? 'conversation'},
+           ${input.responseGroupId ?? null},
+           ${input.sequenceIndex ?? null},
+           ${input.executorAlias ?? null},
+           ${input.executorModel ?? null},
+           ${input.sourceBindingId ?? null},
+           ${input.sourceExternalMessageId ?? null},
+           ${input.sourceThreadKey ?? null},
+           ${input.taskType ?? null},
+           ${input.selectedMode ?? null},
+           ${input.transport ?? null},
+           ${input.timeoutPhase ?? null},
+           ${metadata})
+        returning ${db.unsafe(TALK_RUN_COLUMNS)}
+      `
+    : await db<TalkRunRecord[]>`
+        insert into public.talk_runs
+          (talk_id, owner_id, thread_id, requested_by, status,
+           trigger_message_id, job_id, target_agent_id, agent_id,
+           idempotency_key, run_kind, response_group_id, sequence_index,
+           executor_alias, executor_model, source_binding_id,
+           source_external_message_id, source_thread_key, task_type,
+           selected_mode, transport, timeout_phase, metadata_json)
+        values
+          (${input.talkId}::uuid, ${input.ownerId}::uuid,
+           ${input.threadId}::uuid, ${input.requestedBy}::uuid,
+           ${input.status},
+           ${input.triggerMessageId ?? null}::uuid,
+           ${input.jobId ?? null}::uuid,
+           ${input.targetAgentId ?? null}::uuid,
+           ${input.agentId ?? null}::uuid,
+           ${input.idempotencyKey ?? null},
+           ${input.runKind ?? 'conversation'},
+           ${input.responseGroupId ?? null},
+           ${input.sequenceIndex ?? null},
+           ${input.executorAlias ?? null},
+           ${input.executorModel ?? null},
+           ${input.sourceBindingId ?? null},
+           ${input.sourceExternalMessageId ?? null},
+           ${input.sourceThreadKey ?? null},
+           ${input.taskType ?? null},
+           ${input.selectedMode ?? null},
+           ${input.transport ?? null},
+           ${input.timeoutPhase ?? null},
+           ${metadata})
+        returning ${db.unsafe(TALK_RUN_COLUMNS)}
+      `;
+  return rows[0];
+}
+
+export async function getTalkRunById(
+  runId: string,
+): Promise<TalkRunRecord | null> {
+  const db = getDbPg();
+  const rows = await db<TalkRunRecord[]>`
+    select ${db.unsafe(TALK_RUN_COLUMNS)}
+    from public.talk_runs
+    where id = ${runId}::uuid
+    limit 1
+  `;
+  return rows[0] ?? null;
+}
+
+export async function getRunningTalkRun(
+  talkId: string,
+): Promise<TalkRunRecord | null> {
+  const db = getDbPg();
+  const rows = await db<TalkRunRecord[]>`
+    select ${db.unsafe(TALK_RUN_COLUMNS)}
+    from public.talk_runs
+    where talk_id = ${talkId}::uuid
+      and status in ('running', 'awaiting_confirmation')
+    order by created_at desc
+    limit 1
+  `;
+  return rows[0] ?? null;
+}
+
+export async function listQueuedTalkRuns(
+  limit = 50,
+): Promise<TalkRunRecord[]> {
+  const db = getDbPg();
+  return await db<TalkRunRecord[]>`
+    select ${db.unsafe(TALK_RUN_COLUMNS)}
+    from public.talk_runs
+    where status = 'queued'
+    order by created_at asc
+    limit ${limit}
+  `;
+}
+
+export async function listRunningTalkRuns(
+  limit = 50,
+): Promise<TalkRunRecord[]> {
+  const db = getDbPg();
+  return await db<TalkRunRecord[]>`
+    select ${db.unsafe(TALK_RUN_COLUMNS)}
+    from public.talk_runs
+    where status in ('running', 'awaiting_confirmation')
+    order by started_at asc nulls last, created_at asc
+    limit ${limit}
+  `;
+}
+
+export async function countRunningTalkRuns(): Promise<number> {
+  const db = getDbPg();
+  const rows = await db<{ count: number }[]>`
+    select count(*)::int as count
+    from public.talk_runs
+    where status in ('running', 'awaiting_confirmation')
+  `;
+  return rows[0]?.count ?? 0;
+}
+
+export async function hasActiveTalkRuns(input: {
+  talkId: string;
+  threadId?: string | null;
+}): Promise<boolean> {
+  const db = getDbPg();
+  const rows = input.threadId
+    ? await db<{ count: number }[]>`
+        select count(*)::int as count
+        from public.talk_runs
+        where talk_id = ${input.talkId}::uuid
+          and thread_id = ${input.threadId}::uuid
+          and status in ('queued', 'running', 'awaiting_confirmation')
+      `
+    : await db<{ count: number }[]>`
+        select count(*)::int as count
+        from public.talk_runs
+        where talk_id = ${input.talkId}::uuid
+          and status in ('queued', 'running', 'awaiting_confirmation')
+      `;
+  return (rows[0]?.count ?? 0) > 0;
+}
+
+export async function listTalkRunsForTalk(
+  talkId: string,
+  limit = 100,
+): Promise<TalkRunRecord[]> {
+  const db = getDbPg();
+  return await db<TalkRunRecord[]>`
+    select ${db.unsafe(TALK_RUN_COLUMNS)}
+    from public.talk_runs
+    where talk_id = ${talkId}::uuid
+    order by created_at desc
+    limit ${limit}
+  `;
+}
+
+export async function markTalkRunStatus(
+  runId: string,
+  status: TalkRunStatus,
+  patch?: {
+    startedAt?: string | null;
+    endedAt?: string | null;
+    cancelReason?: string | null;
+  },
+): Promise<TalkRunRecord | null> {
+  const db = getDbPg();
+  const rows = await db<TalkRunRecord[]>`
+    update public.talk_runs
+    set status = ${status},
+        started_at = case when ${patch?.startedAt !== undefined}::boolean
+                       then ${patch?.startedAt ?? null}::timestamptz
+                       else started_at end,
+        ended_at = case when ${patch?.endedAt !== undefined}::boolean
+                     then ${patch?.endedAt ?? null}::timestamptz
+                     else ended_at end,
+        cancel_reason = case when ${patch?.cancelReason !== undefined}::boolean
+                          then ${patch?.cancelReason ?? null}
+                          else cancel_reason end
+    where id = ${runId}::uuid
+    returning ${db.unsafe(TALK_RUN_COLUMNS)}
+  `;
+  return rows[0] ?? null;
+}
+
+export async function setTalkRunMetadata(
+  runId: string,
+  metadata: Record<string, unknown> | null,
+): Promise<void> {
+  const db = getDbPg();
+  await db`
+    update public.talk_runs
+    set metadata_json = ${metadata ? db.json(metadata as never) : null}
+    where id = ${runId}::uuid
+  `;
+}
+
+export async function updateTalkRunMetadata(
+  runId: string,
+  patch: Record<string, unknown>,
+): Promise<TalkRunRecord | null> {
+  // Shallow merge over existing metadata. Postgres jsonb `||` merges
+  // top-level keys (right overrides left).
+  const db = getDbPg();
+  const rows = await db<TalkRunRecord[]>`
+    update public.talk_runs
+    set metadata_json = coalesce(metadata_json, '{}'::jsonb)
+                        || ${db.json(patch as never)}
+    where id = ${runId}::uuid
+    returning ${db.unsafe(TALK_RUN_COLUMNS)}
+  `;
+  return rows[0] ?? null;
+}
+
+export async function setTalkRunExecutorProfile(input: {
+  runId: string;
+  executorAlias: string;
+  executorModel: string;
+}): Promise<void> {
+  const db = getDbPg();
+  await db`
+    update public.talk_runs
+    set executor_alias = ${input.executorAlias},
+        executor_model = ${input.executorModel}
+    where id = ${input.runId}::uuid
+  `;
+}
+
+// ---------------------------------------------------------------------------
+// Run metadata derivation helpers
+// (browser-block surface dropped — chassis removal)
+// ---------------------------------------------------------------------------
+
+export function normalizeTalkRunTaskType(
+  value: unknown,
+): TalkRunTaskType | null {
+  return value === 'chat' || value === 'browser' ? value : null;
+}
+
+export function normalizeTalkRunSelectedMode(
+  value: unknown,
+): TalkRunSelectedMode | null {
+  return value === 'api' || value === 'subscription' ? value : null;
+}
+
+export function normalizeTalkRunTransport(
+  value: unknown,
+): TalkRunTransport | null {
+  return value === 'direct' || value === 'subscription' ? value : null;
+}
+
+export function getTalkRunTaskType(
+  run: Pick<TalkRunRecord, 'task_type' | 'metadata_json'>,
+): TalkRunTaskType {
+  const typed = normalizeTalkRunTaskType(run.task_type);
+  if (typed) return typed;
+  const meta = run.metadata_json ?? {};
+  if (
+    meta.executionStrategy === 'browser_fast_lane' ||
+    meta.routeReason === 'browser_fast_lane'
+  ) {
+    return 'browser';
+  }
+  return 'chat';
+}
+
+export function getTalkRunSelectedMode(
+  run: Pick<TalkRunRecord, 'selected_mode' | 'metadata_json'>,
+): TalkRunSelectedMode | null {
+  const typed = normalizeTalkRunSelectedMode(run.selected_mode);
+  if (typed) return typed;
+  const meta = run.metadata_json ?? {};
+  const decision =
+    meta.executionDecision &&
+    typeof meta.executionDecision === 'object' &&
+    !Array.isArray(meta.executionDecision)
+      ? (meta.executionDecision as Record<string, unknown>)
+      : null;
+  if (decision?.authPath === 'api_key') return 'api';
+  if (decision?.authPath === 'subscription') return 'subscription';
+  return null;
+}
+
+export function getTalkRunTransport(
+  run: Pick<TalkRunRecord, 'transport' | 'metadata_json'>,
+): TalkRunTransport | null {
+  const typed = normalizeTalkRunTransport(run.transport);
+  if (typed) return typed;
+  const meta = run.metadata_json ?? {};
+  const decision =
+    meta.executionDecision &&
+    typeof meta.executionDecision === 'object' &&
+    !Array.isArray(meta.executionDecision)
+      ? (meta.executionDecision as Record<string, unknown>)
+      : null;
+  if (decision?.backend === 'direct_http') return 'direct';
+  if (decision?.backend === 'container') return 'subscription';
+  return null;
+}
+
+export function getTalkRunTimeoutPhase(
+  run: Pick<TalkRunRecord, 'timeout_phase' | 'metadata_json'>,
+): string | null {
+  if (typeof run.timeout_phase === 'string' && run.timeout_phase) {
+    return run.timeout_phase;
+  }
+  const meta = run.metadata_json ?? {};
+  return typeof meta.timeoutPhase === 'string' ? meta.timeoutPhase : null;
+}

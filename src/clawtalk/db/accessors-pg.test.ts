@@ -14,25 +14,43 @@ import {
 import {
   canUserAccessTalk,
   canUserEditTalk,
+  countRunningTalkRuns,
   createTalk,
   createTalkFolder,
+  createTalkMessage,
+  createTalkRun,
   createTalkThread,
   deleteTalkFolderAndMoveTalksToTopLevel,
   deleteTalkForOwner,
   deleteTalkMember,
   deleteTalkThread,
   getOrCreateDefaultThread,
+  getRunningTalkRun,
   getTalkById,
   getTalkForUser,
   getTalkIdsAccessibleByUser,
+  getTalkMessageById,
+  getTalkRunById,
+  getTalkRunSelectedMode,
+  getTalkRunTaskType,
+  hasActiveTalkRuns,
+  listQueuedTalkRuns,
+  listRunningTalkRuns,
   listTalkFoldersForOwner,
+  listTalkMessages,
+  listTalkRunsForTalk,
   listTalksForUser,
   listTalkThreads,
+  markTalkRunStatus,
   patchTalkMetadata,
   renameTalkFolder,
   resolveThreadIdForTalk,
+  searchTalkMessages,
+  setTalkRunExecutorProfile,
+  setTalkRunMetadata,
   touchTalkUpdatedAt,
   updateTalkProjectPath,
+  updateTalkRunMetadata,
   updateTalkThreadMetadata,
   updateTalkThreadTitle,
   upsertTalk,
@@ -381,6 +399,183 @@ describe('accessors-pg slice 1: talks/folders/members/threads', () => {
         ownerId: USER_A_ID,
       });
       expect(def2).toBe(defaultThreadId);
+    });
+  });
+
+  // ── Messages ───────────────────────────────────────────────────────
+
+  it('messages: create, list (ordered ascending), search, getById', async () => {
+    await withUserContext(USER_A_ID, async () => {
+      const talk = await createTalk({
+        ownerId: USER_A_ID,
+        topicTitle: 'Msg Talk',
+      });
+      const threadId = await getOrCreateDefaultThread({
+        talkId: talk.id,
+        ownerId: USER_A_ID,
+      });
+
+      // Explicit timestamps so the ordering assertion isn't at the mercy
+      // of UUID tiebreaking when same-tx inserts share a microsecond.
+      const m1 = await createTalkMessage({
+        ownerId: USER_A_ID,
+        talkId: talk.id,
+        threadId,
+        role: 'user',
+        content: 'hello world',
+        createdBy: USER_A_ID,
+        createdAt: '2026-05-12T00:00:01.000Z',
+      });
+      const m2 = await createTalkMessage({
+        ownerId: USER_A_ID,
+        talkId: talk.id,
+        threadId,
+        role: 'assistant',
+        content: 'goodbye world',
+        metadata: { agentNickname: 'Argus' },
+        createdAt: '2026-05-12T00:00:02.000Z',
+      });
+      expect(m1.content).toBe('hello world');
+      expect(m2.metadata_json).toEqual({ agentNickname: 'Argus' });
+
+      const list = await listTalkMessages({ talkId: talk.id });
+      // Ascending by created_at — m1 first, m2 second.
+      expect(list.map((m) => m.id)).toEqual([m1.id, m2.id]);
+
+      const fetched = await getTalkMessageById(m1.id);
+      expect(fetched?.content).toBe('hello world');
+
+      const search = await searchTalkMessages({
+        talkId: talk.id,
+        query: 'world',
+      });
+      expect(search.length).toBe(2);
+      const hello = await searchTalkMessages({
+        talkId: talk.id,
+        query: 'hello',
+      });
+      expect(hello.map((r) => r.id)).toEqual([m1.id]);
+      const none = await searchTalkMessages({
+        talkId: talk.id,
+        query: 'nope',
+      });
+      expect(none.length).toBe(0);
+    });
+  });
+
+  // ── Runs ───────────────────────────────────────────────────────────
+
+  it('runs: create + status transitions + listing helpers', async () => {
+    await withUserContext(USER_A_ID, async () => {
+      const talk = await createTalk({
+        ownerId: USER_A_ID,
+        topicTitle: 'Run Talk',
+      });
+      const threadId = await getOrCreateDefaultThread({
+        talkId: talk.id,
+        ownerId: USER_A_ID,
+      });
+      const trigger = await createTalkMessage({
+        ownerId: USER_A_ID,
+        talkId: talk.id,
+        threadId,
+        role: 'user',
+        content: 'go',
+      });
+
+      const r1 = await createTalkRun({
+        ownerId: USER_A_ID,
+        talkId: talk.id,
+        threadId,
+        requestedBy: USER_A_ID,
+        status: 'queued',
+        triggerMessageId: trigger.id,
+        idempotencyKey: 'key-1',
+      });
+      expect(r1.status).toBe('queued');
+      expect(r1.owner_id).toBe(USER_A_ID);
+
+      const fetched = await getTalkRunById(r1.id);
+      expect(fetched?.id).toBe(r1.id);
+
+      expect((await listQueuedTalkRuns()).map((r) => r.id)).toContain(r1.id);
+      expect(await countRunningTalkRuns()).toBe(0);
+      expect(
+        await hasActiveTalkRuns({ talkId: talk.id, threadId }),
+      ).toBe(true);
+
+      // Transition queued → running
+      const started = await markTalkRunStatus(r1.id, 'running', {
+        startedAt: new Date().toISOString(),
+      });
+      expect(started?.status).toBe('running');
+      expect(started?.started_at).toBeTruthy();
+      expect(await getRunningTalkRun(talk.id)).not.toBeNull();
+      expect(await countRunningTalkRuns()).toBe(1);
+      expect(
+        (await listRunningTalkRuns()).map((r) => r.id),
+      ).toContain(r1.id);
+
+      // Executor profile + metadata set/merge.
+      await setTalkRunExecutorProfile({
+        runId: r1.id,
+        executorAlias: 'direct_http',
+        executorModel: 'claude-opus-4-7',
+      });
+      await setTalkRunMetadata(r1.id, { stage: 'thinking' });
+      const merged = await updateTalkRunMetadata(r1.id, {
+        executionDecision: { authPath: 'api_key', backend: 'direct_http' },
+      });
+      expect(merged?.executor_alias).toBe('direct_http');
+      expect(merged?.metadata_json).toMatchObject({
+        stage: 'thinking',
+        executionDecision: { authPath: 'api_key', backend: 'direct_http' },
+      });
+      // Derivation helpers walk metadata for fallbacks.
+      expect(getTalkRunTaskType(merged!)).toBe('chat');
+      expect(getTalkRunSelectedMode(merged!)).toBe('api');
+
+      // Transition running → completed
+      const ended = await markTalkRunStatus(r1.id, 'completed', {
+        endedAt: new Date().toISOString(),
+      });
+      expect(ended?.status).toBe('completed');
+      expect(ended?.ended_at).toBeTruthy();
+      expect(await countRunningTalkRuns()).toBe(0);
+      expect(
+        await hasActiveTalkRuns({ talkId: talk.id, threadId }),
+      ).toBe(false);
+
+      // listTalkRunsForTalk returns most-recent first.
+      const runs = await listTalkRunsForTalk(talk.id);
+      expect(runs.length).toBe(1);
+      expect(runs[0].id).toBe(r1.id);
+    });
+  });
+
+  it('runs: cancel + cancel_reason recorded', async () => {
+    await withUserContext(USER_A_ID, async () => {
+      const talk = await createTalk({
+        ownerId: USER_A_ID,
+        topicTitle: 'Cancel',
+      });
+      const threadId = await getOrCreateDefaultThread({
+        talkId: talk.id,
+        ownerId: USER_A_ID,
+      });
+      const run = await createTalkRun({
+        ownerId: USER_A_ID,
+        talkId: talk.id,
+        threadId,
+        requestedBy: USER_A_ID,
+        status: 'queued',
+      });
+      const cancelled = await markTalkRunStatus(run.id, 'cancelled', {
+        endedAt: new Date().toISOString(),
+        cancelReason: 'user_requested',
+      });
+      expect(cancelled?.status).toBe('cancelled');
+      expect(cancelled?.cancel_reason).toBe('user_requested');
     });
   });
 
