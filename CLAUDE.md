@@ -1,24 +1,15 @@
-# ClawRocket Repo Context
+# ClawTalk Repo Context
 
 See [README.md](README.md) for product overview. This file is the short coding context for agents working inside the repo.
 
 ## Current Project Shape
 
-ClawRocket is a NanoClaw-derived fork with two distinct runtime domains:
+ClawTalk is a web product where users invite different LLM personas into context-bound "Talks" and watch them discuss together.
 
-1. **NanoClaw core**
-   - single-process orchestrator
-   - containerized Claude execution
-   - channels, scheduler, IPC, group queues
-
-2. **ClawRocket web/talk stack**
-   - auth + RBAC
-   - web UI and API
-   - executor settings
-   - provider-routed Talk runtime
-   - direct HTTP streaming talk execution
-
-Keep those domains separate when making changes.
+- **Backend:** Hono server in `src/server.ts` (entry) → `src/clawtalk/web/index.ts` (web bootstrap) → `src/clawtalk/web/server.ts` (route registration). SQLite store via `src/db.ts` + `src/clawtalk/db/init.ts`.
+- **Talk runtime:** `src/clawtalk/talks/` — TalkRunWorker + TalkJobWorker + CleanTalkExecutor stream multi-agent responses via direct HTTP to LLM providers (Anthropic / OpenAI / etc.).
+- **Frontend:** Vite + React under `webapp/`. TalkList → TalkDetail flow, AiAgents page for provider/agent config, Settings, Profile.
+- **Identity:** Google OAuth + device-code auth in `src/clawtalk/identity/`. RBAC (`owner`, `admin`, `member`). HttpOnly access/refresh cookies + double-submit CSRF.
 
 ## Engineering Defaults
 
@@ -28,67 +19,44 @@ Keep those domains separate when making changes.
 - If a simpler implementation requires resetting, deleting, or rebuilding local data/users, do that instead of carrying compatibility baggage.
 - Remove dead paths instead of supporting old and new behavior in parallel.
 
-## Most Important Boundaries
-
-- Prefer ClawRocket-specific work under `src/clawrocket/*`.
-- Treat changes to `src/index.ts`, `src/db.ts`, `src/config.ts`, and `src/task-scheduler.ts` as upstream-sensitive.
-- Before widening that surface, check [docs/UPSTREAM-PATCH-SURFACE.md](docs/UPSTREAM-PATCH-SURFACE.md).
-
 ## Key Files
 
-| File | Purpose |
-| --- | --- |
-| `src/index.ts` | core startup, singleton coordination, channels, scheduler, message loop |
-| `src/instance-coordinator.ts` | single-instance ownership and graceful takeover |
-| `src/container-runner.ts` | containerized core executor path |
-| `src/clawrocket/web/index.ts` | web-server bootstrap and Talk worker wiring |
-| `src/clawrocket/web/server.ts` | Hono app and HTTP bind lifecycle |
-| `src/clawrocket/talks/direct-executor.ts` | provider-neutral direct Talk runtime |
-| `src/clawrocket/talks/run-worker.ts` | queued Talk run dispatch |
-| `src/clawrocket/talks/executor-settings.ts` | core executor settings + restart status |
-| `src/clawrocket/db/init.ts` | ClawRocket schema |
-| `src/clawrocket/db/llm-accessors.ts` | Talk provider, route, agent, and attempt persistence |
-| `webapp/src/pages/SettingsPage.tsx` | executor + Talk LLM settings UI |
-| `webapp/src/pages/TalkDetailPage.tsx` | Talk UI, agent targeting, streaming state |
+| File                                                                                          | Purpose                                                            |
+| --------------------------------------------------------------------------------------------- | ------------------------------------------------------------------ |
+| `src/server.ts`                                                                               | Top-level entry: init DB → start web server → SIGINT/SIGTERM       |
+| `src/db.ts`                                                                                   | better-sqlite3 connection (`getDb`, `initDatabase`)                |
+| `src/clawtalk/config.ts`                                                                      | Server + auth + provider env config                                |
+| `src/clawtalk/db/init.ts`                                                                     | SQLite schema for Talks/agents/sessions/etc.                       |
+| `src/clawtalk/db/accessors.ts`, `agent-accessors.ts`, etc.                                    | Typed DB accessors                                                 |
+| `src/clawtalk/identity/auth-service.ts`                                                       | Google OAuth + device-code + session lifecycle                     |
+| `src/clawtalk/talks/new-executor.ts`                                                          | CleanTalkExecutor — orchestrates a single Talk run                 |
+| `src/clawtalk/talks/run-worker.ts`, `job-worker.ts`                                           | Talk run + job dispatch                                            |
+| `src/clawtalk/agents/agent-registry.ts`, `agent-router.ts`                                    | Multi-agent registry + per-Talk routing                            |
+| `src/clawtalk/llm/`                                                                           | Provider catalog, secret store, LLM client                         |
+| `src/clawtalk/web/server.ts`                                                                  | Hono app + route registration (monolithic; carve in a future PR)   |
+| `webapp/src/pages/TalkDetailPage.tsx`                                                         | Talk UI (agent targeting + streaming)                              |
 
-## Current Runtime Facts
+## Chassis-removed shims (transient)
 
-- Talk runtime mode is `direct_http`.
-- Talks are stateless and text-only in v1.
-- Core executor remains on the container/Claude path.
-- Talk provider secrets are encrypted at rest.
-- Core executor credentials are managed through the executor settings service.
-- A built-in mock Talk route exists for first boot.
-- Only one process should own a given `DATA_DIR`; a second process attempts graceful takeover.
+`src/clawtalk/web/routes/{agent-management,executor-settings,main-channel,browser,data-connectors,talk-tools,channels}.ts` and `_chassis-removed.ts` are tiny stub modules whose route handlers return HTTP 410 Gone. They exist only so `web/server.ts` still compiles after the chassis purge without ripping out hundreds of route registrations in one PR. Delete them and their referencing route registrations in `web/server.ts` as a follow-up cleanup PR.
 
-## Operations Facts
-
-- Ubuntu `systemd --user` is the canonical deployment model.
-- `CLAWROCKET_SELF_RESTART=1` enables owner-triggered restart from the settings page.
-- The web server should only log startup success after confirmed bind.
+Similarly, `new-executor.ts`, `context-loader.ts`, `agents/agent-router.ts`, and `db/accessors.ts` have inline `// Chassis-removal stubs` blocks near the imports. Same deal — they keep the type-checker green; remove them when the rest of the chassis surface comes out.
 
 ## Development Commands
 
 ```bash
-npm run dev
-npm run dev:web
-npm run typecheck
-npm run test
-npm run build
+npm run dev                   # backend on :3210 (tsx src/server.ts)
+npm run dev:web               # webapp on :5173 (proxies /api/* to :3210)
+npm run typecheck             # backend tsc --noEmit
+npm run test                  # backend vitest run
 npm --prefix webapp run typecheck
 npm --prefix webapp run test
+npm --prefix webapp run build
 ```
 
-## Docs To Trust
+## What's Next (Phase 2+)
 
-- [docs/SPEC.md](docs/SPEC.md): current architecture
-- [docs/REQUIREMENTS.md](docs/REQUIREMENTS.md): current constraints/priorities
-- [docs/SECURITY.md](docs/SECURITY.md): security model
-- [docs/DEBUG_CHECKLIST.md](docs/DEBUG_CHECKLIST.md): debugging flows
-- [docs/OPERATIONS_UBUNTU.md](docs/OPERATIONS_UBUNTU.md): production operations
-
-## Docs To Avoid Reintroducing
-
-- old phase plans
-- rollout notes masquerading as source-of-truth docs
-- upstream NanoClaw-only descriptions that ignore the ClawRocket web/talk stack
+1. **AI Persona system** — extend agents with `role` + `system_prompt_template`. Persona CRUD page. Talk-invite picks a persona.
+2. **Talk-level context** — `talk_context` table (files/links/notes). Context plumbed into LLM-call prompt assembly. Context tab on TalkDetailPage.
+3. **Projects** — new top-level entity (deliverable). Talk → Project spinoff. Rich editor (port back from `editorial-room-archive-2026-05` tag).
+4. **Cloud port** — clawtalk.app on Cloudflare Workers + Supabase Postgres. Public signup, multi-tenant data.

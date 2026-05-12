@@ -1,5 +1,5 @@
 type GoogleAccountPopupEvent = {
-  type: 'clawrocket:google-account-link';
+  type: 'clawtalk:google-account-link';
   status: 'success' | 'error';
   message?: string | null;
 };
@@ -9,7 +9,7 @@ export function launchGoogleAccountPopup(
 ): Promise<void> {
   const popup = window.open(
     authorizationUrl,
-    'clawrocket-google-account',
+    'clawtalk-google-account',
     'popup=yes,width=620,height=760,noopener=no,noreferrer=no',
   );
 
@@ -43,7 +43,7 @@ export function launchGoogleAccountPopup(
     const onMessage = (event: MessageEvent) => {
       if (event.origin !== window.location.origin) return;
       const data = event.data as GoogleAccountPopupEvent | null;
-      if (!data || data.type !== 'clawrocket:google-account-link') return;
+      if (!data || data.type !== 'clawtalk:google-account-link') return;
       if (data.status === 'error') {
         finish(
           new Error(data.message || 'Google authorization did not complete.'),

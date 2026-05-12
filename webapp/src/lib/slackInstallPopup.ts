@@ -1,5 +1,5 @@
 type SlackInstallPopupEvent = {
-  type: 'clawrocket:slack-workspace-install';
+  type: 'clawtalk:slack-workspace-install';
   status: 'success' | 'error';
   message?: string | null;
   workspaceName?: string | null;
@@ -10,7 +10,7 @@ export function launchSlackInstallPopup(
 ): Promise<void> {
   const popup = window.open(
     authorizationUrl,
-    'clawrocket-slack-install',
+    'clawtalk-slack-install',
     'popup=yes,width=720,height=820,noopener=no,noreferrer=no',
   );
 
@@ -44,7 +44,7 @@ export function launchSlackInstallPopup(
     const onMessage = (event: MessageEvent) => {
       if (event.origin !== window.location.origin) return;
       const data = event.data as SlackInstallPopupEvent | null;
-      if (!data || data.type !== 'clawrocket:slack-workspace-install') return;
+      if (!data || data.type !== 'clawtalk:slack-workspace-install') return;
       if (data.status === 'error') {
         finish(new Error(data.message || 'Slack installation did not complete.'));
         return;

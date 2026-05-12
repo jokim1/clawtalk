@@ -1246,7 +1246,7 @@ export function AiAgentsPage({ onUnauthorized, userRole }: Props): JSX.Element {
                           <span>Host login</span>
                           <p className="talk-llm-meta">
                             {provider.hostStatus?.message ||
-                              'Run Codex login against the managed ClawRocket home, then verify this provider.'}
+                              'Run Codex login against the managed ClawTalk home, then verify this provider.'}
                           </p>
                           {provider.hostStatus?.managedHomePath ? (
                             <p className="talk-llm-meta">

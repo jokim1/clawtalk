@@ -69,7 +69,7 @@ export function SignInView(props: {
   return (
     <main className="auth-shell">
       <section className="auth-panel">
-        <h1>ClawRocket</h1>
+        <h1>ClawTalk</h1>
         <p>Sign in to access your talks and machine-local context.</p>
         <button
           type="button"

@@ -769,7 +769,7 @@ export function SettingsPage({ onUnauthorized, userRole }: Props) {
     if (!status) return;
     if (
       !window.confirm(
-        'This will restart the ClawRocket service. Active connections will be interrupted. Continue?',
+        'This will restart the ClawTalk service. Active connections will be interrupted. Continue?',
       )
     ) {
       return;
@@ -1663,7 +1663,7 @@ export function SettingsPage({ onUnauthorized, userRole }: Props) {
                 onClick={async () => {
                   if (!editingBrowserProfile) return;
                   const confirmed = globalThis.confirm(
-                    `Delete browser profile ${formatBrowserProfileLabel(editingBrowserProfile)}? This keeps your real Chrome profile intact but removes this saved browser profile from Clawrocket.`,
+                    `Delete browser profile ${formatBrowserProfileLabel(editingBrowserProfile)}? This keeps your real Chrome profile intact but removes this saved browser profile from Clawtalk.`,
                   );
                   if (!confirmed) {
                     return;
@@ -1918,11 +1918,11 @@ export function SettingsPage({ onUnauthorized, userRole }: Props) {
       </section>
 
       <section className="settings-card">
-        <h2>Restart ClawRocket Service</h2>
+        <h2>Restart ClawTalk Service</h2>
         {!status.restartSupported ? (
           <p className="settings-copy">
             Service restart is only available when running under the systemd
-            service with <code>CLAWROCKET_SELF_RESTART=1</code>.
+            service with <code>CLAWTALK_SELF_RESTART=1</code>.
           </p>
         ) : null}
         {status.activeRunCount > 0 ? (
@@ -1945,7 +1945,7 @@ export function SettingsPage({ onUnauthorized, userRole }: Props) {
           >
             {busySection === 'restart'
               ? 'Restarting…'
-              : 'Restart ClawRocket Service'}
+              : 'Restart ClawTalk Service'}
           </button>
         ) : null}
       </section>

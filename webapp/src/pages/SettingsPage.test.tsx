@@ -70,7 +70,7 @@ describe('SettingsPage', () => {
     ).toBeGreaterThan(0);
     expect(
       await screen.findByRole('button', {
-        name: 'Restart ClawRocket Service',
+        name: 'Restart ClawTalk Service',
       }),
     ).toBeTruthy();
   });
@@ -133,7 +133,7 @@ describe('SettingsPage', () => {
       ).length,
     ).toBeGreaterThan(0);
     expect(
-      screen.queryByRole('button', { name: 'Restart ClawRocket Service' }),
+      screen.queryByRole('button', { name: 'Restart ClawTalk Service' }),
     ).toBeNull();
   });
 

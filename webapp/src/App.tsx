@@ -30,8 +30,6 @@ import {
   UnauthorizedError,
 } from './lib/api';
 import { AiAgentsPage } from './pages/AiAgentsPage';
-import { DataConnectorsPage } from './pages/DataConnectorsPage';
-import { MainChannelPage } from './pages/MainChannelPage';
 import { TalkDetailPage } from './pages/TalkDetailPage';
 import { TalkListPage } from './pages/TalkListPage';
 import { ProfilePage } from './pages/ProfilePage';
@@ -746,15 +744,7 @@ export function App() {
           className={`app-main-content${isTalkRoute || isMainRoute ? ' app-main-content-talk' : ''}`}
         >
           <Routes>
-            <Route path="/" element={<Navigate to="/app/main" replace />} />
-            <Route
-              path="/app/main"
-              element={<MainChannelPage onUnauthorized={handleUnauthorized} />}
-            />
-            <Route
-              path="/app/main/:threadId"
-              element={<MainChannelPage onUnauthorized={handleUnauthorized} />}
-            />
+            <Route path="/" element={<Navigate to="/app/talks" replace />} />
             <Route
               path="/app/talks"
               element={
@@ -787,19 +777,6 @@ export function App() {
                   onUnauthorized={handleUnauthorized}
                   userRole={auth.user.role}
                 />
-              }
-            />
-            <Route
-              path="/app/connectors"
-              element={
-                canManageAgents ? (
-                  <DataConnectorsPage
-                    onUnauthorized={handleUnauthorized}
-                    userRole={auth.user.role}
-                  />
-                ) : (
-                  <Navigate to="/app/talks" replace />
-                )
               }
             />
             <Route

@@ -38,7 +38,7 @@ describe('App', () => {
     });
 
     renderWithRouter('/app/talks');
-    await screen.findByRole('heading', { name: 'ClawRocket' });
+    await screen.findByRole('heading', { name: 'ClawTalk' });
     await waitFor(() =>
       expect(
         screen.queryByRole('heading', { name: 'Developer Quick Login' }),
@@ -72,7 +72,7 @@ describe('App', () => {
     });
 
     renderWithRouter('/app/talks');
-    await screen.findByRole('heading', { name: 'ClawRocket' });
+    await screen.findByRole('heading', { name: 'ClawTalk' });
     await screen.findByRole('heading', { name: 'Developer Quick Login' });
   });
 
@@ -327,7 +327,7 @@ describe('App', () => {
 
     renderWithRouter('/app/talks');
     await waitFor(() =>
-      expect(screen.getByRole('heading', { name: 'ClawRocket' })).toBeTruthy(),
+      expect(screen.getByRole('heading', { name: 'ClawTalk' })).toBeTruthy(),
     );
   });
 
@@ -378,7 +378,7 @@ describe('App', () => {
     });
     logOutButton.click();
 
-    await screen.findByRole('heading', { name: 'ClawRocket' });
+    await screen.findByRole('heading', { name: 'ClawTalk' });
   });
 
   it('shows unavailable talk state for 404 detail fetch', async () => {

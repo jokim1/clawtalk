@@ -1544,7 +1544,7 @@ function formatToolAccessState(state: string): string {
   }
 }
 
-// Keep this mapping in sync with src/clawrocket/web/routes/talk-tools.ts.
+// Keep this mapping in sync with src/clawtalk/web/routes/talk-tools.ts.
 function requiredScopesForTool(toolId: string): string[] {
   switch (toolId) {
     case 'gmail_read':

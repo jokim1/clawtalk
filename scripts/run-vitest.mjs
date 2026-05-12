@@ -18,7 +18,7 @@ function readExpectedNodeMajor() {
 }
 
 function assertSupportedNodeVersion() {
-  if (process.env.NANOCLAW_ALLOW_UNSUPPORTED_NODE === '1') {
+  if (process.env.CLAWTALK_ALLOW_UNSUPPORTED_NODE === '1') {
     return;
   }
 
@@ -30,7 +30,7 @@ function assertSupportedNodeVersion() {
       [
         `Vitest in this repo is only supported on Node ${expectedMajor}.x.`,
         `Detected Node ${process.versions.node}.`,
-        `Switch to the version in .nvmrc before running tests, or set NANOCLAW_ALLOW_UNSUPPORTED_NODE=1 to override.`,
+        `Switch to the version in .nvmrc before running tests, or set CLAWTALK_ALLOW_UNSUPPORTED_NODE=1 to override.`,
       ].join('\n'),
     );
     process.exit(1);

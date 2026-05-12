@@ -1396,7 +1396,7 @@ describe('TalkDetailPage', () => {
         new MessageEvent('message', {
           origin: window.location.origin,
           data: {
-            type: 'clawrocket:google-account-link',
+            type: 'clawtalk:google-account-link',
             status: 'success',
           },
         }),
@@ -1455,7 +1455,7 @@ describe('TalkDetailPage', () => {
         new MessageEvent('message', {
           origin: window.location.origin,
           data: {
-            type: 'clawrocket:google-account-link',
+            type: 'clawtalk:google-account-link',
             status: 'success',
           },
         }),
