@@ -25,9 +25,13 @@
 //   - Foreign-keyed columns enforced strictly (no missing-row inserts).
 //   - talk_threads.owner_id is required (denormalized from talks for RLS).
 
+import { randomUUID } from 'node:crypto';
+
 import { getDbPg } from '../../db-pg.js';
 import { notifyOutboxEvent } from '../talks/outbox-notifier.js';
 import {
+  inferThreadTitleFromContent,
+  isLegacyPlaceholderTalkThreadTitle,
   normalizeStoredThreadTitle,
   validateEditableThreadTitle,
 } from './thread-title-utils.js';
@@ -1465,6 +1469,296 @@ export async function appendAssistantMessageWithOutbox(input: {
     },
   });
   return message;
+}
+
+// ---------------------------------------------------------------------------
+// Error classes (carried over)
+// ---------------------------------------------------------------------------
+
+export class TalkActiveRoundError extends Error {
+  readonly code = 'talk_active_round';
+  readonly scope: 'talk' | 'thread';
+  constructor(scope: 'talk' | 'thread') {
+    super(
+      scope === 'thread'
+        ? 'This thread already has an active round'
+        : 'This talk already has an active round',
+    );
+    this.name = 'TalkActiveRoundError';
+    this.scope = scope;
+  }
+}
+
+export class AttachmentValidationError extends Error {
+  readonly code: string;
+  constructor(code: string, message: string) {
+    super(message);
+    this.name = 'AttachmentValidationError';
+    this.code = code;
+  }
+}
+
+export class TalkThreadValidationError extends Error {
+  readonly code: 'thread_not_found';
+  constructor(message = 'Thread not found or does not belong to this talk') {
+    super(message);
+    this.name = 'TalkThreadValidationError';
+    this.code = 'thread_not_found';
+  }
+}
+
+export class ThreadDeleteConflictError extends Error {
+  readonly code:
+    | 'default_thread'
+    | 'internal_thread'
+    | 'job_owned_thread'
+    | 'thread_has_active_runs';
+  constructor(
+    code:
+      | 'default_thread'
+      | 'internal_thread'
+      | 'job_owned_thread'
+      | 'thread_has_active_runs',
+    message: string,
+  ) {
+    super(message);
+    this.name = 'ThreadDeleteConflictError';
+    this.code = code;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Thread title inference (heal-on-write)
+// ---------------------------------------------------------------------------
+
+async function getFirstThreadUserMessageContent(
+  talkId: string,
+  threadId: string,
+): Promise<string | null> {
+  const db = getDbPg();
+  const rows = await db<{ content: string }[]>`
+    select content
+    from public.talk_messages
+    where talk_id = ${talkId}::uuid
+      and thread_id = ${threadId}::uuid
+      and role = 'user'
+    order by created_at asc, id asc
+    limit 1
+  `;
+  return rows[0]?.content ?? null;
+}
+
+async function maybePersistTalkThreadTitleFromMessages(
+  talkId: string,
+  threadId: string,
+  currentTitle: string | null | undefined,
+): Promise<string | null> {
+  const normalizedTitle = normalizeStoredThreadTitle(currentTitle);
+  if (
+    normalizedTitle !== null &&
+    !isLegacyPlaceholderTalkThreadTitle(normalizedTitle)
+  ) {
+    return normalizedTitle;
+  }
+  const inferred = inferThreadTitleFromContent(
+    await getFirstThreadUserMessageContent(talkId, threadId),
+  );
+  if (!inferred) return normalizedTitle;
+  const db = getDbPg();
+  await db`
+    update public.talk_threads
+    set title = ${inferred}, updated_at = now()
+    where id = ${threadId}::uuid and talk_id = ${talkId}::uuid
+      and (title is null or trim(title) = '' or title = 'Default Thread')
+  `;
+  return inferred;
+}
+
+// ---------------------------------------------------------------------------
+// enqueueTalkTurnAtomic — user message + N queued runs + outbox events
+//
+// Caller's withUserContext wraps this in a single tx; either all rows
+// land or none do. Attachments path is preserved from sqlite for
+// completeness (validates count cap + atomically links message_id).
+// ---------------------------------------------------------------------------
+
+export async function enqueueTalkTurnAtomic(input: {
+  ownerId: string;
+  talkId: string;
+  threadId?: string | null;
+  userId: string;
+  content: string;
+  messageId?: string;
+  runIds?: string[];
+  targetAgentIds: string[];
+  responseGroupId?: string | null;
+  sequenceIndexes?: Array<number | null> | null;
+  attachmentIds?: string[] | null;
+  maxAttachmentsPerMessage?: number;
+  idempotencyKey?: string | null;
+}): Promise<{
+  message: TalkMessageRecord;
+  runs: TalkRunRecord[];
+  threadId: string;
+}> {
+  if (input.targetAgentIds.length === 0) {
+    throw new Error('talk turn requires at least one target agent');
+  }
+  if (
+    input.runIds &&
+    input.runIds.length !== input.targetAgentIds.length
+  ) {
+    throw new Error('talk turn requires one run id per target agent');
+  }
+  if (
+    input.sequenceIndexes &&
+    input.sequenceIndexes.length !== input.targetAgentIds.length
+  ) {
+    throw new Error('talk turn requires one sequence index per run');
+  }
+
+  const threadId = await resolveThreadIdForTalk({
+    talkId: input.talkId,
+    threadId: input.threadId,
+    ownerId: input.ownerId,
+  });
+
+  // No concurrent rounds — if any run is queued/running/awaiting on the
+  // thread, reject before creating new ones.
+  const db = getDbPg();
+  const active = await db<{ count: number }[]>`
+    select count(*)::int as count
+    from public.talk_runs
+    where talk_id = ${input.talkId}::uuid
+      and thread_id = ${threadId}::uuid
+      and status in ('queued', 'running', 'awaiting_confirmation')
+  `;
+  if ((active[0]?.count ?? 0) > 0) {
+    throw new TalkActiveRoundError('thread');
+  }
+
+  const responseGroupId =
+    input.responseGroupId?.trim() || `group_${randomUUID()}`;
+  const sequenceIndexes = input.targetAgentIds.map((_, i) => {
+    const raw = input.sequenceIndexes?.[i];
+    return typeof raw === 'number' &&
+      Number.isFinite(raw) &&
+      Number.isInteger(raw) &&
+      raw >= 0
+      ? raw
+      : null;
+  });
+
+  const message = await createTalkMessage({
+    ownerId: input.ownerId,
+    id: input.messageId,
+    talkId: input.talkId,
+    threadId,
+    role: 'user',
+    content: input.content,
+    createdBy: input.userId,
+  });
+
+  // Heal thread title from the first user message — runs in the same
+  // tx so a rollback drops the title write too.
+  const threadRows = await db<{ title: string | null }[]>`
+    select title from public.talk_threads
+    where id = ${threadId}::uuid and talk_id = ${input.talkId}::uuid
+    limit 1
+  `;
+  await maybePersistTalkThreadTitleFromMessages(
+    input.talkId,
+    threadId,
+    threadRows[0]?.title ?? null,
+  );
+
+  // Fan out one queued run per target agent.
+  const runs: TalkRunRecord[] = [];
+  for (let i = 0; i < input.targetAgentIds.length; i++) {
+    const run = await createTalkRun({
+      ownerId: input.ownerId,
+      id: input.runIds?.[i],
+      talkId: input.talkId,
+      threadId,
+      requestedBy: input.userId,
+      status: 'queued',
+      triggerMessageId: message.id,
+      targetAgentId: input.targetAgentIds[i],
+      idempotencyKey: i === 0 ? input.idempotencyKey ?? null : null,
+      responseGroupId,
+      sequenceIndex: sequenceIndexes[i],
+    });
+    runs.push(run);
+  }
+
+  await touchTalkUpdatedAt(input.talkId);
+  await appendOutboxEvent({
+    topic: `talk:${input.talkId}`,
+    eventType: 'message_appended',
+    payload: {
+      talkId: input.talkId,
+      threadId,
+      messageId: message.id,
+      runId: null,
+      role: 'user',
+      createdBy: input.userId,
+      content: input.content,
+      createdAt: message.created_at,
+    },
+  });
+  for (const run of runs) {
+    await appendOutboxEvent({
+      topic: `talk:${input.talkId}`,
+      eventType: 'talk_run_queued',
+      payload: {
+        talkId: input.talkId,
+        threadId,
+        runId: run.id,
+        runKind: run.run_kind,
+        triggerMessageId: message.id,
+        targetAgentId: run.target_agent_id,
+        responseGroupId,
+        sequenceIndex: run.sequence_index,
+        status: 'queued',
+        executorAlias: run.executor_alias,
+        executorModel: run.executor_model,
+      },
+    });
+  }
+
+  // Attachments: validate cap + atomically link by message_id. Any
+  // un-linkable ID rolls back the whole turn via the throw.
+  const attIds = input.attachmentIds;
+  if (Array.isArray(attIds) && attIds.length > 0) {
+    const cap = input.maxAttachmentsPerMessage ?? 5;
+    if (attIds.length > cap) {
+      throw new AttachmentValidationError(
+        'too_many_attachments',
+        `A message may have at most ${cap} attachments.`,
+      );
+    }
+    const invalidIds: string[] = [];
+    for (const attId of attIds) {
+      const result = await db<{ id: string }[]>`
+        update public.talk_message_attachments
+        set message_id = ${message.id}::uuid
+        where id = ${attId}::uuid
+          and talk_id = ${input.talkId}::uuid
+          and message_id is null
+        returning id
+      `;
+      if (result.length === 0) invalidIds.push(attId);
+    }
+    if (invalidIds.length > 0) {
+      throw new AttachmentValidationError(
+        'invalid_attachment_ids',
+        `Some attachment IDs could not be linked: ${invalidIds.join(', ')}. ` +
+          'They may be invalid, already linked, or belong to another talk.',
+      );
+    }
+  }
+
+  return { message, runs, threadId };
 }
 
 export async function appendRuntimeTalkMessage(input: {

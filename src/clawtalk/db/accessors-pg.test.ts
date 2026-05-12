@@ -27,6 +27,7 @@ import {
   deleteTalkForOwner,
   deleteTalkMember,
   deleteTalkThread,
+  enqueueTalkTurnAtomic,
   getIdempotencyCache,
   getOrCreateDefaultThread,
   getOutboxEventsForTopics,
@@ -58,6 +59,7 @@ import {
   searchTalkMessages,
   setTalkRunExecutorProfile,
   setTalkRunMetadata,
+  TalkActiveRoundError,
   touchTalkUpdatedAt,
   updateTalkProjectPath,
   updateTalkRunMetadata,
@@ -773,9 +775,7 @@ describe('accessors-pg slice 1: talks/folders/members/threads', () => {
         status: 'running',
         triggerMessageId: trigger.id,
       });
-      const beforeMax = await getOutboxMaxEventIdForTopics([
-        `talk:${talk.id}`,
-      ]);
+      const beforeMax = await getOutboxMaxEventIdForTopics([`talk:${talk.id}`]);
 
       const msg = await appendAssistantMessageWithOutbox({
         ownerId: USER_A_ID,
@@ -854,6 +854,85 @@ describe('accessors-pg slice 1: talks/folders/members/threads', () => {
         agentNickname: 'Argus',
       });
     });
+  });
+
+  // ── enqueueTalkTurnAtomic ──────────────────────────────────────────
+
+  it('enqueueTalkTurnAtomic: fans out N queued runs + outbox events; rejects concurrent rounds', async () => {
+    const AGENT_1 = '0c555555-9999-9999-9999-000000000001';
+    const AGENT_2 = '0c555555-9999-9999-9999-000000000002';
+
+    const { talkId, threadId } = await withUserContext(
+      USER_A_ID,
+      async () => {
+        const t = await createTalk({
+          ownerId: USER_A_ID,
+          topicTitle: 'Turn',
+        });
+        const tid = await getOrCreateDefaultThread({
+          talkId: t.id,
+          ownerId: USER_A_ID,
+        });
+        return { talkId: t.id, threadId: tid };
+      },
+    );
+
+    const result = await withUserContext(USER_A_ID, async () => {
+      return await enqueueTalkTurnAtomic({
+        ownerId: USER_A_ID,
+        talkId,
+        threadId,
+        userId: USER_A_ID,
+        content: 'What should I read about ricin?',
+        targetAgentIds: [AGENT_1, AGENT_2],
+      });
+    });
+    expect(result.threadId).toBe(threadId);
+    expect(result.message.role).toBe('user');
+    expect(result.message.content).toMatch(/ricin/);
+    expect(result.runs).toHaveLength(2);
+    expect(result.runs.every((r) => r.status === 'queued')).toBe(true);
+    expect(result.runs[0].response_group_id).toBe(
+      result.runs[1].response_group_id,
+    );
+    expect(result.runs[0].target_agent_id).toBe(AGENT_1);
+    expect(result.runs[1].target_agent_id).toBe(AGENT_2);
+
+    // Title inferred from the message — the default thread starts with
+    // title=null, heal-on-write should set it from the question.
+    await withUserContext(USER_A_ID, async () => {
+      const threads = await listTalkThreads({
+        talkId,
+        ownerId: USER_A_ID,
+      });
+      const def = threads.find((t) => t.id === threadId);
+      expect(def?.title).toBeTruthy();
+    });
+
+    // Outbox events: 1 message_appended + 2 talk_run_queued.
+    await withUserContext(USER_A_ID, async () => {
+      const events = await getOutboxEventsForTopics([`talk:${talkId}`], 0);
+      const byType = events.reduce<Record<string, number>>(
+        (acc, e) => ({ ...acc, [e.event_type]: (acc[e.event_type] ?? 0) + 1 }),
+        {},
+      );
+      expect(byType['message_appended']).toBeGreaterThanOrEqual(1);
+      expect(byType['talk_run_queued']).toBe(2);
+    });
+
+    // Concurrent round rejected.
+    await expect(
+      withUserContext(USER_A_ID, async () => {
+        await enqueueTalkTurnAtomic({
+          ownerId: USER_A_ID,
+          talkId,
+          threadId,
+          userId: USER_A_ID,
+          content: 'second round before first finishes',
+          targetAgentIds: [AGENT_1],
+        });
+      }),
+    ).rejects.toBeInstanceOf(TalkActiveRoundError);
   });
 
   // ── RLS gates ──────────────────────────────────────────────────────
