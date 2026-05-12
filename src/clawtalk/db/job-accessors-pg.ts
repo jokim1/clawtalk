@@ -471,7 +471,9 @@ async function validateTalkJobConfiguration(input: {
   deliverableKind: TalkJobDeliverableKind;
   reportOutputId?: string | null;
 }): Promise<void> {
-  if (!(await validateTargetAgentMembership(input.talkId, input.targetAgentId))) {
+  if (
+    !(await validateTargetAgentMembership(input.talkId, input.targetAgentId))
+  ) {
     throw new Error(
       'The selected Talk agent is not currently configured on this talk.',
     );
@@ -623,9 +625,7 @@ export async function patchTalkJob(input: {
   const title =
     input.title !== undefined ? normalizeTitle(input.title) : current.title;
   const prompt =
-    input.prompt !== undefined
-      ? normalizePrompt(input.prompt)
-      : current.prompt;
+    input.prompt !== undefined ? normalizePrompt(input.prompt) : current.prompt;
   const targetAgentId =
     input.targetAgentId !== undefined
       ? input.targetAgentId.trim()
