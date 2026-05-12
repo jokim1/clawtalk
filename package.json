@@ -23,7 +23,7 @@
     "test:watch": "node scripts/run-vitest.mjs"
   },
   "dependencies": {
-    "@hono/node-server": "^1.19.10",
+    "@hono/node-server": "^1.19.13",
     "better-sqlite3": "^11.8.1",
     "exceljs": "^4.4.0",
     "hono": "^4.12.7",
