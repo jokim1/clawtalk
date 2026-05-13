@@ -2774,3 +2774,41 @@ export async function appendRuntimeTalkMessage(input: {
   });
   return message;
 }
+
+// ---------------------------------------------------------------------------
+// Settings KV (system-managed; migration 0004 grants select/insert/update on
+// public.settings_kv to authenticated. Admin gating happens at the route
+// layer under the cloud-era auth model — there is no per-row owner_id.)
+// ---------------------------------------------------------------------------
+
+export async function getSettingValue(key: string): Promise<string | null> {
+  const db = getDbPg();
+  const rows = await db<{ value: string | null }[]>`
+    select value from public.settings_kv where key = ${key} limit 1
+  `;
+  return rows[0]?.value ?? null;
+}
+
+export async function upsertSettingValue(input: {
+  key: string;
+  value: string | null;
+  updatedBy?: string | null;
+}): Promise<void> {
+  const db = getDbPg();
+  await db`
+    insert into public.settings_kv (key, value, updated_by)
+    values (${input.key}, ${input.value},
+            ${input.updatedBy ?? null}::uuid)
+    on conflict (key) do update set
+      value = excluded.value,
+      updated_at = now(),
+      updated_by = excluded.updated_by
+  `;
+}
+
+export async function deleteSettingValue(key: string): Promise<void> {
+  const db = getDbPg();
+  await db`
+    delete from public.settings_kv where key = ${key}
+  `;
+}
