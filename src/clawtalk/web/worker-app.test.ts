@@ -160,8 +160,11 @@ describe('worker-app — public routes', () => {
 
   it('GET /api/v1/_unmapped returns 501 catch-all for unported routes', async () => {
     const app = getWorkerApp();
+    // Use a chassis-removed path that hasn't (and won't) be mounted —
+    // /api/v1/browser/* sits outside the auth-gated namespaces, so
+    // the catch-all is the first matcher to fire.
     const res = await app.request(
-      new Request('https://app.test/api/v1/talks'),
+      new Request('https://app.test/api/v1/browser/profiles'),
       undefined,
       envForWorker(),
     );
