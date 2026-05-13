@@ -38,7 +38,6 @@ import {
 const ensureSystemManagedTelegramConnection = (): { id: string } => ({
   id: '_chassis_removed_',
 });
-import { getDb } from '../../db.js';
 import {
   completeDeviceAuthFlow,
   completeGoogleOAuthCallback,
