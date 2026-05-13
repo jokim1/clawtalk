@@ -1031,7 +1031,7 @@ function buildApp(opts: WebServerOptions): Hono {
     const limit = parsePositiveInt(c.req.query('limit'));
     const offset = parseNonNegativeInt(c.req.query('offset'));
 
-    const result = listTalksRoute({
+    const result = await listTalksRoute({
       auth,
       limit: limit ?? undefined,
       offset: offset ?? undefined,
@@ -1051,7 +1051,7 @@ function buildApp(opts: WebServerOptions): Hono {
       return rateLimitedResponse(c, rateResult);
     }
 
-    const result = listTalkSidebarRoute({ auth });
+    const result = await listTalkSidebarRoute({ auth });
     return new Response(JSON.stringify(result.body), {
       status: result.statusCode,
       headers: { 'content-type': 'application/json; charset=utf-8' },
@@ -2590,7 +2590,7 @@ function buildApp(opts: WebServerOptions): Hono {
       );
     }
 
-    const result = createTalkRoute({
+    const result = await createTalkRoute({
       auth,
       title: payload.data.title,
     });
@@ -2655,7 +2655,7 @@ function buildApp(opts: WebServerOptions): Hono {
       );
     }
 
-    const result = createTalkFolderRoute({
+    const result = await createTalkFolderRoute({
       auth,
       title: payload.data.title,
     });
@@ -2690,7 +2690,7 @@ function buildApp(opts: WebServerOptions): Hono {
       );
     }
 
-    const result = getTalkRoute({
+    const result = await getTalkRoute({
       talkId,
       auth,
     });
@@ -2762,7 +2762,7 @@ function buildApp(opts: WebServerOptions): Hono {
       );
     }
 
-    const result = patchTalkRoute({
+    const result = await patchTalkRoute({
       talkId,
       auth,
       title:
@@ -2807,7 +2807,7 @@ function buildApp(opts: WebServerOptions): Hono {
       );
     }
 
-    const result = getTalkProjectMountRoute({ auth, talkId });
+    const result = await getTalkProjectMountRoute({ auth, talkId });
     return new Response(JSON.stringify(result.body), {
       status: result.statusCode,
       headers: { 'content-type': 'application/json; charset=utf-8' },
@@ -2872,7 +2872,7 @@ function buildApp(opts: WebServerOptions): Hono {
       );
     }
 
-    const result = updateTalkProjectMountRoute({
+    const result = await updateTalkProjectMountRoute({
       auth,
       talkId,
       projectPath: payload.data.projectPath,
@@ -2919,7 +2919,7 @@ function buildApp(opts: WebServerOptions): Hono {
       );
     }
 
-    const result = clearTalkProjectMountRoute({ auth, talkId });
+    const result = await clearTalkProjectMountRoute({ auth, talkId });
     return new Response(JSON.stringify(result.body), {
       status: result.statusCode,
       headers: { 'content-type': 'application/json; charset=utf-8' },
@@ -2969,7 +2969,7 @@ function buildApp(opts: WebServerOptions): Hono {
       );
     }
 
-    const result = deleteTalkRoute({
+    const result = await deleteTalkRoute({
       talkId,
       auth,
     });
@@ -3037,7 +3037,7 @@ function buildApp(opts: WebServerOptions): Hono {
       );
     }
 
-    const result = patchTalkFolderRoute({
+    const result = await patchTalkFolderRoute({
       folderId,
       auth,
       title:
@@ -3092,7 +3092,7 @@ function buildApp(opts: WebServerOptions): Hono {
       );
     }
 
-    const result = deleteTalkFolderRoute({
+    const result = await deleteTalkFolderRoute({
       folderId,
       auth,
     });
@@ -3213,7 +3213,7 @@ function buildApp(opts: WebServerOptions): Hono {
       );
     }
 
-    const result = reorderTalkSidebarRoute({
+    const result = await reorderTalkSidebarRoute({
       auth,
       itemType: payload.data.itemType,
       itemId: payload.data.itemId,
@@ -3253,7 +3253,7 @@ function buildApp(opts: WebServerOptions): Hono {
     const limit = parsePositiveInt(c.req.query('limit'));
     const beforeCreatedAt = c.req.query('before') || undefined;
     const threadId = (c.req.query('threadId') || '').trim() || undefined;
-    const result = listTalkMessagesRoute({
+    const result = await listTalkMessagesRoute({
       talkId,
       auth,
       threadId,
@@ -3316,7 +3316,7 @@ function buildApp(opts: WebServerOptions): Hono {
       : [];
     const threadId =
       typeof payload.data.threadId === 'string' ? payload.data.threadId : null;
-    const result = deleteTalkMessagesRoute({
+    const result = await deleteTalkMessagesRoute({
       talkId: c.req.param('talkId'),
       auth,
       messageIds,
@@ -3353,7 +3353,7 @@ function buildApp(opts: WebServerOptions): Hono {
 
     const query = c.req.query('q') || '';
     const limit = parsePositiveInt(c.req.query('limit'));
-    const result = searchTalkMessagesRoute({
+    const result = await searchTalkMessagesRoute({
       talkId,
       auth,
       query,
@@ -3613,7 +3613,7 @@ function buildApp(opts: WebServerOptions): Hono {
       );
     }
 
-    const result = listTalkAgentsRoute({
+    const result = await listTalkAgentsRoute({
       talkId,
       auth,
     });
@@ -6497,7 +6497,7 @@ function buildApp(opts: WebServerOptions): Hono {
       );
     }
 
-    const result = updateTalkAgentsRoute({
+    const result = await updateTalkAgentsRoute({
       talkId,
       auth,
       agents: payload.data.agents,
@@ -6543,7 +6543,7 @@ function buildApp(opts: WebServerOptions): Hono {
       );
     }
 
-    const result = listTalkRunsRoute({ talkId, auth });
+    const result = await listTalkRunsRoute({ talkId, auth });
     return new Response(JSON.stringify(result.body), {
       status: result.statusCode,
       headers: { 'content-type': 'application/json; charset=utf-8' },
@@ -6576,7 +6576,7 @@ function buildApp(opts: WebServerOptions): Hono {
       );
     }
 
-    const result = getTalkRunContextRoute({ talkId, runId, auth });
+    const result = await getTalkRunContextRoute({ talkId, runId, auth });
     return new Response(JSON.stringify(result.body), {
       status: result.statusCode,
       headers: { 'content-type': 'application/json; charset=utf-8' },
@@ -6607,7 +6607,7 @@ function buildApp(opts: WebServerOptions): Hono {
       );
     }
 
-    const result = getTalkPolicyRoute({
+    const result = await getTalkPolicyRoute({
       talkId,
       auth,
     });
@@ -6705,7 +6705,7 @@ function buildApp(opts: WebServerOptions): Hono {
       );
     }
 
-    const result = updateTalkPolicyRoute({
+    const result = await updateTalkPolicyRoute({
       talkId,
       auth,
       agents: payload.data.agents,
@@ -6823,7 +6823,7 @@ function buildApp(opts: WebServerOptions): Hono {
       );
     }
 
-    const result = enqueueTalkChat({
+    const result = await enqueueTalkChat({
       talkId,
       threadId:
         typeof payload.data.threadId === 'string'
@@ -7100,7 +7100,7 @@ function buildApp(opts: WebServerOptions): Hono {
       );
     }
 
-    const result = cancelTalkChat({
+    const result = await cancelTalkChat({
       talkId,
       threadId:
         typeof payload.data.threadId === 'string'
