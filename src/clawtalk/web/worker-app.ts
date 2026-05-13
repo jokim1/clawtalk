@@ -34,20 +34,34 @@
 //                                         same module as the rest of
 //                                         the context surface)
 //   /api/v1/talks/:talkId/outputs[/...] — talk-outputs.ts
+//   /api/v1/talks/:talkId/jobs[/...]    — talk-jobs.ts (CRUD +
+//                                         pause/resume/run-now; the
+//                                         run-now mount creates a
+//                                         trigger row but the queue
+//                                         consumer is Node-only until
+//                                         the Cloudflare Queues port
+//                                         lands)
+//   /api/v1/talks/:talkId/attachments[/...] — talk-attachments.ts
+//   /api/v1/talks/:talkId/threads/:threadId — talk-threads.ts (PATCH
+//                                         + DELETE only; GET list and
+//                                         POST create stayed inline
+//                                         in server.ts and are not
+//                                         yet extracted into the route
+//                                         module)
 //
-// NOT mounted (still sqlite-bound or needs Workers Queue plumbing):
+// NOT mounted (needs Workers Queue plumbing or other follow-ups):
 //   /api/v1/talks/:talkId/chat[/cancel] — needs run-worker wake; will
 //                                          land alongside the Queue
 //                                          producer in a future unit.
-//   /api/v1/talks/:talkId/threads[/...] — talk-threads.ts still on
-//                                          sqlite.
-//   /api/v1/talks/:talkId/{attachments,jobs}
-//                                       — corresponding route file
-//                                          still on sqlite.
+//   GET /api/v1/talks/:talkId/threads,  — thread list + create inline
+//   POST /api/v1/talks/:talkId/threads     in server.ts; pending
+//                                          extraction into the route
+//                                          module.
 //   /api/v1/events, /api/v1/talks/:talkId/events — SSE streams; SSE
 //                                          + outbox-notifier still
 //                                          sqlite + Node-process
-//                                          coupled.
+//                                          coupled. Cloudflare needs
+//                                          Durable Objects port.
 //   /api/v1/main/*, /api/v1/browser/*, /api/v1/data-connectors/*,
 //   /api/v1/channel-connectors/*, /api/v1/channel-connections/*,
 //   /api/v1/talks/:talkId/{tools,resources,channels,data-connectors}
@@ -89,6 +103,11 @@ import {
   verifyAiProviderCredentialRoute,
 } from './routes/ai-agents.js';
 import {
+  getTalkAttachmentContentRoute,
+  listTalkAttachmentsRoute,
+  uploadTalkAttachmentRoute,
+} from './routes/talk-attachments.js';
+import {
   createTalkContextRuleRoute,
   createTalkContextSourceRoute,
   deleteTalkContextRuleRoute,
@@ -105,12 +124,27 @@ import {
   uploadTalkContextSourceRoute,
 } from './routes/talk-context.js';
 import {
+  createTalkJobRoute,
+  deleteTalkJobRoute,
+  getTalkJobRoute,
+  listTalkJobRunsRoute,
+  listTalkJobsRoute,
+  patchTalkJobRoute,
+  pauseTalkJobRoute,
+  resumeTalkJobRoute,
+  runTalkJobNowRoute,
+} from './routes/talk-jobs.js';
+import {
   createTalkOutputRoute,
   deleteTalkOutputRoute,
   getTalkOutputRoute,
   listTalkOutputsRoute,
   patchTalkOutputRoute,
 } from './routes/talk-outputs.js';
+import {
+  deleteTalkThreadRoute,
+  patchTalkThreadRoute,
+} from './routes/talk-threads.js';
 import {
   cancelTalkChat,
   clearTalkProjectMountRoute,
@@ -1205,6 +1239,300 @@ function buildApp(): Hono<{ Variables: Variables }> {
         sourceId: c.req.param('sourceId'),
       });
       return jsonResponse(result);
+    },
+  );
+
+  // ── talk-threads.ts: thread metadata edits + delete ──────────
+  // (GET list + POST create still inline in server.ts and not yet
+  // extracted into the route module; only PATCH + DELETE land here.)
+  app.patch('/api/v1/talks/:talkId/threads/:threadId', async (c) => {
+    const auth = c.get('auth');
+    const rl = checkRateLimit({ principalId: auth.userId, bucket: 'write' });
+    if (!rl.allowed) return rateLimitedResponse(c, rl);
+    const csrfFail = checkCsrf(c, auth);
+    if (csrfFail) return csrfFail;
+    const payload = await readJsonBody<{ title?: unknown; pinned?: unknown }>(c);
+    if (!payload.ok) return invalidJsonResponse(c, payload.error);
+    const result = await patchTalkThreadRoute({
+      auth,
+      talkId: c.req.param('talkId'),
+      threadId: c.req.param('threadId'),
+      body: payload.data,
+    });
+    return jsonResponse(result);
+  });
+
+  app.delete('/api/v1/talks/:talkId/threads/:threadId', async (c) => {
+    const auth = c.get('auth');
+    const rl = checkRateLimit({ principalId: auth.userId, bucket: 'write' });
+    if (!rl.allowed) return rateLimitedResponse(c, rl);
+    const csrfFail = checkCsrf(c, auth);
+    if (csrfFail) return csrfFail;
+    const result = await deleteTalkThreadRoute({
+      auth,
+      talkId: c.req.param('talkId'),
+      threadId: c.req.param('threadId'),
+    });
+    return jsonResponse(result);
+  });
+
+  // ── talk-jobs.ts: jobs CRUD + lifecycle ──────────────────────
+  // The job CRUD endpoints write to postgres via withUserContext.
+  // run-now creates a trigger row but does NOT wake any worker —
+  // the Cloudflare Queues consumer is pending a follow-up unit.
+  app.get('/api/v1/talks/:talkId/jobs', async (c) => {
+    const auth = c.get('auth');
+    const rl = checkRateLimit({ principalId: auth.userId, bucket: 'read' });
+    if (!rl.allowed) return rateLimitedResponse(c, rl);
+    const result = await listTalkJobsRoute({
+      auth,
+      talkId: c.req.param('talkId'),
+    });
+    return jsonResponse(result);
+  });
+
+  app.get('/api/v1/talks/:talkId/jobs/:jobId', async (c) => {
+    const auth = c.get('auth');
+    const rl = checkRateLimit({ principalId: auth.userId, bucket: 'read' });
+    if (!rl.allowed) return rateLimitedResponse(c, rl);
+    const result = await getTalkJobRoute({
+      auth,
+      talkId: c.req.param('talkId'),
+      jobId: c.req.param('jobId'),
+    });
+    return jsonResponse(result);
+  });
+
+  app.get('/api/v1/talks/:talkId/jobs/:jobId/runs', async (c) => {
+    const auth = c.get('auth');
+    const rl = checkRateLimit({ principalId: auth.userId, bucket: 'read' });
+    if (!rl.allowed) return rateLimitedResponse(c, rl);
+    const limit = parsePositiveInt(c.req.query('limit'));
+    const result = await listTalkJobRunsRoute({
+      auth,
+      talkId: c.req.param('talkId'),
+      jobId: c.req.param('jobId'),
+      limit: limit ?? undefined,
+    });
+    return jsonResponse(result);
+  });
+
+  app.post('/api/v1/talks/:talkId/jobs', async (c) => {
+    const auth = c.get('auth');
+    const rl = checkRateLimit({ principalId: auth.userId, bucket: 'write' });
+    if (!rl.allowed) return rateLimitedResponse(c, rl);
+    const csrfFail = checkCsrf(c, auth);
+    if (csrfFail) return csrfFail;
+    const payload = await readJsonBody<{
+      title?: string;
+      prompt?: string;
+      targetAgentId?: string;
+      schedule?: Record<string, unknown>;
+      timezone?: string;
+      deliverableKind?: 'thread' | 'report';
+      reportOutputId?: string | null;
+      createReport?: Record<string, unknown>;
+      sourceScope?: Record<string, unknown>;
+    }>(c);
+    if (!payload.ok) return invalidJsonResponse(c, payload.error);
+    const result = await createTalkJobRoute({
+      auth,
+      talkId: c.req.param('talkId'),
+      title: typeof payload.data.title === 'string' ? payload.data.title : '',
+      prompt:
+        typeof payload.data.prompt === 'string' ? payload.data.prompt : '',
+      targetAgentId:
+        typeof payload.data.targetAgentId === 'string'
+          ? payload.data.targetAgentId
+          : '',
+      schedule: (payload.data.schedule ?? null) as any,
+      timezone:
+        typeof payload.data.timezone === 'string' ? payload.data.timezone : '',
+      deliverableKind:
+        payload.data.deliverableKind === 'report' ? 'report' : 'thread',
+      reportOutputId:
+        typeof payload.data.reportOutputId === 'string' ||
+        payload.data.reportOutputId === null
+          ? payload.data.reportOutputId
+          : undefined,
+      createReport: payload.data.createReport,
+      sourceScope: (payload.data.sourceScope ?? null) as any,
+    });
+    return jsonResponse(result);
+  });
+
+  app.patch('/api/v1/talks/:talkId/jobs/:jobId', async (c) => {
+    const auth = c.get('auth');
+    const rl = checkRateLimit({ principalId: auth.userId, bucket: 'write' });
+    if (!rl.allowed) return rateLimitedResponse(c, rl);
+    const csrfFail = checkCsrf(c, auth);
+    if (csrfFail) return csrfFail;
+    const payload = await readJsonBody<{
+      title?: string;
+      prompt?: string;
+      targetAgentId?: string;
+      schedule?: Record<string, unknown>;
+      timezone?: string;
+      deliverableKind?: 'thread' | 'report';
+      reportOutputId?: string | null;
+      createReport?: Record<string, unknown>;
+      sourceScope?: Record<string, unknown>;
+    }>(c);
+    if (!payload.ok) return invalidJsonResponse(c, payload.error);
+    const result = await patchTalkJobRoute({
+      auth,
+      talkId: c.req.param('talkId'),
+      jobId: c.req.param('jobId'),
+      title:
+        typeof payload.data.title === 'string' ? payload.data.title : undefined,
+      prompt:
+        typeof payload.data.prompt === 'string'
+          ? payload.data.prompt
+          : undefined,
+      targetAgentId:
+        typeof payload.data.targetAgentId === 'string'
+          ? payload.data.targetAgentId
+          : undefined,
+      schedule: payload.data.schedule as any,
+      timezone:
+        typeof payload.data.timezone === 'string'
+          ? payload.data.timezone
+          : undefined,
+      deliverableKind:
+        payload.data.deliverableKind === 'report' ||
+        payload.data.deliverableKind === 'thread'
+          ? payload.data.deliverableKind
+          : undefined,
+      reportOutputId:
+        typeof payload.data.reportOutputId === 'string' ||
+        payload.data.reportOutputId === null
+          ? payload.data.reportOutputId
+          : undefined,
+      createReport: payload.data.createReport,
+      sourceScope: payload.data.sourceScope as any,
+    });
+    return jsonResponse(result);
+  });
+
+  app.delete('/api/v1/talks/:talkId/jobs/:jobId', async (c) => {
+    const auth = c.get('auth');
+    const rl = checkRateLimit({ principalId: auth.userId, bucket: 'write' });
+    if (!rl.allowed) return rateLimitedResponse(c, rl);
+    const csrfFail = checkCsrf(c, auth);
+    if (csrfFail) return csrfFail;
+    const result = await deleteTalkJobRoute({
+      auth,
+      talkId: c.req.param('talkId'),
+      jobId: c.req.param('jobId'),
+    });
+    return jsonResponse(result);
+  });
+
+  app.post('/api/v1/talks/:talkId/jobs/:jobId/pause', async (c) => {
+    const auth = c.get('auth');
+    const rl = checkRateLimit({ principalId: auth.userId, bucket: 'write' });
+    if (!rl.allowed) return rateLimitedResponse(c, rl);
+    const csrfFail = checkCsrf(c, auth);
+    if (csrfFail) return csrfFail;
+    const result = await pauseTalkJobRoute({
+      auth,
+      talkId: c.req.param('talkId'),
+      jobId: c.req.param('jobId'),
+    });
+    return jsonResponse(result);
+  });
+
+  app.post('/api/v1/talks/:talkId/jobs/:jobId/resume', async (c) => {
+    const auth = c.get('auth');
+    const rl = checkRateLimit({ principalId: auth.userId, bucket: 'write' });
+    if (!rl.allowed) return rateLimitedResponse(c, rl);
+    const csrfFail = checkCsrf(c, auth);
+    if (csrfFail) return csrfFail;
+    const result = await resumeTalkJobRoute({
+      auth,
+      talkId: c.req.param('talkId'),
+      jobId: c.req.param('jobId'),
+    });
+    return jsonResponse(result);
+  });
+
+  app.post('/api/v1/talks/:talkId/jobs/:jobId/run-now', async (c) => {
+    const auth = c.get('auth');
+    const rl = checkRateLimit({ principalId: auth.userId, bucket: 'write' });
+    if (!rl.allowed) return rateLimitedResponse(c, rl);
+    const csrfFail = checkCsrf(c, auth);
+    if (csrfFail) return csrfFail;
+    const result = await runTalkJobNowRoute({
+      auth,
+      talkId: c.req.param('talkId'),
+      jobId: c.req.param('jobId'),
+    });
+    return jsonResponse(result);
+  });
+
+  // ── talk-attachments.ts: upload + list + content download ────
+  app.post('/api/v1/talks/:talkId/attachments', async (c) => {
+    const auth = c.get('auth');
+    const rl = checkRateLimit({ principalId: auth.userId, bucket: 'write' });
+    if (!rl.allowed) return rateLimitedResponse(c, rl);
+    const csrfFail = checkCsrf(c, auth);
+    if (csrfFail) return csrfFail;
+    const body = await c.req.parseBody();
+    const file = body['file'];
+    if (!file || !(file instanceof File)) {
+      return c.json(
+        {
+          ok: false,
+          error: { code: 'file_required', message: 'A file field is required' },
+        },
+        400,
+      );
+    }
+    const arrayBuffer = await file.arrayBuffer();
+    const result = await uploadTalkAttachmentRoute({
+      auth,
+      talkId: c.req.param('talkId'),
+      file: {
+        name: file.name || 'unnamed',
+        data: Buffer.from(arrayBuffer),
+        type: file.type || 'application/octet-stream',
+      },
+    });
+    return jsonResponse(result);
+  });
+
+  app.get('/api/v1/talks/:talkId/attachments', async (c) => {
+    const auth = c.get('auth');
+    const rl = checkRateLimit({ principalId: auth.userId, bucket: 'read' });
+    if (!rl.allowed) return rateLimitedResponse(c, rl);
+    const result = await listTalkAttachmentsRoute({
+      auth,
+      talkId: c.req.param('talkId'),
+    });
+    return jsonResponse(result);
+  });
+
+  app.get(
+    '/api/v1/talks/:talkId/attachments/:attachmentId/content',
+    async (c) => {
+      const auth = c.get('auth');
+      const rl = checkRateLimit({ principalId: auth.userId, bucket: 'read' });
+      if (!rl.allowed) return rateLimitedResponse(c, rl);
+      const result = await getTalkAttachmentContentRoute({
+        auth,
+        talkId: c.req.param('talkId'),
+        attachmentId: c.req.param('attachmentId'),
+      });
+      if ('headers' in result && result.headers) {
+        return new Response(result.body, {
+          status: result.statusCode,
+          headers: result.headers,
+        });
+      }
+      return new Response(JSON.stringify(result.body), {
+        status: result.statusCode,
+        headers: { 'content-type': 'application/json; charset=utf-8' },
+      });
     },
   );
 
