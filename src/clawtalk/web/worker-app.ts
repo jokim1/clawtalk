@@ -55,10 +55,7 @@ import type { Context, MiddlewareHandler } from 'hono';
 
 import { isPgDatabaseHealthy } from '../../db-pg.js';
 import { authenticateRequestPg } from './middleware/auth-pg.js';
-import {
-  authChallengeHeader,
-  extractJwksEnv,
-} from './middleware/auth-pg.js';
+import { authChallengeHeader, extractJwksEnv } from './middleware/auth-pg.js';
 import { validateCsrfTokenPg } from './middleware/csrf-pg.js';
 import {
   checkRateLimit,
@@ -878,10 +875,7 @@ const requireAuthMiddleware: MiddlewareHandler<{
 // ── shared helpers ──────────────────────────────────────────────
 
 /** Translate a route handler envelope into an HTTP response. */
-function jsonResponse(result: {
-  statusCode: number;
-  body: unknown;
-}): Response {
+function jsonResponse(result: { statusCode: number; body: unknown }): Response {
   return new Response(JSON.stringify(result.body), {
     status: result.statusCode,
     headers: { 'content-type': 'application/json; charset=utf-8' },
@@ -942,10 +936,7 @@ async function readJsonBody<T = Record<string, unknown>>(
 }
 
 function invalidJsonResponse(c: Context, message: string): Response {
-  return c.json(
-    { ok: false, error: { code: 'invalid_json', message } },
-    400,
-  );
+  return c.json({ ok: false, error: { code: 'invalid_json', message } }, 400);
 }
 
 type DecodedIdParam =
