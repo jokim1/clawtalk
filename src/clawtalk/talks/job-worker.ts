@@ -1,9 +1,6 @@
 import { withUserContext } from '../../db.js';
 import { TALK_RUN_POLL_MS } from '../config.js';
-import {
-  claimDueTalkJobs,
-  createJobTriggerRun,
-} from '../db/job-accessors.js';
+import { claimDueTalkJobs, createJobTriggerRun } from '../db/job-accessors.js';
 import { logger } from '../../logger.js';
 import { WakeablePollLoop } from './wakeable-poll-loop.js';
 
