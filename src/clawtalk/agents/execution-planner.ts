@@ -174,11 +174,7 @@ export function getAnthropicApiKeyFromDb(): string | null {
 }
 
 export async function getConfiguredExecutorAuthMode(): Promise<
-  | 'subscription'
-  | 'api_key'
-  | 'advanced_bearer'
-  | 'none'
-  | null
+  'subscription' | 'api_key' | 'advanced_bearer' | 'none' | null
 > {
   const mode = (await getSettingValue('executor.authMode'))?.trim() || '';
   if (
@@ -195,7 +191,8 @@ export async function getConfiguredExecutorAuthMode(): Promise<
 export async function resolveContainerCredential(input?: {
   preferredAuthMode?: 'api_key' | 'subscription';
 }): Promise<ContainerCredentialConfig> {
-  const configuredAuthMode = (await getConfiguredExecutorAuthMode()) || undefined;
+  const configuredAuthMode =
+    (await getConfiguredExecutorAuthMode()) || undefined;
   const dbOauth =
     (await getSettingValue('executor.claudeOauthToken'))?.trim() || null;
   const dbAuth =
