@@ -222,7 +222,7 @@ function buildApp(): Hono<{ Variables: Variables }> {
     };
     if (err && typeof err === 'object') {
       for (const key of Object.getOwnPropertyNames(err)) {
-        const v = (err as Record<string, unknown>)[key];
+        const v = (err as unknown as Record<string, unknown>)[key];
         description[key] =
           typeof v === 'string' || typeof v === 'number' ? v : String(v);
       }
