@@ -70,6 +70,21 @@ max_batch_timeout = 5
 max_retries = 3
 dead_letter_queue = "clawtalk-talk-runs-dlq"
 
+# ─── Durable Objects — W7 live events ─────────────────────────────────
+#
+# UserEventHub: one DO per signed-in user. Holds hibernating WebSocket
+# connections and drains outbox notifies into live frames. Produced by
+# the Worker (which forwards /api/v1/events upgrades via
+# `idFromName(userId).fetch(/upgrade)`) and notified by the run-worker
+# producer side after every outbox INSERT.
+[[durable_objects.bindings]]
+name = "USER_EVENT_HUB"
+class_name = "UserEventHub"
+
+[[migrations]]
+tag = "v1-user-event-hub"
+new_sqlite_classes = ["UserEventHub"]
+
 # ─── Secrets (set via CLI, not here) ──────────────────────────────────
 #
 #   wrangler secret put CLAWTALK_PROVIDER_SECRET_KEY
@@ -79,6 +94,14 @@ dead_letter_queue = "clawtalk-talk-runs-dlq"
 #   wrangler secret put SUPABASE_PUBLISHABLE_KEY
 #     Supabase anon key (`sb_publishable_...`). Used by auth-refresh /
 #     auth-logout to call Supabase's REST auth endpoints.
+#
+#   wrangler secret put DB_EVENT_HUB_URL
+#     Postgres connection string scoped to the `clawtalk_event_hub`
+#     LOGIN role (NOBYPASSRLS + SELECT-only on event_outbox). Created
+#     by migration 0005 in U3. The UserEventHub DO uses this URL for
+#     outbox SELECT during replay + notify drain — it never sees user
+#     credentials. Migration 0006 (which revokes outbox SELECT from
+#     `authenticated`) must NOT apply until this secret is set.
 #
 # What does NOT live as a Workers Secret:
 #   - SUPABASE_PROJECT_URL: declared in [vars] (non-secret).

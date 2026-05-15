@@ -17,6 +17,8 @@
 import { type RequestExecutionContext, withRequestScopedDb } from './db.js';
 import { getWorkerApp } from './clawtalk/web/worker-app.js';
 
+export { UserEventHub } from './clawtalk/talks/user-event-hub.js';
+
 // Wrangler bindings declared in wrangler.toml. Workers Secrets (set via
 // `wrangler secret put`) appear on the same env object — those modules
 // that need them read via process.env thanks to nodejs_compat.
@@ -25,7 +27,9 @@ export interface Env {
   ASSETS: { fetch: (request: Request) => Promise<Response> };
   JWKS_CACHE: KVNamespace;
   TALK_RUN_QUEUE: Queue;
+  USER_EVENT_HUB: UserEventHubNamespace;
   SUPABASE_PROJECT_URL: string;
+  DB_EVENT_HUB_URL: string;
 }
 
 // Minimal KVNamespace + Queue types — pulled inline to avoid forcing
@@ -42,6 +46,17 @@ interface KVNamespace {
 interface Queue {
   send(message: unknown): Promise<void>;
   sendBatch(messages: Array<{ body: unknown }>): Promise<void>;
+}
+
+interface UserEventHubNamespace {
+  idFromName(name: string): UserEventHubId;
+  get(id: UserEventHubId): UserEventHubStub;
+}
+interface UserEventHubId {
+  readonly __brand: 'UserEventHubId';
+}
+interface UserEventHubStub {
+  fetch(input: Request | URL | string, init?: RequestInit): Promise<Response>;
 }
 
 interface MessageBatch {
@@ -72,8 +87,14 @@ export default {
     }
 
     try {
-      return await withRequestScopedDb(env.DB.connectionString, ctx, async () =>
-        getWorkerApp().fetch(request, env),
+      return await withRequestScopedDb(
+        env.DB.connectionString,
+        ctx,
+        {
+          DB_EVENT_HUB_URL: env.DB_EVENT_HUB_URL,
+          USER_EVENT_HUB: env.USER_EVENT_HUB,
+        },
+        async () => getWorkerApp().fetch(request, env),
       );
     } catch (err) {
       console.error(
