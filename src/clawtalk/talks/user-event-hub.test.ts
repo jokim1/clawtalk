@@ -1,8 +1,15 @@
 // UserEventHub unit tests. Drives the DO class with a MockDurableObjectState
 // and MockWebSocket against the live local Supabase. Requires:
 //   - `supabase status` running on 127.0.0.1:54432
-//   - role `clawtalk_event_hub` exists with SELECT on event_outbox
-//     (created via migration 0005 + the manual ALTER ROLE PASSWORD).
+//
+// We point `DB_EVENT_HUB_URL` at the *admin* connection string for the
+// tests, NOT the `clawtalk_event_hub` role. The role grant + password
+// flow is a production deployment concern (see migrations 0005/0006 +
+// the predeploy gate); these tests exercise the DO's READ/FILTER/SEND/
+// CURSOR logic, which is independent of which login role runs the SELECT.
+// CI doesn't have the role's password set (the migration deliberately
+// omits it for security), and adding a test-only ALTER ROLE step here
+// is more brittle than just sidestepping the role entirely.
 //
 // `WebSocketPair` and Response.webSocket are Cloudflare workerd globals,
 // so the upgrade-handshake parts (101 returns, WS handshake) are not
@@ -23,8 +30,6 @@ import {
 } from './user-event-hub.js';
 
 const ADMIN_DB_URL = 'postgresql://postgres:postgres@127.0.0.1:54432/postgres';
-const EVENT_HUB_DB_URL =
-  'postgresql://clawtalk_event_hub:event_hub_pw@127.0.0.1:54432/postgres';
 
 const TEST_TOPIC_PREFIX = 'do-test-';
 const TEST_USER = '00000000-0000-0000-0000-0000000000a3';
@@ -189,7 +194,7 @@ afterAll(async () => {
   await closePgDatabase();
 });
 
-const ENV: UserEventHubEnv = { DB_EVENT_HUB_URL: EVENT_HUB_DB_URL };
+const ENV: UserEventHubEnv = { DB_EVENT_HUB_URL: ADMIN_DB_URL };
 
 function createHub(state: MockDurableObjectState): UserEventHub {
   // The DO class accepts our MockDurableObjectState through the
