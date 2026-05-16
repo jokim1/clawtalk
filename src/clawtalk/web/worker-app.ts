@@ -44,16 +44,15 @@
 //   /api/v1/talks/:talkId/attachments[/...] — talk-attachments.ts
 //   /api/v1/talks/:talkId/threads[/...]     — talk-threads.ts (list +
 //                                         create + PATCH + DELETE)
+//   /api/v1/events                  — events-upgrade.ts (user-scope
+//                                         WebSocket forwarded to the
+//                                         UserEventHub DO)
+//   /api/v1/talks/:talkId/events    — events-upgrade.ts (talk-scope WS)
 //
 // NOT mounted (needs Workers Queue plumbing or other follow-ups):
 //   /api/v1/talks/:talkId/chat[/cancel] — needs run-worker wake; will
 //                                          land alongside the Queue
 //                                          producer in a future unit.
-//   /api/v1/events, /api/v1/talks/:talkId/events — SSE streams; SSE
-//                                          + outbox-notifier still
-//                                          sqlite + Node-process
-//                                          coupled. Cloudflare needs
-//                                          Durable Objects port.
 //   /api/v1/main/*, /api/v1/browser/*, /api/v1/data-connectors/*,
 //   /api/v1/channel-connectors/*, /api/v1/channel-connections/*,
 //   /api/v1/talks/:talkId/{tools,resources,channels,data-connectors}
@@ -78,6 +77,10 @@ import {
 import { handleAuthCallback } from './routes/auth-callback.js';
 import { handleAuthLogout } from './routes/auth-logout.js';
 import { handleAuthRefresh } from './routes/auth-refresh.js';
+import {
+  talkEventsUpgradeRoute,
+  userEventsUpgradeRoute,
+} from './routes/events-upgrade.js';
 import {
   createAgentRoute,
   deleteAgentRoute,
@@ -276,6 +279,7 @@ function buildApp(): Hono<{ Variables: Variables }> {
   app.use('/api/v1/talk-folders/*', requireAuthMiddleware);
   app.use('/api/v1/user/*', requireAuthMiddleware);
   app.use('/api/v1/session/*', requireAuthMiddleware);
+  app.use('/api/v1/events', requireAuthMiddleware);
 
   // ── Sanity probe for the auth middleware ─────────────────────
   app.get('/api/v1/_protected/whoami', (c) => {
@@ -1341,6 +1345,12 @@ function buildApp(): Hono<{ Variables: Variables }> {
       return jsonResponse(result);
     },
   );
+
+  // ── events-upgrade.ts: WebSocket Hibernation routes forwarded
+  // to the UserEventHub Durable Object. G9 clone-and-mutate from
+  // c.req.raw preserves Sec-WebSocket-* handshake headers.
+  app.get('/api/v1/events', userEventsUpgradeRoute);
+  app.get('/api/v1/talks/:talkId/events', talkEventsUpgradeRoute);
 
   // ── talk-threads.ts: thread list + create + metadata edits + delete
   app.get('/api/v1/talks/:talkId/threads', async (c) => {
