@@ -10,12 +10,19 @@
 //   /api/*    → worker-app Hono router (with per-request DB scope)
 //   non-/api  → env.ASSETS.fetch() (SPA fallback)
 //
-// Queue consumer still acks every message (placeholder). The talk-
-// run-via-queues port lands as its own slice after the route caller-
-// swap finishes.
+// Queue + scheduled handlers (Queues port U1 — scaffold):
+//   queue()     dispatches each message through processTalkRunMessage.
+//               U1's stub logs + acks; U3 replaces with real run exec.
+//   scheduled() job-trigger scheduler stub. U4 wires the real
+//               claimDueTalkJobs → dispatchRun loop.
+//
+// Both handlers ack-or-retry per Cloudflare Queues semantics: throw
+// → retry (up to wrangler.toml's max_retries=3 then DLQ); return →
+// ack.
 
 import { type RequestExecutionContext, withRequestScopedDb } from './db.js';
 import { getWorkerApp } from './clawtalk/web/worker-app.js';
+import { processTalkRunMessage } from './clawtalk/talks/queue-consumer.js';
 
 export { UserEventHub } from './clawtalk/talks/user-event-hub.js';
 
@@ -44,7 +51,10 @@ interface KVNamespace {
 }
 
 interface Queue {
-  send(message: unknown): Promise<void>;
+  send(
+    message: unknown,
+    options?: { contentType?: string; delaySeconds?: number },
+  ): Promise<void>;
   sendBatch(messages: Array<{ body: unknown }>): Promise<void>;
 }
 
@@ -59,9 +69,21 @@ interface UserEventHubStub {
   fetch(input: Request | URL | string, init?: RequestInit): Promise<Response>;
 }
 
+interface QueueMessage {
+  id: string;
+  body: unknown;
+  ack(): void;
+  retry(options?: { delaySeconds?: number }): void;
+}
+
 interface MessageBatch {
-  messages: Array<{ id: string; body: unknown; ack(): void; retry(): void }>;
+  messages: QueueMessage[];
   ackAll(): void;
+}
+
+interface ScheduledEvent {
+  cron: string;
+  scheduledTime: number;
 }
 
 function jsonResponse(body: unknown, init?: ResponseInit): Response {
@@ -93,6 +115,7 @@ export default {
         {
           DB_EVENT_HUB_URL: env.DB_EVENT_HUB_URL,
           USER_EVENT_HUB: env.USER_EVENT_HUB,
+          TALK_RUN_QUEUE: env.TALK_RUN_QUEUE,
         },
         async () => getWorkerApp().fetch(request, env),
       );
@@ -118,12 +141,57 @@ export default {
   },
 
   // Queue consumer — wired up in wrangler.toml [[queues.consumers]].
-  // PR 1 acks every message immediately (foundation only). PR 2 replaces
-  // this with the real talk-run worker that dispatches multi-agent runs.
-  async queue(batch: MessageBatch, _env: Env, _ctx: RequestExecutionContext) {
+  // U1 dispatches each message through the processTalkRunMessage stub
+  // (logs + acks). U3 replaces the stub with the real run executor.
+  async queue(
+    batch: MessageBatch,
+    _env: Env,
+    _ctx: RequestExecutionContext,
+  ): Promise<void> {
     for (const message of batch.messages) {
-      console.log('queue message received (PR 1 placeholder ack)', message.id);
-      message.ack();
+      const body = message.body;
+      if (!isRunMessageBody(body)) {
+        console.warn(
+          'queue message: invalid body shape, acking to DLQ',
+          message.id,
+        );
+        message.ack();
+        continue;
+      }
+      try {
+        await processTalkRunMessage({ runId: body.runId });
+        message.ack();
+      } catch (err) {
+        console.error(
+          'queue message: processTalkRunMessage threw',
+          message.id,
+          body.runId,
+          err instanceof Error ? err.message : String(err),
+        );
+        message.retry({ delaySeconds: 30 });
+      }
     }
   },
+
+  // Cron trigger — fires every minute per wrangler.toml [triggers].
+  // U1 stubs the handler (logs the tick). U4 replaces with the real
+  // claimDueTalkJobs → createJobTriggerRun → dispatchRun loop plus the
+  // stuck-run sweep.
+  async scheduled(
+    event: ScheduledEvent,
+    _env: Env,
+    _ctx: RequestExecutionContext,
+  ): Promise<void> {
+    console.log(
+      'scheduled trigger (U1 stub)',
+      event.cron,
+      new Date(event.scheduledTime).toISOString(),
+    );
+  },
 };
+
+function isRunMessageBody(body: unknown): body is { runId: string } {
+  if (!body || typeof body !== 'object') return false;
+  const candidate = body as { runId?: unknown };
+  return typeof candidate.runId === 'string' && candidate.runId.length > 0;
+}

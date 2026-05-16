@@ -52,6 +52,7 @@ export type Sql = postgres.Sql;
 export interface DbScopeEnvBindings {
   DB_EVENT_HUB_URL?: string;
   USER_EVENT_HUB?: UserEventHubNamespace;
+  TALK_RUN_QUEUE?: TalkRunQueueLike;
 }
 
 interface UserEventHubNamespace {
@@ -63,6 +64,16 @@ interface UserEventHubId {
 }
 interface UserEventHubStub {
   fetch(input: Request | URL | string, init?: RequestInit): Promise<Response>;
+}
+
+// Minimal Cloudflare Queue surface — only what `dispatchRun` calls.
+// Kept inline so consumer modules don't have to import
+// @cloudflare/workers-types globals.
+interface TalkRunQueueLike {
+  send(
+    message: unknown,
+    options?: { contentType?: string; delaySeconds?: number },
+  ): Promise<void>;
 }
 
 // ─── Notify queue entry (bare array on ALS) ─────────────────────────────

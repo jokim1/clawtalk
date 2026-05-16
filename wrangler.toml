@@ -70,6 +70,16 @@ max_batch_timeout = 5
 max_retries = 3
 dead_letter_queue = "clawtalk-talk-runs-dlq"
 
+# ─── Cron triggers — job scheduler ────────────────────────────────────
+#
+# Replaces the Node-mode TalkJobWorker polling loop. Every minute the
+# scheduled() handler in src/worker.ts claims due jobs and dispatches
+# them onto TALK_RUN_QUEUE. Sub-minute granularity isn't needed for the
+# current product (jobs are "daily report at 9am" shape). U4 lands the
+# real scheduler; U1 wires the trigger + a stub.
+[triggers]
+crons = ["* * * * *"]
+
 # ─── Durable Objects — W7 live events ─────────────────────────────────
 #
 # UserEventHub: one DO per signed-in user. Holds hibernating WebSocket
