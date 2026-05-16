@@ -27,6 +27,7 @@ import type {
 } from './executor.js';
 import {
   BlockedBySiblingError,
+  processDlqMessage,
   processTalkRunMessage,
 } from './queue-consumer.js';
 
@@ -318,5 +319,44 @@ describe('processTalkRunMessage', () => {
 
     const run = await getTalkRunById(runId);
     expect(run?.status).toBe('cancelled');
+  });
+});
+
+describe('processDlqMessage', () => {
+  it('flips a queued run to failed with dlq_exhausted and emits talk_run_failed', async () => {
+    const { runId, talkId } = await setupRun({ status: 'queued' });
+
+    await processDlqMessage({ runId });
+
+    const run = await getTalkRunById(runId);
+    expect(run?.status).toBe('failed');
+    expect(run?.cancel_reason).toContain('dlq_exhausted');
+
+    const events = await getOutboxEventsForTopics([`talk:${talkId}`], 0);
+    const failed = events.find((e) => e.event_type === 'talk_run_failed');
+    expect(failed).toBeTruthy();
+    expect((failed?.payload as { errorCode?: string }).errorCode).toBe(
+      'dlq_exhausted',
+    );
+  });
+
+  it('flips a running run to failed', async () => {
+    const { runId } = await setupRun({ status: 'running' });
+    await processDlqMessage({ runId });
+    const run = await getTalkRunById(runId);
+    expect(run?.status).toBe('failed');
+  });
+
+  it('is a no-op on an already-terminal run', async () => {
+    const { runId } = await setupRun({ status: 'completed' });
+    await processDlqMessage({ runId });
+    const run = await getTalkRunById(runId);
+    expect(run?.status).toBe('completed');
+  });
+
+  it('is a no-op for a missing runId', async () => {
+    await expect(
+      processDlqMessage({ runId: '11111111-1111-1111-1111-111111111111' }),
+    ).resolves.toBeUndefined();
   });
 });

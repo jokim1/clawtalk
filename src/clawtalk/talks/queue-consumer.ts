@@ -18,8 +18,9 @@
 
 import { randomUUID } from 'crypto';
 
-import { withUserContext } from '../../db.js';
+import { getDbPg, withUserContext } from '../../db.js';
 import {
+  appendOutboxEvent,
   completeRunAndPromoteNextAtomic,
   failRunAndPromoteNextAtomic,
   getTalkMessageById,
@@ -330,6 +331,101 @@ function errorMessageText(err: unknown): string {
   if (err instanceof Error && err.message) return err.message;
   if (typeof err === 'string' && err) return err;
   return 'Unknown talk execution failure';
+}
+
+/**
+ * DLQ consumer (Queues port U5).
+ *
+ * Cloudflare Queues drops a message into the configured
+ * dead_letter_queue once it exhausts max_retries on the main queue.
+ * The corresponding talk_runs row is therefore stranded — typically
+ * 'running' (a consumer claimed it, threw, retried 3×, and the
+ * fail-atomic path never landed) or, less commonly, still 'queued'
+ * (every claim attempt hit a transient infrastructure error before
+ * markRunRunning even returned).
+ *
+ * The handler flips the row to 'failed' with code 'dlq_exhausted'
+ * and emits a talk_run_failed outbox event so the UI moves on. No
+ * retries on the DLQ itself (max_retries=0 in wrangler.toml) — we
+ * either succeed or log + ack. Either way the message is gone.
+ */
+export async function processDlqMessage(input: {
+  runId: string;
+}): Promise<void> {
+  const db = getDbPg();
+  const rows = await db<
+    Pick<
+      TalkRunRecord,
+      | 'id'
+      | 'owner_id'
+      | 'talk_id'
+      | 'thread_id'
+      | 'trigger_message_id'
+      | 'run_kind'
+      | 'executor_alias'
+      | 'executor_model'
+      | 'status'
+    >[]
+  >`
+    select id, owner_id, talk_id, thread_id, trigger_message_id, run_kind,
+           executor_alias, executor_model, status
+    from public.talk_runs
+    where id = ${input.runId}::uuid
+    limit 1
+  `;
+  if (rows.length === 0) {
+    logger.warn({ runId: input.runId }, 'DLQ: run not found, acking');
+    return;
+  }
+  const run = rows[0];
+  if (run.status !== 'queued' && run.status !== 'running') {
+    logger.debug(
+      { runId: input.runId, status: run.status },
+      'DLQ: run already terminal, acking',
+    );
+    return;
+  }
+
+  const reason = 'dlq_exhausted: queue retries exhausted';
+  const updated = await db<{ id: string }[]>`
+    update public.talk_runs
+    set status = 'failed',
+        ended_at = now(),
+        cancel_reason = ${reason}
+    where id = ${input.runId}::uuid
+      and status in ('queued', 'running')
+    returning id
+  `;
+  if (updated.length === 0) {
+    logger.debug(
+      { runId: input.runId },
+      'DLQ: status race lost (another path flipped first), acking',
+    );
+    return;
+  }
+
+  await withUserContext(run.owner_id, async () => {
+    await appendOutboxEvent({
+      topic: `talk:${run.talk_id}`,
+      eventType: 'talk_run_failed',
+      payload: {
+        talkId: run.talk_id,
+        threadId: run.thread_id,
+        runId: run.id,
+        runKind: run.run_kind,
+        triggerMessageId: run.trigger_message_id,
+        errorCode: 'dlq_exhausted',
+        errorMessage: 'Queue retries exhausted; run failed.',
+        executorAlias: run.executor_alias,
+        executorModel: run.executor_model,
+      },
+    });
+  });
+
+  logger.warn(
+    { runId: input.runId, talkId: run.talk_id },
+    'DLQ: run flipped to failed after queue retry exhaustion',
+  );
 }
 
 /**
