@@ -31,7 +31,6 @@ import {
 } from './lib/api';
 import { isSupabaseConfigured } from './lib/supabase-client';
 import { installAuthStateListener } from './lib/supabase-cookie-shim';
-import { AiAgentsPage } from './pages/AiAgentsPage';
 import { TalkDetailPage } from './pages/TalkDetailPage';
 import { TalkListPage } from './pages/TalkListPage';
 import { ProfilePage } from './pages/ProfilePage';
@@ -776,12 +775,7 @@ export function App() {
             />
             <Route
               path="/app/agents"
-              element={
-                <AiAgentsPage
-                  onUnauthorized={handleUnauthorized}
-                  userRole={auth.user.role}
-                />
-              }
+              element={<Navigate to="/app/settings?tab=agents" replace />}
             />
             <Route
               path="/app/settings"

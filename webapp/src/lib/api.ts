@@ -1086,61 +1086,6 @@ export type ExecutorSettings = {
   configErrors: string[];
 };
 
-export type ExecutorSettingsUpdate = {
-  executorAuthMode?: 'subscription' | 'api_key' | 'advanced_bearer' | 'none';
-  anthropicApiKey?: string | null;
-  claudeOauthToken?: string | null;
-  anthropicAuthToken?: string | null;
-  anthropicBaseUrl?: string | null;
-  aliasModelMap?: Record<string, string>;
-  defaultAlias?: string;
-};
-
-export type ExecutorStatus = {
-  mode: 'real' | 'mock';
-  restartSupported: boolean;
-  pendingRestartReasons: string[];
-  activeRunCount: number;
-  containerRuntimeAvailability: 'ready' | 'unavailable';
-  executorAuthMode: 'subscription' | 'api_key' | 'advanced_bearer' | 'none';
-  activeCredentialConfigured: boolean;
-  verificationStatus:
-    | 'missing'
-    | 'not_verified'
-    | 'verifying'
-    | 'verified'
-    | 'invalid'
-    | 'unavailable'
-    | 'rate_limited';
-  lastVerifiedAt: string | null;
-  lastVerificationError: string | null;
-  hasProviderAuth: boolean;
-  hasValidAliasMap: boolean;
-  configVersion: number;
-  isConfigured: boolean;
-  bootId: string;
-  configErrors: string[];
-};
-
-export type ExecutorSubscriptionHostStatus = {
-  serviceUser: string | null;
-  serviceUid: number | null;
-  serviceHomePath: string;
-  runtimeContext: 'host' | 'systemd' | 'container' | 'unknown';
-  claudeCliInstalled: boolean | null;
-  hostLoginDetected: boolean;
-  serviceEnvOauthPresent: boolean;
-  importAvailable: boolean;
-  hostCredentialFingerprint: string | null;
-  message: string;
-  recommendedCommands: string[];
-};
-
-export type ExecutorSubscriptionImportResult = {
-  status: 'imported' | 'no_change';
-  settings: ExecutorSettings;
-};
-
 type ApiEnvelope<T> =
   | {
       ok: true;
@@ -3324,71 +3269,6 @@ export async function updateTalkLlmSettings(
     includeJson: true,
     body: JSON.stringify(update),
   });
-}
-
-export async function getExecutorSettings(): Promise<ExecutorSettings> {
-  return apiRequest<ExecutorSettings>('/api/v1/settings/executor');
-}
-
-export async function updateExecutorSettings(
-  update: ExecutorSettingsUpdate,
-): Promise<ExecutorSettings> {
-  return apiMutationRequest<ExecutorSettings>('/api/v1/settings/executor', {
-    method: 'PUT',
-    includeJson: true,
-    body: JSON.stringify(update),
-  });
-}
-
-export async function getExecutorStatus(): Promise<ExecutorStatus> {
-  return apiRequest<ExecutorStatus>('/api/v1/settings/executor-status');
-}
-
-export async function verifyExecutorCredentials(): Promise<{
-  scheduled: boolean;
-  code: string;
-  message: string;
-}> {
-  return apiMutationRequest<{
-    scheduled: boolean;
-    code: string;
-    message: string;
-  }>('/api/v1/settings/executor/verify', {
-    method: 'POST',
-  });
-}
-
-export async function getExecutorSubscriptionHostStatus(): Promise<ExecutorSubscriptionHostStatus> {
-  return apiRequest<ExecutorSubscriptionHostStatus>(
-    '/api/v1/settings/executor/subscription-host-status',
-  );
-}
-
-export async function importExecutorSubscriptionFromHost(
-  expectedFingerprint: string,
-): Promise<ExecutorSubscriptionImportResult> {
-  return apiMutationRequest<ExecutorSubscriptionImportResult>(
-    '/api/v1/settings/executor/subscription/import',
-    {
-      method: 'POST',
-      includeJson: true,
-      body: JSON.stringify({
-        expectedFingerprint,
-      }),
-    },
-  );
-}
-
-export async function restartService(): Promise<{
-  status: string;
-  activeRunCount: number;
-}> {
-  return apiMutationRequest<{ status: string; activeRunCount: number }>(
-    '/api/v1/settings/restart',
-    {
-      method: 'POST',
-    },
-  );
 }
 
 // ---------------------------------------------------------------------------
