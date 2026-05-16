@@ -24,6 +24,7 @@ import { type RequestExecutionContext, withRequestScopedDb } from './db.js';
 import { getWorkerApp } from './clawtalk/web/worker-app.js';
 import {
   BlockedBySiblingError,
+  processDlqMessage,
   processTalkRunMessage,
 } from './clawtalk/talks/queue-consumer.js';
 import { runScheduledTick } from './clawtalk/talks/scheduler.js';
@@ -81,6 +82,7 @@ interface QueueMessage {
 }
 
 interface MessageBatch {
+  queue: string;
   messages: QueueMessage[];
   ackAll(): void;
 }
@@ -145,28 +147,32 @@ export default {
   },
 
   // Queue consumer — wired up in wrangler.toml [[queues.consumers]].
-  // Each message is wrapped in its own withRequestScopedDb scope so
-  // processTalkRunMessage's withUserContext, the streaming-coalesce
-  // notifier, and the cooperative cancel poller all have working DB
-  // access.
+  // The same Worker handles both the main run queue and the DLQ;
+  // dispatch by batch.queue name.
   //
-  // Retry strategy:
-  //   - BlockedBySiblingError: ordered sibling still active. Retry
-  //     in 60s so the sibling has time to complete. Cloudflare Queues
-  //     caps total retries via wrangler.toml [[queues.consumers]]
-  //     max_retries=3 before DLQ.
-  //   - Unexpected throw: retry in 30s.
-  //   - Returned normally: ack.
+  // Main queue (`clawtalk-talk-runs`): each message goes through
+  // processTalkRunMessage in its own withRequestScopedDb scope.
+  //   - Returned normally → ack.
+  //   - BlockedBySiblingError → retry in 60s (sibling still active).
+  //   - Other throw → retry in 30s. After max_retries=3, Cloudflare
+  //     drops the message onto the DLQ.
+  //
+  // DLQ (`clawtalk-talk-runs-dlq`): processDlqMessage flips the
+  // corresponding talk_runs row to 'failed' with code 'dlq_exhausted'
+  // and emits a talk_run_failed outbox event. No retries on the DLQ
+  // itself (max_retries=0); unconditionally ack.
   async queue(
     batch: MessageBatch,
     env: Env,
     ctx: RequestExecutionContext,
   ): Promise<void> {
+    const isDlq = batch.queue === 'clawtalk-talk-runs-dlq';
     for (const message of batch.messages) {
       const body = message.body;
       if (!isRunMessageBody(body)) {
         console.warn(
-          'queue message: invalid body shape, acking to DLQ',
+          'queue message: invalid body shape, acking',
+          batch.queue,
           message.id,
         );
         message.ack();
@@ -181,10 +187,24 @@ export default {
             USER_EVENT_HUB: env.USER_EVENT_HUB,
             TALK_RUN_QUEUE: env.TALK_RUN_QUEUE,
           },
-          async () => processTalkRunMessage({ runId: body.runId }),
+          async () =>
+            isDlq
+              ? processDlqMessage({ runId: body.runId })
+              : processTalkRunMessage({ runId: body.runId }),
         );
         message.ack();
       } catch (err) {
+        if (isDlq) {
+          // No DLQ retries — log and ack so the message doesn't loop.
+          console.error(
+            'dlq message: processDlqMessage threw, acking',
+            message.id,
+            body.runId,
+            err instanceof Error ? err.message : String(err),
+          );
+          message.ack();
+          continue;
+        }
         if (err instanceof BlockedBySiblingError) {
           message.retry({ delaySeconds: 60 });
           continue;

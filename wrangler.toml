@@ -70,6 +70,17 @@ max_batch_timeout = 5
 max_retries = 3
 dead_letter_queue = "clawtalk-talk-runs-dlq"
 
+# DLQ consumer — messages that exhaust max_retries above land here.
+# The handler flips the corresponding talk_runs row to 'failed' with
+# error_code='dlq_exhausted' so the UI moves on. No retries on the
+# DLQ itself: these messages are already post-failure and acking them
+# is unconditional.
+[[queues.consumers]]
+queue = "clawtalk-talk-runs-dlq"
+max_batch_size = 5
+max_batch_timeout = 30
+max_retries = 0
+
 # ─── Cron triggers — job scheduler ────────────────────────────────────
 #
 # Replaces the Node-mode TalkJobWorker polling loop. Every minute the
