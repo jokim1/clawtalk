@@ -113,5 +113,5 @@ new_sqlite_classes = ["UserEventHub"]
 PUBLIC_MODE = "true"
 WEB_SECURE_COOKIES = "true"
 TRUSTED_PROXY_MODE = "cloudflare"
-CLAWTALK_ALLOWED_ORIGIN = "https://clawtalk.jokim1.workers.dev,https://clawtalk.app"
+CLAWTALK_ALLOWED_ORIGINS = "https://clawtalk.jokim1.workers.dev,https://clawtalk.app"
 SUPABASE_PROJECT_URL = "https://llklxclnredhtpxmhyea.supabase.co"
