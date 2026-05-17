@@ -338,10 +338,7 @@ async function listPersonalSubscriptionMetadata(): Promise<
       and provider_id = any(${BUILTIN_ADDITIONAL_PROVIDER_IDS})
   `;
   return new Map(
-    rows.map((row) => [
-      row.provider_id,
-      { expiresAt: row.expires_at },
-    ]),
+    rows.map((row) => [row.provider_id, { expiresAt: row.expires_at }]),
   );
 }
 
@@ -358,10 +355,7 @@ async function listWorkspaceSubscriptionMetadata(): Promise<
       and provider_id = any(${BUILTIN_ADDITIONAL_PROVIDER_IDS})
   `;
   return new Map(
-    rows.map((row) => [
-      row.provider_id,
-      { expiresAt: row.expires_at },
-    ]),
+    rows.map((row) => [row.provider_id, { expiresAt: row.expires_at }]),
   );
 }
 
@@ -505,11 +499,9 @@ async function buildAdditionalProviderCards(): Promise<AgentProviderCard[]> {
           ? (workspaceVerification?.last_error ?? null)
           : null,
       hasPersonalSubscription: !!personalSubscription,
-      personalSubscriptionExpiresAt:
-        personalSubscription?.expiresAt ?? null,
+      personalSubscriptionExpiresAt: personalSubscription?.expiresAt ?? null,
       hasWorkspaceSubscription: !!workspaceSubscription,
-      workspaceSubscriptionExpiresAt:
-        workspaceSubscription?.expiresAt ?? null,
+      workspaceSubscriptionExpiresAt: workspaceSubscription?.expiresAt ?? null,
       hostStatus,
       modelSuggestions: (modelsByProvider.get(provider.id) ?? []).map(
         (model) => {

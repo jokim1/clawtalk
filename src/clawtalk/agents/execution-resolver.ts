@@ -269,7 +269,10 @@ async function resolveSecret(
     agent.provider_id === 'provider.anthropic' &&
     TALK_EXECUTOR_ANTHROPIC_API_KEY
   ) {
-    return { apiKey: TALK_EXECUTOR_ANTHROPIC_API_KEY, credentialKind: 'api_key' };
+    return {
+      apiKey: TALK_EXECUTOR_ANTHROPIC_API_KEY,
+      credentialKind: 'api_key',
+    };
   }
 
   if (agent.provider_id === 'provider.anthropic') {
