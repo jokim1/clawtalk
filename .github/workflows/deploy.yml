@@ -68,8 +68,14 @@ jobs:
 
       # Migrations run before the Worker so the new schema is live
       # when the new Worker code starts taking traffic. `supabase db
-      # push` only applies pending migrations against the linked
-      # project — re-runs are no-ops.
+      # push --include-all` applies every pending migration against
+      # the linked project; re-runs are no-ops.
+      #
+      # --include-all is required because `9999_rollback_outbox_authenticated.sql`
+      # was deliberately named with a `9999` prefix to sort last, but
+      # any future migration with a lower-numbered prefix (e.g. 0007)
+      # is then "back-dated" relative to the already-applied 9999 and
+      # `supabase db push` refuses to apply it without --include-all.
       #
       # Required GitHub repo secrets:
       #   SUPABASE_ACCESS_TOKEN  — Supabase Management API token
@@ -82,7 +88,7 @@ jobs:
           SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
         run: |
           supabase link --project-ref ${{ secrets.SUPABASE_PROJECT_REF }}
-          supabase db push
+          supabase db push --include-all
 
       # Sync SUPABASE_PUBLISHABLE_KEY as a Workers Secret BEFORE the
       # deploy step so the new Worker code (auth-refresh + auth-logout,
