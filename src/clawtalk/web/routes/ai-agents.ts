@@ -77,6 +77,13 @@ export type AgentProviderCard = {
   workspaceVerificationStatus: AdditionalProviderVerificationStatus;
   workspaceLastVerifiedAt: string | null;
   workspaceLastVerificationError: string | null;
+  // OAuth subscription metadata. Either or both may be present
+  // alongside api-key credentials — the resolver prefers api_key but
+  // falls back to subscription when only the OAuth route is set.
+  hasPersonalSubscription: boolean;
+  personalSubscriptionExpiresAt: string | null;
+  hasWorkspaceSubscription: boolean;
+  workspaceSubscriptionExpiresAt: string | null;
   hostStatus?: CodexHostStatusView;
   modelSuggestions: Array<{
     modelId: string;
@@ -252,6 +259,7 @@ async function listProviderSecrets(): Promise<Map<string, LlmSecret | null>> {
     select provider_id, ciphertext
     from public.llm_provider_secrets
     where provider_id = any(${BUILTIN_ADDITIONAL_PROVIDER_IDS})
+      and credential_kind = 'api_key'
   `;
 
   const entries = await Promise.all(
@@ -280,6 +288,7 @@ async function listProviderVerifications(): Promise<
     select provider_id, status, last_verified_at, last_error
     from public.llm_provider_verifications
     where provider_id = any(${BUILTIN_ADDITIONAL_PROVIDER_IDS})
+      and credential_kind = 'api_key'
   `;
 
   return new Map(
@@ -302,6 +311,7 @@ async function listWorkspaceProviderSecrets(): Promise<
     select provider_id, ciphertext
     from public.workspace_provider_secrets
     where provider_id = any(${BUILTIN_ADDITIONAL_PROVIDER_IDS})
+      and credential_kind = 'api_key'
   `;
 
   const entries = await Promise.all(
@@ -313,6 +323,46 @@ async function listWorkspaceProviderSecrets(): Promise<
     ),
   );
   return new Map(entries);
+}
+
+async function listPersonalSubscriptionMetadata(): Promise<
+  Map<string, { expiresAt: string | null }>
+> {
+  const db = getDbPg();
+  const rows = await db<
+    Array<{ provider_id: string; expires_at: string | null }>
+  >`
+    select provider_id, expires_at::text as expires_at
+    from public.llm_provider_secrets
+    where credential_kind = 'subscription'
+      and provider_id = any(${BUILTIN_ADDITIONAL_PROVIDER_IDS})
+  `;
+  return new Map(
+    rows.map((row) => [
+      row.provider_id,
+      { expiresAt: row.expires_at },
+    ]),
+  );
+}
+
+async function listWorkspaceSubscriptionMetadata(): Promise<
+  Map<string, { expiresAt: string | null }>
+> {
+  const db = getDbPg();
+  const rows = await db<
+    Array<{ provider_id: string; expires_at: string | null }>
+  >`
+    select provider_id, expires_at::text as expires_at
+    from public.workspace_provider_secrets
+    where credential_kind = 'subscription'
+      and provider_id = any(${BUILTIN_ADDITIONAL_PROVIDER_IDS})
+  `;
+  return new Map(
+    rows.map((row) => [
+      row.provider_id,
+      { expiresAt: row.expires_at },
+    ]),
+  );
 }
 
 async function listWorkspaceProviderVerifications(): Promise<
@@ -330,6 +380,7 @@ async function listWorkspaceProviderVerifications(): Promise<
     select provider_id, status, last_verified_at, last_error
     from public.workspace_provider_verifications
     where provider_id = any(${BUILTIN_ADDITIONAL_PROVIDER_IDS})
+      and credential_kind = 'api_key'
   `;
 
   return new Map(
@@ -352,6 +403,10 @@ async function buildAdditionalProviderCards(): Promise<AgentProviderCard[]> {
   const workspaceSecretsByProvider = await listWorkspaceProviderSecrets();
   const workspaceVerificationsByProvider =
     await listWorkspaceProviderVerifications();
+  const personalSubscriptionsByProvider =
+    await listPersonalSubscriptionMetadata();
+  const workspaceSubscriptionsByProvider =
+    await listWorkspaceSubscriptionMetadata();
   const codexHostStatus = providerRows.some(
     (provider) => provider.id === CODEX_PROVIDER_ID,
   )
@@ -395,6 +450,13 @@ async function buildAdditionalProviderCards(): Promise<AgentProviderCard[]> {
         : secret
           ? maskApiKey(secret.apiKey)
           : null;
+
+    const personalSubscription = personalSubscriptionsByProvider.get(
+      provider.id,
+    );
+    const workspaceSubscription = workspaceSubscriptionsByProvider.get(
+      provider.id,
+    );
 
     const workspaceHasCredential =
       credentialMode === 'host_login' ? false : !!workspaceSecret;
@@ -442,6 +504,12 @@ async function buildAdditionalProviderCards(): Promise<AgentProviderCard[]> {
         workspaceVerificationStatus === 'unavailable'
           ? (workspaceVerification?.last_error ?? null)
           : null,
+      hasPersonalSubscription: !!personalSubscription,
+      personalSubscriptionExpiresAt:
+        personalSubscription?.expiresAt ?? null,
+      hasWorkspaceSubscription: !!workspaceSubscription,
+      workspaceSubscriptionExpiresAt:
+        workspaceSubscription?.expiresAt ?? null,
       hostStatus,
       modelSuggestions: (modelsByProvider.get(provider.id) ?? []).map(
         (model) => {
@@ -514,13 +582,14 @@ async function upsertProviderVerification(
   const db = getDbPg();
   await db`
     insert into public.llm_provider_verifications (
-      owner_id, provider_id, status, last_verified_at, last_error
+      owner_id, provider_id, credential_kind, status,
+      last_verified_at, last_error
     )
     values (
-      ${ownerId}::uuid, ${providerId}, ${result.status},
+      ${ownerId}::uuid, ${providerId}, 'api_key', ${result.status},
       ${result.lastVerifiedAt}::timestamptz, ${result.lastError}
     )
-    on conflict (owner_id, provider_id) do update set
+    on conflict (owner_id, provider_id, credential_kind) do update set
       status = excluded.status,
       last_verified_at = excluded.last_verified_at,
       last_error = excluded.last_error,
@@ -533,6 +602,7 @@ async function deleteProviderVerification(providerId: string): Promise<void> {
   await db`
     delete from public.llm_provider_verifications
     where provider_id = ${providerId}
+      and credential_kind = 'api_key'
   `;
 }
 
@@ -543,13 +613,13 @@ async function upsertWorkspaceProviderVerification(
   const db = getDbPg();
   await db`
     insert into public.workspace_provider_verifications (
-      provider_id, status, last_verified_at, last_error
+      provider_id, credential_kind, status, last_verified_at, last_error
     )
     values (
-      ${providerId}, ${result.status},
+      ${providerId}, 'api_key', ${result.status},
       ${result.lastVerifiedAt}::timestamptz, ${result.lastError}
     )
-    on conflict (provider_id) do update set
+    on conflict (provider_id, credential_kind) do update set
       status = excluded.status,
       last_verified_at = excluded.last_verified_at,
       last_error = excluded.last_error,
@@ -564,6 +634,7 @@ async function deleteWorkspaceProviderVerification(
   await db`
     delete from public.workspace_provider_verifications
     where provider_id = ${providerId}
+      and credential_kind = 'api_key'
   `;
 }
 
@@ -669,10 +740,12 @@ async function verifyProviderSecret(
       ? await db<Array<{ ciphertext: string }>>`
           select ciphertext from public.workspace_provider_secrets
           where provider_id = ${providerId}
+            and credential_kind = 'api_key'
         `
       : await db<Array<{ ciphertext: string }>>`
           select ciphertext from public.llm_provider_secrets
           where provider_id = ${providerId}
+            and credential_kind = 'api_key'
         `;
   const secret = secretRows[0]
     ? await parseStoredSecret(secretRows[0].ciphertext)
@@ -899,12 +972,14 @@ export async function putAiProviderCredentialRoute(
         await db`
           delete from public.workspace_provider_secrets
           where provider_id = ${providerId}
+            and credential_kind = 'api_key'
         `;
         await deleteWorkspaceProviderVerification(providerId);
       } else {
         await db`
           delete from public.llm_provider_secrets
           where provider_id = ${providerId}
+            and credential_kind = 'api_key'
         `;
         await deleteProviderVerification(providerId);
       }
@@ -918,10 +993,12 @@ export async function putAiProviderCredentialRoute(
     if (scope === 'workspace') {
       await db`
         insert into public.workspace_provider_secrets (
-          provider_id, ciphertext, updated_by
+          provider_id, credential_kind, ciphertext, updated_by
         )
-        values (${providerId}, ${ciphertext}, ${auth.userId}::uuid)
-        on conflict (provider_id) do update set
+        values (
+          ${providerId}, 'api_key', ${ciphertext}, ${auth.userId}::uuid
+        )
+        on conflict (provider_id, credential_kind) do update set
           ciphertext = excluded.ciphertext,
           updated_by = excluded.updated_by,
           updated_at = now()
@@ -929,12 +1006,12 @@ export async function putAiProviderCredentialRoute(
     } else {
       await db`
         insert into public.llm_provider_secrets (
-          owner_id, provider_id, ciphertext
+          owner_id, provider_id, credential_kind, ciphertext
         )
         values (
-          ${auth.userId}::uuid, ${providerId}, ${ciphertext}
+          ${auth.userId}::uuid, ${providerId}, 'api_key', ${ciphertext}
         )
-        on conflict (owner_id, provider_id) do update set
+        on conflict (owner_id, provider_id, credential_kind) do update set
           ciphertext = excluded.ciphertext,
           updated_at = now()
       `;

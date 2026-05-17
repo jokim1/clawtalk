@@ -358,6 +358,10 @@ function buildAiAgentsData(): AiAgentsPageData {
         workspaceVerificationStatus: 'missing',
         workspaceLastVerifiedAt: null,
         workspaceLastVerificationError: null,
+        hasPersonalSubscription: false,
+        personalSubscriptionExpiresAt: null,
+        hasWorkspaceSubscription: false,
+        workspaceSubscriptionExpiresAt: null,
         modelSuggestions: [
           {
             modelId: 'claude-sonnet-4-6',
@@ -386,6 +390,10 @@ function buildAiAgentsData(): AiAgentsPageData {
         workspaceVerificationStatus: 'missing',
         workspaceLastVerifiedAt: null,
         workspaceLastVerificationError: null,
+        hasPersonalSubscription: false,
+        personalSubscriptionExpiresAt: null,
+        hasWorkspaceSubscription: false,
+        workspaceSubscriptionExpiresAt: null,
         modelSuggestions: [
           {
             modelId: 'gpt-5-mini',
@@ -414,6 +422,10 @@ function buildAiAgentsData(): AiAgentsPageData {
         workspaceVerificationStatus: 'missing',
         workspaceLastVerifiedAt: null,
         workspaceLastVerificationError: null,
+        hasPersonalSubscription: false,
+        personalSubscriptionExpiresAt: null,
+        hasWorkspaceSubscription: false,
+        workspaceSubscriptionExpiresAt: null,
         modelSuggestions: [
           {
             modelId: 'gemini-2.5-flash',
@@ -442,6 +454,10 @@ function buildAiAgentsData(): AiAgentsPageData {
         workspaceVerificationStatus: 'missing',
         workspaceLastVerifiedAt: null,
         workspaceLastVerificationError: null,
+        hasPersonalSubscription: false,
+        personalSubscriptionExpiresAt: null,
+        hasWorkspaceSubscription: false,
+        workspaceSubscriptionExpiresAt: null,
         modelSuggestions: [
           {
             modelId: 'moonshotai/kimi-k2.5',

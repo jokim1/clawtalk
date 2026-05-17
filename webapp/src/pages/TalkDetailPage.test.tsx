@@ -5183,6 +5183,10 @@ function buildAiAgentsData(): AiAgentsPageData {
         workspaceVerificationStatus: 'missing',
         workspaceLastVerifiedAt: null,
         workspaceLastVerificationError: null,
+        hasPersonalSubscription: false,
+        personalSubscriptionExpiresAt: null,
+        hasWorkspaceSubscription: false,
+        workspaceSubscriptionExpiresAt: null,
         modelSuggestions: [
           {
             modelId: 'gpt-5-mini',

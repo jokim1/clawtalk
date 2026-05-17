@@ -15,6 +15,11 @@
 import { randomUUID } from 'crypto';
 
 import {
+  ANTHROPIC_CLAUDE_CODE_VERSION,
+  ANTHROPIC_OAUTH_BETAS,
+  buildClaudeCodeSystemBlocks,
+} from '../llm/anthropic-oauth.js';
+import {
   computeAdaptiveResponseStartTimeout,
   recordTtftObservation,
 } from './llm-timeout-stats.js';
@@ -39,6 +44,12 @@ export interface LlmProviderConfig {
 export interface LlmSecret {
   apiKey: string;
   organizationId?: string;
+  // 'subscription' indicates an OAuth-backed access token (Claude
+  // Pro/Max via console.anthropic.com, ChatGPT Plus/Pro via
+  // auth.openai.com). When set, callers downstream of the resolver
+  // use Bearer auth + provider-specific OAuth headers regardless of
+  // the provider row's nominal auth_scheme.
+  credentialKind?: 'api_key' | 'subscription';
 }
 
 export interface LlmToolDefinition {
@@ -240,6 +251,12 @@ function toOpenAiUserContentParts(
 
 /**
  * Build authorization headers based on the authentication scheme.
+ *
+ * Subscription credentials always use Bearer auth regardless of the
+ * provider row's nominal scheme — Anthropic OAuth tokens go in
+ * `Authorization: Bearer …` and require additional Claude Code
+ * user-agent + anthropic-beta headers, layered in by the per-provider
+ * request builders (see buildAnthropicRequest).
  */
 export function buildAuthHeaders(
   provider: LlmProviderConfig,
@@ -248,7 +265,9 @@ export function buildAuthHeaders(
   if (!secret) return {};
 
   const headers: Record<string, string> = {};
-  if (provider.authScheme === 'x_api_key') {
+  if (secret.credentialKind === 'subscription') {
+    headers.authorization = `Bearer ${secret.apiKey}`;
+  } else if (provider.authScheme === 'x_api_key') {
     headers['x-api-key'] = secret.apiKey;
   } else {
     headers.authorization = `Bearer ${secret.apiKey}`;
@@ -452,10 +471,11 @@ function buildAnthropicRequest(
   messages: LlmMessage[],
   tools: LlmToolDefinition[] | undefined,
   maxOutputTokens: number | undefined,
+  credentialKind: 'api_key' | 'subscription' = 'api_key',
 ): {
   model: string;
   max_tokens: number;
-  system?: string;
+  system?: string | Array<{ type: 'text'; text: string }>;
   messages: AnthropicMessage[];
   tools?: AnthropicToolDefinition[];
   stream: boolean;
@@ -532,10 +552,21 @@ function buildAnthropicRequest(
     }
   }
 
+  // OAuth-backed (subscription) requests REQUIRE the system prompt
+  // shaped as a content-block array with the Claude Code identity as
+  // the first block, or Anthropic's OAuth routing returns a minimal-
+  // body 429. API-key requests keep the plain string form.
+  const systemField =
+    credentialKind === 'subscription'
+      ? buildClaudeCodeSystemBlocks(systemText)
+      : systemText
+        ? systemText
+        : undefined;
+
   return {
     model: modelId,
     max_tokens: maxOutputTokens || 1024,
-    ...(systemText ? { system: systemText } : {}),
+    ...(systemField !== undefined ? { system: systemField } : {}),
     messages: conversationMessages,
     ...(tools && tools.length > 0
       ? {
@@ -984,18 +1015,33 @@ export async function* streamLlmResponse(
     };
 
     if (provider.apiFormat === 'anthropic_messages') {
+      const credentialKind = secret?.credentialKind ?? 'api_key';
       const requestBody = buildAnthropicRequest(
         modelId,
         messages,
         options?.tools,
         options?.maxOutputTokens,
+        credentialKind,
       );
+
+      // Subscription requests need Claude Code's user-agent + OAuth betas.
+      // The identity-prefixed system prompt is already baked into
+      // requestBody.system by buildAnthropicRequest above.
+      const subscriptionHeaders: Record<string, string> =
+        credentialKind === 'subscription'
+          ? {
+              'anthropic-beta': ANTHROPIC_OAUTH_BETAS.join(','),
+              'user-agent': `claude-cli/${ANTHROPIC_CLAUDE_CODE_VERSION} (external, cli)`,
+              'x-app': 'cli',
+            }
+          : {};
 
       const response = await fetch(`${provider.baseUrl}/v1/messages`, {
         method: 'POST',
         headers: {
           'content-type': 'application/json',
           'anthropic-version': '2023-06-01',
+          ...subscriptionHeaders,
           ...authHeaders,
         },
         body: JSON.stringify(requestBody),

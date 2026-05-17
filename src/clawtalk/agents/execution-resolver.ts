@@ -32,7 +32,18 @@
 
 import { getDbPg, type Sql } from '../../db.js';
 import type { RegisteredAgentRecord } from '../db/agent-accessors.js';
-import { decryptProviderSecret } from '../llm/provider-secret-store.js';
+import {
+  decryptProviderSecret,
+  encryptProviderSecret,
+} from '../llm/provider-secret-store.js';
+import {
+  isAnthropicOauthCredentialExpiring,
+  refreshAnthropicOauthToken,
+} from '../llm/anthropic-oauth.js';
+import {
+  isOpenAiCodexCredentialExpiring,
+  refreshOpenAiCodexOauthToken,
+} from '../llm/openai-codex-oauth.js';
 import type { LlmProviderConfig, LlmSecret } from './llm-client.js';
 import {
   TALK_EXECUTOR_ANTHROPIC_API_KEY,
@@ -55,7 +66,12 @@ interface LlmProviderModelRow {
 
 interface LlmProviderSecretRow {
   ciphertext: string;
+  credential_kind: 'api_key' | 'subscription';
+  encrypted_refresh_token: string | null;
+  expires_at: string | null;
 }
+
+type CredentialOrigin = 'personal' | 'workspace';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -198,46 +214,54 @@ async function resolveSecret(
   agent: RegisteredAgentRecord,
   db: Sql,
 ): Promise<LlmSecret> {
-  // Precedence: caller's personal key, then the workspace-shared key
-  // set by an admin, then (Anthropic only) the env-var fallback.
-  // Per-user RLS: this call must be inside withUserContext, which downgrades
-  // the connection to `authenticated` and binds auth.uid() to the caller.
+  // Order precedence:
+  //   1. Personal api_key
+  //   2. Personal subscription (OAuth)
+  //   3. Workspace api_key
+  //   4. Workspace subscription (OAuth)
+  //   5. Env var (Anthropic only)
+  //
+  // Per-user RLS scopes the personal queries to auth.uid() automatically.
   const personalRows = await db<LlmProviderSecretRow[]>`
-    select ciphertext
+    select ciphertext, credential_kind, encrypted_refresh_token,
+           expires_at::text as expires_at
     from public.llm_provider_secrets
     where provider_id = ${agent.provider_id}
-    limit 1
+    order by case credential_kind
+      when 'api_key' then 0
+      when 'subscription' then 1
+    end asc
+    limit 2
   `;
-  const personalRecord = personalRows[0];
 
-  if (personalRecord) {
-    try {
-      return await decryptProviderSecret(personalRecord.ciphertext);
-    } catch {
-      throw new ExecutionResolverError(
-        `Failed to decrypt provider secret for ${agent.provider_id}`,
-        'SECRET_DECRYPTION_FAILED',
-      );
-    }
+  for (const row of personalRows) {
+    const secret = await tryUseSecretRow({
+      providerId: agent.provider_id,
+      origin: 'personal',
+      row,
+    });
+    if (secret) return secret;
   }
 
   const workspaceRows = await db<LlmProviderSecretRow[]>`
-    select ciphertext
+    select ciphertext, credential_kind, encrypted_refresh_token,
+           expires_at::text as expires_at
     from public.workspace_provider_secrets
     where provider_id = ${agent.provider_id}
-    limit 1
+    order by case credential_kind
+      when 'api_key' then 0
+      when 'subscription' then 1
+    end asc
+    limit 2
   `;
-  const workspaceRecord = workspaceRows[0];
 
-  if (workspaceRecord) {
-    try {
-      return await decryptProviderSecret(workspaceRecord.ciphertext);
-    } catch {
-      throw new ExecutionResolverError(
-        `Failed to decrypt workspace provider secret for ${agent.provider_id}`,
-        'SECRET_DECRYPTION_FAILED',
-      );
-    }
+  for (const row of workspaceRows) {
+    const secret = await tryUseSecretRow({
+      providerId: agent.provider_id,
+      origin: 'workspace',
+      row,
+    });
+    if (secret) return secret;
   }
 
   // For provider.anthropic: fall back to the API key env var ONLY.
@@ -245,16 +269,14 @@ async function resolveSecret(
     agent.provider_id === 'provider.anthropic' &&
     TALK_EXECUTOR_ANTHROPIC_API_KEY
   ) {
-    return { apiKey: TALK_EXECUTOR_ANTHROPIC_API_KEY };
+    return { apiKey: TALK_EXECUTOR_ANTHROPIC_API_KEY, credentialKind: 'api_key' };
   }
 
-  // Not found — produce a specific error for Anthropic subscription users.
   if (agent.provider_id === 'provider.anthropic') {
     throw new ExecutionResolverError(
-      'No Anthropic API key configured. Claude subscription/OAuth credentials ' +
-        'cannot be used for direct HTTP agent execution. Either configure an ' +
-        'Anthropic API key, or use container execution for Claude agents.',
-      'ANTHROPIC_REQUIRES_API_KEY',
+      'No Anthropic credentials configured. Add an Anthropic API key in ' +
+        'Settings → API Keys, or connect a Claude subscription.',
+      'ANTHROPIC_REQUIRES_CREDENTIAL',
     );
   }
 
@@ -262,4 +284,105 @@ async function resolveSecret(
     `No API credentials found for provider ${agent.provider_id}`,
     'PROVIDER_SECRET_MISSING',
   );
+}
+
+async function tryUseSecretRow(input: {
+  providerId: string;
+  origin: CredentialOrigin;
+  row: LlmProviderSecretRow;
+}): Promise<LlmSecret | null> {
+  const { providerId, origin, row } = input;
+
+  if (row.credential_kind === 'subscription') {
+    return resolveSubscriptionSecret({ providerId, origin, row });
+  }
+
+  try {
+    const decrypted = await decryptProviderSecret(row.ciphertext);
+    return { ...decrypted, credentialKind: 'api_key' };
+  } catch {
+    throw new ExecutionResolverError(
+      `Failed to decrypt provider secret for ${providerId}`,
+      'SECRET_DECRYPTION_FAILED',
+    );
+  }
+}
+
+async function resolveSubscriptionSecret(input: {
+  providerId: string;
+  origin: CredentialOrigin;
+  row: LlmProviderSecretRow;
+}): Promise<LlmSecret> {
+  const { providerId, origin, row } = input;
+
+  const expiring =
+    providerId === 'provider.openai_codex'
+      ? isOpenAiCodexCredentialExpiring(row.expires_at)
+      : providerId === 'provider.anthropic'
+        ? isAnthropicOauthCredentialExpiring(row.expires_at)
+        : false;
+
+  if (expiring && row.encrypted_refresh_token) {
+    const refreshedAccess = await refreshAndPersist({
+      providerId,
+      origin,
+      encryptedRefreshToken: row.encrypted_refresh_token,
+    });
+    return { apiKey: refreshedAccess, credentialKind: 'subscription' };
+  }
+
+  try {
+    const decrypted = await decryptProviderSecret(row.ciphertext);
+    return { apiKey: decrypted.apiKey, credentialKind: 'subscription' };
+  } catch {
+    throw new ExecutionResolverError(
+      `Failed to decrypt subscription credential for ${providerId}`,
+      'SECRET_DECRYPTION_FAILED',
+    );
+  }
+}
+
+async function refreshAndPersist(input: {
+  providerId: string;
+  origin: CredentialOrigin;
+  encryptedRefreshToken: string;
+}): Promise<string> {
+  const refreshTokenPayload = await decryptProviderSecret(
+    input.encryptedRefreshToken,
+  );
+  const refreshed =
+    input.providerId === 'provider.openai_codex'
+      ? await refreshOpenAiCodexOauthToken(refreshTokenPayload.apiKey)
+      : await refreshAnthropicOauthToken(refreshTokenPayload.apiKey);
+
+  const encryptedAccess = await encryptProviderSecret({
+    apiKey: refreshed.accessToken,
+  });
+  const encryptedRefresh = await encryptProviderSecret({
+    apiKey: refreshed.refreshToken,
+  });
+
+  const db = getDbPg();
+  if (input.origin === 'workspace') {
+    await db`
+      update public.workspace_provider_secrets
+      set ciphertext = ${encryptedAccess},
+          encrypted_refresh_token = ${encryptedRefresh},
+          expires_at = ${refreshed.expiresAtIso}::timestamptz,
+          updated_at = now()
+      where provider_id = ${input.providerId}
+        and credential_kind = 'subscription'
+    `;
+  } else {
+    await db`
+      update public.llm_provider_secrets
+      set ciphertext = ${encryptedAccess},
+          encrypted_refresh_token = ${encryptedRefresh},
+          expires_at = ${refreshed.expiresAtIso}::timestamptz,
+          updated_at = now()
+      where provider_id = ${input.providerId}
+        and credential_kind = 'subscription'
+    `;
+  }
+  return refreshed.accessToken;
 }

@@ -10,9 +10,13 @@ import {
   type ProviderVerificationStatus,
   type RegisteredAgent,
   type SessionUser,
+  completeAnthropicSubscriptionOauth,
   getAiAgents,
   getMainRegisteredAgent,
+  initiateAnthropicSubscriptionOauth,
+  initiateOpenAiCodexSubscriptionOauth,
   listRegisteredAgents,
+  pollOpenAiCodexSubscriptionOauth,
   saveAiProviderCredential,
   UnauthorizedError,
   updateMainRegisteredAgent,
@@ -918,7 +922,386 @@ function ProviderCredentialCard({
           </div>
         </details>
       ) : null}
+
+      {provider.id === 'provider.anthropic' ? (
+        <AnthropicSubscriptionSection
+          scope={scope}
+          provider={provider}
+          canManage={canManage}
+        />
+      ) : null}
+      {provider.id === 'provider.openai_codex' ? (
+        <OpenAiCodexSubscriptionSection
+          scope={scope}
+          provider={provider}
+          canManage={canManage}
+        />
+      ) : null}
     </article>
+  );
+}
+
+// ─── Anthropic OAuth subscription section ─────────────────────────
+
+function AnthropicSubscriptionSection({
+  scope,
+  provider,
+  canManage,
+}: {
+  scope: ProviderCredentialScope;
+  provider: AgentProviderCard;
+  canManage: boolean;
+}): JSX.Element {
+  const hasSubscription =
+    scope === 'workspace'
+      ? provider.hasWorkspaceSubscription
+      : provider.hasPersonalSubscription;
+  const expiresAt =
+    scope === 'workspace'
+      ? provider.workspaceSubscriptionExpiresAt
+      : provider.personalSubscriptionExpiresAt;
+
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [authorizeUrl, setAuthorizeUrl] = useState<string | null>(null);
+  const [state, setState] = useState<string | null>(null);
+  const [codeDraft, setCodeDraft] = useState('');
+  const [done, setDone] = useState(false);
+
+  const handleConnect = async (): Promise<void> => {
+    setBusy(true);
+    setError(null);
+    try {
+      const init = await initiateAnthropicSubscriptionOauth(scope);
+      setAuthorizeUrl(init.authorizationUrl);
+      setState(init.state);
+      window.open(init.authorizationUrl, '_blank', 'noopener,noreferrer');
+    } catch (err) {
+      setError(
+        err instanceof ApiError
+          ? err.message
+          : 'Failed to start Claude OAuth.',
+      );
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleComplete = async (): Promise<void> => {
+    if (!state || !codeDraft.trim()) {
+      setError('Paste the code from console.anthropic.com.');
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      // Anthropic's console returns `{code}#{state}` — accept either
+      // the full blob or just the code.
+      const codeOnly = codeDraft.trim().split('#')[0];
+      await completeAnthropicSubscriptionOauth({
+        state,
+        code: codeOnly,
+      });
+      setDone(true);
+      // Reload the page to refresh the AgentProviderCard.
+      window.location.reload();
+    } catch (err) {
+      setError(
+        err instanceof ApiError
+          ? err.message
+          : 'Failed to complete Claude OAuth.',
+      );
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <section
+      style={{
+        marginTop: '1rem',
+        paddingTop: '0.75rem',
+        borderTop: '1px solid var(--border-color, #e3eaf5)',
+      }}
+    >
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+        }}
+      >
+        <div>
+          <strong>Claude subscription</strong>
+          <p className="talk-llm-meta">
+            {hasSubscription
+              ? `Connected · refreshes automatically${
+                  expiresAt
+                    ? ` (current token expires ${formatDateTime(expiresAt)})`
+                    : ''
+                }`
+              : 'Connect a Claude Pro or Max account so this provider works without a console API key.'}
+          </p>
+        </div>
+        {canManage && !authorizeUrl && !done ? (
+          <button
+            type="button"
+            className="secondary-btn"
+            onClick={() => void handleConnect()}
+            disabled={busy}
+          >
+            {busy
+              ? 'Starting…'
+              : hasSubscription
+                ? 'Reconnect with Claude'
+                : 'Connect with Claude'}
+          </button>
+        ) : null}
+      </div>
+      {authorizeUrl && !done ? (
+        <div className="talk-llm-grid" style={{ marginTop: '0.5rem' }}>
+          <p className="talk-llm-meta">
+            A new tab opened to{' '}
+            <a href={authorizeUrl} target="_blank" rel="noreferrer">
+              claude.ai
+            </a>
+            . Sign in and approve access, then paste the code shown on{' '}
+            <code>console.anthropic.com</code> back here.
+          </p>
+          <label className="talk-llm-field-span">
+            <span>Paste the code (or full code#state blob)</span>
+            <input
+              type="text"
+              value={codeDraft}
+              onChange={(event) => setCodeDraft(event.target.value)}
+              placeholder="…#…"
+              disabled={busy}
+            />
+          </label>
+          <div className="talk-llm-inline-actions">
+            <button
+              type="button"
+              className="primary-btn"
+              onClick={() => void handleComplete()}
+              disabled={busy || !codeDraft.trim()}
+            >
+              {busy ? 'Completing…' : 'Complete connection'}
+            </button>
+            <button
+              type="button"
+              className="secondary-btn"
+              onClick={() => {
+                setAuthorizeUrl(null);
+                setState(null);
+                setCodeDraft('');
+                setError(null);
+              }}
+              disabled={busy}
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      ) : null}
+      {error ? (
+        <p className="talk-llm-meta error-text" role="alert">
+          {error}
+        </p>
+      ) : null}
+    </section>
+  );
+}
+
+// ─── OpenAI Codex device-code subscription section ────────────────
+
+function OpenAiCodexSubscriptionSection({
+  scope,
+  provider,
+  canManage,
+}: {
+  scope: ProviderCredentialScope;
+  provider: AgentProviderCard;
+  canManage: boolean;
+}): JSX.Element {
+  const hasSubscription =
+    scope === 'workspace'
+      ? provider.hasWorkspaceSubscription
+      : provider.hasPersonalSubscription;
+  const expiresAt =
+    scope === 'workspace'
+      ? provider.workspaceSubscriptionExpiresAt
+      : provider.personalSubscriptionExpiresAt;
+
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [pending, setPending] = useState<{
+    state: string;
+    userCode: string;
+    verificationUrl: string;
+    pollIntervalSeconds: number;
+  } | null>(null);
+  const [polling, setPolling] = useState(false);
+
+  useEffect(() => {
+    if (!pending) return;
+    let cancelled = false;
+    let timer: number | null = null;
+    setPolling(true);
+    const tick = async (): Promise<void> => {
+      try {
+        const result = await pollOpenAiCodexSubscriptionOauth({
+          state: pending.state,
+        });
+        if (cancelled) return;
+        if (result.status === 'authorized') {
+          setPending(null);
+          setPolling(false);
+          window.location.reload();
+          return;
+        }
+        timer = window.setTimeout(
+          () => void tick(),
+          pending.pollIntervalSeconds * 1000,
+        );
+      } catch (err) {
+        if (cancelled) return;
+        setError(
+          err instanceof ApiError
+            ? err.message
+            : 'Failed to poll OpenAI device authorization.',
+        );
+        setPolling(false);
+      }
+    };
+    timer = window.setTimeout(
+      () => void tick(),
+      pending.pollIntervalSeconds * 1000,
+    );
+    return () => {
+      cancelled = true;
+      if (timer !== null) clearTimeout(timer);
+    };
+  }, [pending]);
+
+  const handleConnect = async (): Promise<void> => {
+    setBusy(true);
+    setError(null);
+    try {
+      const init = await initiateOpenAiCodexSubscriptionOauth(scope);
+      setPending({
+        state: init.state,
+        userCode: init.userCode,
+        verificationUrl: init.verificationUrl,
+        pollIntervalSeconds: init.pollIntervalSeconds,
+      });
+      window.open(init.verificationUrl, '_blank', 'noopener,noreferrer');
+    } catch (err) {
+      setError(
+        err instanceof ApiError
+          ? err.message
+          : 'Failed to start ChatGPT OAuth.',
+      );
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <section
+      style={{
+        marginTop: '1rem',
+        paddingTop: '0.75rem',
+        borderTop: '1px solid var(--border-color, #e3eaf5)',
+      }}
+    >
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+        }}
+      >
+        <div>
+          <strong>ChatGPT subscription</strong>
+          <p className="talk-llm-meta">
+            {hasSubscription
+              ? `Connected · refreshes automatically${
+                  expiresAt
+                    ? ` (current token expires ${formatDateTime(expiresAt)})`
+                    : ''
+                }`
+              : 'Connect a ChatGPT Plus or Pro account. Note: inference adapter for Codex Responses is still in progress — auth lands here first.'}
+          </p>
+        </div>
+        {canManage && !pending ? (
+          <button
+            type="button"
+            className="secondary-btn"
+            onClick={() => void handleConnect()}
+            disabled={busy}
+          >
+            {busy
+              ? 'Starting…'
+              : hasSubscription
+                ? 'Reconnect with ChatGPT'
+                : 'Connect with ChatGPT'}
+          </button>
+        ) : null}
+      </div>
+      {pending ? (
+        <div
+          className="talk-llm-grid"
+          style={{ marginTop: '0.5rem', gap: '0.5rem' }}
+        >
+          <p className="talk-llm-meta">
+            Open{' '}
+            <a
+              href={pending.verificationUrl}
+              target="_blank"
+              rel="noreferrer"
+            >
+              {pending.verificationUrl}
+            </a>{' '}
+            and enter this code:
+          </p>
+          <div
+            style={{
+              fontSize: '1.5rem',
+              fontFamily: 'monospace',
+              letterSpacing: '0.25rem',
+              padding: '0.5rem',
+              background: 'var(--surface-alt, #f3f6fb)',
+              borderRadius: '6px',
+              textAlign: 'center',
+            }}
+          >
+            {pending.userCode}
+          </div>
+          <p className="talk-llm-meta">
+            {polling
+              ? 'Waiting for you to authorize on OpenAI… this page refreshes when done.'
+              : 'Ready.'}
+          </p>
+          <div className="talk-llm-inline-actions">
+            <button
+              type="button"
+              className="secondary-btn"
+              onClick={() => {
+                setPending(null);
+                setError(null);
+              }}
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      ) : null}
+      {error ? (
+        <p className="talk-llm-meta error-text" role="alert">
+          {error}
+        </p>
+      ) : null}
+    </section>
   );
 }
 

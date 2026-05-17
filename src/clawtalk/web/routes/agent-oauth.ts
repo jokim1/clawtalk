@@ -262,8 +262,7 @@ export async function completeAnthropicOauthRoute(
   statusCode: number;
   body: ApiEnvelope<{ scope: ProviderCredentialScope; expiresAt: string }>;
 }> {
-  const stateInput =
-    typeof body.state === 'string' ? body.state.trim() : '';
+  const stateInput = typeof body.state === 'string' ? body.state.trim() : '';
   const codeInput = typeof body.code === 'string' ? body.code.trim() : '';
   if (!stateInput || !codeInput) {
     return invalidInputResponse('state and code are required.');
@@ -281,17 +280,12 @@ export async function completeAnthropicOauthRoute(
       return invalidInputResponse('This OAuth link has already been used.');
     }
     if (Date.parse(existing.expires_at) <= Date.now()) {
-      return invalidInputResponse(
-        'OAuth state expired. Start the flow again.',
-      );
+      return invalidInputResponse('OAuth state expired. Start the flow again.');
     }
     if (existing.flow_kind !== 'pkce' || !existing.code_verifier) {
       return invalidInputResponse('OAuth state is not a PKCE flow.');
     }
-    if (
-      existing.scope === 'workspace' &&
-      !isAdminLike(auth.role)
-    ) {
+    if (existing.scope === 'workspace' && !isAdminLike(auth.role)) {
       return forbiddenResponse(
         'Only workspace admins can complete a workspace-shared subscription.',
       );
@@ -394,8 +388,7 @@ export async function pollOpenAiCodexOauthRoute(
     | { status: 'pending' }
   >;
 }> {
-  const stateInput =
-    typeof body.state === 'string' ? body.state.trim() : '';
+  const stateInput = typeof body.state === 'string' ? body.state.trim() : '';
   if (!stateInput) {
     return invalidInputResponse('state is required.');
   }
@@ -412,23 +405,16 @@ export async function pollOpenAiCodexOauthRoute(
       return invalidInputResponse('This OAuth link has already been used.');
     }
     if (Date.parse(existing.expires_at) <= Date.now()) {
-      return invalidInputResponse(
-        'OAuth state expired. Start the flow again.',
-      );
+      return invalidInputResponse('OAuth state expired. Start the flow again.');
     }
     if (
       existing.flow_kind !== 'device_code' ||
       !existing.device_auth_id ||
       !existing.user_code
     ) {
-      return invalidInputResponse(
-        'OAuth state is not a device-code flow.',
-      );
+      return invalidInputResponse('OAuth state is not a device-code flow.');
     }
-    if (
-      existing.scope === 'workspace' &&
-      !isAdminLike(auth.role)
-    ) {
+    if (existing.scope === 'workspace' && !isAdminLike(auth.role)) {
       return forbiddenResponse(
         'Only workspace admins can complete a workspace-shared subscription.',
       );
@@ -445,7 +431,11 @@ export async function pollOpenAiCodexOauthRoute(
         body: { ok: true, data: { status: 'pending' } },
       };
     }
-    if (poll.status === 'error' || !poll.authorizationCode || !poll.codeVerifier) {
+    if (
+      poll.status === 'error' ||
+      !poll.authorizationCode ||
+      !poll.codeVerifier
+    ) {
       return invalidInputResponse(
         poll.errorMessage ?? 'OpenAI device auth failed.',
       );

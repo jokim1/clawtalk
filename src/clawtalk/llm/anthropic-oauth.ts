@@ -5,8 +5,7 @@
 // console.anthropic.com redirect URI that displays the code back to the
 // user to paste into our UI.
 
-export const ANTHROPIC_OAUTH_CLIENT_ID =
-  '9d1c250a-e61b-44d9-88ed-5944d1962f5e';
+export const ANTHROPIC_OAUTH_CLIENT_ID = '9d1c250a-e61b-44d9-88ed-5944d1962f5e';
 export const ANTHROPIC_OAUTH_AUTHORIZE_URL =
   'https://claude.ai/oauth/authorize';
 // Anthropic's own console catches the OAuth redirect and displays the

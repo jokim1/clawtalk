@@ -964,6 +964,10 @@ export type AgentProviderCard = {
   workspaceVerificationStatus: ProviderVerificationStatus;
   workspaceLastVerifiedAt: string | null;
   workspaceLastVerificationError: string | null;
+  hasPersonalSubscription: boolean;
+  personalSubscriptionExpiresAt: string | null;
+  hasWorkspaceSubscription: boolean;
+  workspaceSubscriptionExpiresAt: string | null;
   hostStatus?: {
     cliInstalled: boolean;
     authenticated: boolean;
@@ -3267,6 +3271,87 @@ export async function verifyAiProviderCredential(
     },
   );
   return envelope.provider;
+}
+
+// ─── OAuth subscription flows ───────────────────────────────────
+
+export interface AnthropicOauthInitiateResult {
+  authorizationUrl: string;
+  state: string;
+}
+
+export async function initiateAnthropicSubscriptionOauth(
+  scope: ProviderCredentialScope = 'user',
+): Promise<AnthropicOauthInitiateResult> {
+  return apiMutationRequest<AnthropicOauthInitiateResult>(
+    '/api/v1/agents/providers/provider.anthropic/oauth/initiate',
+    {
+      method: 'POST',
+      includeJson: true,
+      body: JSON.stringify({ scope }),
+    },
+  );
+}
+
+export interface AnthropicOauthCompleteResult {
+  scope: ProviderCredentialScope;
+  expiresAt: string;
+}
+
+export async function completeAnthropicSubscriptionOauth(input: {
+  state: string;
+  code: string;
+}): Promise<AnthropicOauthCompleteResult> {
+  return apiMutationRequest<AnthropicOauthCompleteResult>(
+    '/api/v1/agents/providers/provider.anthropic/oauth/complete',
+    {
+      method: 'POST',
+      includeJson: true,
+      body: JSON.stringify(input),
+    },
+  );
+}
+
+export interface OpenAiCodexOauthInitiateResult {
+  state: string;
+  userCode: string;
+  verificationUrl: string;
+  pollIntervalSeconds: number;
+  expiresAt: string;
+}
+
+export async function initiateOpenAiCodexSubscriptionOauth(
+  scope: ProviderCredentialScope = 'user',
+): Promise<OpenAiCodexOauthInitiateResult> {
+  return apiMutationRequest<OpenAiCodexOauthInitiateResult>(
+    '/api/v1/agents/providers/provider.openai_codex/oauth/initiate',
+    {
+      method: 'POST',
+      includeJson: true,
+      body: JSON.stringify({ scope }),
+    },
+  );
+}
+
+export type OpenAiCodexOauthPollResult =
+  | { status: 'pending' }
+  | {
+      status: 'authorized';
+      scope: ProviderCredentialScope;
+      expiresAt: string;
+    };
+
+export async function pollOpenAiCodexSubscriptionOauth(input: {
+  state: string;
+}): Promise<OpenAiCodexOauthPollResult> {
+  return apiMutationRequest<OpenAiCodexOauthPollResult>(
+    '/api/v1/agents/providers/provider.openai_codex/oauth/poll',
+    {
+      method: 'POST',
+      includeJson: true,
+      body: JSON.stringify(input),
+    },
+  );
 }
 
 export async function getTalkLlmSettings(): Promise<TalkLlmSettings> {

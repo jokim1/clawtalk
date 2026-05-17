@@ -183,9 +183,7 @@ export async function exchangeOpenAiCodexAuthorizationCode(input: {
     expires_in?: unknown;
   };
   const accessToken =
-    typeof payload.access_token === 'string'
-      ? payload.access_token.trim()
-      : '';
+    typeof payload.access_token === 'string' ? payload.access_token.trim() : '';
   const refreshToken =
     typeof payload.refresh_token === 'string'
       ? payload.refresh_token.trim()
@@ -200,9 +198,7 @@ export async function exchangeOpenAiCodexAuthorizationCode(input: {
   return {
     accessToken,
     refreshToken,
-    expiresAtIso: new Date(
-      Date.now() + expiresInSeconds * 1000,
-    ).toISOString(),
+    expiresAtIso: new Date(Date.now() + expiresInSeconds * 1000).toISOString(),
   };
 }
 
@@ -245,24 +241,19 @@ export async function refreshOpenAiCodexOauthToken(
     expires_in?: unknown;
   };
   const accessToken =
-    typeof payload.access_token === 'string'
-      ? payload.access_token.trim()
-      : '';
+    typeof payload.access_token === 'string' ? payload.access_token.trim() : '';
   if (!accessToken) {
     throw new Error('OpenAI Codex token refresh missing access_token');
   }
   const nextRefresh =
-    typeof payload.refresh_token === 'string' &&
-    payload.refresh_token.trim()
+    typeof payload.refresh_token === 'string' && payload.refresh_token.trim()
       ? payload.refresh_token.trim()
       : refreshToken;
   const expiresInSeconds = Math.max(1, Number(payload.expires_in ?? 3600));
   return {
     accessToken,
     refreshToken: nextRefresh,
-    expiresAtIso: new Date(
-      Date.now() + expiresInSeconds * 1000,
-    ).toISOString(),
+    expiresAtIso: new Date(Date.now() + expiresInSeconds * 1000).toISOString(),
   };
 }
 
