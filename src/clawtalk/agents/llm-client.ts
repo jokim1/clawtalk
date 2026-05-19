@@ -1275,8 +1275,16 @@ export async function* streamLlmResponse(
       if (!response.ok) {
         const errorText = await response.text();
         const failureClass = classifyHttpFailure(response.status, errorText);
+        // Surface the backend's error body — chatgpt.com/backend-api/codex
+        // returns structured JSON with the real reason (invalid field,
+        // unsupported model, expired token, missing entitlement, etc.)
+        // that the bare statusText hides. Trim defensively so a giant
+        // stack trace doesn't blow up the assistant message.
+        const detail = errorText ? errorText.slice(0, 600).trim() : '';
         throw new LlmClientError(
-          `Codex Responses API error: ${response.statusText}`,
+          `Codex Responses API error (${response.status} ${response.statusText})${
+            detail ? `: ${detail}` : ''
+          }`,
           failureClass,
           response.status,
         );
