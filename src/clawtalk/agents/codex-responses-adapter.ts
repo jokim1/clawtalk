@@ -521,9 +521,13 @@ export function buildCodexRequestBody(
     body.parallel_tool_calls = true;
   }
 
-  if (opts.maxOutputTokens && opts.maxOutputTokens > 0) {
-    body.max_output_tokens = opts.maxOutputTokens;
-  }
+  // The chatgpt.com/backend-api/codex backend rejects max_output_tokens
+  // with `{"detail":"Unsupported parameter: max_output_tokens"}` (400).
+  // Hermes' transport/codex.py also skips it when targeting the Codex
+  // backend; the model picks its own output budget. We intentionally
+  // drop the caller's hint here. (If a non-Codex Responses backend
+  // ever ships through this apiFormat, gate this on baseUrl.)
+  void opts.maxOutputTokens;
 
   if (opts.sessionId) {
     body.prompt_cache_key = opts.sessionId;

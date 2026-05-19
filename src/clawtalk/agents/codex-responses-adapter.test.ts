@@ -223,7 +223,7 @@ describe('buildCodexRequestBody', () => {
     expect(withTools.parallel_tool_calls).toBe(true);
   });
 
-  it('forwards max_output_tokens, prompt_cache_key, and stream when set', () => {
+  it('forwards prompt_cache_key and stream when set, and drops max_output_tokens', () => {
     const body = buildCodexRequestBody({
       model: 'gpt-5.4',
       systemPrompt: 's',
@@ -232,7 +232,10 @@ describe('buildCodexRequestBody', () => {
       sessionId: 'talk-uuid-abc',
       stream: true,
     });
-    expect(body.max_output_tokens).toBe(1024);
+    // chatgpt.com/backend-api/codex rejects max_output_tokens
+    // outright. The caller's hint is intentionally dropped on the
+    // codex_responses path — see buildCodexRequestBody for context.
+    expect(body.max_output_tokens).toBeUndefined();
     expect(body.prompt_cache_key).toBe('talk-uuid-abc');
     expect(body.stream).toBe(true);
   });
