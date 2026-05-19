@@ -144,9 +144,7 @@ async function executeWebSearch(
       : undefined;
 
   try {
-    const { runWebSearchForUser } = await import(
-      '../web-search/registry.js'
-    );
+    const { runWebSearchForUser } = await import('../web-search/registry.js');
     const response = await runWebSearchForUser(query, { maxResults, signal });
     if (response.results.length === 0) {
       return {

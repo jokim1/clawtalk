@@ -149,9 +149,13 @@ describe('braveSearch', () => {
     const results = await braveSearch('BSA-test', 'cats');
 
     const [url, init] = fetchMock.mock.calls[0];
-    expect((url as string).startsWith('https://api.search.brave.com/res/v1/web/search')).toBe(true);
-    expect((url as string)).toContain('q=cats');
-    expect((url as string)).toContain('count=5');
+    expect(
+      (url as string).startsWith(
+        'https://api.search.brave.com/res/v1/web/search',
+      ),
+    ).toBe(true);
+    expect(url as string).toContain('q=cats');
+    expect(url as string).toContain('count=5');
     expect((init as RequestInit).method).toBe('GET');
     const headers = (init as RequestInit).headers as Record<string, string>;
     expect(headers['X-Subscription-Token']).toBe('BSA-test');
