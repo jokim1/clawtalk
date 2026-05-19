@@ -158,7 +158,16 @@ function deriveExecutorSettings(
   providers: AgentProviderCard[],
 ): ExecutorSettings {
   const anthropic = providers.find((p) => p.id === 'provider.anthropic');
-  const hasApiKey = anthropic?.hasCredential === true;
+  // Any credential surface the execution-resolver will accept counts as
+  // "configured". Workspace api_key + personal/workspace OAuth
+  // subscriptions all flow into the same resolver fallback chain, so
+  // surfacing them here unblocks Save in the agent form.
+  const hasApiKey =
+    anthropic?.hasCredential === true ||
+    anthropic?.workspaceHasCredential === true;
+  const hasOauthToken =
+    anthropic?.hasPersonalSubscription === true ||
+    anthropic?.hasWorkspaceSubscription === true;
   return {
     configuredAliasMap: {},
     effectiveAliasMap: {},
@@ -166,15 +175,15 @@ function deriveExecutorSettings(
     executorAuthMode: 'api_key',
     authModeSource: 'settings',
     hasApiKey,
-    hasOauthToken: false,
+    hasOauthToken,
     hasAuthToken: false,
     apiKeySource: hasApiKey ? 'stored' : null,
-    oauthTokenSource: null,
+    oauthTokenSource: hasOauthToken ? 'stored' : null,
     authTokenSource: null,
     apiKeyHint: anthropic?.credentialHint ?? null,
     oauthTokenHint: null,
     authTokenHint: null,
-    activeCredentialConfigured: hasApiKey,
+    activeCredentialConfigured: hasApiKey || hasOauthToken,
     verificationStatus: anthropic?.verificationStatus ?? 'missing',
     lastVerifiedAt: anthropic?.lastVerifiedAt ?? null,
     lastVerificationError: anthropic?.lastVerificationError ?? null,

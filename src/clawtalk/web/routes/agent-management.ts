@@ -48,12 +48,22 @@ function isAdminLike(role: string): boolean {
 
 async function providerHasCredential(providerId: string): Promise<boolean> {
   const db = getDbPg();
-  const rows = await db<Array<{ ok: number }>>`
+  // llm_provider_secrets carries BOTH personal api_keys and personal
+  // OAuth subscriptions (PR #330 added credential_kind). Same for the
+  // workspace-shared table. Any row is enough — the execution-resolver
+  // walks personal → workspace → env in the same order.
+  const personal = await db<Array<{ ok: number }>>`
     select 1 as ok from public.llm_provider_secrets
     where provider_id = ${providerId}
     limit 1
   `;
-  if (rows.length > 0) return true;
+  if (personal.length > 0) return true;
+  const workspace = await db<Array<{ ok: number }>>`
+    select 1 as ok from public.workspace_provider_secrets
+    where provider_id = ${providerId}
+    limit 1
+  `;
+  if (workspace.length > 0) return true;
   if (providerId === 'provider.anthropic') {
     return TALK_EXECUTOR_ANTHROPIC_API_KEY.trim().length > 0;
   }
