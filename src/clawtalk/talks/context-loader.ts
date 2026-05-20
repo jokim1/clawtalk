@@ -26,15 +26,29 @@ import type { TalkJobExecutionPolicy } from './executor.js';
 const WEB_TOOL_DEFINITIONS: LlmToolDefinition[] = [
   {
     name: 'web_search',
-    description:
-      "Search the live web for recent information. Returns a list of result objects with title, url, and a short snippet. Use this when the user asks about current events, recent news, or any fact that may have changed since your training data. The actual search backend (Tavily, Brave, Firecrawl) is chosen by the workspace's active provider setting — you don't need to specify one.",
+    description: [
+      'Search the live web for current information. Returns a list of result objects with title, url, and a short snippet.',
+      '',
+      'When to call this:',
+      '- Anything that may have changed since your training data: current events, news, rosters, prices, schedules, "current" / "latest" / "this season" / "right now" anything.',
+      '- Any fact the user states or implies a date for. Even if you think you know, verify.',
+      '- When the user pushes back on a fact you stated — re-check before defending it.',
+      '',
+      'Query tips:',
+      '- Anchor time-sensitive queries to the actual timeframe you need, not just the year. "Cal football news past week" beats "Cal football news"; "game dev releases past few days" beats "game dev releases"; "today" or "last 24 hours" works for fast-moving stories. Default search returns popular pages, often months or years old.',
+      '- Check the date on each result before trusting it. For "past week" questions, even a 2-week-old article is stale. For "current season" questions, anything before this season is stale. For "today" / breaking news, anything more than a day or two old should be flagged or re-searched.',
+      '- If two recent results disagree, prefer the most recent and surface the disagreement to the user instead of picking silently.',
+      '- One search rarely settles a personnel question (transfers, hirings, injuries) or a fast-breaking story. Do a second, more specific search before stating it as fact.',
+      '',
+      "The search backend (Tavily, Brave, Firecrawl) is chosen by the workspace's active provider setting — you don't need to specify one.",
+    ].join('\n'),
     inputSchema: {
       type: 'object',
       properties: {
         query: {
           type: 'string',
           description:
-            'The natural-language search query. Keep it short and focused — like what you would type into Google.',
+            'The natural-language search query. Keep it short and focused — like what you would type into Google. Include an explicit timeframe ("past week", "today", "2026 season") when freshness matters.',
         },
         max_results: {
           type: 'number',
@@ -370,6 +384,19 @@ export async function loadTalkContext(
   });
   const boundGoogleDriveResources = '';
 
+  // Web tools gate: only inject the "today's date + verify time-sensitive
+  // facts" stanza for agents that actually have web_search available. An
+  // agent without web access can't act on the rule, so the stanza is pure
+  // token cost for those — skip it.
+  const enabledToolFamilies = new Set(
+    (options?.effectiveTools ?? [])
+      .filter((tool) => tool.enabled)
+      .map((tool) => tool.toolFamily),
+  );
+  const webEnabled = !options?.effectiveTools || enabledToolFamilies.has('web');
+  const includeWebFreshnessStanza =
+    webEnabled && (!options?.jobPolicy || options.jobPolicy.allowWeb);
+
   // Step 3: Build connector tools (currently empty stub)
   const connectorTools = buildConnectorTools(talkId, options?.jobPolicy);
 
@@ -385,6 +412,7 @@ export async function loadTalkContext(
     retrievedContext.promptText,
     sourceLines,
     boundGoogleDriveResources,
+    includeWebFreshnessStanza,
   );
   const systemPromptTokens = Math.ceil(systemPrompt.length * CHARS_TO_TOKENS);
 
@@ -635,6 +663,15 @@ function buildConnectorTools(
 // Step 4: Assemble System Prompt
 // ---------------------------------------------------------------------------
 
+function buildWebFreshnessStanza(): string {
+  const today = new Date().toISOString().slice(0, 10);
+  return [
+    `**Today's date:** ${today}`,
+    '',
+    "Your training data has a cutoff — facts that change over time (rosters, prices, schedules, news, who-is-the-current-X) may be out of date. Before stating a time-sensitive fact as current, verify it with web_search. If web_search isn't configured, say so and ask the user for an authoritative source instead of guessing.",
+  ].join('\n');
+}
+
 function assembleSystemPrompt(
   goal: string | null,
   summary: string | null,
@@ -654,8 +691,13 @@ function assembleSystemPrompt(
     inlineContent: string | null;
   }>,
   boundGoogleDriveResources: string | null,
+  includeWebFreshnessStanza: boolean,
 ): string {
   const parts: string[] = [];
+
+  if (includeWebFreshnessStanza) {
+    parts.push(buildWebFreshnessStanza());
+  }
 
   if (goal) {
     parts.push(`**Goal:**\n${goal}`);
