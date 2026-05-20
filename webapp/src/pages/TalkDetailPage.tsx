@@ -144,6 +144,7 @@ import { ThreadRowTitleEditor } from '../components/ThreadRowTitleEditor';
 import { ThreadStartButton } from '../components/ThreadStartButton';
 import { TalkHistoryEditor } from '../components/TalkHistoryEditor';
 import { stripInternalAssistantText } from '../lib/assistantText';
+import { linkifyText } from '../lib/linkifyText';
 import { launchGoogleAccountPopup } from '../lib/googleAccountPopup';
 import { openGoogleDrivePicker } from '../lib/googlePicker';
 import { displayThreadTitle } from '../lib/threadTitles';
@@ -13371,9 +13372,13 @@ export function TalkDetailPage({
                                 </time>
                               </header>
                               <p>
-                                {message.role === 'assistant'
-                                  ? stripInternalAssistantText(message.content)
-                                  : message.content}
+                                {linkifyText(
+                                  message.role === 'assistant'
+                                    ? stripInternalAssistantText(
+                                        message.content,
+                                      )
+                                    : message.content,
+                                )}
                               </p>
                               {message.attachments &&
                               message.attachments.length > 0 ? (
