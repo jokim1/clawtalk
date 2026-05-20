@@ -268,6 +268,23 @@ export async function withUserContext<T>(
   );
 }
 
+// postgres.js parses date/timestamp/timestamptz columns into JavaScript
+// `Date` objects by default. Our accessor types declare these columns as
+// `string` and downstream code (sort comparators, API serializers, equality
+// checks) is written against that contract. Override the date parser to keep
+// the raw Postgres-text representation; the serializer still accepts Date or
+// string on the way in. Shared between Workers and Node test clients so test
+// runtime matches production.
+const PG_TIMESTAMP_AS_STRING: Record<string, postgres.PostgresType> = {
+  date: {
+    to: 1184,
+    from: [1082, 1114, 1184],
+    serialize: (x: Date | string): string =>
+      (x instanceof Date ? x : new Date(x)).toISOString(),
+    parse: (x: string): string => x,
+  },
+};
+
 // Test-mode init — call once at suite setup. Idempotent.
 export async function initPgDatabase(input?: { url?: string }): Promise<void> {
   if (nodeScopedDb) return;
@@ -275,6 +292,7 @@ export async function initPgDatabase(input?: { url?: string }): Promise<void> {
     max: 5,
     idle_timeout: 20,
     connect_timeout: 10,
+    types: PG_TIMESTAMP_AS_STRING,
   });
 }
 
@@ -299,6 +317,7 @@ function buildRequestPgClient(url: string): postgres.Sql {
     idle_timeout: 5,
     connect_timeout: 10,
     prepare: false,
+    types: PG_TIMESTAMP_AS_STRING,
   });
 }
 
