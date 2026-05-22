@@ -51,6 +51,10 @@ jobs:
         env:
           VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
           VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
+          # PR1: enable Settings → Tools → Google Account section in prod.
+          # Flip to 'false' (or remove) if you want to hide the UI again
+          # (e.g. before public launch with non-test-user accounts).
+          VITE_GOOGLE_TOOLS_ENABLED: 'true'
         run: npm --prefix webapp run build
 
       - uses: supabase/setup-cli@v1
