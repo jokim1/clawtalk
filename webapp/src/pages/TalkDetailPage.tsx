@@ -35,19 +35,16 @@ import {
   ChannelQueueFailure,
   ChannelTarget,
   ChannelTargetListPage,
-  connectUserGoogleAccount,
   ContextGoal,
   ContextRule,
   ContextSource,
   createTalkThread,
-  createTalkGoogleDriveResource,
   createTalkChannel,
   createTalkContextRule,
   createTalkContextSource,
   createTalkOutput,
   createTalkJob,
   DataConnector,
-  deleteTalkResource,
   deleteTalkChannel,
   deleteTalkChannelBindingState,
   deleteTalkChannelDeliveryFailure,
@@ -60,16 +57,13 @@ import {
   deleteTalkJob,
   deleteTalkStateEntry,
   detachTalkDataConnector,
-  expandUserGoogleScopes,
   getAiAgents,
   getDataConnectors,
-  getGooglePickerSession,
   getTalk,
   getTalkAgents,
   getTalkOutput,
   getTalkJob,
   getTalkState,
-  getTalkTools,
   getTalkContext,
   getTalkRunContext,
   getTalkDataConnectors,
@@ -105,7 +99,6 @@ import {
   TalkJobSchedule,
   TalkJobScope,
   TalkJobWeekday,
-  TalkTools,
   TalkChannelBinding,
   TalkChannelBindingStateEntry,
   TalkDataConnector,
@@ -124,7 +117,6 @@ import {
   unquarantineTalkChannelBinding,
   retryTalkChannelDeliveryFailuresCapped,
   upsertTalkChannelBindingState,
-  updateTalkTools,
   updateTalkAgents,
   updateTalkThread,
   pauseTalkJob,
@@ -144,8 +136,6 @@ import { ThreadStartButton } from '../components/ThreadStartButton';
 import { TalkHistoryEditor } from '../components/TalkHistoryEditor';
 import { stripInternalAssistantText } from '../lib/assistantText';
 import { linkifyText } from '../lib/linkifyText';
-import { launchGoogleAccountPopup } from '../lib/googleAccountPopup';
-import { openGoogleDrivePicker } from '../lib/googlePicker';
 import { displayThreadTitle } from '../lib/threadTitles';
 import { openTalkStream } from '../lib/talkStream';
 import type {
@@ -168,7 +158,6 @@ import type {
 type TabKey =
   | 'talk'
   | 'agents'
-  | 'tools'
   | 'context'
   | 'state'
   | 'outputs'
@@ -190,8 +179,8 @@ const ORCHESTRATION_MODE_TOOLTIP =
   'Ordered is turn based synthesis focused multi-agent response. Parallel is fast independent response.';
 
 const SETTINGS_TAB_KEYS: ReadonlyArray<
-  Extract<TabKey, 'tools' | 'state' | 'channels' | 'data-connectors'>
-> = ['tools', 'state', 'channels', 'data-connectors'];
+  Extract<TabKey, 'state' | 'channels' | 'data-connectors'>
+> = ['state', 'channels', 'data-connectors'];
 
 function isSettingsTabKey(tab: TabKey): boolean {
   return SETTINGS_TAB_KEYS.includes(tab as (typeof SETTINGS_TAB_KEYS)[number]);
@@ -1692,7 +1681,6 @@ function formatTalkRole(role: TalkAgent['role']): string {
 function getTabFromPath(pathname: string, talkId: string): TabKey {
   const base = `/app/talks/${talkId}`;
   if (pathname === `${base}/agents`) return 'agents';
-  if (pathname === `${base}/tools`) return 'tools';
   if (pathname === `${base}/context`) return 'context';
   if (pathname === `${base}/state`) return 'state';
   if (pathname === `${base}/outputs`) return 'outputs';
@@ -1700,50 +1688,6 @@ function getTabFromPath(pathname: string, talkId: string): TabKey {
   if (pathname === `${base}/data-connectors`) return 'data-connectors';
   if (pathname === `${base}/runs`) return 'runs';
   return 'talk';
-}
-
-function formatToolAccessState(state: string): string {
-  switch (state) {
-    case 'available':
-      return 'Available';
-    case 'unavailable_due_to_route':
-      return 'Route blocked';
-    case 'unavailable_due_to_identity':
-      return 'Needs Google account';
-    case 'unavailable_due_to_pending_scopes':
-      return 'Needs Google permissions';
-    case 'unavailable_due_to_scope':
-      return 'Scope expansion required';
-    case 'unavailable_due_to_missing_resource':
-      return 'Missing resource';
-    case 'unavailable_due_to_config':
-    default:
-      return 'Disabled';
-  }
-}
-
-// Keep this mapping in sync with src/clawtalk/web/routes/talk-tools.ts.
-function requiredScopesForTool(toolId: string): string[] {
-  switch (toolId) {
-    case 'gmail_read':
-      return ['gmail.readonly'];
-    case 'gmail_send':
-      return ['gmail.send'];
-    case 'google_drive_search':
-    case 'google_drive_read':
-    case 'google_drive_list_folder':
-      return ['drive.readonly'];
-    case 'google_docs_read':
-      return ['documents.readonly'];
-    case 'google_docs_batch_update':
-      return ['documents'];
-    case 'google_sheets_read_range':
-      return ['spreadsheets.readonly'];
-    case 'google_sheets_batch_update':
-      return ['spreadsheets'];
-    default:
-      return [];
-  }
 }
 
 function formatConnectorKind(kind: DataConnector['connectorKind']): string {
@@ -2907,8 +2851,6 @@ export function TalkDetailPage({
   const currentTab = getTabFromPath(location.pathname, talkId);
   const locationParams = new URLSearchParams(location.search);
   const requestedThreadId = locationParams.get('thread')?.trim() || null;
-  const googleToolsError =
-    locationParams.get('googleToolsError')?.trim() || null;
   const [state, dispatch] = useReducer(
     detailReducer,
     undefined,
@@ -3012,23 +2954,6 @@ export function TalkDetailPage({
     status: 'idle' | 'loading' | 'saving' | 'error' | 'success';
     message?: string;
   }>({ status: 'idle' });
-  const [talkTools, setTalkTools] = useState<TalkTools | null>(null);
-  const [toolGrantDrafts, setToolGrantDrafts] = useState<
-    Record<string, boolean>
-  >({});
-  const [toolStatus, setToolStatus] = useState<{
-    status: 'idle' | 'loading' | 'saving' | 'error' | 'success';
-    message?: string;
-  }>({ status: 'idle' });
-  const [driveBindingDraft, setDriveBindingDraft] = useState<{
-    bindingKind: 'google_drive_folder' | 'google_drive_file';
-    externalId: string;
-    displayName: string;
-  }>({
-    bindingKind: 'google_drive_folder',
-    externalId: '',
-    displayName: '',
-  });
   const [historyEditorOpen, setHistoryEditorOpen] = useState(false);
   const [historyEditState, setHistoryEditState] = useState<{
     status: 'idle' | 'saving' | 'error' | 'success';
@@ -3528,24 +3453,6 @@ export function TalkDetailPage({
       return { job, runs };
     },
     [selectedJobId, talkId],
-  );
-
-  const refreshTalkTools = useCallback(
-    async (options?: { showLoading?: boolean }) => {
-      if (options?.showLoading) {
-        setToolStatus({ status: 'loading' });
-      }
-      const next = await getTalkTools(talkId);
-      setTalkTools(next);
-      setToolGrantDrafts(
-        next.grants.reduce<Record<string, boolean>>((acc, grant) => {
-          acc[grant.toolId] = grant.enabled;
-          return acc;
-        }, {}),
-      );
-      setToolStatus({ status: 'idle' });
-    },
-    [talkId],
   );
 
   useEffect(() => {
@@ -4870,25 +4777,6 @@ export function TalkDetailPage({
         .sort((left, right) => left.label.localeCompare(right.label)),
     [channelConnections, channelTargetInventory.targets, talkId],
   );
-  const missingGoogleScopes = useMemo(() => {
-    if (!talkTools) return [] as string[];
-    const currentScopes = new Set(talkTools.googleAccount.scopes);
-    return Array.from(
-      new Set(
-        talkTools.grants
-          .filter((grant) => grant.enabled)
-          .flatMap((grant) => requiredScopesForTool(grant.toolId))
-          .filter((scope) => !currentScopes.has(scope)),
-      ),
-    );
-  }, [talkTools]);
-  const hasUnsavedToolChanges = useMemo(() => {
-    if (!talkTools) return false;
-    return talkTools.grants.some(
-      (grant) => (toolGrantDrafts[grant.toolId] ?? false) !== grant.enabled,
-    );
-  }, [talkTools, toolGrantDrafts]);
-
   const talkTabHref = `/app/talks/${talkId}`;
   const threadAwareTalkTabHref = activeThreadId
     ? buildThreadHref(talkId, activeThreadId)
@@ -4896,9 +4784,6 @@ export function TalkDetailPage({
   const agentsTabHref = activeThreadId
     ? buildThreadHref(talkId, activeThreadId, 'agents')
     : `/app/talks/${talkId}/agents`;
-  const toolsTabHref = activeThreadId
-    ? buildThreadHref(talkId, activeThreadId, 'tools')
-    : `/app/talks/${talkId}/tools`;
   const contextTabHref = activeThreadId
     ? buildThreadHref(talkId, activeThreadId, 'context')
     : `/app/talks/${talkId}/context`;
@@ -4917,7 +4802,7 @@ export function TalkDetailPage({
   const runsTabHref = activeThreadId
     ? buildThreadHref(talkId, activeThreadId, 'runs')
     : `/app/talks/${talkId}/runs`;
-  const settingsTabHref = toolsTabHref;
+  const settingsTabHref = stateTabHref;
   const manageAgentsHref = `/app/settings?tab=agents&returnTo=${encodeURIComponent(
     threadAwareTalkTabHref,
   )}`;
@@ -4931,55 +4816,6 @@ export function TalkDetailPage({
   const manageConnectorsHref = '/app/connectors';
   const isRenaming = renameDraft?.talkId === talkId;
   const isSettingsTab = isSettingsTabKey(currentTab);
-
-  useEffect(() => {
-    if (state.kind !== 'ready' || currentTab !== 'tools') return;
-
-    let cancelled = false;
-    setToolStatus((current) =>
-      current.status === 'saving' ? current : { status: 'loading' },
-    );
-
-    const loadTools = async () => {
-      try {
-        const next = await getTalkTools(talkId);
-        if (cancelled) return;
-        setTalkTools(next);
-        setToolGrantDrafts(
-          next.grants.reduce<Record<string, boolean>>((acc, grant) => {
-            acc[grant.toolId] = grant.enabled;
-            return acc;
-          }, {}),
-        );
-        setToolStatus({ status: 'idle' });
-      } catch (err) {
-        if (err instanceof UnauthorizedError) {
-          handleUnauthorized();
-          return;
-        }
-        if (!cancelled) {
-          setToolStatus({
-            status: 'error',
-            message:
-              err instanceof Error ? err.message : 'Failed to load Talk tools.',
-          });
-        }
-      }
-    };
-
-    void loadTools();
-    return () => {
-      cancelled = true;
-    };
-  }, [currentTab, handleUnauthorized, state.kind, talkId]);
-
-  useEffect(() => {
-    if (currentTab !== 'tools' || !googleToolsError) return;
-    setToolStatus({
-      status: 'error',
-      message: googleToolsError,
-    });
-  }, [currentTab, googleToolsError]);
 
   useEffect(() => {
     if (state.kind !== 'ready' || currentTab !== 'data-connectors') return;
@@ -7848,224 +7684,6 @@ export function TalkDetailPage({
     }
   };
 
-  const handleSaveTalkTools = async () => {
-    if (!canEditAgents || !talkTools) return;
-
-    setToolStatus({ status: 'saving' });
-    try {
-      const next = await updateTalkTools({
-        talkId,
-        grants: talkTools.registry.map((entry) => ({
-          toolId: entry.id,
-          enabled: toolGrantDrafts[entry.id] ?? false,
-        })),
-      });
-      setTalkTools(next);
-      setToolGrantDrafts(
-        next.grants.reduce<Record<string, boolean>>((acc, grant) => {
-          acc[grant.toolId] = grant.enabled;
-          return acc;
-        }, {}),
-      );
-      setToolStatus({
-        status: 'success',
-        message: 'Talk tool grants updated.',
-      });
-    } catch (err) {
-      if (err instanceof UnauthorizedError) {
-        handleUnauthorized();
-        return;
-      }
-      setToolStatus({
-        status: 'error',
-        message:
-          err instanceof Error ? err.message : 'Failed to save Talk tools.',
-      });
-    }
-  };
-
-  const handleConnectGoogleAccount = async () => {
-    setToolStatus({ status: 'saving' });
-    try {
-      const launch = await connectUserGoogleAccount({
-        returnTo: toolsTabHref,
-      });
-      await launchGoogleAccountPopup(launch.authorizationUrl);
-      await refreshTalkTools();
-      setToolStatus({
-        status: 'success',
-        message: 'Google account connected for this user.',
-      });
-    } catch (err) {
-      if (err instanceof UnauthorizedError) {
-        handleUnauthorized();
-        return;
-      }
-      setToolStatus({
-        status: 'error',
-        message:
-          err instanceof Error
-            ? err.message
-            : 'Failed to connect Google account.',
-      });
-    }
-  };
-
-  const handleGrantGoogleScopes = async () => {
-    if (!talkTools) return;
-    const currentScopes = new Set(talkTools.googleAccount.scopes);
-    const missingScopes = Array.from(
-      new Set(
-        talkTools.grants
-          .filter((grant) => grant.enabled)
-          .flatMap((grant) => requiredScopesForTool(grant.toolId))
-          .filter((scope) => !currentScopes.has(scope)),
-      ),
-    );
-    if (missingScopes.length === 0) return;
-
-    setToolStatus({ status: 'saving' });
-    try {
-      const launch = await expandUserGoogleScopes({
-        scopes: missingScopes,
-        returnTo: toolsTabHref,
-      });
-      await launchGoogleAccountPopup(launch.authorizationUrl);
-      await refreshTalkTools();
-      setToolStatus({
-        status: 'success',
-        message: 'Google permissions updated.',
-      });
-    } catch (err) {
-      if (err instanceof UnauthorizedError) {
-        handleUnauthorized();
-        return;
-      }
-      setToolStatus({
-        status: 'error',
-        message:
-          err instanceof Error
-            ? err.message
-            : 'Failed to update Google permissions.',
-      });
-    }
-  };
-
-  const handleAddDriveBinding = async () => {
-    if (!canEditAgents) return;
-    if (
-      !driveBindingDraft.externalId.trim() ||
-      !driveBindingDraft.displayName.trim()
-    ) {
-      setToolStatus({
-        status: 'error',
-        message: 'Drive bindings require both a display name and resource id.',
-      });
-      return;
-    }
-
-    setToolStatus({ status: 'saving' });
-    try {
-      await createTalkGoogleDriveResource({
-        talkId,
-        kind: driveBindingDraft.bindingKind,
-        externalId: driveBindingDraft.externalId.trim(),
-        displayName: driveBindingDraft.displayName.trim(),
-      });
-      setDriveBindingDraft({
-        bindingKind: 'google_drive_folder',
-        externalId: '',
-        displayName: '',
-      });
-      await refreshTalkTools();
-      setToolStatus({
-        status: 'success',
-        message: 'Drive binding added to this Talk.',
-      });
-    } catch (err) {
-      if (err instanceof UnauthorizedError) {
-        handleUnauthorized();
-        return;
-      }
-      setToolStatus({
-        status: 'error',
-        message:
-          err instanceof Error ? err.message : 'Failed to add Drive binding.',
-      });
-    }
-  };
-
-  const handleOpenDrivePicker = async (mode: 'folder' | 'file') => {
-    if (!canEditAgents) return;
-
-    setToolStatus({ status: 'saving' });
-    try {
-      const session = await getGooglePickerSession();
-      const selections = await openGoogleDrivePicker({ session, mode });
-      if (selections.length === 0) {
-        setToolStatus({ status: 'idle' });
-        return;
-      }
-
-      await Promise.all(
-        selections.map((selection) =>
-          createTalkGoogleDriveResource({
-            talkId,
-            kind: selection.kind,
-            externalId: selection.externalId,
-            displayName: selection.displayName,
-            metadata: selection.metadata,
-          }),
-        ),
-      );
-
-      await refreshTalkTools();
-      setToolStatus({
-        status: 'success',
-        message:
-          selections.length === 1
-            ? 'Drive binding added to this Talk.'
-            : `${selections.length} Drive bindings added to this Talk.`,
-      });
-    } catch (err) {
-      if (err instanceof UnauthorizedError) {
-        handleUnauthorized();
-        return;
-      }
-      setToolStatus({
-        status: 'error',
-        message:
-          err instanceof Error ? err.message : 'Failed to open Google Picker.',
-      });
-    }
-  };
-
-  const handleDeleteDriveBinding = async (bindingId: string) => {
-    if (!canEditAgents) return;
-
-    setToolStatus({ status: 'saving' });
-    try {
-      await deleteTalkResource({ talkId, resourceId: bindingId });
-      await refreshTalkTools();
-      setToolStatus({
-        status: 'success',
-        message: 'Drive binding removed from this Talk.',
-      });
-    } catch (err) {
-      if (err instanceof UnauthorizedError) {
-        handleUnauthorized();
-        return;
-      }
-      setToolStatus({
-        status: 'error',
-        message:
-          err instanceof Error
-            ? err.message
-            : 'Failed to remove Drive binding.',
-      });
-    }
-  };
-
   const handleClearUnread = () => {
     scrollToBottom('smooth');
     dispatch({ type: 'CLEAR_UNREAD' });
@@ -8655,12 +8273,6 @@ export function TalkDetailPage({
                         className="talk-tabs talk-subtabs"
                         aria-label="Talk settings sections"
                       >
-                        <Link
-                          to={toolsTabHref}
-                          className={`talk-tab ${currentTab === 'tools' ? 'talk-tab-active' : ''}`}
-                        >
-                          Tools
-                        </Link>
                         <Link
                           to={stateTabHref}
                           className={`talk-tab ${currentTab === 'state' ? 'talk-tab-active' : ''}`}
@@ -9733,406 +9345,6 @@ export function TalkDetailPage({
             </section>
           ) : null}
 
-
-          {currentTab === 'tools' ? (
-            <section className="talk-tab-panel" aria-label="Talk tools">
-              {toolStatus.status === 'loading' ? (
-                <p className="page-state">Loading Talk tools…</p>
-              ) : toolStatus.status === 'error' ? (
-                <p className="page-state error">{toolStatus.message}</p>
-              ) : talkTools ? (
-                <>
-                  <div className="agents-panel-header">
-                    <h2>Tools</h2>
-                  </div>
-                  <p className="policy-muted">
-                    Bind bounded resources, grant tool access for this Talk, and
-                    inspect which agents can actually use those tools.
-                  </p>
-
-                  <div className="talk-llm-card">
-                    <div className="connector-card-header">
-                      <div>
-                        <h3>Capability Summary</h3>
-                        <p className="talk-llm-meta">
-                          Effective Talk-wide capability summary for the current
-                          bindings and user identity.
-                        </p>
-                      </div>
-                    </div>
-                    {talkTools.summary.length > 0 ? (
-                      <ul style={{ margin: 0, paddingLeft: '1.25rem' }}>
-                        {talkTools.summary.map((line) => (
-                          <li key={line}>{line}</li>
-                        ))}
-                      </ul>
-                    ) : (
-                      <p className="page-state">
-                        No Talk tools are enabled yet.
-                      </p>
-                    )}
-                    {talkTools.warnings.map((warning) => (
-                      <div
-                        key={warning}
-                        className="inline-banner inline-banner-warning"
-                        role="status"
-                        style={{ marginTop: '0.75rem' }}
-                      >
-                        {warning}
-                      </div>
-                    ))}
-                  </div>
-
-                  <div className="talk-llm-card">
-                    <div className="connector-card-header">
-                      <div>
-                        <h3>Google Account</h3>
-                        <p className="talk-llm-meta">
-                          Google-scoped tools run as the triggering user.
-                        </p>
-                      </div>
-                    </div>
-                    <p className="talk-llm-meta">
-                      {talkTools.googleAccount.connected
-                        ? `Connected as ${talkTools.googleAccount.email || 'Unknown account'}`
-                        : 'No Google account connected for this user.'}
-                    </p>
-                    {talkTools.googleAccount.scopes.length > 0 ? (
-                      <p className="talk-llm-meta">
-                        Scopes: {talkTools.googleAccount.scopes.join(', ')}
-                      </p>
-                    ) : null}
-                    <div className="settings-button-row">
-                      {canEditAgents && !talkTools.googleAccount.connected ? (
-                        <button
-                          type="button"
-                          className="secondary-btn"
-                          onClick={() => void handleConnectGoogleAccount()}
-                          disabled={toolStatus.status === 'saving'}
-                        >
-                          Connect Google
-                        </button>
-                      ) : null}
-                      {canEditAgents && missingGoogleScopes.length > 0 ? (
-                        <button
-                          type="button"
-                          className="secondary-btn"
-                          onClick={() => void handleGrantGoogleScopes()}
-                          disabled={toolStatus.status === 'saving'}
-                        >
-                          Grant Google permissions
-                        </button>
-                      ) : null}
-                    </div>
-                  </div>
-
-                  <div className="talk-llm-card">
-                    <div className="connector-card-header">
-                      <div>
-                        <h3>Talk Grants</h3>
-                        <p className="talk-llm-meta">
-                          Enable or restrict built-in tool capabilities for this
-                          Talk.
-                        </p>
-                      </div>
-                    </div>
-                    <div
-                      style={{
-                        display: 'grid',
-                        gridTemplateColumns:
-                          'repeat(auto-fit, minmax(220px, 1fr))',
-                        gap: '0.75rem',
-                      }}
-                    >
-                      {talkTools.registry.map((entry) => (
-                        <label
-                          key={entry.id}
-                          className="talk-llm-card"
-                          style={{ margin: 0 }}
-                        >
-                          <div
-                            style={{
-                              display: 'flex',
-                              alignItems: 'center',
-                              justifyContent: 'space-between',
-                              gap: '0.75rem',
-                            }}
-                          >
-                            <strong>{entry.displayName}</strong>
-                            <input
-                              type="checkbox"
-                              aria-label={entry.displayName}
-                              checked={toolGrantDrafts[entry.id] ?? false}
-                              disabled={
-                                !canEditAgents || toolStatus.status === 'saving'
-                              }
-                              onChange={(event) =>
-                                setToolGrantDrafts((current) => ({
-                                  ...current,
-                                  [entry.id]: event.target.checked,
-                                }))
-                              }
-                            />
-                          </div>
-                          <p
-                            className="talk-llm-meta"
-                            style={{ marginBottom: 0 }}
-                          >
-                            {entry.description}
-                          </p>
-                        </label>
-                      ))}
-                    </div>
-                    {canEditAgents ? (
-                      <div
-                        className="settings-button-row"
-                        style={{ marginTop: '0.75rem' }}
-                      >
-                        <button
-                          type="button"
-                          className="secondary-btn"
-                          onClick={() => void handleSaveTalkTools()}
-                          disabled={
-                            toolStatus.status === 'saving' ||
-                            !hasUnsavedToolChanges
-                          }
-                        >
-                          {toolStatus.status === 'saving'
-                            ? 'Saving…'
-                            : 'Save Tool Grants'}
-                        </button>
-                      </div>
-                    ) : null}
-                  </div>
-
-                  <div className="talk-llm-card">
-                    <div className="connector-card-header">
-                      <div>
-                        <h3>Bound Drive Resources</h3>
-                        <p className="talk-llm-meta">
-                          Agents may only search/read Drive, Docs, and Sheets
-                          inside these bounds.
-                        </p>
-                      </div>
-                    </div>
-                    {talkTools.bindings.length > 0 ? (
-                      <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>
-                        {talkTools.bindings.map((binding) => (
-                          <li
-                            key={binding.id}
-                            style={{
-                              display: 'flex',
-                              alignItems: 'center',
-                              gap: '0.75rem',
-                              padding: '0.45rem 0',
-                              borderBottom: '1px solid var(--border, #e6e9ef)',
-                            }}
-                          >
-                            <span
-                              style={{
-                                fontSize: '0.72rem',
-                                textTransform: 'uppercase',
-                                opacity: 0.6,
-                              }}
-                            >
-                              {binding.kind === 'google_drive_folder'
-                                ? 'Folder'
-                                : binding.kind === 'google_drive_file'
-                                  ? 'File'
-                                  : binding.kind}
-                            </span>
-                            <strong style={{ flex: 1 }}>
-                              {binding.displayName}
-                            </strong>
-                            <code>{binding.externalId}</code>
-                            {canEditAgents ? (
-                              <button
-                                type="button"
-                                className="secondary-btn"
-                                onClick={() =>
-                                  void handleDeleteDriveBinding(binding.id)
-                                }
-                                disabled={toolStatus.status === 'saving'}
-                              >
-                                Remove
-                              </button>
-                            ) : null}
-                          </li>
-                        ))}
-                      </ul>
-                    ) : (
-                      <p className="page-state">
-                        No Drive files or folders are bound to this Talk yet.
-                      </p>
-                    )}
-                    {canEditAgents ? (
-                      <div style={{ marginTop: '0.75rem' }}>
-                        <div className="settings-button-row">
-                          <button
-                            type="button"
-                            className="secondary-btn"
-                            onClick={() => void handleOpenDrivePicker('folder')}
-                            disabled={
-                              toolStatus.status === 'saving' ||
-                              !talkTools.googleAccount.connected
-                            }
-                          >
-                            Bind Folders
-                          </button>
-                          <button
-                            type="button"
-                            className="secondary-btn"
-                            onClick={() => void handleOpenDrivePicker('file')}
-                            disabled={
-                              toolStatus.status === 'saving' ||
-                              !talkTools.googleAccount.connected
-                            }
-                          >
-                            Bind Files
-                          </button>
-                        </div>
-                        <p
-                          className="talk-llm-meta"
-                          style={{ marginTop: '0.5rem' }}
-                        >
-                          Use Google Picker for multi-select binding, or enter a
-                          Drive id manually below.
-                        </p>
-                        <div className="connector-attach-row">
-                          <label>
-                            <span className="settings-label">Kind</span>
-                            <select
-                              value={driveBindingDraft.bindingKind}
-                              onChange={(event) =>
-                                setDriveBindingDraft((current) => ({
-                                  ...current,
-                                  bindingKind: event.target.value as
-                                    | 'google_drive_folder'
-                                    | 'google_drive_file',
-                                }))
-                              }
-                              disabled={toolStatus.status === 'saving'}
-                            >
-                              <option value="google_drive_folder">
-                                Folder
-                              </option>
-                              <option value="google_drive_file">File</option>
-                            </select>
-                          </label>
-                          <label style={{ flex: 1 }}>
-                            <span className="settings-label">Display Name</span>
-                            <input
-                              type="text"
-                              value={driveBindingDraft.displayName}
-                              onChange={(event) =>
-                                setDriveBindingDraft((current) => ({
-                                  ...current,
-                                  displayName: event.target.value,
-                                }))
-                              }
-                              placeholder="Accounting"
-                              style={{ width: '100%' }}
-                              disabled={toolStatus.status === 'saving'}
-                            />
-                          </label>
-                        </div>
-                        <label
-                          style={{ display: 'block', marginTop: '0.5rem' }}
-                        >
-                          <span className="settings-label">Resource ID</span>
-                          <input
-                            type="text"
-                            value={driveBindingDraft.externalId}
-                            onChange={(event) =>
-                              setDriveBindingDraft((current) => ({
-                                ...current,
-                                externalId: event.target.value,
-                              }))
-                            }
-                            placeholder="drive-folder-id-or-file-id"
-                            style={{ width: '100%' }}
-                            disabled={toolStatus.status === 'saving'}
-                          />
-                        </label>
-                        <div
-                          className="settings-button-row"
-                          style={{ marginTop: '0.75rem' }}
-                        >
-                          <button
-                            type="button"
-                            className="secondary-btn"
-                            onClick={() => void handleAddDriveBinding()}
-                            disabled={toolStatus.status === 'saving'}
-                          >
-                            Add Drive Binding
-                          </button>
-                        </div>
-                      </div>
-                    ) : null}
-                  </div>
-
-                  <div className="talk-llm-card">
-                    <div className="connector-card-header">
-                      <div>
-                        <h3>Effective Agent Access</h3>
-                        <p className="talk-llm-meta">
-                          Which agents can actually use the currently granted
-                          tools on this Talk.
-                        </p>
-                      </div>
-                    </div>
-                    <div style={{ display: 'grid', gap: '0.75rem' }}>
-                      {talkTools.effectiveAccess.map((agent) => (
-                        <article key={agent.agentId} className="talk-llm-card">
-                          <div className="connector-card-header">
-                            <div>
-                              <h3>{agent.nickname}</h3>
-                              <p className="talk-llm-meta">
-                                {agent.modelId || 'No model selected'}
-                              </p>
-                            </div>
-                          </div>
-                          <div
-                            style={{
-                              display: 'flex',
-                              flexWrap: 'wrap',
-                              gap: '0.5rem',
-                            }}
-                          >
-                            {agent.toolAccess.map((tool) => {
-                              const entry = talkTools.registry.find(
-                                (candidate) => candidate.id === tool.toolId,
-                              );
-                              if (!entry) return null;
-                              return (
-                                <span
-                                  key={`${agent.agentId}:${tool.toolId}`}
-                                  className="talk-agent-chip"
-                                  title={tool.toolId}
-                                >
-                                  {entry.displayName}:{' '}
-                                  {formatToolAccessState(tool.state)}
-                                </span>
-                              );
-                            })}
-                          </div>
-                        </article>
-                      ))}
-                    </div>
-                  </div>
-
-                  {toolStatus.status === 'success' ? (
-                    <div
-                      className="inline-banner inline-banner-success"
-                      role="status"
-                    >
-                      {toolStatus.message}
-                    </div>
-                  ) : null}
-                </>
-              ) : null}
-            </section>
-          ) : null}
 
           {currentTab === 'channels' ? (
             <section className="talk-tab-panel" aria-label="Talk channels">

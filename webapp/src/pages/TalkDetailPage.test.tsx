@@ -13,7 +13,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 
 import { TalkDetailPage } from './TalkDetailPage';
-import { openGoogleDrivePicker } from '../lib/googlePicker';
 import { openTalkStream } from '../lib/talkStream';
 import type {
   AiAgentsPageData,
@@ -38,7 +37,6 @@ import type {
   TalkJobRunSummary,
   TalkStateEntry,
   TalkThread,
-  TalkTools,
   RegisteredAgent,
 } from '../lib/api';
 
@@ -47,10 +45,6 @@ const ORCHESTRATION_MODE_TOOLTIP =
 
 vi.mock('../lib/talkStream', () => ({
   openTalkStream: vi.fn(),
-}));
-
-vi.mock('../lib/googlePicker', () => ({
-  openGoogleDrivePicker: vi.fn(),
 }));
 
 type StreamCallbacks = Parameters<typeof openTalkStream>[0];
@@ -129,7 +123,6 @@ function mockTextareaMetrics(input: {
 
 describe('TalkDetailPage', () => {
   const openTalkStreamMock = vi.mocked(openTalkStream);
-  const openGoogleDrivePickerMock = vi.mocked(openGoogleDrivePicker);
   let streamInput: StreamCallbacks | null = null;
 
   beforeEach(() => {
@@ -155,7 +148,6 @@ describe('TalkDetailPage', () => {
         close: vi.fn(),
       };
     });
-    openGoogleDrivePickerMock.mockReset();
   });
 
   afterEach(() => {
@@ -1270,247 +1262,6 @@ describe('TalkDetailPage', () => {
 
     await user.click(screen.getByRole('button', { name: 'Delete Report' }));
     expect(await screen.findByText('Report deleted.')).toBeTruthy();
-  });
-
-  it('loads the Tools tab and renders capability summaries and effective access', async () => {
-    const user = userEvent.setup();
-    installTalkDetailFetch();
-
-    renderDetailPage('/app/talks/talk-1/tools');
-
-    await screen.findByRole('heading', { name: 'Tools' });
-    expect(screen.getByText('This Talk can search the web')).toBeTruthy();
-    expect(
-      screen.getByText(
-        'Google Drive unavailable — bind a file or folder to enable',
-      ),
-    ).toBeTruthy();
-    expect(screen.getByText('Claude Sonnet 4.6')).toBeTruthy();
-    expect(screen.getByText(/Web Search: Available/i)).toBeTruthy();
-
-    await user.click(screen.getByLabelText('Gmail Send'));
-    await user.click(screen.getByRole('button', { name: 'Save Tool Grants' }));
-    expect(await screen.findByText('Talk tool grants updated.')).toBeTruthy();
-  });
-
-  it('refreshes Talk Tools after popup Google account connect completes', async () => {
-    const user = userEvent.setup();
-    const popup = { closed: false };
-    const openSpy = vi
-      .spyOn(window, 'open')
-      .mockReturnValue(popup as unknown as Window);
-    installTalkDetailFetch();
-
-    renderDetailPage('/app/talks/talk-1/tools');
-
-    await screen.findByRole('heading', { name: 'Tools' });
-    await user.click(screen.getByRole('button', { name: 'Connect Google' }));
-
-    await waitFor(() => expect(openSpy).toHaveBeenCalledTimes(1));
-    act(() => {
-      window.dispatchEvent(
-        new MessageEvent('message', {
-          origin: window.location.origin,
-          data: {
-            type: 'clawtalk:google-account-link',
-            status: 'success',
-          },
-        }),
-      );
-    });
-
-    expect(
-      await screen.findByText('Google account connected for this user.'),
-    ).toBeTruthy();
-    expect(screen.getByText(/Connected as owner@example\.com/i)).toBeTruthy();
-  });
-
-  it('refreshes Talk Tools after popup scope expansion completes', async () => {
-    const user = userEvent.setup();
-    const popup = { closed: false };
-    const openSpy = vi
-      .spyOn(window, 'open')
-      .mockReturnValue(popup as unknown as Window);
-    installTalkDetailFetch({
-      talkTools: {
-        ...buildTalkTools(),
-        googleAccount: {
-          connected: true,
-          email: 'owner@example.com',
-          displayName: 'Owner',
-          scopes: [],
-          accessExpiresAt: null,
-        },
-        grants: [
-          {
-            toolId: 'web_search',
-            enabled: true,
-            updatedAt: '2026-03-06T00:00:00.000Z',
-            updatedBy: 'owner-1',
-          },
-          {
-            toolId: 'gmail_send',
-            enabled: true,
-            updatedAt: '2026-03-06T00:00:00.000Z',
-            updatedBy: 'owner-1',
-          },
-        ],
-      },
-    });
-
-    renderDetailPage('/app/talks/talk-1/tools');
-
-    await screen.findByRole('heading', { name: 'Tools' });
-    await user.click(
-      screen.getByRole('button', { name: 'Grant Google permissions' }),
-    );
-
-    await waitFor(() => expect(openSpy).toHaveBeenCalledTimes(1));
-    act(() => {
-      window.dispatchEvent(
-        new MessageEvent('message', {
-          origin: window.location.origin,
-          data: {
-            type: 'clawtalk:google-account-link',
-            status: 'success',
-          },
-        }),
-      );
-    });
-
-    expect(await screen.findByText('Google permissions updated.')).toBeTruthy();
-    expect(screen.getByText(/gmail\.send/i)).toBeTruthy();
-  });
-
-  it('binds Drive resources from Google Picker selections', async () => {
-    const user = userEvent.setup();
-    openGoogleDrivePickerMock.mockResolvedValue([
-      {
-        kind: 'google_drive_folder',
-        externalId: 'folder-123',
-        displayName: 'Accounting',
-        metadata: { mimeType: 'application/vnd.google-apps.folder', url: null },
-      },
-      {
-        kind: 'google_drive_folder',
-        externalId: 'folder-456',
-        displayName: 'Forecasts',
-        metadata: { mimeType: 'application/vnd.google-apps.folder', url: null },
-      },
-    ]);
-    installTalkDetailFetch({
-      talkTools: {
-        ...buildTalkTools(),
-        googleAccount: {
-          connected: true,
-          email: 'owner@example.com',
-          displayName: 'Owner',
-          scopes: ['drive.readonly'],
-          accessExpiresAt: null,
-        },
-        bindings: [],
-      },
-    });
-
-    renderDetailPage('/app/talks/talk-1/tools');
-
-    await screen.findByRole('heading', { name: 'Tools' });
-    await user.click(screen.getByRole('button', { name: 'Bind Folders' }));
-
-    expect(
-      await screen.findByText('2 Drive bindings added to this Talk.'),
-    ).toBeTruthy();
-    expect(screen.getByText('Accounting')).toBeTruthy();
-    expect(screen.getByText('Forecasts')).toBeTruthy();
-    expect(openGoogleDrivePickerMock).toHaveBeenCalledTimes(1);
-  });
-
-  it('treats picker cancellation as a no-op', async () => {
-    const user = userEvent.setup();
-    openGoogleDrivePickerMock.mockResolvedValue([]);
-    installTalkDetailFetch({
-      talkTools: {
-        ...buildTalkTools(),
-        googleAccount: {
-          connected: true,
-          email: 'owner@example.com',
-          displayName: 'Owner',
-          scopes: ['drive.readonly'],
-          accessExpiresAt: null,
-        },
-        bindings: [],
-      },
-    });
-
-    renderDetailPage('/app/talks/talk-1/tools');
-
-    await screen.findByRole('heading', { name: 'Tools' });
-    await user.click(screen.getByRole('button', { name: 'Bind Files' }));
-
-    await waitFor(() =>
-      expect(openGoogleDrivePickerMock).toHaveBeenCalledTimes(1),
-    );
-    expect(screen.queryByText(/Drive binding added to this Talk/i)).toBeNull();
-    expect(screen.queryByText(/Drive bindings added to this Talk/i)).toBeNull();
-  });
-
-  it('shows picker errors inline in the Tools tab', async () => {
-    const user = userEvent.setup();
-    openGoogleDrivePickerMock.mockRejectedValue(
-      new Error('Google Picker is unavailable.'),
-    );
-    installTalkDetailFetch({
-      talkTools: {
-        ...buildTalkTools(),
-        googleAccount: {
-          connected: true,
-          email: 'owner@example.com',
-          displayName: 'Owner',
-          scopes: ['drive.readonly'],
-          accessExpiresAt: null,
-        },
-      },
-    });
-
-    renderDetailPage('/app/talks/talk-1/tools');
-
-    await screen.findByRole('heading', { name: 'Tools' });
-    await user.click(screen.getByRole('button', { name: 'Bind Files' }));
-
-    expect(
-      await screen.findByText('Google Picker is unavailable.'),
-    ).toBeTruthy();
-  });
-
-  it('shows picker-token fetch errors without opening Google Picker', async () => {
-    const user = userEvent.setup();
-    installTalkDetailFetch({
-      pickerTokenError: {
-        status: 503,
-        code: 'google_picker_not_configured',
-        message: 'Google Picker is not configured.',
-      },
-      talkTools: {
-        ...buildTalkTools(),
-        googleAccount: {
-          connected: true,
-          email: 'owner@example.com',
-          displayName: 'Owner',
-          scopes: ['drive.readonly'],
-          accessExpiresAt: null,
-        },
-      },
-    });
-
-    renderDetailPage('/app/talks/talk-1/tools');
-
-    await screen.findByRole('heading', { name: 'Tools' });
-    await user.click(screen.getByRole('button', { name: 'Bind Files' }));
-
-    expect(
-      await screen.findByText('Google Picker is not configured.'),
-    ).toBeTruthy();
-    expect(openGoogleDrivePickerMock).not.toHaveBeenCalled();
   });
 
   it('treats awaiting confirmation runs as active rounds on the Talk tab', async () => {
@@ -4664,86 +4415,6 @@ function buildTalkWith(overrides: Partial<Talk>): Talk {
   };
 }
 
-function buildTalkTools(): TalkTools {
-  return {
-    talkId: 'talk-1',
-    registry: [
-      {
-        id: 'web_search',
-        family: 'web',
-        displayName: 'Web Search',
-        description: 'Search the public web.',
-        enabled: true,
-        installStatus: 'installed',
-        healthStatus: 'healthy',
-        authRequirements: null,
-        mutatesExternalState: false,
-        requiresBinding: false,
-        defaultGrant: true,
-        sortOrder: 10,
-        updatedAt: '2026-03-06T00:00:00.000Z',
-        updatedBy: null,
-      },
-      {
-        id: 'gmail_send',
-        family: 'gmail',
-        displayName: 'Gmail Send',
-        description: 'Draft and send email.',
-        enabled: true,
-        installStatus: 'installed',
-        healthStatus: 'healthy',
-        authRequirements: null,
-        mutatesExternalState: true,
-        requiresBinding: false,
-        defaultGrant: false,
-        sortOrder: 20,
-        updatedAt: '2026-03-06T00:00:00.000Z',
-        updatedBy: null,
-      },
-    ],
-    grants: [
-      {
-        toolId: 'web_search',
-        enabled: true,
-        updatedAt: '2026-03-06T00:00:00.000Z',
-        updatedBy: 'owner-1',
-      },
-      {
-        toolId: 'gmail_send',
-        enabled: false,
-        updatedAt: '2026-03-06T00:00:00.000Z',
-        updatedBy: 'owner-1',
-      },
-    ],
-    bindings: [],
-    googleAccount: {
-      connected: false,
-      email: null,
-      displayName: null,
-      scopes: [],
-      accessExpiresAt: null,
-    },
-    summary: [
-      'This Talk can search the web',
-      'Google Drive unavailable — bind a file or folder to enable',
-    ],
-    warnings: [],
-    effectiveAccess: [
-      {
-        agentId: 'agent-claude',
-        nickname: 'Claude Sonnet 4.6',
-        sourceKind: 'claude_default',
-        providerId: null,
-        modelId: 'claude-sonnet-4-6',
-        toolAccess: [
-          { toolId: 'web_search', state: 'available' },
-          { toolId: 'gmail_send', state: 'unavailable_due_to_config' },
-        ],
-      },
-    ],
-  };
-}
-
 function buildTalkAgent(
   input: Partial<TalkAgent> & Pick<TalkAgent, 'id' | 'nickname'>,
 ): TalkAgent {
@@ -5317,12 +4988,6 @@ function installTalkDetailFetch(input?: {
   talkChannels?: TalkChannelBinding[];
   ingressFailures?: ChannelQueueFailure[];
   deliveryFailures?: ChannelQueueFailure[];
-  talkTools?: TalkTools;
-  pickerTokenError?: {
-    status: number;
-    code?: string;
-    message: string;
-  };
   aiAgents?: AiAgentsPageData;
   onPutAgents?: (body: SavedTalkAgentRequest) => TalkAgent[];
   onGetContext?: () => TalkContext;
@@ -5485,7 +5150,6 @@ function installTalkDetailFetch(input?: {
       reasonDetail: 'Telegram delivery exhausted retries.',
     }),
   ];
-  let talkTools = input?.talkTools ?? buildTalkTools();
   const aiAgents = input?.aiAgents ?? buildAiAgentsData();
 
   vi.stubGlobal(
@@ -6333,163 +5997,6 @@ function installTalkDetailFetch(input?: {
         context = {
           ...context,
           rules: context.rules.filter((rule) => rule.id !== ruleId),
-        };
-        return jsonResponse(200, {
-          ok: true,
-          data: { deleted: true },
-        });
-      }
-
-      if (path === '/api/v1/talks/talk-1/tools' && method === 'GET') {
-        return jsonResponse(200, {
-          ok: true,
-          data: talkTools,
-        });
-      }
-
-      if (path === '/api/v1/talks/talk-1/tools/grants' && method === 'PUT') {
-        const body = JSON.parse(String(init?.body || '{}')) as {
-          grants?: Array<{ toolId: string; enabled: boolean }>;
-        };
-        if (Array.isArray(body.grants)) {
-          talkTools = {
-            ...talkTools,
-            grants: talkTools.grants.map((grant) => {
-              const update = body.grants?.find(
-                (entry) => entry.toolId === grant.toolId,
-              );
-              return update ? { ...grant, enabled: update.enabled } : grant;
-            }),
-          };
-        }
-        return jsonResponse(200, {
-          ok: true,
-          data: talkTools,
-        });
-      }
-
-      if (url.endsWith('/api/v1/me/google-account') && method === 'GET') {
-        return jsonResponse(200, {
-          ok: true,
-          data: {
-            authorizationUrl:
-              'http://127.0.0.1:3210/api/v1/auth/google/callback?state=connect-state&email=owner@example.com&name=Owner',
-            expiresInSec: 600,
-          },
-        });
-      }
-
-      if (
-        url.endsWith('/api/v1/me/google-account/connect') &&
-        method === 'POST'
-      ) {
-        talkTools = {
-          ...talkTools,
-          googleAccount: {
-            connected: true,
-            email: 'owner@example.com',
-            displayName: 'Owner',
-            scopes: talkTools.googleAccount.scopes,
-            accessExpiresAt: null,
-          },
-        };
-        return jsonResponse(200, {
-          ok: true,
-          data: { googleAccount: talkTools.googleAccount },
-        });
-      }
-
-      if (
-        url.endsWith('/api/v1/me/google-account/expand-scopes') &&
-        method === 'POST'
-      ) {
-        const body = JSON.parse(String(init?.body || '{}')) as {
-          scopes?: string[];
-        };
-        talkTools = {
-          ...talkTools,
-          googleAccount: {
-            ...talkTools.googleAccount,
-            connected: true,
-            email: talkTools.googleAccount.email ?? 'owner@example.com',
-            displayName: talkTools.googleAccount.displayName ?? 'Owner',
-            scopes: Array.from(
-              new Set([
-                ...talkTools.googleAccount.scopes,
-                ...(Array.isArray(body.scopes) ? body.scopes : []),
-              ]),
-            ),
-          },
-        };
-        return jsonResponse(200, {
-          ok: true,
-          data: {
-            authorizationUrl:
-              'http://127.0.0.1:3210/api/v1/auth/google/callback?state=scope-state&email=owner@example.com&name=Owner',
-            expiresInSec: 600,
-          },
-        });
-      }
-
-      if (
-        url.endsWith('/api/v1/me/google-account/picker-token') &&
-        method === 'GET'
-      ) {
-        if (input?.pickerTokenError) {
-          return jsonResponse(input.pickerTokenError.status, {
-            ok: false,
-            error: {
-              code: input.pickerTokenError.code,
-              message: input.pickerTokenError.message,
-            },
-          });
-        }
-        return jsonResponse(200, {
-          ok: true,
-          data: {
-            oauthToken: 'picker-oauth-token',
-            developerKey: 'picker-dev-key',
-            appId: 'picker-app-id',
-          },
-        });
-      }
-
-      if (url.endsWith('/api/v1/talks/talk-1/resources') && method === 'POST') {
-        const body = JSON.parse(String(init?.body || '{}')) as {
-          kind?: TalkTools['bindings'][number]['kind'];
-          externalId?: string;
-          displayName?: string;
-          metadata?: Record<string, unknown> | null;
-        };
-        const binding = {
-          id: `binding-${talkTools.bindings.length + 1}`,
-          kind: body.kind ?? 'google_drive_folder',
-          externalId: body.externalId ?? 'resource-id',
-          displayName: body.displayName ?? 'Resource',
-          metadata: body.metadata ?? null,
-          createdAt: '2026-03-06T00:00:00.000Z',
-          createdBy: 'owner-1',
-        };
-        talkTools = {
-          ...talkTools,
-          bindings: [...talkTools.bindings, binding],
-        };
-        return jsonResponse(201, {
-          ok: true,
-          data: { binding },
-        });
-      }
-
-      if (
-        url.includes('/api/v1/talks/talk-1/resources/') &&
-        method === 'DELETE'
-      ) {
-        const resourceId = url.split('/').pop() || '';
-        talkTools = {
-          ...talkTools,
-          bindings: talkTools.bindings.filter(
-            (binding) => binding.id !== resourceId,
-          ),
         };
         return jsonResponse(200, {
           ok: true,
