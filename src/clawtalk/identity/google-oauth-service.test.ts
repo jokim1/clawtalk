@@ -404,14 +404,18 @@ describe('google-oauth-service', () => {
 
       mockTokenExchange({});
       mockJwtVerify({ nonce: 'completely-different-nonce' });
-      const result = await completeGoogleOAuthCallback({
-        rawState,
-        code: 'good-code',
-        googleError: null,
+      // The service throws GoogleOAuthError('id_token_invalid'); the route
+      // catches and renders an error popup. At this layer we assert the throw.
+      await expect(
+        completeGoogleOAuthCallback({
+          rawState,
+          code: 'good-code',
+          googleError: null,
+        }),
+      ).rejects.toMatchObject({
+        name: 'GoogleOAuthError',
+        code: 'id_token_invalid',
       });
-      expect(result.errorCode).toBe('callback_failed');
-      // ...or 'id_token_invalid' depending on where the error surfaces.
-      // The route catches GoogleOAuthError and maps to a generic message.
     });
 
     it('rejects when jose throws (tampered signature)', async () => {
