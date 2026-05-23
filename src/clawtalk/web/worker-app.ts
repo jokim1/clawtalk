@@ -59,11 +59,15 @@
 // NOT mounted (chassis-removed; will not return):
 //   /api/v1/main/*, /api/v1/browser/*, /api/v1/data-connectors/*,
 //   /api/v1/channel-connectors/*, /api/v1/channel-connections/*,
-//   /api/v1/talks/:talkId/{tools,resources,channels,data-connectors}
+//   /api/v1/talks/:talkId/tools
 //
 // The 501 catch-all at the bottom of buildApp() now only fires for
 // routes in the not-yet-mounted bucket (above) plus genuinely
 // unknown paths.
+//
+// Connectors refactor PR 1: /api/v1/workspace/channels +
+// /api/v1/workspace/data-connectors + /api/v1/talks/:talkId/connectors
+// land here on the new workspace-global schema.
 
 import { Hono } from 'hono';
 import type { Context, MiddlewareHandler } from 'hono';
@@ -101,6 +105,23 @@ import {
   updateDefaultClaudeModelRoute,
   verifyAiProviderCredentialRoute,
 } from './routes/ai-agents.js';
+import {
+  createWorkspaceChannelRoute,
+  createWorkspaceDataConnectorRoute,
+  deleteTalkChannelLinkRoute,
+  deleteTalkDataConnectorLinkRoute,
+  deleteWorkspaceChannelRoute,
+  deleteWorkspaceDataConnectorRoute,
+  getTalkConnectorsRoute,
+  listWorkspaceChannelsRoute,
+  listWorkspaceDataConnectorsRoute,
+  setTalkChannelLinkRoute,
+  setTalkDataConnectorLinkRoute,
+  setWorkspaceChannelCredentialRoute,
+  setWorkspaceDataConnectorCredentialRoute,
+  updateWorkspaceChannelRoute,
+  updateWorkspaceDataConnectorRoute,
+} from './routes/connectors.js';
 import {
   completeAnthropicOauthRoute,
   initiateAnthropicOauthRoute,
@@ -297,6 +318,7 @@ function buildApp(): Hono<{ Variables: Variables }> {
   app.use('/api/v1/registered-agents/*', requireAuthMiddleware);
   app.use('/api/v1/web-search', requireAuthMiddleware);
   app.use('/api/v1/web-search/*', requireAuthMiddleware);
+  app.use('/api/v1/workspace/*', requireAuthMiddleware);
   app.use('/api/v1/talks', requireAuthMiddleware);
   app.use('/api/v1/talks/*', requireAuthMiddleware);
   app.use('/api/v1/talk-folders', requireAuthMiddleware);
@@ -447,6 +469,218 @@ function buildApp(): Hono<{ Variables: Variables }> {
     );
     return jsonResponse(result);
   });
+
+  // ── Workspace channels (admin-managed pool, talk picker reads) ──
+  app.get('/api/v1/workspace/channels', async (c) => {
+    const auth = c.get('auth');
+    const rl = checkRateLimit({ principalId: auth.userId, bucket: 'read' });
+    if (!rl.allowed) return rateLimitedResponse(c, rl);
+    const result = await listWorkspaceChannelsRoute(auth);
+    return jsonResponse(result);
+  });
+
+  app.post('/api/v1/workspace/channels', async (c) => {
+    const auth = c.get('auth');
+    const rl = checkRateLimit({ principalId: auth.userId, bucket: 'write' });
+    if (!rl.allowed) return rateLimitedResponse(c, rl);
+    const csrfFail = checkCsrf(c, auth);
+    if (csrfFail) return csrfFail;
+    const payload = await readJsonBody(c);
+    if (!payload.ok) return invalidJsonResponse(c, payload.error);
+    const result = await createWorkspaceChannelRoute({
+      auth,
+      body: payload.data as any,
+    });
+    return jsonResponse(result);
+  });
+
+  app.patch('/api/v1/workspace/channels/:channelId', async (c) => {
+    const auth = c.get('auth');
+    const rl = checkRateLimit({ principalId: auth.userId, bucket: 'write' });
+    if (!rl.allowed) return rateLimitedResponse(c, rl);
+    const csrfFail = checkCsrf(c, auth);
+    if (csrfFail) return csrfFail;
+    const payload = await readJsonBody(c);
+    if (!payload.ok) return invalidJsonResponse(c, payload.error);
+    const result = await updateWorkspaceChannelRoute({
+      auth,
+      channelId: c.req.param('channelId'),
+      body: payload.data as any,
+    });
+    return jsonResponse(result);
+  });
+
+  app.delete('/api/v1/workspace/channels/:channelId', async (c) => {
+    const auth = c.get('auth');
+    const rl = checkRateLimit({ principalId: auth.userId, bucket: 'write' });
+    if (!rl.allowed) return rateLimitedResponse(c, rl);
+    const csrfFail = checkCsrf(c, auth);
+    if (csrfFail) return csrfFail;
+    const result = await deleteWorkspaceChannelRoute({
+      auth,
+      channelId: c.req.param('channelId'),
+    });
+    return jsonResponse(result);
+  });
+
+  app.put('/api/v1/workspace/channels/:channelId/credential', async (c) => {
+    const auth = c.get('auth');
+    const rl = checkRateLimit({ principalId: auth.userId, bucket: 'write' });
+    if (!rl.allowed) return rateLimitedResponse(c, rl);
+    const csrfFail = checkCsrf(c, auth);
+    if (csrfFail) return csrfFail;
+    const payload = await readJsonBody(c);
+    if (!payload.ok) return invalidJsonResponse(c, payload.error);
+    const result = await setWorkspaceChannelCredentialRoute({
+      auth,
+      channelId: c.req.param('channelId'),
+      body: payload.data as any,
+    });
+    return jsonResponse(result);
+  });
+
+  // ── Workspace data connectors ───────────────────────────────────
+  app.get('/api/v1/workspace/data-connectors', async (c) => {
+    const auth = c.get('auth');
+    const rl = checkRateLimit({ principalId: auth.userId, bucket: 'read' });
+    if (!rl.allowed) return rateLimitedResponse(c, rl);
+    const result = await listWorkspaceDataConnectorsRoute(auth);
+    return jsonResponse(result);
+  });
+
+  app.post('/api/v1/workspace/data-connectors', async (c) => {
+    const auth = c.get('auth');
+    const rl = checkRateLimit({ principalId: auth.userId, bucket: 'write' });
+    if (!rl.allowed) return rateLimitedResponse(c, rl);
+    const csrfFail = checkCsrf(c, auth);
+    if (csrfFail) return csrfFail;
+    const payload = await readJsonBody(c);
+    if (!payload.ok) return invalidJsonResponse(c, payload.error);
+    const result = await createWorkspaceDataConnectorRoute({
+      auth,
+      body: payload.data as any,
+    });
+    return jsonResponse(result);
+  });
+
+  app.patch('/api/v1/workspace/data-connectors/:connectorId', async (c) => {
+    const auth = c.get('auth');
+    const rl = checkRateLimit({ principalId: auth.userId, bucket: 'write' });
+    if (!rl.allowed) return rateLimitedResponse(c, rl);
+    const csrfFail = checkCsrf(c, auth);
+    if (csrfFail) return csrfFail;
+    const payload = await readJsonBody(c);
+    if (!payload.ok) return invalidJsonResponse(c, payload.error);
+    const result = await updateWorkspaceDataConnectorRoute({
+      auth,
+      connectorId: c.req.param('connectorId'),
+      body: payload.data as any,
+    });
+    return jsonResponse(result);
+  });
+
+  app.delete('/api/v1/workspace/data-connectors/:connectorId', async (c) => {
+    const auth = c.get('auth');
+    const rl = checkRateLimit({ principalId: auth.userId, bucket: 'write' });
+    if (!rl.allowed) return rateLimitedResponse(c, rl);
+    const csrfFail = checkCsrf(c, auth);
+    if (csrfFail) return csrfFail;
+    const result = await deleteWorkspaceDataConnectorRoute({
+      auth,
+      connectorId: c.req.param('connectorId'),
+    });
+    return jsonResponse(result);
+  });
+
+  app.put(
+    '/api/v1/workspace/data-connectors/:connectorId/credential',
+    async (c) => {
+      const auth = c.get('auth');
+      const rl = checkRateLimit({ principalId: auth.userId, bucket: 'write' });
+      if (!rl.allowed) return rateLimitedResponse(c, rl);
+      const csrfFail = checkCsrf(c, auth);
+      if (csrfFail) return csrfFail;
+      const payload = await readJsonBody(c);
+      if (!payload.ok) return invalidJsonResponse(c, payload.error);
+      const result = await setWorkspaceDataConnectorCredentialRoute({
+        auth,
+        connectorId: c.req.param('connectorId'),
+        body: payload.data as any,
+      });
+      return jsonResponse(result);
+    },
+  );
+
+  // ── Per-Talk connector picker + toggles ─────────────────────────
+  app.get('/api/v1/talks/:talkId/connectors', async (c) => {
+    const auth = c.get('auth');
+    const rl = checkRateLimit({ principalId: auth.userId, bucket: 'read' });
+    if (!rl.allowed) return rateLimitedResponse(c, rl);
+    const result = await getTalkConnectorsRoute({
+      auth,
+      talkId: c.req.param('talkId'),
+    });
+    return jsonResponse(result);
+  });
+
+  app.put('/api/v1/talks/:talkId/channels/:channelId', async (c) => {
+    const auth = c.get('auth');
+    const rl = checkRateLimit({ principalId: auth.userId, bucket: 'write' });
+    if (!rl.allowed) return rateLimitedResponse(c, rl);
+    const csrfFail = checkCsrf(c, auth);
+    if (csrfFail) return csrfFail;
+    const result = await setTalkChannelLinkRoute({
+      auth,
+      talkId: c.req.param('talkId'),
+      channelId: c.req.param('channelId'),
+    });
+    return jsonResponse(result);
+  });
+
+  app.delete('/api/v1/talks/:talkId/channels/:channelId', async (c) => {
+    const auth = c.get('auth');
+    const rl = checkRateLimit({ principalId: auth.userId, bucket: 'write' });
+    if (!rl.allowed) return rateLimitedResponse(c, rl);
+    const csrfFail = checkCsrf(c, auth);
+    if (csrfFail) return csrfFail;
+    const result = await deleteTalkChannelLinkRoute({
+      auth,
+      talkId: c.req.param('talkId'),
+      channelId: c.req.param('channelId'),
+    });
+    return jsonResponse(result);
+  });
+
+  app.put('/api/v1/talks/:talkId/data-connectors/:connectorId', async (c) => {
+    const auth = c.get('auth');
+    const rl = checkRateLimit({ principalId: auth.userId, bucket: 'write' });
+    if (!rl.allowed) return rateLimitedResponse(c, rl);
+    const csrfFail = checkCsrf(c, auth);
+    if (csrfFail) return csrfFail;
+    const result = await setTalkDataConnectorLinkRoute({
+      auth,
+      talkId: c.req.param('talkId'),
+      connectorId: c.req.param('connectorId'),
+    });
+    return jsonResponse(result);
+  });
+
+  app.delete(
+    '/api/v1/talks/:talkId/data-connectors/:connectorId',
+    async (c) => {
+      const auth = c.get('auth');
+      const rl = checkRateLimit({ principalId: auth.userId, bucket: 'write' });
+      if (!rl.allowed) return rateLimitedResponse(c, rl);
+      const csrfFail = checkCsrf(c, auth);
+      if (csrfFail) return csrfFail;
+      const result = await deleteTalkDataConnectorLinkRoute({
+        auth,
+        talkId: c.req.param('talkId'),
+        connectorId: c.req.param('connectorId'),
+      });
+      return jsonResponse(result);
+    },
+  );
 
   // ── Web search providers (per-user keys + active picker) ─────
   app.get('/api/v1/web-search/providers', async (c) => {
