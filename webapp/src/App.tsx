@@ -364,12 +364,37 @@ function buildOptimisticReorder(
   });
 }
 
+function MainTalkRedirect({
+  mainTalkId,
+  loading,
+  error,
+}: {
+  mainTalkId: string | null;
+  loading: boolean;
+  error: string | null;
+}): JSX.Element {
+  if (mainTalkId) {
+    return (
+      <Navigate to={`/app/talks/${encodeURIComponent(mainTalkId)}`} replace />
+    );
+  }
+  if (loading) {
+    return <main className="page-state">Loading Main…</main>;
+  }
+  return (
+    <main className="page-state">
+      {error ?? 'Main is not available yet. Try refreshing the page.'}
+    </main>
+  );
+}
+
 export function App() {
   const location = useLocation();
   const navigate = useNavigate();
   const [auth, setAuth] = useState<AuthState>({ status: 'loading' });
   const [signOutBusy, setSignOutBusy] = useState(false);
   const [sidebarItems, setSidebarItems] = useState<TalkSidebarItem[]>([]);
+  const [mainTalkId, setMainTalkId] = useState<string | null>(null);
   const [sidebarLoading, setSidebarLoading] = useState(true);
   const [sidebarError, setSidebarError] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState<RenameDraft>(null);
@@ -444,6 +469,7 @@ export function App() {
     try {
       const tree = await getTalkSidebar();
       setSidebarItems(tree.items);
+      setMainTalkId(tree.mainTalkId);
       setSidebarError(null);
     } catch (err) {
       if (err instanceof UnauthorizedError) {
@@ -461,6 +487,7 @@ export function App() {
   useEffect(() => {
     if (auth.status !== 'authenticated') {
       setSidebarItems([]);
+      setMainTalkId(null);
       setSidebarLoading(true);
       setSidebarError(null);
       setRenameDraft(null);
@@ -725,6 +752,7 @@ export function App() {
           loading={sidebarLoading}
           error={sidebarError}
           user={auth.user}
+          mainTalkId={mainTalkId}
           onSignOut={handleSignOut}
           signOutBusy={signOutBusy}
           onCreateTalk={handleCreateTalk}
@@ -789,6 +817,16 @@ export function App() {
               element={<Navigate to="/app/settings?tab=profile" replace />}
             />
             <Route path="/app/connectors" element={<ConnectorsPage />} />
+            <Route
+              path="/app/main"
+              element={
+                <MainTalkRedirect
+                  mainTalkId={mainTalkId}
+                  loading={sidebarLoading}
+                  error={sidebarError}
+                />
+              }
+            />
             <Route path="*" element={<Navigate to="/app/main" replace />} />
           </Routes>
         </div>

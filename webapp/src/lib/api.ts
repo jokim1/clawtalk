@@ -68,6 +68,7 @@ export type TalkSidebarItem = TalkSidebarTalk | TalkSidebarFolder;
 
 export type TalkSidebarTree = {
   items: TalkSidebarItem[];
+  mainTalkId: string | null;
 };
 
 export type DataConnectorVerificationStatus =
@@ -564,20 +565,6 @@ export type ExecutionDecision = {
   modelId: string;
 };
 
-export type MainRunTiming = {
-  queueStartedAt?: string | null;
-  executorStartedAt?: string | null;
-  leaseRequestedAt?: string | null;
-  leaseReadyAt?: string | null;
-  taskDispatchedAt?: string | null;
-  firstProviderEventAt?: string | null;
-  firstTokenAt?: string | null;
-  firstBrowserEventAt?: string | null;
-  firstPageReadyAt?: string | null;
-  blockedAt?: string | null;
-  completedAt?: string | null;
-};
-
 export type CarriedBrowserSession = {
   sessionId: string;
   siteKey: string;
@@ -587,11 +574,6 @@ export type CarriedBrowserSession = {
   lastKnownUrl: string;
   lastKnownTitle: string;
   lastUpdatedAt: string;
-};
-
-export type MainRunTerminalSummary = {
-  statusLabel: 'Failed' | 'Cancelled';
-  body: string;
 };
 
 export type BrowserSessionStatus = {
@@ -3422,223 +3404,10 @@ export async function updateTalkLlmSettings(
 }
 
 // ---------------------------------------------------------------------------
-// Main Channel (Nanoclaw)
+// (Main Channel removed — the legacy Nanoclaw routes were retired during
+// the Phase 5 cloud port. The new Main is a regular Talk addressed via
+// /app/main; the sidebar tree endpoint exposes mainTalkId for routing.)
 // ---------------------------------------------------------------------------
-
-export type MainThreadSummary = {
-  threadId: string;
-  title: string | null;
-  isPinned: boolean;
-  lastMessageAt: string;
-  messageCount: number;
-  hasActiveRun: boolean;
-};
-
-export type MainThreadMessage = {
-  id: string;
-  threadId: string;
-  role: 'user' | 'assistant' | 'system' | 'tool';
-  content: string;
-  runId?: string | null;
-  agentId: string | null;
-  createdBy: string | null;
-  createdAt: string;
-};
-
-export type MainRun = {
-  id: string;
-  threadId: string;
-  taskType: 'chat' | 'browser';
-  browserPhase?: 'starting' | 'interacting' | 'summarizing' | null;
-  blockedReason?:
-    | 'login_required'
-    | 'phone_approval'
-    | 'app_approval'
-    | 'code_entry'
-    | 'session_conflict'
-    | 'manual_takeover'
-    | null;
-  browserSessionId?: string | null;
-  selectedMode?: 'api' | 'subscription' | null;
-  transport?: 'direct' | 'subscription' | null;
-  status:
-    | 'queued'
-    | 'running'
-    | 'awaiting_confirmation'
-    | 'cancelled'
-    | 'completed'
-    | 'failed';
-  createdAt: string;
-  startedAt: string | null;
-  endedAt: string | null;
-  triggerMessageId: string | null;
-  targetAgentId: string | null;
-  cancelReason: string | null;
-  kind: string | null;
-  parentRunId: string | null;
-  promotionState: 'pending' | 'superseded' | null;
-  promotionChildRunId: string | null;
-  requestedToolFamilies: string[];
-  userVisibleSummary: string | null;
-  browserBlock?: BrowserBlock | null;
-  browserResume?: BrowserResume | null;
-  carriedBrowserSessions?: CarriedBrowserSession[];
-  executionDecision?: ExecutionDecision | null;
-  executionStrategy?: 'browser_fast_lane' | 'generic_agent_loop' | null;
-  routeReason?: 'browser_fast_lane' | 'subscription_fallback' | 'normal' | null;
-  currentStep?: string | null;
-  timeoutPhase?: string | null;
-  leaseState?:
-    | 'cold_boot'
-    | 'warm_reuse'
-    | 'recovered_cold_boot'
-    | 'one_shot_fallback'
-    | null;
-  timing?: MainRunTiming | null;
-  streamedTextPreview?: string | null;
-  lastProgressMessage?: string | null;
-  lastHeartbeatAt?: string | null;
-  terminalSummary?: MainRunTerminalSummary | null;
-  resumeRequestedAt?: string | null;
-  resumeRequestedBy?: string | null;
-};
-
-export async function listMainThreads(): Promise<MainThreadSummary[]> {
-  return apiRequest<MainThreadSummary[]>('/api/v1/main/threads');
-}
-
-export async function getMainThread(
-  threadId: string,
-): Promise<MainThreadMessage[]> {
-  return apiRequest<MainThreadMessage[]>(
-    `/api/v1/main/threads/${encodeURIComponent(threadId)}`,
-  );
-}
-
-export async function postMainMessage(input: {
-  content: string;
-  threadId?: string;
-  forceBrowser?: boolean;
-}): Promise<{
-  messageId: string;
-  threadId: string;
-  runId: string;
-  title: string | null;
-  run: MainRun;
-}> {
-  return apiMutationRequest<{
-    messageId: string;
-    threadId: string;
-    runId: string;
-    title: string | null;
-    run: MainRun;
-  }>('/api/v1/main/messages', {
-    method: 'POST',
-    includeJson: true,
-    body: JSON.stringify({
-      content: input.content,
-      ...(input.threadId ? { threadId: input.threadId } : {}),
-      ...(input.forceBrowser === true ? { forceBrowser: true } : {}),
-    }),
-  });
-}
-
-export async function deleteMainMessages(input: {
-  threadId: string;
-  messageIds: string[];
-}): Promise<{
-  threadId: string;
-  deletedCount: number;
-  deletedMessageIds: string[];
-  threadDeleted: boolean;
-}> {
-  return apiMutationRequest<{
-    threadId: string;
-    deletedCount: number;
-    deletedMessageIds: string[];
-    threadDeleted: boolean;
-  }>(
-    `/api/v1/main/threads/${encodeURIComponent(input.threadId)}/messages/delete`,
-    {
-      method: 'POST',
-      includeJson: true,
-      body: JSON.stringify({
-        messageIds: input.messageIds,
-      }),
-    },
-  );
-}
-
-export async function listMainRuns(threadId: string): Promise<MainRun[]> {
-  return apiRequest<MainRun[]>(
-    `/api/v1/main/threads/${encodeURIComponent(threadId)}/runs`,
-  );
-}
-
-export async function postMainRunVisible(input: {
-  runId: string;
-  firstVisibleAt: string;
-}): Promise<{ recorded: boolean }> {
-  return apiMutationRequest<{ recorded: boolean }>(
-    `/api/v1/main/runs/${encodeURIComponent(input.runId)}/visible`,
-    {
-      method: 'POST',
-      includeJson: true,
-      body: JSON.stringify({
-        firstVisibleAt: input.firstVisibleAt,
-      }),
-    },
-  );
-}
-
-export async function cancelMainRun(input: {
-  runId: string;
-}): Promise<{
-  runId: string;
-  threadId: string;
-  cancelled: boolean;
-}> {
-  return apiMutationRequest<{
-    runId: string;
-    threadId: string;
-    cancelled: boolean;
-  }>(`/api/v1/main/runs/${encodeURIComponent(input.runId)}/cancel`, {
-    method: 'POST',
-    includeJson: true,
-    body: JSON.stringify({}),
-  });
-}
-
-export async function updateMainThread(input: {
-  threadId: string;
-  title?: string;
-  pinned?: boolean;
-}): Promise<{ threadId: string; title: string | null; isPinned: boolean }> {
-  return apiMutationRequest<{
-    threadId: string;
-    title: string | null;
-    isPinned: boolean;
-  }>(
-    `/api/v1/main/threads/${encodeURIComponent(input.threadId)}`,
-    {
-      method: 'PATCH',
-      includeJson: true,
-      body: JSON.stringify({
-        ...(input.title !== undefined ? { title: input.title } : {}),
-        ...(input.pinned !== undefined ? { pinned: input.pinned } : {}),
-      }),
-    },
-  );
-}
-
-export async function deleteMainThread(threadId: string): Promise<void> {
-  await apiMutationRequest<{ deleted: true }>(
-    `/api/v1/main/threads/${encodeURIComponent(threadId)}`,
-    {
-      method: 'DELETE',
-    },
-  );
-}
 
 export async function getHealthStatus(): Promise<boolean> {
   try {

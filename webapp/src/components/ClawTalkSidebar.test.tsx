@@ -123,6 +123,7 @@ describe('ClawTalkSidebar', () => {
           loading={false}
           error={null}
           user={buildUser()}
+          mainTalkId={null}
           onSignOut={vi.fn()}
           signOutBusy={false}
           onCreateTalk={vi.fn(async () => buildTalk())}
