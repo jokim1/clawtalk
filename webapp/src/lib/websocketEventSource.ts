@@ -1,8 +1,8 @@
 // WebSocket adapter that wears an EventSource-shaped face for the
-// talkStream / mainStream wrappers. The Worker → UserEventHub DO
-// pipeline sends framed events as `{event, data, id}` JSON messages
-// over WebSocket Hibernation (W7 U3/U4); this adapter turns each
-// message into a wrapper-friendly dispatch callback.
+// talkStream wrapper. The Worker → UserEventHub DO pipeline sends
+// framed events as `{event, data, id}` JSON messages over WebSocket
+// Hibernation (W7 U3/U4); this adapter turns each message into a
+// wrapper-friendly dispatch callback.
 //
 // Cursor state lives in the wrapper (G4). The adapter reads via the
 // `getLastEventId` callback when constructing the reconnect URL and

@@ -692,7 +692,10 @@ export async function listTalkSidebarRoute(input: {
   auth: AuthContext;
 }): Promise<{
   statusCode: number;
-  body: ApiEnvelope<{ items: TalkSidebarItemApiRecord[] }>;
+  body: ApiEnvelope<{
+    items: TalkSidebarItemApiRecord[];
+    mainTalkId: string | null;
+  }>;
 }> {
   return await withUserContext(input.auth.userId, async () => {
     const tree = await listTalkSidebarTreeForUser();
@@ -718,6 +721,7 @@ export async function listTalkSidebarRoute(input: {
         ok: true,
         data: {
           items: rootItems,
+          mainTalkId: tree.mainTalkId,
         },
       },
     };

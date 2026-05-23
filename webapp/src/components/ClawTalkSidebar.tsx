@@ -20,7 +20,7 @@ import {
   useState,
 } from 'react';
 import { createPortal } from 'react-dom';
-import { NavLink } from 'react-router-dom';
+import { NavLink, useLocation } from 'react-router-dom';
 
 import { SidebarProfileMenu } from './SidebarProfileMenu';
 import type {
@@ -58,6 +58,7 @@ type Props = {
   loading: boolean;
   error: string | null;
   user: SessionUser;
+  mainTalkId: string | null;
   onSignOut: () => void;
   signOutBusy: boolean;
   onCreateTalk: () => Promise<Talk>;
@@ -199,6 +200,7 @@ export function ClawTalkSidebar({
   loading,
   error,
   user,
+  mainTalkId,
   onSignOut,
   signOutBusy,
   onCreateTalk,
@@ -211,6 +213,16 @@ export function ClawTalkSidebar({
   onReorder,
   renameDraft,
 }: Props): JSX.Element {
+  const location = useLocation();
+  // The Main NavLink targets /app/main, which redirects to the system
+  // Talk at /app/talks/<mainTalkId>. Highlight the link whether we're
+  // mid-redirect or already on the system Talk.
+  const isMainActive =
+    location.pathname.startsWith('/app/main') ||
+    (mainTalkId !== null &&
+      location.pathname.startsWith(
+        `/app/talks/${encodeURIComponent(mainTalkId)}`,
+      ));
   const [expandedFolderIds, setExpandedFolderIds] = useState<
     Record<string, boolean>
   >({});
@@ -799,11 +811,11 @@ export function ClawTalkSidebar({
 
         <NavLink
           to="/app/main"
-          className={({ isActive }) =>
-            `clawtalk-sidebar-link clawtalk-sidebar-link-main${isActive ? ' active' : ''}`
-          }
+          className={`clawtalk-sidebar-link clawtalk-sidebar-link-main${
+            isMainActive ? ' active' : ''
+          }`}
         >
-          Main (Nanoclaw)
+          Main
         </NavLink>
 
         <div className="clawtalk-sidebar-talks" aria-label="Talk list">

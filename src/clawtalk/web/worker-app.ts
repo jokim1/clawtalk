@@ -165,6 +165,7 @@ import {
   handleGoogleCallback,
   startConnectRoute,
 } from './routes/google-account.js';
+import { ensureMainTalkForUser } from '../talks/main-talk-bootstrap.js';
 import { dispatchRun } from '../talks/queue-producer.js';
 import {
   cancelTalkChat,
@@ -330,6 +331,16 @@ function buildApp(): Hono<{ Variables: Variables }> {
         },
         401,
       );
+    }
+    // Lazy first-sign-in bootstrap. Idempotent fast path is a single
+    // SELECT, so safe to run on every session probe. Failures must not
+    // block the session response — keep going.
+    try {
+      await withUserContext(auth.userId, () =>
+        ensureMainTalkForUser(auth.userId),
+      );
+    } catch (err) {
+      console.warn('[session/me] ensureMainTalkForUser failed', err);
     }
     return c.json({ ok: true, data: { user: normalizeUser(user) } });
   });

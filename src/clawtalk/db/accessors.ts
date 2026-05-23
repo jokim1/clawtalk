@@ -52,6 +52,7 @@ export interface TalkRecord {
   topic_title: string | null;
   orchestration_mode: 'ordered' | 'panel';
   status: 'active' | 'paused' | 'archived';
+  is_system: boolean;
   version: number;
   created_at: string;
   updated_at: string;
@@ -100,6 +101,7 @@ export interface TalkSidebarTreeRecord {
   folders: TalkFolderRecord[];
   rootTalks: TalkSidebarTalkRecord[];
   talksByFolderId: Record<string, TalkSidebarTalkRecord[]>;
+  mainTalkId: string | null;
 }
 
 export function normalizeTalkListPage(input?: {
@@ -122,7 +124,7 @@ export function normalizeTalkListPage(input?: {
 // ---------------------------------------------------------------------------
 
 const TALK_COLUMNS = `id, owner_id, folder_id, sort_order, topic_title,
-  orchestration_mode, status, version, created_at, updated_at`;
+  orchestration_mode, status, is_system, version, created_at, updated_at`;
 
 export async function createTalk(input: {
   ownerId: string;
@@ -130,42 +132,52 @@ export async function createTalk(input: {
   topicTitle?: string | null;
   orchestrationMode?: 'ordered' | 'panel';
   status?: 'active' | 'paused' | 'archived';
+  isSystem?: boolean;
 }): Promise<TalkRecord> {
   const db = getDbPg();
-  // Insert at sort_order 0 and bump everyone else by 1 so the new talk
-  // appears first in the sidebar. Bumping happens for both root talks and
-  // root folders so the (talk, folder) ordering stays interleaved.
-  await db`
-    update public.talks
-    set sort_order = sort_order + 1
-    where owner_id = ${input.ownerId}::uuid and folder_id is null
-  `;
-  await db`
-    update public.talk_folders
-    set sort_order = sort_order + 1
-    where owner_id = ${input.ownerId}::uuid
-  `;
+  const isSystem = input.isSystem === true;
+  // System Talks (the per-user Main channel) live outside the sidebar
+  // list, so they don't participate in the sort_order shuffle.
+  if (!isSystem) {
+    // Insert at sort_order 0 and bump everyone else by 1 so the new talk
+    // appears first in the sidebar. Bumping happens for both root talks and
+    // root folders so the (talk, folder) ordering stays interleaved.
+    await db`
+      update public.talks
+      set sort_order = sort_order + 1
+      where owner_id = ${input.ownerId}::uuid
+        and folder_id is null
+        and is_system = false
+    `;
+    await db`
+      update public.talk_folders
+      set sort_order = sort_order + 1
+      where owner_id = ${input.ownerId}::uuid
+    `;
+  }
   const inserted = input.id
     ? await db<TalkRecord[]>`
         insert into public.talks
           (id, owner_id, folder_id, sort_order, topic_title,
-           orchestration_mode, status)
+           orchestration_mode, status, is_system)
         values
           (${input.id}::uuid, ${input.ownerId}::uuid, null, 0,
            ${input.topicTitle ?? null},
            ${input.orchestrationMode ?? 'ordered'},
-           ${input.status ?? 'active'})
+           ${input.status ?? 'active'},
+           ${isSystem})
         returning ${db.unsafe(TALK_COLUMNS)}
       `
     : await db<TalkRecord[]>`
         insert into public.talks
           (owner_id, folder_id, sort_order, topic_title,
-           orchestration_mode, status)
+           orchestration_mode, status, is_system)
         values
           (${input.ownerId}::uuid, null, 0,
            ${input.topicTitle ?? null},
            ${input.orchestrationMode ?? 'ordered'},
-           ${input.status ?? 'active'})
+           ${input.status ?? 'active'},
+           ${isSystem})
         returning ${db.unsafe(TALK_COLUMNS)}
       `;
   const talk = inserted[0];
@@ -225,17 +237,22 @@ export async function listTalksForUser(input: {
   // (editor/viewer via talk_members) will need an `owner_id = auth.uid()
   // OR id in (select talk_id from talk_members where user_id = auth.uid())`
   // policy expansion when the sharing feature ships.
+  // System Talks (the per-user Main channel) are addressed via the
+  // dedicated /app/main route, not the sidebar list — filter them out so
+  // they don't appear as duplicates.
   const rows = input.status
     ? await db<TalkRecord[]>`
         select ${db.unsafe(TALK_COLUMNS)}
         from public.talks
         where status = ${input.status}
+          and is_system = false
         order by updated_at desc, created_at desc
         limit ${page.limit} offset ${page.offset}
       `
     : await db<TalkRecord[]>`
         select ${db.unsafe(TALK_COLUMNS)}
         from public.talks
+        where is_system = false
         order by updated_at desc, created_at desc
         limit ${page.limit} offset ${page.offset}
       `;
@@ -686,7 +703,18 @@ export async function listTalkSidebarTreeForUser(input?: {
       );
     return acc;
   }, {});
-  return { folders, rootTalks, talksByFolderId };
+  // The system Talk (Main) is filtered out of listTalksForUser, so we
+  // resolve its id via a dedicated query. Returned to the client so the
+  // sidebar's "Main" pin can deep-link to /app/talks/<mainTalkId>.
+  const db = getDbPg();
+  const mainTalkRows = await db<Array<{ id: string }>>`
+    select id
+    from public.talks
+    where is_system = true
+    limit 1
+  `;
+  const mainTalkId = mainTalkRows[0]?.id ?? null;
+  return { folders, rootTalks, talksByFolderId, mainTalkId };
 }
 
 export async function reorderTalkSidebarItem(input: {
