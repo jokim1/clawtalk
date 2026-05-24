@@ -174,6 +174,14 @@ import {
   patchTalkOutputRoute,
 } from './routes/talk-outputs.js';
 import {
+  acceptContentProposalRoute,
+  createTalkContentRoute,
+  getContentProposalRoute,
+  getTalkContentRoute,
+  patchContentRoute,
+  rejectContentProposalRoute,
+} from './routes/talk-contents.js';
+import {
   createTalkThreadRoute,
   deleteTalkThreadRoute,
   listTalkThreadsRoute,
@@ -321,6 +329,7 @@ function buildApp(): Hono<{ Variables: Variables }> {
   app.use('/api/v1/workspace/*', requireAuthMiddleware);
   app.use('/api/v1/talks', requireAuthMiddleware);
   app.use('/api/v1/talks/*', requireAuthMiddleware);
+  app.use('/api/v1/contents/*', requireAuthMiddleware);
   app.use('/api/v1/talk-folders', requireAuthMiddleware);
   app.use('/api/v1/talk-folders/*', requireAuthMiddleware);
   app.use('/api/v1/user/*', requireAuthMiddleware);
@@ -1464,6 +1473,107 @@ function buildApp(): Hono<{ Variables: Variables }> {
     });
     return jsonResponse(result);
   });
+
+  // ── talk-contents.ts: 1:1 Content doc per Talk + agent proposals ─
+  app.get('/api/v1/talks/:talkId/content', async (c) => {
+    const auth = c.get('auth');
+    const rl = checkRateLimit({ principalId: auth.userId, bucket: 'read' });
+    if (!rl.allowed) return rateLimitedResponse(c, rl);
+    const result = await getTalkContentRoute({
+      auth,
+      talkId: c.req.param('talkId'),
+    });
+    return jsonResponse(result);
+  });
+
+  app.post('/api/v1/talks/:talkId/content', async (c) => {
+    const auth = c.get('auth');
+    const rl = checkRateLimit({ principalId: auth.userId, bucket: 'write' });
+    if (!rl.allowed) return rateLimitedResponse(c, rl);
+    const csrfFail = checkCsrf(c, auth);
+    if (csrfFail) return csrfFail;
+    const payload = await readJsonBody<{ title?: unknown }>(c);
+    if (!payload.ok) return invalidJsonResponse(c, payload.error);
+    const result = await createTalkContentRoute({
+      auth,
+      talkId: c.req.param('talkId'),
+      title: payload.data.title,
+    });
+    return jsonResponse(result);
+  });
+
+  app.patch('/api/v1/contents/:contentId', async (c) => {
+    const auth = c.get('auth');
+    const rl = checkRateLimit({ principalId: auth.userId, bucket: 'write' });
+    if (!rl.allowed) return rateLimitedResponse(c, rl);
+    const csrfFail = checkCsrf(c, auth);
+    if (csrfFail) return csrfFail;
+    const payload = await readJsonBody<{
+      expectedVersion?: unknown;
+      bodyMarkdown?: unknown;
+      title?: unknown;
+    }>(c);
+    if (!payload.ok) return invalidJsonResponse(c, payload.error);
+    const result = await patchContentRoute({
+      auth,
+      contentId: c.req.param('contentId'),
+      expectedVersion: payload.data.expectedVersion,
+      bodyMarkdown: payload.data.bodyMarkdown,
+      title: payload.data.title,
+    });
+    return jsonResponse(result);
+  });
+
+  app.get('/api/v1/contents/:contentId/proposals/:proposalId', async (c) => {
+    const auth = c.get('auth');
+    const rl = checkRateLimit({ principalId: auth.userId, bucket: 'read' });
+    if (!rl.allowed) return rateLimitedResponse(c, rl);
+    const result = await getContentProposalRoute({
+      auth,
+      contentId: c.req.param('contentId'),
+      proposalId: c.req.param('proposalId'),
+    });
+    return jsonResponse(result);
+  });
+
+  app.post(
+    '/api/v1/contents/:contentId/proposals/:proposalId/accept',
+    async (c) => {
+      const auth = c.get('auth');
+      const rl = checkRateLimit({ principalId: auth.userId, bucket: 'write' });
+      if (!rl.allowed) return rateLimitedResponse(c, rl);
+      const csrfFail = checkCsrf(c, auth);
+      if (csrfFail) return csrfFail;
+      const payload = await readJsonBody<{ expectedContentVersion?: unknown }>(
+        c,
+      );
+      if (!payload.ok) return invalidJsonResponse(c, payload.error);
+      const result = await acceptContentProposalRoute({
+        auth,
+        contentId: c.req.param('contentId'),
+        proposalId: c.req.param('proposalId'),
+        expectedContentVersion: payload.data.expectedContentVersion,
+      });
+      return jsonResponse(result);
+    },
+  );
+
+  app.post(
+    '/api/v1/contents/:contentId/proposals/:proposalId/reject',
+    async (c) => {
+      const auth = c.get('auth');
+      const rl = checkRateLimit({ principalId: auth.userId, bucket: 'write' });
+      if (!rl.allowed) return rateLimitedResponse(c, rl);
+      const csrfFail = checkCsrf(c, auth);
+      if (csrfFail) return csrfFail;
+      const result = await rejectContentProposalRoute({
+        auth,
+        contentId: c.req.param('contentId'),
+        proposalId: c.req.param('proposalId'),
+      });
+      return jsonResponse(result);
+    },
+  );
 
   // ── talk-context.ts: goal + rules + state + sources ──────────
   app.get('/api/v1/talks/:talkId/context', async (c) => {

@@ -2,6 +2,7 @@
 
 export * from './accessors.js';
 export * from './agent-accessors.js';
+export * from './content-accessors.js';
 export * from './context-accessors.js';
 export * from './job-accessors.js';
 export * from './output-accessors.js';
