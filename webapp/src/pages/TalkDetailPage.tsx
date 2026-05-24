@@ -131,6 +131,7 @@ import { ExecutionDecisionSummary } from '../components/ExecutionDecisionSummary
 import { LiveResponsePanel } from '../components/LiveResponsePanel';
 import { InlineEditableTitle } from '../components/InlineEditableTitle';
 import { TalkToolsPanel } from '../components/TalkToolsPanel';
+import { TalkConnectorsPanel } from '../components/connectors/TalkConnectorsPanel';
 import { ThreadContextMenu } from '../components/ThreadContextMenu';
 import { ThreadRowTitleEditor } from '../components/ThreadRowTitleEditor';
 import { ThreadStartButton } from '../components/ThreadStartButton';
@@ -165,6 +166,7 @@ type TabKey =
   | 'outputs'
   | 'channels'
   | 'data-connectors'
+  | 'connectors'
   | 'runs';
 
 type TalkOrchestrationMode = Talk['orchestrationMode'];
@@ -901,7 +903,9 @@ function deriveLiveResponsesFromRuns(
       responseGroupId: run.responseGroupId ?? null,
       sequenceIndex: run.sequenceIndex ?? null,
       queuedAt,
-      startedAt: run.startedAt ? Date.parse(run.startedAt) || queuedAt : queuedAt,
+      startedAt: run.startedAt
+        ? Date.parse(run.startedAt) || queuedAt
+        : queuedAt,
       pendingStatus: run.status === 'queued' ? 'queued' : 'running',
     };
   }
@@ -1689,6 +1693,7 @@ function getTabFromPath(pathname: string, talkId: string): TabKey {
   if (pathname === `${base}/outputs`) return 'outputs';
   if (pathname === `${base}/channels`) return 'channels';
   if (pathname === `${base}/data-connectors`) return 'data-connectors';
+  if (pathname === `${base}/connectors`) return 'connectors';
   if (pathname === `${base}/runs`) return 'runs';
   return 'talk';
 }
@@ -4574,10 +4579,7 @@ export function TalkDetailPage({
             ? state.messages.find((m) => m.id === triggerMessageId)
             : undefined;
           const anchorTimestamp = Date.parse(
-            triggerMessage?.createdAt ||
-              run?.startedAt ||
-              run?.createdAt ||
-              '',
+            triggerMessage?.createdAt || run?.startedAt || run?.createdAt || '',
           );
           return {
             kind: 'live-response' as const,
@@ -4805,6 +4807,9 @@ export function TalkDetailPage({
   const connectorsTabHref = activeThreadId
     ? buildThreadHref(talkId, activeThreadId, 'data-connectors')
     : `/app/talks/${talkId}/data-connectors`;
+  const workspaceConnectorsTabHref = activeThreadId
+    ? buildThreadHref(talkId, activeThreadId, 'connectors')
+    : `/app/talks/${talkId}/connectors`;
   const runsTabHref = activeThreadId
     ? buildThreadHref(talkId, activeThreadId, 'runs')
     : `/app/talks/${talkId}/runs`;
@@ -8189,6 +8194,12 @@ export function TalkDetailPage({
                         Reports
                       </Link>
                       <Link
+                        to={workspaceConnectorsTabHref}
+                        className={`talk-tab ${currentTab === 'connectors' ? 'talk-tab-active' : ''}`}
+                      >
+                        Connectors
+                      </Link>
+                      <Link
                         to={runsTabHref}
                         className={`talk-tab ${currentTab === 'runs' ? 'talk-tab-active' : ''}`}
                       >
@@ -9119,6 +9130,13 @@ export function TalkDetailPage({
 
           {currentTab === 'tools' ? <TalkToolsPanel talkId={talkId} /> : null}
 
+          {currentTab === 'connectors' ? (
+            <TalkConnectorsPanel
+              talkId={talkId}
+              onUnauthorized={handleUnauthorized}
+            />
+          ) : null}
+
           {currentTab === 'state' ? (
             <section className="talk-tab-panel" aria-label="Talk state">
               {talkStateStatus.status === 'loading' && !talkStateLoaded ? (
@@ -9358,7 +9376,6 @@ export function TalkDetailPage({
               )}
             </section>
           ) : null}
-
 
           {currentTab === 'channels' ? (
             <section className="talk-tab-panel" aria-label="Talk channels">
