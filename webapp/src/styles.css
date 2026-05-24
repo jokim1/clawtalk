@@ -2474,6 +2474,282 @@ a {
   color: var(--talk-status-cancelled-fg);
 }
 
+/* Workspace connectors status pills (D11 — 2026-05-24). Reuses the
+   .run-history-status-* token system. Precedence (most-specific first):
+   `Disabled by admin` > `Credential missing` > `Ready` > `Configuration only`. */
+.connector-status-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  border: 1px solid transparent;
+  border-radius: 9999px;
+  padding: 0.1rem 0.5rem;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+  font-size: 0.7rem;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.connector-status-pill-configuration-only {
+  border-color: var(--color-border-subtle, #d1d5db);
+  background: var(--color-bg-muted, #f3f4f6);
+  color: var(--color-text-muted, #6b7280);
+}
+
+.connector-status-pill-credential-missing {
+  border-color: var(--talk-status-queued-border);
+  background: var(--talk-status-queued-bg);
+  color: var(--talk-status-queued-fg);
+}
+
+.connector-status-pill-ready {
+  border-color: var(--talk-status-completed-border);
+  background: var(--talk-status-completed-bg);
+  color: var(--talk-status-completed-fg);
+}
+
+.connector-status-pill-disabled {
+  border-color: var(--color-border-subtle, #d1d5db);
+  background: var(--color-bg-muted, #f3f4f6);
+  color: var(--color-text-muted, #6b7280);
+  text-decoration: line-through;
+}
+
+/* Connectors tab — table, rows, action buttons, modal backdrop, forms. */
+.connectors-section {
+  margin-bottom: 2rem;
+}
+
+.connector-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.95rem;
+}
+
+.connector-table th,
+.connector-table td {
+  text-align: left;
+  padding: 0.65rem 0.5rem;
+  border-bottom: 1px solid var(--color-border-subtle, #e5e7eb);
+  vertical-align: middle;
+}
+
+.connector-table th {
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--color-text-muted, #6b7280);
+  font-weight: 600;
+}
+
+.connector-row-name {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+.connector-row-subtitle {
+  font-size: 0.8rem;
+  color: var(--color-text-muted, #6b7280);
+}
+
+.connector-row-actions {
+  display: flex;
+  gap: 0.4rem;
+  justify-content: flex-end;
+}
+
+.page-state-footer {
+  margin-top: 0.5rem;
+  font-size: 0.85rem;
+  color: var(--color-text-muted, #6b7280);
+}
+
+.btn-danger-outline {
+  border: 1px solid #ef4444;
+  background: transparent;
+  color: #ef4444;
+}
+
+.btn-danger {
+  background: #ef4444;
+  color: #fff;
+  border: 1px solid #ef4444;
+}
+
+.connector-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
+  z-index: 50;
+}
+
+.connector-modal {
+  background: var(--color-bg, #fff);
+  border-radius: 0.5rem;
+  padding: 1.5rem;
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.2);
+  width: 100%;
+  max-width: 520px;
+  max-height: 90vh;
+  overflow-y: auto;
+}
+
+.connector-modal h3 {
+  margin: 0 0 1rem;
+  font-size: 1.1rem;
+}
+
+.connector-delete-modal p {
+  margin: 0 0 1.25rem;
+  color: var(--color-text-muted, #6b7280);
+}
+
+.connector-kind-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.85rem;
+}
+
+.connector-kind-form .form-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.connector-kind-form .form-field-label {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--color-text-muted, #4b5563);
+}
+
+.connector-kind-form .form-field input,
+.connector-kind-form .form-field select {
+  width: 100%;
+  padding: 0.5rem 0.65rem;
+  border: 1px solid var(--color-border-subtle, #d1d5db);
+  border-radius: 0.35rem;
+  font-size: 0.95rem;
+}
+
+.connector-kind-form .form-field-help {
+  margin: 0;
+  font-size: 0.8rem;
+  color: var(--color-text-muted, #6b7280);
+}
+
+.connector-kind-form-credential {
+  border: 1px solid var(--color-border-subtle, #d1d5db);
+  border-radius: 0.35rem;
+  padding: 0.65rem 0.75rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.connector-kind-form-credential legend {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--color-text-muted, #4b5563);
+  padding: 0 0.35rem;
+}
+
+.connector-kind-form-credential input {
+  width: 100%;
+  padding: 0.5rem 0.65rem;
+  border: 1px solid var(--color-border-subtle, #d1d5db);
+  border-radius: 0.35rem;
+  font-size: 0.95rem;
+}
+
+.connector-kind-form-credential-row {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.connector-kind-form .form-actions {
+  display: flex;
+  gap: 0.5rem;
+  justify-content: flex-end;
+  margin-top: 0.5rem;
+}
+
+.connector-kind-form .form-error {
+  color: #b91c1c;
+  margin: 0;
+  font-size: 0.9rem;
+}
+
+/* Talk → Connectors picker (per-Talk toggle list). */
+.talk-connectors-section {
+  margin-top: 1.25rem;
+}
+
+.talk-connectors-section h3 {
+  font-size: 0.95rem;
+  margin: 0 0 0.5rem;
+}
+
+.talk-connector-toggle-row {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.6rem 0.75rem;
+  border: 1px solid var(--color-border-subtle, #e5e7eb);
+  border-radius: 0.4rem;
+  margin-bottom: 0.4rem;
+}
+
+.talk-connector-toggle-row .talk-connector-toggle {
+  min-width: 44px;
+  min-height: 24px;
+  padding: 0.2rem 0.5rem;
+  border-radius: 9999px;
+  background: var(--color-bg-muted, #e5e7eb);
+  border: 1px solid var(--color-border-subtle, #d1d5db);
+  cursor: pointer;
+  font-size: 0.7rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.talk-connector-toggle-row .talk-connector-toggle[aria-checked='true'] {
+  background: #10b981;
+  color: #fff;
+  border-color: #10b981;
+}
+
+.talk-connector-toggle-row .talk-connector-toggle:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.talk-connector-row-meta {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+.talk-connector-row-kind {
+  font-size: 0.75rem;
+  color: var(--color-text-muted, #6b7280);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.talk-connectors-section-footer-link {
+  font-size: 0.8rem;
+  color: var(--color-text-muted, #6b7280);
+}
+
 /* Elapsed-time segment inside a status pill. Tabular figures + min-width
    prevent layout jitter as digits roll over (3s → 12s → 1:04). */
 .run-history-status .elapsed {

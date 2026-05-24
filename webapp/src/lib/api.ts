@@ -1,7 +1,4 @@
-import {
-  getSupabaseClient,
-  isSupabaseConfigured,
-} from './supabase-client';
+import { getSupabaseClient, isSupabaseConfigured } from './supabase-client';
 
 export class UnauthorizedError extends Error {
   constructor(message = 'Authentication is required') {
@@ -555,11 +552,7 @@ export type ExecutionDecision = {
     | 'auth_token'
     | 'host_auth'
     | 'missing';
-  routeReason?:
-    | 'browser_fast_lane'
-    | 'subscription_fallback'
-    | 'normal'
-    | null;
+  routeReason?: 'browser_fast_lane' | 'subscription_fallback' | 'normal' | null;
   plannerReason: string;
   providerId: string;
   modelId: string;
@@ -1769,11 +1762,14 @@ export async function cancelConflictingBrowserRun(input: {
     conflictingRunId: string;
     queuedCurrentRun: boolean;
     currentRunStatus: string | null;
-  }>(`/api/v1/browser/runs/${encodeURIComponent(input.runId)}/cancel-conflict`, {
-    method: 'POST',
-    includeJson: true,
-    body: '{}',
-  });
+  }>(
+    `/api/v1/browser/runs/${encodeURIComponent(input.runId)}/cancel-conflict`,
+    {
+      method: 'POST',
+      includeJson: true,
+      body: '{}',
+    },
+  );
 }
 
 export async function approveBrowserConfirmation(input: {
@@ -2254,8 +2250,7 @@ function mapChannelTarget(record: ChannelTargetApiRecord): ChannelTarget {
     activeBindingId: record.active_binding_id ?? null,
     activeBindingTalkId: record.active_binding_talk_id ?? null,
     activeBindingTalkTitle: record.active_binding_talk_title ?? null,
-    activeBindingTalkAccessible:
-      record.active_binding_talk_accessible === 1,
+    activeBindingTalkAccessible: record.active_binding_talk_accessible === 1,
   };
 }
 
@@ -2322,19 +2317,22 @@ export async function getTelegramChannelConnector(): Promise<TelegramChannelConn
   return {
     connection,
     bot: {
-      botUserId:
-        typeof config.botUserId === 'number' ? config.botUserId : null,
+      botUserId: typeof config.botUserId === 'number' ? config.botUserId : null,
       botUsername:
         typeof config.botUsername === 'string' ? config.botUsername : null,
       botDisplayName:
-        typeof config.botDisplayName === 'string' ? config.botDisplayName : null,
+        typeof config.botDisplayName === 'string'
+          ? config.botDisplayName
+          : null,
       canJoinGroups: config.canJoinGroups === true,
     },
     targets: envelope.targets.map(mapChannelTarget),
   };
 }
 
-export async function validateTelegramChannelConnector(botToken: string): Promise<{
+export async function validateTelegramChannelConnector(
+  botToken: string,
+): Promise<{
   bot: {
     botUserId: number;
     botUsername: string | null;
@@ -2365,12 +2363,13 @@ export async function saveTelegramChannelConnectorToken(
   return {
     connection,
     bot: {
-      botUserId:
-        typeof config.botUserId === 'number' ? config.botUserId : null,
+      botUserId: typeof config.botUserId === 'number' ? config.botUserId : null,
       botUsername:
         typeof config.botUsername === 'string' ? config.botUsername : null,
       botDisplayName:
-        typeof config.botDisplayName === 'string' ? config.botDisplayName : null,
+        typeof config.botDisplayName === 'string'
+          ? config.botDisplayName
+          : null,
       canJoinGroups: config.canJoinGroups === true,
     },
     targets: envelope.targets.map(mapChannelTarget),
@@ -2389,12 +2388,13 @@ export async function clearTelegramChannelConnectorToken(): Promise<TelegramChan
   return {
     connection,
     bot: {
-      botUserId:
-        typeof config.botUserId === 'number' ? config.botUserId : null,
+      botUserId: typeof config.botUserId === 'number' ? config.botUserId : null,
       botUsername:
         typeof config.botUsername === 'string' ? config.botUsername : null,
       botDisplayName:
-        typeof config.botDisplayName === 'string' ? config.botDisplayName : null,
+        typeof config.botDisplayName === 'string'
+          ? config.botDisplayName
+          : null,
       canJoinGroups: config.canJoinGroups === true,
     },
     targets: envelope.targets.map(mapChannelTarget),
@@ -2413,12 +2413,13 @@ export async function adoptTelegramChannelConnectorEnvToken(): Promise<TelegramC
   return {
     connection,
     bot: {
-      botUserId:
-        typeof config.botUserId === 'number' ? config.botUserId : null,
+      botUserId: typeof config.botUserId === 'number' ? config.botUserId : null,
       botUsername:
         typeof config.botUsername === 'string' ? config.botUsername : null,
       botDisplayName:
-        typeof config.botDisplayName === 'string' ? config.botDisplayName : null,
+        typeof config.botDisplayName === 'string'
+          ? config.botDisplayName
+          : null,
       canJoinGroups: config.canJoinGroups === true,
     },
     targets: envelope.targets.map(mapChannelTarget),
@@ -2478,9 +2479,7 @@ export async function startSlackChannelConnectorInstall(
   });
 }
 
-export async function syncSlackWorkspace(
-  connectionId: string,
-): Promise<{
+export async function syncSlackWorkspace(connectionId: string): Promise<{
   syncedCount: number;
   publicCount: number;
   privateCount: number;
@@ -2728,7 +2727,9 @@ export async function upsertTalkChannelBindingState(input: {
   value: unknown;
   expectedVersion: number;
 }): Promise<TalkChannelBindingStateEntry> {
-  const envelope = await apiMutationRequest<{ entry: TalkChannelBindingStateEntry }>(
+  const envelope = await apiMutationRequest<{
+    entry: TalkChannelBindingStateEntry;
+  }>(
     `/api/v1/talks/${encodeURIComponent(input.talkId)}/channels/${encodeURIComponent(input.bindingId)}/state`,
     {
       method: 'POST',
@@ -2770,7 +2771,9 @@ export async function reviewTalkChannelInstructions(input: {
   bindingLabel?: string | null;
   timezone?: string | null;
 }): Promise<ChannelInstructionReview> {
-  const envelope = await apiMutationRequest<{ review: ChannelInstructionReview }>(
+  const envelope = await apiMutationRequest<{
+    review: ChannelInstructionReview;
+  }>(
     `/api/v1/talks/${encodeURIComponent(input.talkId)}/channel-instruction-review`,
     {
       method: 'POST',
@@ -3576,14 +3579,14 @@ export async function createBrowserProfile(input: {
   connectionMode?: BrowserConnectionMode;
   connectionConfig?: Record<string, unknown>;
 }): Promise<{ profile: BrowserProfileSummary; created: boolean }> {
-  return apiMutationRequest<{ profile: BrowserProfileSummary; created: boolean }>(
-    '/api/v1/browser/profiles',
-    {
-      method: 'POST',
-      includeJson: true,
-      body: JSON.stringify(input),
-    },
-  );
+  return apiMutationRequest<{
+    profile: BrowserProfileSummary;
+    created: boolean;
+  }>('/api/v1/browser/profiles', {
+    method: 'POST',
+    includeJson: true,
+    body: JSON.stringify(input),
+  });
 }
 
 export async function updateBrowserProfileConnectionMode(
@@ -3613,7 +3616,9 @@ export async function deleteBrowserProfile(
   );
 }
 
-export async function releaseBrowserProfileSessions(profileId: string): Promise<{
+export async function releaseBrowserProfileSessions(
+  profileId: string,
+): Promise<{
   releasedCount: number;
   liveReleasedCount: number;
   staleReleasedCount: number;
@@ -3622,11 +3627,14 @@ export async function releaseBrowserProfileSessions(profileId: string): Promise<
     releasedCount: number;
     liveReleasedCount: number;
     staleReleasedCount: number;
-  }>(`/api/v1/browser/profiles/${encodeURIComponent(profileId)}/release-sessions`, {
-    method: 'POST',
-    includeJson: true,
-    body: '{}',
-  });
+  }>(
+    `/api/v1/browser/profiles/${encodeURIComponent(profileId)}/release-sessions`,
+    {
+      method: 'POST',
+      includeJson: true,
+      body: '{}',
+    },
+  );
 }
 
 async function apiRequest<T>(path: string, init?: RequestInit): Promise<T> {
@@ -3886,4 +3894,267 @@ function buildIdempotencyKey(): string {
     return randomUUID.call(globalThis.crypto);
   }
   return `idem-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+// ---------------------------------------------------------------------------
+// Workspace connectors (channels + data connectors) — PR 2 additive surface.
+// Coexists with chassis-era DataConnector/ChannelConnection/etc. types above;
+// those get removed in PR 3 once nothing else references them.
+// ---------------------------------------------------------------------------
+
+export type ChannelKind = 'slack' | 'telegram';
+
+export type DataConnectorKind = 'posthog' | 'google_docs' | 'google_sheets';
+
+export type WorkspaceChannel = {
+  id: string;
+  kind: ChannelKind;
+  displayName: string;
+  config: Record<string, unknown>;
+  hasCredential: boolean;
+  enabled: boolean;
+  boundTalkCount: number;
+  createdAt: string;
+  updatedAt: string;
+  createdBy: string | null;
+  updatedBy: string | null;
+};
+
+export type WorkspaceDataConnector = {
+  id: string;
+  kind: DataConnectorKind;
+  displayName: string;
+  config: Record<string, unknown>;
+  hasCredential: boolean;
+  enabled: boolean;
+  boundTalkCount: number;
+  createdAt: string;
+  updatedAt: string;
+  createdBy: string | null;
+  updatedBy: string | null;
+};
+
+export type TalkConnectorChannelRow = {
+  id: string;
+  kind: ChannelKind;
+  displayName: string;
+  enabled: boolean;
+  linked: boolean;
+};
+
+export type TalkConnectorDataConnectorRow = {
+  id: string;
+  kind: DataConnectorKind;
+  displayName: string;
+  enabled: boolean;
+  linked: boolean;
+};
+
+export type TalkConnectorsView = {
+  channels: TalkConnectorChannelRow[];
+  dataConnectors: TalkConnectorDataConnectorRow[];
+};
+
+export async function listWorkspaceChannels(): Promise<WorkspaceChannel[]> {
+  const envelope = await apiRequest<{ channels: WorkspaceChannel[] }>(
+    '/api/v1/workspace/channels',
+  );
+  return envelope.channels;
+}
+
+export async function createWorkspaceChannel(input: {
+  kind: ChannelKind;
+  displayName: string;
+  config: Record<string, unknown>;
+  enabled?: boolean;
+}): Promise<WorkspaceChannel> {
+  const envelope = await apiMutationRequest<{ channel: WorkspaceChannel }>(
+    '/api/v1/workspace/channels',
+    {
+      method: 'POST',
+      includeJson: true,
+      body: JSON.stringify(input),
+    },
+  );
+  return envelope.channel;
+}
+
+export async function updateWorkspaceChannel(input: {
+  channelId: string;
+  displayName?: string;
+  config?: Record<string, unknown>;
+  enabled?: boolean;
+}): Promise<WorkspaceChannel> {
+  const { channelId, ...patch } = input;
+  const envelope = await apiMutationRequest<{ channel: WorkspaceChannel }>(
+    `/api/v1/workspace/channels/${encodeURIComponent(channelId)}`,
+    {
+      method: 'PATCH',
+      includeJson: true,
+      body: JSON.stringify(patch),
+    },
+  );
+  return envelope.channel;
+}
+
+export async function deleteWorkspaceChannel(channelId: string): Promise<void> {
+  await apiMutationRequest<{ deleted: true }>(
+    `/api/v1/workspace/channels/${encodeURIComponent(channelId)}`,
+    {
+      method: 'DELETE',
+    },
+  );
+}
+
+export async function setWorkspaceChannelCredential(input: {
+  channelId: string;
+  apiKey: string | null;
+  organizationId?: string;
+}): Promise<WorkspaceChannel> {
+  const envelope = await apiMutationRequest<{ channel: WorkspaceChannel }>(
+    `/api/v1/workspace/channels/${encodeURIComponent(input.channelId)}/credential`,
+    {
+      method: 'PUT',
+      includeJson: true,
+      body: JSON.stringify({
+        apiKey: input.apiKey,
+        ...(input.organizationId
+          ? { organizationId: input.organizationId }
+          : {}),
+      }),
+    },
+  );
+  return envelope.channel;
+}
+
+export async function listWorkspaceDataConnectors(): Promise<
+  WorkspaceDataConnector[]
+> {
+  const envelope = await apiRequest<{
+    dataConnectors: WorkspaceDataConnector[];
+  }>('/api/v1/workspace/data-connectors');
+  return envelope.dataConnectors;
+}
+
+export async function createWorkspaceDataConnector(input: {
+  kind: DataConnectorKind;
+  displayName: string;
+  config: Record<string, unknown>;
+  enabled?: boolean;
+}): Promise<WorkspaceDataConnector> {
+  const envelope = await apiMutationRequest<{
+    dataConnector: WorkspaceDataConnector;
+  }>('/api/v1/workspace/data-connectors', {
+    method: 'POST',
+    includeJson: true,
+    body: JSON.stringify(input),
+  });
+  return envelope.dataConnector;
+}
+
+export async function updateWorkspaceDataConnector(input: {
+  connectorId: string;
+  displayName?: string;
+  config?: Record<string, unknown>;
+  enabled?: boolean;
+}): Promise<WorkspaceDataConnector> {
+  const { connectorId, ...patch } = input;
+  const envelope = await apiMutationRequest<{
+    dataConnector: WorkspaceDataConnector;
+  }>(`/api/v1/workspace/data-connectors/${encodeURIComponent(connectorId)}`, {
+    method: 'PATCH',
+    includeJson: true,
+    body: JSON.stringify(patch),
+  });
+  return envelope.dataConnector;
+}
+
+export async function deleteWorkspaceDataConnector(
+  connectorId: string,
+): Promise<void> {
+  await apiMutationRequest<{ deleted: true }>(
+    `/api/v1/workspace/data-connectors/${encodeURIComponent(connectorId)}`,
+    {
+      method: 'DELETE',
+    },
+  );
+}
+
+export async function setWorkspaceDataConnectorCredential(input: {
+  connectorId: string;
+  apiKey: string | null;
+  organizationId?: string;
+}): Promise<WorkspaceDataConnector> {
+  const envelope = await apiMutationRequest<{
+    dataConnector: WorkspaceDataConnector;
+  }>(
+    `/api/v1/workspace/data-connectors/${encodeURIComponent(input.connectorId)}/credential`,
+    {
+      method: 'PUT',
+      includeJson: true,
+      body: JSON.stringify({
+        apiKey: input.apiKey,
+        ...(input.organizationId
+          ? { organizationId: input.organizationId }
+          : {}),
+      }),
+    },
+  );
+  return envelope.dataConnector;
+}
+
+export async function getTalkConnectors(
+  talkId: string,
+): Promise<TalkConnectorsView> {
+  return apiRequest<TalkConnectorsView>(
+    `/api/v1/talks/${encodeURIComponent(talkId)}/connectors`,
+  );
+}
+
+export async function setTalkChannelLink(input: {
+  talkId: string;
+  channelId: string;
+}): Promise<void> {
+  await apiMutationRequest<{ linked: true }>(
+    `/api/v1/talks/${encodeURIComponent(input.talkId)}/channels/${encodeURIComponent(input.channelId)}`,
+    {
+      method: 'PUT',
+    },
+  );
+}
+
+export async function deleteTalkChannelLink(input: {
+  talkId: string;
+  channelId: string;
+}): Promise<void> {
+  await apiMutationRequest<{ unlinked: true }>(
+    `/api/v1/talks/${encodeURIComponent(input.talkId)}/channels/${encodeURIComponent(input.channelId)}`,
+    {
+      method: 'DELETE',
+    },
+  );
+}
+
+export async function setTalkDataConnectorLink(input: {
+  talkId: string;
+  connectorId: string;
+}): Promise<void> {
+  await apiMutationRequest<{ linked: true }>(
+    `/api/v1/talks/${encodeURIComponent(input.talkId)}/data-connectors/${encodeURIComponent(input.connectorId)}`,
+    {
+      method: 'PUT',
+    },
+  );
+}
+
+export async function deleteTalkDataConnectorLink(input: {
+  talkId: string;
+  connectorId: string;
+}): Promise<void> {
+  await apiMutationRequest<{ unlinked: true }>(
+    `/api/v1/talks/${encodeURIComponent(input.talkId)}/data-connectors/${encodeURIComponent(input.connectorId)}`,
+    {
+      method: 'DELETE',
+    },
+  );
 }

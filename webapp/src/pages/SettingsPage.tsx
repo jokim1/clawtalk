@@ -5,6 +5,8 @@ import {
   ApiError,
   type AgentProviderCard,
   type AiAgentsPageData,
+  type ChannelKind,
+  type DataConnectorKind,
   type ExecutorSettings,
   type ProviderCredentialScope,
   type ProviderVerificationStatus,
@@ -13,9 +15,15 @@ import {
   type UserGoogleAccount,
   type WebSearchPageData,
   type WebSearchProviderId,
+  type WorkspaceChannel,
+  type WorkspaceDataConnector,
   clearWebSearchCredential,
   completeAnthropicSubscriptionOauth,
   connectUserGoogleAccount,
+  createWorkspaceChannel,
+  createWorkspaceDataConnector,
+  deleteWorkspaceChannel,
+  deleteWorkspaceDataConnector,
   disconnectUserGoogleAccount,
   expandUserGoogleScopes,
   getAiAgents,
@@ -25,17 +33,30 @@ import {
   initiateAnthropicSubscriptionOauth,
   initiateOpenAiCodexSubscriptionOauth,
   listRegisteredAgents,
+  listWorkspaceChannels,
+  listWorkspaceDataConnectors,
   pollOpenAiCodexSubscriptionOauth,
   saveAiProviderCredential,
   setActiveWebSearchProvider,
   setWebSearchCredential,
+  setWorkspaceChannelCredential,
+  setWorkspaceDataConnectorCredential,
   UnauthorizedError,
   updateMainRegisteredAgent,
   updateSessionMe,
+  updateWorkspaceChannel,
+  updateWorkspaceDataConnector,
   verifyAiProviderCredential,
 } from '../lib/api';
 import { launchGoogleAccountPopup } from '../lib/googleAccountPopup';
 import { RegisteredAgentsPanel } from '../components/RegisteredAgentsPanel';
+import { ConnectorStatusPill } from '../components/connectors/StatusPill';
+import { resolveConnectorSubtitle } from '../components/connectors/subtitle';
+import { SlackChannelForm } from '../components/connectors/SlackChannelForm';
+import { TelegramChannelForm } from '../components/connectors/TelegramChannelForm';
+import { PostHogDataConnectorForm } from '../components/connectors/PostHogDataConnectorForm';
+import { GoogleDocsDataConnectorForm } from '../components/connectors/GoogleDocsDataConnectorForm';
+import { GoogleSheetsDataConnectorForm } from '../components/connectors/GoogleSheetsDataConnectorForm';
 
 const REQUIRED_GOOGLE_TOOL_SCOPES = ['drive.readonly', 'documents'];
 
@@ -50,7 +71,7 @@ type Props = {
   onUserUpdated: (user: SessionUser) => void;
 };
 
-type SettingsTab = 'profile' | 'api-keys' | 'agents' | 'tools';
+type SettingsTab = 'profile' | 'api-keys' | 'agents' | 'tools' | 'connectors';
 
 type ProviderDraft = {
   apiKey: string;
@@ -63,9 +84,13 @@ const TAB_VALUES: readonly SettingsTab[] = [
   'api-keys',
   'agents',
   'tools',
+  'connectors',
 ];
 
-const TAB_PAGE_HEADERS: Record<SettingsTab, { title: string; subtitle: string }> = {
+const TAB_PAGE_HEADERS: Record<
+  SettingsTab,
+  { title: string; subtitle: string }
+> = {
   profile: {
     title: 'My Profile',
     subtitle: 'Manage your personal information.',
@@ -82,6 +107,11 @@ const TAB_PAGE_HEADERS: Record<SettingsTab, { title: string; subtitle: string }>
   tools: {
     title: 'Tools',
     subtitle: 'Configure tool integrations that agents can call.',
+  },
+  connectors: {
+    title: 'Connectors',
+    subtitle:
+      'Workspace-wide channels and data sources that any talk can opt into.',
   },
 };
 
@@ -266,12 +296,12 @@ export function SettingsPage({
         <ApiKeysTab onUnauthorized={onUnauthorized} userRole={userRole} />
       ) : null}
 
-      {tab === 'agents' ? (
-        <AgentsTab onUnauthorized={onUnauthorized} />
-      ) : null}
+      {tab === 'agents' ? <AgentsTab onUnauthorized={onUnauthorized} /> : null}
 
-      {tab === 'tools' ? (
-        <ToolsTab onUnauthorized={onUnauthorized} />
+      {tab === 'tools' ? <ToolsTab onUnauthorized={onUnauthorized} /> : null}
+
+      {tab === 'connectors' ? (
+        <ConnectorsTab onUnauthorized={onUnauthorized} userRole={userRole} />
       ) : null}
     </section>
   );
@@ -382,10 +412,7 @@ function ProfileTab({
       <section className="settings-card">
         <h2>Profile Picture</h2>
         <div className="profile-avatar-section">
-          <span
-            className="profile-avatar-lg"
-            style={{ background: gradient }}
-          >
+          <span className="profile-avatar-lg" style={{ background: gradient }}>
             {initials}
           </span>
         </div>
@@ -905,7 +932,9 @@ function GoogleAccountSection({
         return;
       }
       setError(
-        err instanceof Error ? err.message : 'Could not connect Google account.',
+        err instanceof Error
+          ? err.message
+          : 'Could not connect Google account.',
       );
     } finally {
       setBusy(null);
@@ -928,9 +957,7 @@ function GoogleAccountSection({
         onUnauthorized();
         return;
       }
-      setError(
-        err instanceof Error ? err.message : 'Could not update scopes.',
-      );
+      setError(err instanceof Error ? err.message : 'Could not update scopes.');
     } finally {
       setBusy(null);
     }
@@ -974,8 +1001,7 @@ function GoogleAccountSection({
       <header>
         <h2>Google account</h2>
         <p>
-          Connect your Google account to let agents read and write Google
-          Docs.
+          Connect your Google account to let agents read and write Google Docs.
         </p>
       </header>
 
@@ -1035,7 +1061,10 @@ function GoogleAccountSection({
 // Web Search Providers (per-user keys + active picker)
 // ---------------------------------------------------------------------------
 
-const WEB_SEARCH_DOCS: Record<WebSearchProviderId, { url: string; label: string }> = {
+const WEB_SEARCH_DOCS: Record<
+  WebSearchProviderId,
+  { url: string; label: string }
+> = {
   'web_search.tavily': {
     url: 'https://app.tavily.com/home',
     label: 'Tavily',
@@ -1090,7 +1119,9 @@ function WebSearchProvidersSection({
           return;
         }
         setError(
-          err instanceof Error ? err.message : 'Failed to load web search providers.',
+          err instanceof Error
+            ? err.message
+            : 'Failed to load web search providers.',
         );
       } finally {
         if (!cancelled) setLoading(false);
@@ -1124,7 +1155,9 @@ function WebSearchProvidersSection({
         return;
       }
       setError(
-        err instanceof Error ? err.message : 'Failed to reload web search providers.',
+        err instanceof Error
+          ? err.message
+          : 'Failed to reload web search providers.',
       );
     }
   }
@@ -1180,13 +1213,19 @@ function WebSearchProvidersSection({
     try {
       await setActiveWebSearchProvider(providerId);
       await refresh();
-      setNotice(providerId ? 'Active provider updated.' : 'Active provider cleared.');
+      setNotice(
+        providerId ? 'Active provider updated.' : 'Active provider cleared.',
+      );
     } catch (err) {
       if (err instanceof UnauthorizedError) {
         onUnauthorized();
         return;
       }
-      setError(err instanceof Error ? err.message : 'Failed to update active provider.');
+      setError(
+        err instanceof Error
+          ? err.message
+          : 'Failed to update active provider.',
+      );
     } finally {
       setBusyKey(null);
     }
@@ -1211,8 +1250,7 @@ function WebSearchProvidersSection({
       <p className="settings-copy">
         Agents call <code>web_search</code> to look things up on the live web.
         Add a key for at least one provider, then pick which one is active for
-        your account. Keys are personal — they aren't shared with the
-        workspace.
+        your account. Keys are personal — they aren't shared with the workspace.
       </p>
 
       {error ? (
@@ -1228,7 +1266,10 @@ function WebSearchProvidersSection({
 
       <div className="talk-llm-card-list">
         {providers.map((provider) => {
-          const draft = drafts[provider.id] || { apiKey: '', showApiKey: false };
+          const draft = drafts[provider.id] || {
+            apiKey: '',
+            showApiKey: false,
+          };
           const docs = WEB_SEARCH_DOCS[provider.id];
           const placeholder = WEB_SEARCH_PLACEHOLDER[provider.id] ?? 'API key';
           const savingBusy = busyKey === `save:${provider.id}`;
@@ -1243,7 +1284,13 @@ function WebSearchProvidersSection({
                   <h4>
                     {provider.name}
                     {isActive ? (
-                      <span style={{ marginLeft: 8, fontSize: '0.8em', color: '#0a7' }}>
+                      <span
+                        style={{
+                          marginLeft: 8,
+                          fontSize: '0.8em',
+                          color: '#0a7',
+                        }}
+                      >
                         ● Active
                       </span>
                     ) : null}
@@ -1260,7 +1307,9 @@ function WebSearchProvidersSection({
 
               {provider.hasCredential ? (
                 <div className="talk-llm-stored-key">
-                  <span>Stored key: <code>{provider.credentialHint}</code></span>
+                  <span>
+                    Stored key: <code>{provider.credentialHint}</code>
+                  </span>
                   <button
                     type="button"
                     className="secondary-btn"
@@ -1273,7 +1322,9 @@ function WebSearchProvidersSection({
               ) : null}
 
               <label className="agent-form-field">
-                <span>{provider.hasCredential ? 'Replace key' : 'API key'}</span>
+                <span>
+                  {provider.hasCredential ? 'Replace key' : 'API key'}
+                </span>
                 <div style={{ display: 'flex', gap: 8 }}>
                   <input
                     type={draft.showApiKey ? 'text' : 'password'}
@@ -1492,9 +1543,7 @@ function ProviderCredentialCard({
             })
           }
         >
-          <summary>
-            {view.hasCredential ? 'Update key' : 'Configure'}
-          </summary>
+          <summary>{view.hasCredential ? 'Update key' : 'Configure'}</summary>
           <div className="talk-llm-grid">
             <label className="talk-llm-field-span">
               <span>API key</span>
@@ -1527,10 +1576,9 @@ function ProviderCredentialCard({
             </label>
             {provider.id === 'provider.nvidia' ? (
               <p className="talk-llm-meta talk-llm-field-span">
-                On NVIDIA Build, click <strong>Generate API Key</strong>,
-                then copy the <code>nvapi-…</code> token from the Python
-                snippet (it appears in the <code>Authorization</code>{' '}
-                header).
+                On NVIDIA Build, click <strong>Generate API Key</strong>, then
+                copy the <code>nvapi-…</code> token from the Python snippet (it
+                appears in the <code>Authorization</code> header).
               </p>
             ) : null}
             <div className="talk-llm-inline-actions">
@@ -1540,11 +1588,7 @@ function ProviderCredentialCard({
                 onClick={onSave}
                 disabled={disabled || !draft.apiKey.trim()}
               >
-                {busySave
-                  ? 'Saving…'
-                  : view.hasCredential
-                    ? 'Update'
-                    : 'Save'}
+                {busySave ? 'Saving…' : view.hasCredential ? 'Update' : 'Save'}
               </button>
               {view.hasCredential ? (
                 <button
@@ -1616,9 +1660,7 @@ function AnthropicSubscriptionSection({
       window.open(init.authorizationUrl, '_blank', 'noopener,noreferrer');
     } catch (err) {
       setError(
-        err instanceof ApiError
-          ? err.message
-          : 'Failed to start Claude OAuth.',
+        err instanceof ApiError ? err.message : 'Failed to start Claude OAuth.',
       );
     } finally {
       setBusy(false);
@@ -1893,11 +1935,7 @@ function OpenAiCodexSubscriptionSection({
         >
           <p className="talk-llm-meta">
             Open{' '}
-            <a
-              href={pending.verificationUrl}
-              target="_blank"
-              rel="noreferrer"
-            >
+            <a href={pending.verificationUrl} target="_blank" rel="noreferrer">
               {pending.verificationUrl}
             </a>{' '}
             and enter this code:
@@ -2118,6 +2156,763 @@ function AgentsTab({
           ) : null}
         </section>
       ) : null}
+    </>
+  );
+}
+
+// ─── Connectors tab ───────────────────────────────────────────────────
+
+const CHANNEL_KIND_LABELS: Record<ChannelKind, string> = {
+  slack: 'Slack',
+  telegram: 'Telegram',
+};
+
+const DATA_CONNECTOR_KIND_LABELS: Record<DataConnectorKind, string> = {
+  posthog: 'PostHog',
+  google_docs: 'Google Docs',
+  google_sheets: 'Google Sheets',
+};
+
+type ConnectorModalState =
+  | { kind: 'closed' }
+  | { kind: 'create-channel' }
+  | { kind: 'edit-channel'; channel: WorkspaceChannel }
+  | { kind: 'create-data-connector' }
+  | { kind: 'edit-data-connector'; dataConnector: WorkspaceDataConnector };
+
+type ConnectorDeleteState =
+  | { kind: 'closed' }
+  | { kind: 'channel'; channel: WorkspaceChannel }
+  | { kind: 'data-connector'; dataConnector: WorkspaceDataConnector };
+
+type ConnectorListStatus =
+  | { kind: 'loading' }
+  | { kind: 'ready' }
+  | { kind: 'error'; message: string };
+
+function ConnectorsTab({
+  onUnauthorized,
+  userRole,
+}: {
+  onUnauthorized: () => void;
+  userRole: string;
+}): JSX.Element {
+  const isAdmin = userRole === 'owner' || userRole === 'admin';
+  const [status, setStatus] = useState<ConnectorListStatus>({
+    kind: 'loading',
+  });
+  const [channels, setChannels] = useState<WorkspaceChannel[]>([]);
+  const [dataConnectors, setDataConnectors] = useState<
+    WorkspaceDataConnector[]
+  >([]);
+  const [modal, setModal] = useState<ConnectorModalState>({ kind: 'closed' });
+  const [createKind, setCreateKind] = useState<string>('slack');
+  const [deleteState, setDeleteState] = useState<ConnectorDeleteState>({
+    kind: 'closed',
+  });
+  const [formSubmitting, setFormSubmitting] = useState(false);
+  const [formError, setFormError] = useState<string | null>(null);
+  const [deleteSubmitting, setDeleteSubmitting] = useState(false);
+
+  const refresh = async () => {
+    try {
+      const [nextChannels, nextDataConnectors] = await Promise.all([
+        listWorkspaceChannels(),
+        listWorkspaceDataConnectors(),
+      ]);
+      const byName = (
+        a: { displayName: string },
+        b: { displayName: string },
+      ): number => a.displayName.localeCompare(b.displayName);
+      setChannels([...nextChannels].sort(byName));
+      setDataConnectors([...nextDataConnectors].sort(byName));
+      setStatus({ kind: 'ready' });
+    } catch (err) {
+      if (err instanceof UnauthorizedError) {
+        onUnauthorized();
+        return;
+      }
+      setStatus({
+        kind: 'error',
+        message:
+          err instanceof Error ? err.message : 'Failed to load connectors.',
+      });
+    }
+  };
+
+  useEffect(() => {
+    void refresh();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const closeModal = () => {
+    setModal({ kind: 'closed' });
+    setFormError(null);
+    setFormSubmitting(false);
+  };
+
+  const handleCreateChannelSubmit = async (
+    kind: ChannelKind,
+    input: {
+      displayName: string;
+      config: Record<string, unknown>;
+      apiKey?: string | null;
+      rotateCredential?: boolean;
+    },
+  ) => {
+    setFormSubmitting(true);
+    setFormError(null);
+    try {
+      const created = await createWorkspaceChannel({
+        kind,
+        displayName: input.displayName,
+        config: input.config,
+      });
+      if (input.rotateCredential && input.apiKey !== undefined) {
+        await setWorkspaceChannelCredential({
+          channelId: created.id,
+          apiKey: input.apiKey,
+        });
+      }
+      closeModal();
+      await refresh();
+    } catch (err) {
+      if (err instanceof UnauthorizedError) {
+        onUnauthorized();
+        return;
+      }
+      setFormError(
+        err instanceof Error ? err.message : 'Failed to create channel.',
+      );
+    } finally {
+      setFormSubmitting(false);
+    }
+  };
+
+  const handleEditChannelSubmit = async (
+    channel: WorkspaceChannel,
+    input: {
+      displayName: string;
+      config: Record<string, unknown>;
+      apiKey?: string | null;
+      rotateCredential?: boolean;
+    },
+  ) => {
+    setFormSubmitting(true);
+    setFormError(null);
+    try {
+      await updateWorkspaceChannel({
+        channelId: channel.id,
+        displayName: input.displayName,
+        config: input.config,
+      });
+      if (input.rotateCredential && input.apiKey !== undefined) {
+        await setWorkspaceChannelCredential({
+          channelId: channel.id,
+          apiKey: input.apiKey,
+        });
+      }
+      closeModal();
+      await refresh();
+    } catch (err) {
+      if (err instanceof UnauthorizedError) {
+        onUnauthorized();
+        return;
+      }
+      setFormError(
+        err instanceof Error ? err.message : 'Failed to update channel.',
+      );
+    } finally {
+      setFormSubmitting(false);
+    }
+  };
+
+  const handleCreateDataConnectorSubmit = async (
+    kind: DataConnectorKind,
+    input: {
+      displayName: string;
+      config: Record<string, unknown>;
+      apiKey?: string | null;
+      rotateCredential?: boolean;
+    },
+  ) => {
+    setFormSubmitting(true);
+    setFormError(null);
+    try {
+      const created = await createWorkspaceDataConnector({
+        kind,
+        displayName: input.displayName,
+        config: input.config,
+      });
+      if (input.rotateCredential && input.apiKey !== undefined) {
+        await setWorkspaceDataConnectorCredential({
+          connectorId: created.id,
+          apiKey: input.apiKey,
+        });
+      }
+      closeModal();
+      await refresh();
+    } catch (err) {
+      if (err instanceof UnauthorizedError) {
+        onUnauthorized();
+        return;
+      }
+      setFormError(
+        err instanceof Error ? err.message : 'Failed to create data source.',
+      );
+    } finally {
+      setFormSubmitting(false);
+    }
+  };
+
+  const handleEditDataConnectorSubmit = async (
+    dataConnector: WorkspaceDataConnector,
+    input: {
+      displayName: string;
+      config: Record<string, unknown>;
+      apiKey?: string | null;
+      rotateCredential?: boolean;
+    },
+  ) => {
+    setFormSubmitting(true);
+    setFormError(null);
+    try {
+      await updateWorkspaceDataConnector({
+        connectorId: dataConnector.id,
+        displayName: input.displayName,
+        config: input.config,
+      });
+      if (input.rotateCredential && input.apiKey !== undefined) {
+        await setWorkspaceDataConnectorCredential({
+          connectorId: dataConnector.id,
+          apiKey: input.apiKey,
+        });
+      }
+      closeModal();
+      await refresh();
+    } catch (err) {
+      if (err instanceof UnauthorizedError) {
+        onUnauthorized();
+        return;
+      }
+      setFormError(
+        err instanceof Error ? err.message : 'Failed to update data source.',
+      );
+    } finally {
+      setFormSubmitting(false);
+    }
+  };
+
+  const handleConfirmDelete = async () => {
+    if (deleteState.kind === 'closed') return;
+    setDeleteSubmitting(true);
+    try {
+      if (deleteState.kind === 'channel') {
+        await deleteWorkspaceChannel(deleteState.channel.id);
+      } else {
+        await deleteWorkspaceDataConnector(deleteState.dataConnector.id);
+      }
+      setDeleteState({ kind: 'closed' });
+      await refresh();
+    } catch (err) {
+      if (err instanceof UnauthorizedError) {
+        onUnauthorized();
+        return;
+      }
+      // Surface as inline error on the list; close the modal so the user
+      // can see it.
+      setDeleteState({ kind: 'closed' });
+      setStatus({
+        kind: 'error',
+        message:
+          err instanceof Error ? err.message : 'Failed to delete connector.',
+      });
+    } finally {
+      setDeleteSubmitting(false);
+    }
+  };
+
+  if (status.kind === 'loading') {
+    return (
+      <section className="page-shell-section">
+        <p className="page-state">Loading connectors…</p>
+      </section>
+    );
+  }
+
+  return (
+    <>
+      <section
+        className="page-shell-section connectors-section"
+        aria-label="Channels available to talks"
+      >
+        <header className="agents-panel-header">
+          <h2>Channels available to talks</h2>
+          {isAdmin ? (
+            <button
+              type="button"
+              className="btn btn-primary btn-sm"
+              onClick={() => {
+                setCreateKind('slack');
+                setModal({ kind: 'create-channel' });
+              }}
+            >
+              + Add channel
+            </button>
+          ) : null}
+        </header>
+        {status.kind === 'error' ? (
+          <p className="page-state error" role="alert">
+            {status.message}{' '}
+            <button
+              type="button"
+              className="btn btn-sm"
+              onClick={() => {
+                setStatus({ kind: 'loading' });
+                void refresh();
+              }}
+            >
+              Retry
+            </button>
+          </p>
+        ) : null}
+        {channels.length === 0 ? (
+          <p className="page-state">
+            {isAdmin
+              ? 'No channels yet. Add Slack or Telegram to make them available across all your talks.'
+              : 'No channels available. Ask your workspace admin to add one in Settings → Connectors.'}
+          </p>
+        ) : (
+          <ConnectorTable
+            rows={channels.map((channel) => ({
+              id: channel.id,
+              kindLabel: CHANNEL_KIND_LABELS[channel.kind],
+              displayName: channel.displayName,
+              subtitle: resolveConnectorSubtitle(channel.kind, channel.config),
+              boundTalkCount: channel.boundTalkCount,
+              enabled: channel.enabled,
+              hasCredential: channel.hasCredential,
+              onEdit: isAdmin
+                ? () => setModal({ kind: 'edit-channel', channel })
+                : undefined,
+              onDelete: isAdmin
+                ? () => setDeleteState({ kind: 'channel', channel })
+                : undefined,
+              labelNoun: 'Slack/Telegram channel',
+            }))}
+          />
+        )}
+      </section>
+
+      <section
+        className="page-shell-section connectors-section"
+        aria-label="Data sources available to talks"
+      >
+        <header className="agents-panel-header">
+          <h2>Data sources available to talks</h2>
+          {isAdmin ? (
+            <button
+              type="button"
+              className="btn btn-primary btn-sm"
+              onClick={() => {
+                setCreateKind('posthog');
+                setModal({ kind: 'create-data-connector' });
+              }}
+            >
+              + Add data source
+            </button>
+          ) : null}
+        </header>
+        {dataConnectors.length === 0 ? (
+          <p className="page-state">
+            {isAdmin
+              ? 'No data sources yet. Add PostHog or Google Docs/Sheets to make them available across all your talks.'
+              : 'No data sources available. Ask your workspace admin to add one.'}
+          </p>
+        ) : (
+          <ConnectorTable
+            rows={dataConnectors.map((dc) => ({
+              id: dc.id,
+              kindLabel: DATA_CONNECTOR_KIND_LABELS[dc.kind],
+              displayName: dc.displayName,
+              subtitle: resolveConnectorSubtitle(dc.kind, dc.config),
+              boundTalkCount: dc.boundTalkCount,
+              enabled: dc.enabled,
+              hasCredential: dc.hasCredential,
+              onEdit: isAdmin
+                ? () =>
+                    setModal({
+                      kind: 'edit-data-connector',
+                      dataConnector: dc,
+                    })
+                : undefined,
+              onDelete: isAdmin
+                ? () =>
+                    setDeleteState({
+                      kind: 'data-connector',
+                      dataConnector: dc,
+                    })
+                : undefined,
+              labelNoun: 'Data source',
+            }))}
+          />
+        )}
+        {!isAdmin ? (
+          <p className="page-state-footer">
+            Workspace admins manage connectors in Settings.
+          </p>
+        ) : null}
+      </section>
+
+      {modal.kind !== 'closed' ? (
+        <div
+          className="connector-modal-backdrop"
+          role="dialog"
+          aria-modal="true"
+          onClick={(event) => {
+            if (event.target === event.currentTarget) closeModal();
+          }}
+        >
+          <div className="connector-modal">
+            <ConnectorModalContent
+              modal={modal}
+              createKind={createKind}
+              setCreateKind={setCreateKind}
+              submitting={formSubmitting}
+              error={formError}
+              onCancel={closeModal}
+              onCreateChannel={handleCreateChannelSubmit}
+              onEditChannel={handleEditChannelSubmit}
+              onCreateDataConnector={handleCreateDataConnectorSubmit}
+              onEditDataConnector={handleEditDataConnectorSubmit}
+            />
+          </div>
+        </div>
+      ) : null}
+
+      {deleteState.kind !== 'closed' ? (
+        <div
+          className="connector-modal-backdrop"
+          role="dialog"
+          aria-modal="true"
+          onClick={(event) => {
+            if (event.target === event.currentTarget) {
+              if (!deleteSubmitting) setDeleteState({ kind: 'closed' });
+            }
+          }}
+        >
+          <div className="connector-modal connector-delete-modal">
+            <h3>
+              Delete{' '}
+              {deleteState.kind === 'channel'
+                ? deleteState.channel.displayName
+                : deleteState.dataConnector.displayName}
+              ?
+            </h3>
+            <p>
+              Deleting removes this connector from{' '}
+              {deleteState.kind === 'channel'
+                ? deleteState.channel.boundTalkCount
+                : deleteState.dataConnector.boundTalkCount}{' '}
+              talks. Talk histories stay intact. This cannot be undone.
+            </p>
+            <div className="form-actions">
+              <button
+                type="button"
+                className="btn btn-secondary"
+                onClick={() => setDeleteState({ kind: 'closed' })}
+                disabled={deleteSubmitting}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="btn btn-danger"
+                onClick={handleConfirmDelete}
+                disabled={deleteSubmitting}
+              >
+                {deleteSubmitting ? 'Deleting…' : 'Delete connector'}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+    </>
+  );
+}
+
+type ConnectorTableRow = {
+  id: string;
+  kindLabel: string;
+  displayName: string;
+  subtitle: string | null;
+  boundTalkCount: number;
+  enabled: boolean;
+  hasCredential: boolean;
+  labelNoun: string;
+  onEdit?: () => void;
+  onDelete?: () => void;
+};
+
+function ConnectorTable({ rows }: { rows: ConnectorTableRow[] }): JSX.Element {
+  return (
+    <table className="connector-table">
+      <thead>
+        <tr>
+          <th scope="col">Name</th>
+          <th scope="col">Kind</th>
+          <th scope="col">Used by</th>
+          <th scope="col">Status</th>
+          <th scope="col" aria-label="Actions" />
+        </tr>
+      </thead>
+      <tbody>
+        {rows.map((row) => (
+          <tr key={row.id}>
+            <td>
+              <div className="connector-row-name">
+                <strong>{row.displayName}</strong>
+                {row.subtitle ? (
+                  <span className="connector-row-subtitle">{row.subtitle}</span>
+                ) : null}
+              </div>
+            </td>
+            <td>{row.kindLabel}</td>
+            <td>
+              {row.boundTalkCount === 0
+                ? 'Not yet linked'
+                : row.boundTalkCount === 1
+                  ? 'Used by 1 talk'
+                  : `Used by ${row.boundTalkCount} talks`}
+            </td>
+            <td>
+              <ConnectorStatusPill
+                enabled={row.enabled}
+                hasCredential={row.hasCredential}
+              />
+            </td>
+            <td className="connector-row-actions">
+              {row.onEdit ? (
+                <button
+                  type="button"
+                  className="btn btn-sm"
+                  aria-label={`Edit ${row.labelNoun}: ${row.displayName}`}
+                  onClick={row.onEdit}
+                >
+                  Edit
+                </button>
+              ) : null}
+              {row.onDelete ? (
+                <button
+                  type="button"
+                  className="btn btn-sm btn-danger-outline"
+                  aria-label={`Delete ${row.labelNoun}: ${row.displayName}`}
+                  onClick={row.onDelete}
+                >
+                  Delete
+                </button>
+              ) : null}
+            </td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
+}
+
+function ConnectorModalContent({
+  modal,
+  createKind,
+  setCreateKind,
+  submitting,
+  error,
+  onCancel,
+  onCreateChannel,
+  onEditChannel,
+  onCreateDataConnector,
+  onEditDataConnector,
+}: {
+  modal: Exclude<ConnectorModalState, { kind: 'closed' }>;
+  createKind: string;
+  setCreateKind: (kind: string) => void;
+  submitting: boolean;
+  error: string | null;
+  onCancel: () => void;
+  onCreateChannel: (
+    kind: ChannelKind,
+    input: {
+      displayName: string;
+      config: Record<string, unknown>;
+      apiKey?: string | null;
+      rotateCredential?: boolean;
+    },
+  ) => Promise<void>;
+  onEditChannel: (
+    channel: WorkspaceChannel,
+    input: {
+      displayName: string;
+      config: Record<string, unknown>;
+      apiKey?: string | null;
+      rotateCredential?: boolean;
+    },
+  ) => Promise<void>;
+  onCreateDataConnector: (
+    kind: DataConnectorKind,
+    input: {
+      displayName: string;
+      config: Record<string, unknown>;
+      apiKey?: string | null;
+      rotateCredential?: boolean;
+    },
+  ) => Promise<void>;
+  onEditDataConnector: (
+    dc: WorkspaceDataConnector,
+    input: {
+      displayName: string;
+      config: Record<string, unknown>;
+      apiKey?: string | null;
+      rotateCredential?: boolean;
+    },
+  ) => Promise<void>;
+}): JSX.Element {
+  if (modal.kind === 'create-channel') {
+    return (
+      <>
+        <h3>Add channel</h3>
+        <label className="form-field">
+          <span className="form-field-label">Channel kind</span>
+          <select
+            value={createKind}
+            onChange={(event) => setCreateKind(event.target.value)}
+            disabled={submitting}
+          >
+            <option value="slack">Slack</option>
+            <option value="telegram">Telegram</option>
+          </select>
+        </label>
+        {createKind === 'slack' ? (
+          <SlackChannelForm
+            mode="create"
+            submitting={submitting}
+            error={error}
+            onSubmit={(input) => onCreateChannel('slack', input)}
+            onCancel={onCancel}
+          />
+        ) : (
+          <TelegramChannelForm
+            mode="create"
+            submitting={submitting}
+            error={error}
+            onSubmit={(input) => onCreateChannel('telegram', input)}
+            onCancel={onCancel}
+          />
+        )}
+      </>
+    );
+  }
+  if (modal.kind === 'edit-channel') {
+    const channel = modal.channel;
+    return (
+      <>
+        <h3>Edit channel</h3>
+        {channel.kind === 'slack' ? (
+          <SlackChannelForm
+            mode="edit"
+            initial={channel}
+            submitting={submitting}
+            error={error}
+            onSubmit={(input) => onEditChannel(channel, input)}
+            onCancel={onCancel}
+          />
+        ) : (
+          <TelegramChannelForm
+            mode="edit"
+            initial={channel}
+            submitting={submitting}
+            error={error}
+            onSubmit={(input) => onEditChannel(channel, input)}
+            onCancel={onCancel}
+          />
+        )}
+      </>
+    );
+  }
+  if (modal.kind === 'create-data-connector') {
+    return (
+      <>
+        <h3>Add data source</h3>
+        <label className="form-field">
+          <span className="form-field-label">Data source kind</span>
+          <select
+            value={createKind}
+            onChange={(event) => setCreateKind(event.target.value)}
+            disabled={submitting}
+          >
+            <option value="posthog">PostHog</option>
+            <option value="google_docs">Google Docs</option>
+            <option value="google_sheets">Google Sheets</option>
+          </select>
+        </label>
+        {createKind === 'posthog' ? (
+          <PostHogDataConnectorForm
+            mode="create"
+            submitting={submitting}
+            error={error}
+            onSubmit={(input) => onCreateDataConnector('posthog', input)}
+            onCancel={onCancel}
+          />
+        ) : createKind === 'google_docs' ? (
+          <GoogleDocsDataConnectorForm
+            mode="create"
+            submitting={submitting}
+            error={error}
+            onSubmit={(input) => onCreateDataConnector('google_docs', input)}
+            onCancel={onCancel}
+          />
+        ) : (
+          <GoogleSheetsDataConnectorForm
+            mode="create"
+            submitting={submitting}
+            error={error}
+            onSubmit={(input) => onCreateDataConnector('google_sheets', input)}
+            onCancel={onCancel}
+          />
+        )}
+      </>
+    );
+  }
+  const dc = modal.dataConnector;
+  return (
+    <>
+      <h3>Edit data source</h3>
+      {dc.kind === 'posthog' ? (
+        <PostHogDataConnectorForm
+          mode="edit"
+          initial={dc}
+          submitting={submitting}
+          error={error}
+          onSubmit={(input) => onEditDataConnector(dc, input)}
+          onCancel={onCancel}
+        />
+      ) : dc.kind === 'google_docs' ? (
+        <GoogleDocsDataConnectorForm
+          mode="edit"
+          initial={dc}
+          submitting={submitting}
+          error={error}
+          onSubmit={(input) => onEditDataConnector(dc, input)}
+          onCancel={onCancel}
+        />
+      ) : (
+        <GoogleSheetsDataConnectorForm
+          mode="edit"
+          initial={dc}
+          submitting={submitting}
+          error={error}
+          onSubmit={(input) => onEditDataConnector(dc, input)}
+          onCancel={onCancel}
+        />
+      )}
     </>
   );
 }

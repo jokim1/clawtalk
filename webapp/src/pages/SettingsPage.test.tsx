@@ -277,9 +277,7 @@ function installSettingsFetch() {
                 hasCredential: body.apiKey !== null,
                 credentialHint: body.apiKey ? '••••test' : null,
                 verificationStatus: body.apiKey ? 'verified' : 'missing',
-                lastVerifiedAt: body.apiKey
-                  ? '2026-05-16T12:00:00.000Z'
-                  : null,
+                lastVerifiedAt: body.apiKey ? '2026-05-16T12:00:00.000Z' : null,
                 lastVerificationError: null,
               };
             }
@@ -636,5 +634,244 @@ describe('GoogleAccountSection (flag-gated)', () => {
       }),
     ).toBeNull();
   });
+
+  // ─── Connectors tab ──────────────────────────────────────────────────
+
+  it('Connectors tab: admin sees both sections with bound-talk counts and status pills', async () => {
+    installConnectorsFetch({
+      channels: [
+        {
+          id: 'ch-1',
+          kind: 'slack',
+          displayName: 'Eng Slack',
+          config: { workspace_id: 'T123', channel_id: 'C123' },
+          hasCredential: false,
+          enabled: true,
+          boundTalkCount: 2,
+          createdAt: '2026-05-22T00:00:00Z',
+          updatedAt: '2026-05-22T00:00:00Z',
+          createdBy: null,
+          updatedBy: null,
+        },
+      ],
+      dataConnectors: [
+        {
+          id: 'dc-1',
+          kind: 'posthog',
+          displayName: 'Prod analytics',
+          config: { project_id: '999', host: 'https://us.posthog.com' },
+          hasCredential: true,
+          enabled: true,
+          boundTalkCount: 0,
+          createdAt: '2026-05-22T00:00:00Z',
+          updatedAt: '2026-05-22T00:00:00Z',
+          createdBy: null,
+          updatedBy: null,
+        },
+      ],
+    });
+
+    render(
+      <MemoryRouter initialEntries={['/app/settings?tab=connectors']}>
+        <SettingsPage
+          user={buildSessionUser()}
+          userRole="owner"
+          onUnauthorized={vi.fn()}
+          onUserUpdated={vi.fn()}
+        />
+      </MemoryRouter>,
+    );
+
+    await screen.findByRole('heading', { name: 'Channels available to talks' });
+    expect(
+      screen.getByRole('heading', { name: 'Data sources available to talks' }),
+    ).toBeTruthy();
+    expect(screen.getByText('Eng Slack')).toBeTruthy();
+    expect(screen.getByText('Used by 2 talks')).toBeTruthy();
+    // Slack channel has no credential → amber pill
+    expect(screen.getByLabelText('Credential missing')).toBeTruthy();
+    // PostHog has credential + enabled → Configuration only pill
+    expect(screen.getByLabelText('Configuration only')).toBeTruthy();
+  });
+
+  it('Connectors tab: member sees rows but no Add/Edit/Delete affordances', async () => {
+    installConnectorsFetch({
+      channels: [
+        {
+          id: 'ch-1',
+          kind: 'slack',
+          displayName: 'Eng Slack',
+          config: {},
+          hasCredential: true,
+          enabled: true,
+          boundTalkCount: 0,
+          createdAt: '2026-05-22T00:00:00Z',
+          updatedAt: '2026-05-22T00:00:00Z',
+          createdBy: null,
+          updatedBy: null,
+        },
+      ],
+      dataConnectors: [],
+    });
+
+    render(
+      <MemoryRouter initialEntries={['/app/settings?tab=connectors']}>
+        <SettingsPage
+          user={buildSessionUser()}
+          userRole="member"
+          onUnauthorized={vi.fn()}
+          onUserUpdated={vi.fn()}
+        />
+      </MemoryRouter>,
+    );
+
+    await screen.findByRole('heading', { name: 'Channels available to talks' });
+    expect(screen.queryByRole('button', { name: '+ Add channel' })).toBeNull();
+    expect(screen.queryByRole('button', { name: /Edit Slack/i })).toBeNull();
+  });
+
+  it('Connectors tab: Delete shows confirmation modal naming the bound talk count', async () => {
+    const helpers = installConnectorsFetch({
+      channels: [
+        {
+          id: 'ch-1',
+          kind: 'slack',
+          displayName: 'Eng Slack',
+          config: {},
+          hasCredential: true,
+          enabled: true,
+          boundTalkCount: 3,
+          createdAt: '2026-05-22T00:00:00Z',
+          updatedAt: '2026-05-22T00:00:00Z',
+          createdBy: null,
+          updatedBy: null,
+        },
+      ],
+      dataConnectors: [],
+    });
+    const user = userEvent.setup();
+
+    render(
+      <MemoryRouter initialEntries={['/app/settings?tab=connectors']}>
+        <SettingsPage
+          user={buildSessionUser()}
+          userRole="owner"
+          onUnauthorized={vi.fn()}
+          onUserUpdated={vi.fn()}
+        />
+      </MemoryRouter>,
+    );
+
+    await screen.findByText('Eng Slack');
+    await user.click(
+      screen.getByRole('button', {
+        name: /Delete Slack\/Telegram channel: Eng Slack/,
+      }),
+    );
+
+    expect(
+      screen.getByRole('heading', { name: /Delete Eng Slack/ }),
+    ).toBeTruthy();
+    expect(
+      screen.getByText(/removes this connector from 3 talks/),
+    ).toBeTruthy();
+
+    await user.click(screen.getByRole('button', { name: 'Delete connector' }));
+
+    expect(helpers.getDeleteChannelCalls()).toContain('ch-1');
+  });
 });
 
+type WorkspaceChannelFixture = {
+  id: string;
+  kind: 'slack' | 'telegram';
+  displayName: string;
+  config: Record<string, unknown>;
+  hasCredential: boolean;
+  enabled: boolean;
+  boundTalkCount: number;
+  createdAt: string;
+  updatedAt: string;
+  createdBy: string | null;
+  updatedBy: string | null;
+};
+
+type WorkspaceDataConnectorFixture = {
+  id: string;
+  kind: 'posthog' | 'google_docs' | 'google_sheets';
+  displayName: string;
+  config: Record<string, unknown>;
+  hasCredential: boolean;
+  enabled: boolean;
+  boundTalkCount: number;
+  createdAt: string;
+  updatedAt: string;
+  createdBy: string | null;
+  updatedBy: string | null;
+};
+
+function installConnectorsFetch(seed: {
+  channels: WorkspaceChannelFixture[];
+  dataConnectors: WorkspaceDataConnectorFixture[];
+}) {
+  let channels = [...seed.channels];
+  let dataConnectors = [...seed.dataConnectors];
+  const deleteChannelCalls: string[] = [];
+  const deleteDataConnectorCalls: string[] = [];
+
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async (request: RequestInfo | URL, init?: RequestInit) => {
+      const url =
+        typeof request === 'string'
+          ? request
+          : request instanceof URL
+            ? request.toString()
+            : request instanceof Request
+              ? request.url
+              : String(request);
+      const method = init?.method || 'GET';
+
+      if (url.endsWith('/api/v1/workspace/channels') && method === 'GET') {
+        return jsonResponse(200, {
+          ok: true,
+          data: { channels },
+        });
+      }
+      if (
+        url.endsWith('/api/v1/workspace/data-connectors') &&
+        method === 'GET'
+      ) {
+        return jsonResponse(200, {
+          ok: true,
+          data: { dataConnectors },
+        });
+      }
+      const deleteChannelMatch = url.match(
+        /\/api\/v1\/workspace\/channels\/([^/?]+)$/,
+      );
+      if (deleteChannelMatch && method === 'DELETE') {
+        const id = decodeURIComponent(deleteChannelMatch[1]);
+        deleteChannelCalls.push(id);
+        channels = channels.filter((c) => c.id !== id);
+        return jsonResponse(200, { ok: true, data: { deleted: true } });
+      }
+      const deleteDcMatch = url.match(
+        /\/api\/v1\/workspace\/data-connectors\/([^/?]+)$/,
+      );
+      if (deleteDcMatch && method === 'DELETE') {
+        const id = decodeURIComponent(deleteDcMatch[1]);
+        deleteDataConnectorCalls.push(id);
+        dataConnectors = dataConnectors.filter((d) => d.id !== id);
+        return jsonResponse(200, { ok: true, data: { deleted: true } });
+      }
+
+      throw new Error(`Unexpected fetch: ${method} ${url}`);
+    }),
+  );
+
+  return {
+    getDeleteChannelCalls: () => deleteChannelCalls,
+    getDeleteDataConnectorCalls: () => deleteDataConnectorCalls,
+  };
+}
