@@ -77,9 +77,12 @@ describe('buildContentOutline', () => {
     const content = makeContent({
       bodyMarkdown: blocks.join('\n\n'),
     });
-    const outline = buildContentOutline(content, 2048);
+    // 4096-byte budget — generous enough to fit the header + footer
+    // (which grew with the Kimi-prior hardening) plus a handful of
+    // blocks, while still forcing truncation of the rest.
+    const outline = buildContentOutline(content, 4096);
     expect(new TextEncoder().encode(outline).byteLength).toBeLessThanOrEqual(
-      2048,
+      4096,
     );
     expect(outline).toMatch(/\[… \d+ more blocks omitted/);
   });
@@ -117,5 +120,31 @@ describe('buildContentOutline', () => {
     });
     const outline = buildContentOutline(content);
     expect(outline).toContain('do NOT write substantive new prose into chat');
+  });
+
+  // Kimi 2.6 refused to call propose_content_append when the user asked
+  // "can you add a summary paragraph at the end to @doc" — it read the
+  // rhetorical "can you?" as a capability inquiry and replied with text
+  // explaining what it would do. These assertions lock in the prompt
+  // additions that address both that and the related "I cannot directly
+  // edit @doc because it is not a bound Google Doc" pattern.
+  it('teaches the agent that rhetorical questions are instructions', () => {
+    const content = makeContent({
+      bodyMarkdown: '<!-- anchor:ffff11112222 -->\nSome prose.',
+    });
+    const outline = buildContentOutline(content);
+    expect(outline).toContain('Rhetorical questions count as instructions');
+    expect(outline).toContain('Can you add a summary?');
+  });
+
+  it('forbids the "I cannot directly edit" capability-narration pattern', () => {
+    const content = makeContent({
+      bodyMarkdown: '<!-- anchor:ffff11112222 -->\nSome prose.',
+    });
+    const outline = buildContentOutline(content);
+    expect(outline).toContain('NEVER narrate your capabilities');
+    expect(outline).toContain(
+      'I cannot directly edit @doc because it is not a bound Google Doc',
+    );
   });
 });
