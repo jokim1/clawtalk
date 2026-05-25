@@ -177,6 +177,35 @@ export type TalkContentUpdatedEvent = {
   appliedAnchorIds?: string[];
 };
 
+export type TalkContentProposalCreatedEvent = {
+  contentId: string;
+  proposalId: string;
+  messageId: string | null;
+  afterAnchorId: string | null;
+  agentId: string | null;
+};
+
+export type TalkContentProposalStaleEvent = {
+  contentId: string;
+  proposalId: string;
+  reason: string;
+};
+
+export type TalkToolCallStartedEvent = {
+  talkId: string;
+  threadId?: string | null;
+  runId: string;
+  agentId?: string | null;
+  agentNickname?: string | null;
+  responseGroupId?: string | null;
+  sequenceIndex?: number | null;
+  routeStepPosition?: number | null;
+  providerId?: string | null;
+  modelId?: string | null;
+  toolName: string;
+  arguments?: Record<string, unknown> | null;
+};
+
 interface TalkStreamCallbacks {
   onMessageAppended: (event: MessageAppendedEvent) => void;
   onRunStarted: (event: TalkRunStartedEvent) => void;
@@ -195,6 +224,9 @@ interface TalkStreamCallbacks {
   onBrowserBlocked?: (event: TalkBrowserBlockedEvent) => void;
   onBrowserUnblocked?: (event: TalkBrowserUnblockedEvent) => void;
   onContentUpdated?: (event: TalkContentUpdatedEvent) => void;
+  onContentProposalCreated?: (event: TalkContentProposalCreatedEvent) => void;
+  onContentProposalStale?: (event: TalkContentProposalStaleEvent) => void;
+  onToolCallStarted?: (event: TalkToolCallStartedEvent) => void;
   onReplayGap: () => void | Promise<void>;
   onStateChange?: (state: TalkStreamState) => void;
   onUnauthorized: () => void;
@@ -420,6 +452,21 @@ export function openTalkStream(input: OpenTalkStreamInput): TalkStreamHandle {
       case 'content_updated': {
         const payload = parseFrame<TalkContentUpdatedEvent>(frame);
         if (payload) input.onContentUpdated?.(payload);
+        return;
+      }
+      case 'content_proposal_created': {
+        const payload = parseFrame<TalkContentProposalCreatedEvent>(frame);
+        if (payload) input.onContentProposalCreated?.(payload);
+        return;
+      }
+      case 'content_proposal_stale': {
+        const payload = parseFrame<TalkContentProposalStaleEvent>(frame);
+        if (payload) input.onContentProposalStale?.(payload);
+        return;
+      }
+      case 'tool_call_started': {
+        const payload = parseFrame<TalkToolCallStartedEvent>(frame);
+        if (payload) input.onToolCallStarted?.(payload);
         return;
       }
       case 'replay_gap': {

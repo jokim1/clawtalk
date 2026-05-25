@@ -5854,3 +5854,325 @@ a {
     border-right: 0;
   }
 }
+
+/* ── Proposal cards (PR 6) ─────────────────────────────────────────
+   Rendered inline in the chat timeline as the visible end of an
+   agent's `propose_content_append` tool call. Treatment Y from the
+   design board: slate-50 background, flat Lucide icon, green Accept,
+   outlined Reject. */
+
+.proposal-card {
+  margin: 0.85rem 0;
+  padding: 0.85rem 1rem;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  font: inherit;
+  color: #1d2433;
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+}
+
+.proposal-card:focus-visible {
+  outline: 2px solid #2b63d9;
+  outline-offset: 2px;
+}
+
+.proposal-card-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.proposal-card-icon {
+  color: #64748b;
+  flex-shrink: 0;
+}
+
+.proposal-card-label {
+  font-size: 0.6875rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  font-weight: 700;
+  color: #475569;
+}
+
+.proposal-card-monogram {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.5rem;
+  height: 1.5rem;
+  border-radius: 999px;
+  color: #fff;
+  font-size: 0.7rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  margin-left: 0.25rem;
+}
+
+.proposal-card-monogram[data-color='green-500'] {
+  background: #10b981;
+}
+
+.proposal-card-monogram[data-color='blue-500'] {
+  background: #3b82f6;
+}
+
+.proposal-card-monogram[data-color='red-500'] {
+  background: #ef4444;
+}
+
+.proposal-card-monogram[data-color='amber-500'] {
+  background: #f59e0b;
+}
+
+.proposal-card-monogram[data-color='teal-500'] {
+  background: #14b8a6;
+}
+
+.proposal-card-agent-name {
+  font-size: 0.85rem;
+  color: #1d2433;
+  font-weight: 600;
+}
+
+.proposal-card-rationale {
+  margin: 0;
+  color: #475569;
+  font-size: 0.9rem;
+  line-height: 1.45;
+}
+
+.proposal-card-preview {
+  margin: 0;
+  padding: 0.65rem 0.85rem;
+  background: #fff;
+  border: 1px solid #e3eaf5;
+  border-radius: 4px;
+  color: #1d2433;
+  font: inherit;
+  font-size: 0.85rem;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 16rem;
+  overflow-y: auto;
+}
+
+.proposal-card-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.proposal-card-accept-button {
+  min-height: 36px;
+  padding: 0.45rem 0.95rem;
+  background: #16a34a;
+  border: 1px solid #16a34a;
+  color: #fff;
+  border-radius: 8px;
+  font: inherit;
+  font-size: 0.9rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition:
+    background 140ms ease,
+    border-color 140ms ease,
+    color 140ms ease,
+    opacity 140ms ease;
+}
+
+.proposal-card-accept-button:hover:not(:disabled) {
+  background: #15893f;
+  border-color: #15893f;
+}
+
+.proposal-card-accept-button:focus-visible {
+  outline: 2px solid #1d2433;
+  outline-offset: 2px;
+}
+
+.proposal-card-accept-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.proposal-card-reject-button {
+  min-height: 36px;
+  padding: 0.45rem 0.95rem;
+  background: #fff;
+  border: 1px solid #cbd5e1;
+  color: #1d2433;
+  border-radius: 8px;
+  font: inherit;
+  font-size: 0.9rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition:
+    background 140ms ease,
+    border-color 140ms ease,
+    color 140ms ease;
+}
+
+.proposal-card-reject-button:hover:not(:disabled) {
+  background: #f1f5f9;
+  border-color: #94a3b8;
+}
+
+.proposal-card-reject-button:focus-visible {
+  outline: 2px solid #1d2433;
+  outline-offset: 2px;
+}
+
+.proposal-card-reject-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.proposal-card-copy-button {
+  min-height: 32px;
+  padding: 0.35rem 0.75rem;
+  background: #fff;
+  border: 1px solid #cbd5e1;
+  color: #475569;
+  border-radius: 6px;
+  font: inherit;
+  font-size: 0.8rem;
+  font-weight: 600;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.proposal-card-copy-button:hover {
+  background: #f1f5f9;
+  border-color: #94a3b8;
+}
+
+/* Streaming placeholder state. */
+.proposal-card-streaming {
+  background: #f8fafc;
+}
+
+.proposal-card-streaming-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.proposal-card-streaming-text {
+  font-size: 0.85rem;
+  color: #64748b;
+  font-style: italic;
+}
+
+.proposal-card-skeleton-lines {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.proposal-card-skeleton-line {
+  display: block;
+  height: 0.55rem;
+  border-radius: 999px;
+  background: linear-gradient(
+    90deg,
+    #e2e8f0 0%,
+    #f1f5f9 50%,
+    #e2e8f0 100%
+  );
+  background-size: 200% 100%;
+  animation: proposal-card-skeleton-pulse 1.6s ease-in-out infinite;
+}
+
+.proposal-card-skeleton-line-short {
+  width: 60%;
+}
+
+@keyframes proposal-card-skeleton-pulse {
+  0% {
+    background-position: 200% 0;
+  }
+  100% {
+    background-position: -200% 0;
+  }
+}
+
+/* Resolved states. */
+.proposal-card-accepted {
+  background: #f8fafc;
+  padding: 0.55rem 0.85rem;
+}
+
+.proposal-card-summary-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.proposal-card-summary-text {
+  font-size: 0.85rem;
+  color: #475569;
+}
+
+.proposal-card-drift-pill {
+  font-size: 0.7rem;
+  padding: 0.1rem 0.45rem;
+  background: #fef3c7;
+  border: 1px solid #fcd34d;
+  color: #92400e;
+  border-radius: 999px;
+}
+
+.proposal-card-rejected {
+  background: transparent;
+  border-color: #e2e8f0;
+  padding: 0.4rem 0.85rem;
+}
+
+.proposal-card-rejected-text {
+  font-size: 0.82rem;
+  color: #94a3b8;
+}
+
+/* Stale state — anchor no longer in document. */
+.proposal-card-stale {
+  opacity: 0.6;
+}
+
+.proposal-card-stale-pill {
+  font-size: 0.7rem;
+  padding: 0.1rem 0.45rem;
+  background: #fee2e2;
+  border: 1px solid #fca5a5;
+  color: #991b1b;
+  border-radius: 999px;
+  margin-left: 0.25rem;
+}
+
+/* "Accept moment" highlight: the newly-inserted block in the editor
+   gets data-just-inserted="true" and CSS fades the background. */
+.rich-text-editor .ProseMirror [data-just-inserted='true'] {
+  background-color: rgba(167, 243, 208, 0.6);
+  transition: background-color 1200ms ease-out;
+  border-radius: 4px;
+}
+
+.rich-text-editor .ProseMirror [data-just-inserted='false'] {
+  background-color: transparent;
+  transition: background-color 1200ms ease-out;
+}
+
+/* Compact spacing inside the chat timeline. */
+.message + .proposal-card,
+.proposal-card + .proposal-card {
+  margin-top: 0.4rem;
+}
