@@ -786,7 +786,7 @@ export function buildContentOutline(
   const header = [
     `**The Doc — this Talk's attached document:** "${content.title}" (v${content.bodyVersion})`,
     '',
-    'This Talk has exactly one long-form document attached, and the outline below IS that document. When the user says "the doc", "the document", "this doc", "summarize the doc", or anything similar, they mean THIS document — the one outlined below. Do NOT look for a Google Doc binding. Do NOT search [S1]/[S2]/etc. Do NOT inspect chat attachments whose filename happens to match this title (the user often uploads a draft .md before promoting it into the doc — those are stale source material, not the live document). The outline below is the canonical, current copy.',
+    'This Talk has exactly one long-form document attached, and the outline below IS that document. When the user says "the doc", "the document", "this doc", "summarize the doc", or anything similar, they mean THIS document — the one outlined below. The user can also reference it explicitly with the literal token `@doc` in their message — when you see `@doc` anywhere in the latest user turn, treat it as a deterministic reference to THIS section. Do NOT look for a Google Doc binding. Do NOT search [S1]/[S2]/etc. Do NOT inspect chat attachments whose filename happens to match this title (the user often uploads a draft .md before promoting it into the doc — those are stale source material, not the live document). The outline below is the canonical, current copy.',
   ].join('\n');
   const footer =
     'To suggest a new block on this document, call `propose_content_append({ after_anchor_id, markdown, rationale })`. The user reviews and accepts or rejects in the Talk UI; you are not editing the document directly.';

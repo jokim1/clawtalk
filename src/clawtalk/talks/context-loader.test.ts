@@ -71,6 +71,7 @@ describe('buildContentOutline', () => {
     expect(outline).toContain('**The Doc');
     expect(outline).toContain('"Why Fortnite UEFN Failed" (v3)');
     expect(outline.toLowerCase()).toContain('google doc');
+    expect(outline).toContain('@doc');
     expect(outline).toContain(
       '[anchor:aaaa11112222] heading "The Audience Trap"',
     );

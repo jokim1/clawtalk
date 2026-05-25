@@ -2958,6 +2958,11 @@ export function TalkDetailPage({
   const [talkContent, setTalkContent] = useState<Content | null>(null);
   const [talkContentLoading, setTalkContentLoading] = useState(false);
   const [talkContentError, setTalkContentError] = useState<string | null>(null);
+  // @doc mention typeahead state. Tracks the index of the live `@` in
+  // the composer draft so we can replace it with `@doc ` on selection.
+  const [docMentionState, setDocMentionState] = useState<{
+    atIndex: number;
+  } | null>(null);
   const [talkContentSaveStatus, setTalkContentSaveStatus] =
     useState<RichTextEditorSaveStatus>('idle');
   const [talkContentConflict, setTalkContentConflict] = useState(false);
@@ -7196,7 +7201,42 @@ export function TalkDetailPage({
     if (state.kind === 'ready' && state.sendState.status === 'error') {
       dispatch({ type: 'SEND_CLEARED' });
     }
+    // @doc trigger: open the typeahead when the user types `@` at a
+    // word boundary in a Talk that has an attached doc. The literal
+    // `@` stays in the textarea; selection replaces it with `@doc `.
+    if (talkContent) {
+      const ta = textareaRef.current;
+      const pos = ta?.selectionStart ?? value.length;
+      const atIndex = pos - 1;
+      if (atIndex >= 0 && value[atIndex] === '@') {
+        const prev = atIndex > 0 ? value[atIndex - 1] : '';
+        const atWordBoundary = atIndex === 0 || /\s/.test(prev);
+        if (atWordBoundary) {
+          setDocMentionState({ atIndex });
+          return;
+        }
+      }
+    }
+    if (docMentionState !== null) setDocMentionState(null);
   };
+
+  const insertDocMention = useCallback(() => {
+    if (!docMentionState) return;
+    const { atIndex } = docMentionState;
+    const before = draft.slice(0, atIndex);
+    const after = draft.slice(atIndex + 1);
+    const inserted = '@doc ';
+    const next = before + inserted + after;
+    setDraft(next);
+    setDocMentionState(null);
+    requestAnimationFrame(() => {
+      const ta = textareaRef.current;
+      if (!ta) return;
+      ta.focus();
+      const cursor = before.length + inserted.length;
+      ta.setSelectionRange(cursor, cursor);
+    });
+  }, [docMentionState, draft]);
 
   const resizeComposerTextarea = useCallback(() => {
     const textarea = textareaRef.current;
@@ -7732,6 +7772,18 @@ export function TalkDetailPage({
   const handleComposerKeyDown = (
     event: ReactKeyboardEvent<HTMLTextAreaElement>,
   ) => {
+    if (docMentionState) {
+      if (event.key === 'Enter' || event.key === 'Tab') {
+        event.preventDefault();
+        insertDocMention();
+        return;
+      }
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        setDocMentionState(null);
+        return;
+      }
+    }
     if (
       event.key !== 'Enter' ||
       event.shiftKey ||
@@ -12469,6 +12521,27 @@ export function TalkDetailPage({
                   ) : null}
 
                   <div className="composer-input-shell">
+                    {docMentionState && talkContent ? (
+                      <div
+                        className="doc-mention-menu"
+                        role="listbox"
+                        aria-label="Mentions"
+                      >
+                        <button
+                          type="button"
+                          role="option"
+                          aria-selected="true"
+                          className="doc-mention-menu-item"
+                          onMouseDown={(event) => event.preventDefault()}
+                          onClick={insertDocMention}
+                        >
+                          <span className="doc-mention-menu-prefix">@doc</span>
+                          <span className="doc-mention-menu-title">
+                            {talkContent.title}
+                          </span>
+                        </button>
+                      </div>
+                    ) : null}
                     <textarea
                       ref={textareaRef}
                       value={draft}

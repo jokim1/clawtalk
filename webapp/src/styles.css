@@ -3216,6 +3216,7 @@ a {
 }
 
 .composer-input-shell {
+  position: relative;
   display: grid;
   gap: 0.55rem;
   border: 1px solid #c8d3e9;
@@ -3226,6 +3227,57 @@ a {
 .composer-input-shell:focus-within {
   border-color: #2759d6;
   box-shadow: 0 0 0 3px rgba(39, 89, 214, 0.12);
+}
+
+.doc-mention-menu {
+  position: absolute;
+  bottom: calc(100% + 0.35rem);
+  left: 0;
+  min-width: 16rem;
+  padding: 0.3rem;
+  background: #fff;
+  border: 1px solid #d8dfec;
+  border-radius: 10px;
+  box-shadow: 0 10px 30px rgba(15, 23, 42, 0.14);
+  z-index: 50;
+}
+
+.doc-mention-menu-item {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  width: 100%;
+  padding: 0.5rem 0.65rem;
+  background: transparent;
+  border: 0;
+  border-radius: 6px;
+  cursor: pointer;
+  text-align: left;
+  color: #1d2433;
+  font: inherit;
+  line-height: 1.2;
+}
+
+.doc-mention-menu-item:hover,
+.doc-mention-menu-item:focus-visible {
+  background: #eef2f8;
+  outline: none;
+}
+
+.doc-mention-menu-prefix {
+  font-family:
+    'JetBrains Mono', 'IBM Plex Mono', ui-monospace, SFMono-Regular, monospace;
+  font-size: 0.82rem;
+  color: #2759d6;
+  font-weight: 600;
+}
+
+.doc-mention-menu-title {
+  font-size: 0.86rem;
+  color: #475569;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .composer-controls {
