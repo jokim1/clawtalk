@@ -1278,7 +1278,7 @@ export type ContentProposalSummary = {
   proposedByRunId: string | null;
   proposedByAgentId: string | null;
   proposedByMessageId: string | null;
-  kind: 'append' | 'replace';
+  kind: 'append' | 'replace' | 'bulk';
   afterAnchorId: string | null;
   targetAnchorId: string | null;
   insertedMarkdown: string;

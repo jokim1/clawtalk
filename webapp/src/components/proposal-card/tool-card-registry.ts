@@ -34,14 +34,15 @@ export function getToolCard(toolName: string): ToolCardComponent | null {
 export function toolNameForProposal(
   proposal: Pick<ContentProposalSummary, 'kind'>,
 ): string {
-  return proposal.kind === 'replace'
-    ? 'propose_content_replace'
-    : 'propose_content_append';
+  if (proposal.kind === 'replace') return 'propose_content_replace';
+  if (proposal.kind === 'bulk') return 'propose_content_bulk';
+  return 'propose_content_append';
 }
 
 // Default registrations.
 registerToolCard('propose_content_append', ProposalCard);
 registerToolCard('propose_content_replace', ProposalCard);
+registerToolCard('propose_content_bulk', ProposalCard);
 
 export { ProposalCard };
 export type { ProposalCardProps } from './ProposalCard';

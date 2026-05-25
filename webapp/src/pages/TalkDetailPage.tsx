@@ -4573,34 +4573,58 @@ export function TalkDetailPage({
       const previousContent = content;
       const previousProposal = proposal;
       try {
-        const currentDoc = ensureAnchorIds(
-          markdownToTiptapJson(content.bodyMarkdown),
-        );
-        const insertedDoc = markdownToTiptapJson(proposal.insertedMarkdown);
-        const insertedNodes: RichTextNode[] = insertedDoc.content ?? [];
-        const patchResult =
-          proposal.kind === 'replace' && proposal.targetAnchorId
-            ? replaceBlockByAnchor({
-                doc: currentDoc,
-                targetAnchorId: proposal.targetAnchorId,
-                replacementNodes: insertedNodes,
-              })
-            : insertAfterAnchor({
-                doc: currentDoc,
-                afterAnchorId: proposal.afterAnchorId,
-                insertedNodes,
-              });
-        if (!('kind' in patchResult)) {
-          const nextDoc = patchResult.doc;
-          const nextMarkdown = tiptapJsonToMarkdown(nextDoc);
-          const nextAnchorMap = await computeAnchorMap(nextDoc);
+        if (proposal.kind === 'bulk') {
+          // Bulk replaces the whole body. Build a fresh stamped doc
+          // from the proposal markdown so anchors line up with what the
+          // server will compute on the authoritative path.
+          const newBodyDoc = ensureAnchorIds(
+            markdownToTiptapJson(proposal.insertedMarkdown),
+          );
+          const newBodyMarkdown = tiptapJsonToMarkdown(newBodyDoc);
+          const newAnchorMap = await computeAnchorMap(newBodyDoc);
+          const appliedAnchorIds = (newBodyDoc.content ?? [])
+            .map((node) => (node.attrs?.dataAnchorId ?? null) as string | null)
+            .filter((id): id is string => id !== null);
           setTalkContent({
             ...content,
-            bodyMarkdown: nextMarkdown,
+            bodyMarkdown: newBodyMarkdown,
             bodyVersion: content.bodyVersion + 1,
-            anchorMap: nextAnchorMap,
+            anchorMap: newAnchorMap,
           });
-          setJustInsertedAnchorIds(patchResult.appliedAnchorIds);
+          // Don't fire the green-fade highlight for bulk — flashing the
+          // whole doc green is more noise than signal.
+          setJustInsertedAnchorIds([]);
+          void appliedAnchorIds;
+        } else {
+          const currentDoc = ensureAnchorIds(
+            markdownToTiptapJson(content.bodyMarkdown),
+          );
+          const insertedDoc = markdownToTiptapJson(proposal.insertedMarkdown);
+          const insertedNodes: RichTextNode[] = insertedDoc.content ?? [];
+          const patchResult =
+            proposal.kind === 'replace' && proposal.targetAnchorId
+              ? replaceBlockByAnchor({
+                  doc: currentDoc,
+                  targetAnchorId: proposal.targetAnchorId,
+                  replacementNodes: insertedNodes,
+                })
+              : insertAfterAnchor({
+                  doc: currentDoc,
+                  afterAnchorId: proposal.afterAnchorId,
+                  insertedNodes,
+                });
+          if (!('kind' in patchResult)) {
+            const nextDoc = patchResult.doc;
+            const nextMarkdown = tiptapJsonToMarkdown(nextDoc);
+            const nextAnchorMap = await computeAnchorMap(nextDoc);
+            setTalkContent({
+              ...content,
+              bodyMarkdown: nextMarkdown,
+              bodyVersion: content.bodyVersion + 1,
+              anchorMap: nextAnchorMap,
+            });
+            setJustInsertedAnchorIds(patchResult.appliedAnchorIds);
+          }
         }
       } catch {
         // Optimistic step is best-effort. If it throws, fall back to

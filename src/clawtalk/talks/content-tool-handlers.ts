@@ -122,6 +122,108 @@ export async function executeProposeContentAppend(
   }
 }
 
+export async function executeProposeContentBulk(
+  input: ProposeContentToolInput,
+): Promise<ToolResult> {
+  const rawMarkdown = input.args.markdown;
+  const rawSummary = input.args.summary;
+  const rawRationale = input.args.rationale;
+
+  if (typeof rawMarkdown !== 'string' || rawMarkdown.trim().length === 0) {
+    return {
+      result:
+        'Error: propose_content_bulk requires a non-empty `markdown` string (the entire new document body).',
+      isError: true,
+    };
+  }
+  if (typeof rawSummary !== 'string' || rawSummary.trim().length === 0) {
+    return {
+      result:
+        'Error: `summary` is required for propose_content_bulk — give the user one short sentence describing what changed (e.g. "Tighten sections 2-3 and add a closing paragraph"). This is the only preview shown on the card.',
+      isError: true,
+    };
+  }
+  if (
+    rawRationale !== null &&
+    rawRationale !== undefined &&
+    typeof rawRationale !== 'string'
+  ) {
+    return {
+      result: 'Error: `rationale` must be a string when provided.',
+      isError: true,
+    };
+  }
+
+  const content = await getContentByTalkId(input.talkId);
+  if (!content) {
+    return {
+      result:
+        'Error: this Talk has no attached document. Cannot propose a bulk rewrite.',
+      isError: true,
+    };
+  }
+
+  // The summary is the user-visible card text. If a longer rationale
+  // is also provided, append it after the summary in the rationale
+  // field so the card can surface both (summary as the headline).
+  const combinedRationale = rawRationale
+    ? `${rawSummary.trim()}\n\n${rawRationale.trim()}`
+    : rawSummary.trim();
+
+  const result = await createProposal({
+    contentId: content.id,
+    ownerId: content.ownerId,
+    kind: 'bulk',
+    afterAnchorId: null,
+    targetAnchorId: null,
+    insertedMarkdown: rawMarkdown,
+    rationale: combinedRationale,
+    proposedByRunId: input.runId,
+    proposedByAgentId: input.agentId ?? null,
+    proposedByMessageId: input.messageId ?? null,
+  });
+
+  switch (result.kind) {
+    case 'content_not_found':
+      return {
+        result: 'Error: the attached document was not found.',
+        isError: true,
+      };
+    case 'anchor_missing':
+      return {
+        result:
+          'Error: bulk proposals should not reference an anchor — please retry without anchor fields.',
+        isError: true,
+      };
+    case 'empty_after_sanitize':
+      return {
+        result:
+          'Error: the proposed body is empty after sanitization. Provide real content (no HTML-only payloads).',
+        isError: true,
+      };
+    case 'invalid_kind_anchors':
+      return {
+        result:
+          'Error: bulk proposals must not set `after_anchor_id` or `target_anchor_id` — they replace the entire document body.',
+        isError: true,
+      };
+    case 'doc_size_limit':
+      return {
+        result: `Error: the proposed body exceeds the document size limit (would be ${result.wouldBeBytes} bytes).`,
+        isError: true,
+      };
+    case 'ok':
+      return {
+        result: JSON.stringify({
+          proposalId: result.proposal.id,
+          status: result.proposal.status,
+          kind: 'bulk',
+          contentId: content.id,
+        }),
+      };
+  }
+}
+
 export async function executeProposeContentReplace(
   input: ProposeContentToolInput,
 ): Promise<ToolResult> {
