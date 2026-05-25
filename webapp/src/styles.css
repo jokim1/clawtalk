@@ -6132,6 +6132,51 @@ a {
   border-radius: 999px;
 }
 
+.proposal-card-drift-pill[data-replace='true'] {
+  background: #fed7aa;
+  border-color: #f97316;
+  color: #7c2d12;
+  font-weight: 500;
+}
+
+.proposal-card-target-preview {
+  display: flex;
+  gap: 0.4rem;
+  align-items: baseline;
+  margin: 0.25rem 0 0.4rem;
+  padding: 0.35rem 0.55rem;
+  background: #f8fafc;
+  border-left: 3px solid #cbd5e1;
+  border-radius: 0 4px 4px 0;
+  font-size: 0.82rem;
+  color: #475569;
+}
+
+.proposal-card-target-label {
+  font-weight: 600;
+  color: #64748b;
+  flex-shrink: 0;
+}
+
+.proposal-card-target-text {
+  font-style: italic;
+  color: #475569;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.proposal-card-drift-warning {
+  margin: 0.35rem 0 0.4rem;
+  padding: 0.4rem 0.6rem;
+  background: #fff7ed;
+  border: 1px solid #fdba74;
+  border-radius: 4px;
+  color: #9a3412;
+  font-size: 0.78rem;
+  line-height: 1.35;
+}
+
 .proposal-card-rejected {
   background: transparent;
   border-color: #e2e8f0;
