@@ -12,7 +12,7 @@
 //
 // Sibling: `tool-card-registry.ts` (lookup keyed by tool name).
 
-import { Copy, FileEdit, FilePlus, Replace } from 'lucide-react';
+import { Copy, FileEdit, FilePlus, FileText, Replace } from 'lucide-react';
 import {
   useCallback,
   useEffect,
@@ -134,7 +134,13 @@ export function ProposalCard({
 
   if (state.kind === 'streaming') {
     const isReplace = state.toolName === 'propose_content_replace';
-    const StreamingIcon = isReplace ? Replace : FileEdit;
+    const isBulk = state.toolName === 'propose_content_bulk';
+    const StreamingIcon = isBulk ? FileText : isReplace ? Replace : FileEdit;
+    const streamingLabel = isBulk
+      ? 'Rewrite proposal'
+      : isReplace
+        ? 'Replacement proposal'
+        : 'Proposal';
     return (
       <div className="proposal-card proposal-card-streaming" role="status">
         <div className="proposal-card-header">
@@ -143,9 +149,7 @@ export function ProposalCard({
             className="proposal-card-icon"
             aria-hidden="true"
           />
-          <span className="proposal-card-label">
-            {isReplace ? 'Replacement proposal' : 'Proposal'}
-          </span>
+          <span className="proposal-card-label">{streamingLabel}</span>
           <AgentMonogram agent={agent} />
           <span className="proposal-card-agent-name">{agent.label}</span>
         </div>
@@ -169,7 +173,12 @@ export function ProposalCard({
   if (state.kind === 'accepted') {
     const { proposal, driftDetected } = state;
     const isReplace = proposal.kind === 'replace';
-    const verbPhrase = isReplace ? 'rewrote a section' : 'added a section';
+    const isBulk = proposal.kind === 'bulk';
+    const verbPhrase = isBulk
+      ? 'rewrote the doc'
+      : isReplace
+        ? 'rewrote a section'
+        : 'added a section';
     const driftLabel =
       isReplace && driftDetected
         ? 'Your edit was overwritten'
@@ -215,10 +224,18 @@ export function ProposalCard({
   if (state.kind === 'stale') {
     const { proposal } = state;
     const isReplace = proposal.kind === 'replace';
-    const StaleIcon = isReplace ? Replace : FilePlus;
-    const staleLabel = isReplace
-      ? 'Target block no longer in document'
-      : 'Anchor no longer in document';
+    const isBulk = proposal.kind === 'bulk';
+    const StaleIcon = isBulk ? FileText : isReplace ? Replace : FilePlus;
+    const staleLabel = isBulk
+      ? 'Doc changed since this rewrite was proposed'
+      : isReplace
+        ? 'Target block no longer in document'
+        : 'Anchor no longer in document';
+    const staleHeading = isBulk
+      ? 'Rewrite proposal'
+      : isReplace
+        ? 'Replacement proposal'
+        : 'Proposal';
     return (
       <div className="proposal-card proposal-card-stale" aria-disabled="true">
         <div className="proposal-card-header">
@@ -227,9 +244,7 @@ export function ProposalCard({
             className="proposal-card-icon"
             aria-hidden="true"
           />
-          <span className="proposal-card-label">
-            {isReplace ? 'Replacement proposal' : 'Proposal'}
-          </span>
+          <span className="proposal-card-label">{staleHeading}</span>
           <AgentMonogram agent={agent} />
           <span className="proposal-card-agent-name">{agent.label}</span>
           <span className="proposal-card-stale-pill">{staleLabel}</span>
@@ -237,7 +252,9 @@ export function ProposalCard({
         {proposal.rationale ? (
           <p className="proposal-card-rationale">{proposal.rationale}</p>
         ) : null}
-        <PreviewMarkdown markdown={proposal.insertedMarkdown} />
+        {isBulk ? null : (
+          <PreviewMarkdown markdown={proposal.insertedMarkdown} />
+        )}
         <div className="proposal-card-actions">
           <button
             type="button"
@@ -260,7 +277,13 @@ export function ProposalCard({
     targetPreview,
   } = state;
   const isReplace = proposal.kind === 'replace';
-  const PendingIcon = isReplace ? Replace : FilePlus;
+  const isBulk = proposal.kind === 'bulk';
+  const PendingIcon = isBulk ? FileText : isReplace ? Replace : FilePlus;
+  const pendingLabel = isBulk
+    ? 'Rewrite proposal'
+    : isReplace
+      ? 'Replacement proposal'
+      : 'Proposal';
   const titleId = `proposal-card-title-${proposal.id}`;
   const rationaleId = proposal.rationale
     ? `proposal-card-rationale-${proposal.id}`
@@ -298,7 +321,7 @@ export function ProposalCard({
           aria-hidden="true"
         />
         <span className="proposal-card-label" id={titleId}>
-          {isReplace ? 'Replacement proposal' : 'Proposal'}
+          {pendingLabel}
         </span>
         <AgentMonogram agent={agent} />
         <span className="proposal-card-agent-name">{agent.label}</span>
@@ -318,13 +341,21 @@ export function ProposalCard({
           </span>
         </div>
       ) : null}
+      {isBulk ? (
+        <p className="proposal-card-bulk-note" role="note">
+          Accepting will replace the entire document body. No per-block diff
+          is shown; the rewrite is described above.
+        </p>
+      ) : null}
       {showPreAcceptDriftWarning ? (
         <p className="proposal-card-drift-warning" role="status">
           You edited this block after the agent wrote this proposal. Accepting
           will overwrite your changes.
         </p>
       ) : null}
-      <PreviewMarkdown markdown={proposal.insertedMarkdown} />
+      {isBulk ? null : (
+        <PreviewMarkdown markdown={proposal.insertedMarkdown} />
+      )}
       <div className="proposal-card-actions">
         <button
           type="button"

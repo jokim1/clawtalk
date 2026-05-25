@@ -6177,6 +6177,18 @@ a {
   line-height: 1.35;
 }
 
+.proposal-card-bulk-note {
+  margin: 0.35rem 0 0.4rem;
+  padding: 0.4rem 0.6rem;
+  background: #f8fafc;
+  border: 1px solid #cbd5e1;
+  border-radius: 4px;
+  color: #475569;
+  font-size: 0.78rem;
+  line-height: 1.35;
+  font-style: italic;
+}
+
 .proposal-card-rejected {
   background: transparent;
   border-color: #e2e8f0;

@@ -14,12 +14,14 @@
 
 import { getDbPg } from '../../db.js';
 import {
+  ANCHOR_ATTR_KEY,
   type AnchorMap,
   type RichTextDocument,
   type RichTextNode,
   computeAnchorMap,
   ensureAnchorIds,
   findBlockIndexByAnchor,
+  getAnchorId,
   insertAfterAnchor,
   markdownToTiptapJson,
   plainTextOf,
@@ -33,7 +35,7 @@ import {
 import { emitOutboxEvent } from '../talks/outbox-emit.js';
 
 export const CONTENT_BODY_BYTE_LIMIT = 512_000;
-export type ProposalKind = 'append' | 'replace';
+export type ProposalKind = 'append' | 'replace' | 'bulk';
 export type ProposalStatus = 'pending' | 'accepted' | 'rejected' | 'stale';
 
 export interface ContentRecord {
@@ -374,17 +376,24 @@ export async function updateContentBody(input: {
     return { kind: 'conflict', current: toContent(refetch[0]) };
   }
 
-  // In the same transaction, mark stale any pending proposal whose
-  // anchor (after_anchor_id for append, target_anchor_id for replace)
-  // no longer exists in the new anchor map. The `?` operator tests
-  // jsonb key existence at the top level — anchor_map_json is shaped
-  // `{ anchorId: { ... } }`, so this checks whether the anchor key is
-  // present.
+  // In the same transaction, mark stale:
+  // - append/replace proposals whose anchor (after_anchor_id or
+  //   target_anchor_id) no longer exists in the new anchor map. The `?`
+  //   operator tests jsonb key existence at the top level —
+  //   anchor_map_json is shaped `{ anchorId: { ... } }`, so this checks
+  //   whether the anchor key is present.
+  // - ALL pending bulk proposals on this content, because bulk proposes
+  //   a whole-doc replacement against `base_content_version`; any user
+  //   edit moves the base out from under the proposal and the user's
+  //   approval would otherwise silently overwrite their fresh edits.
   const anchorMapJson = db.json(anchorMap as never);
-  const staleRows = await db<{ id: string }[]>`
+  const staleRows = await db<{ id: string; reason: string }[]>`
     update public.content_proposals
     set status = 'stale',
-        status_reason = 'anchor_removed',
+        status_reason = case
+          when kind = 'bulk' then 'doc_changed_since_bulk_proposal'
+          else 'anchor_removed'
+        end,
         resolved_at = now()
     where content_id = ${input.contentId}::uuid
       and status = 'pending'
@@ -393,19 +402,20 @@ export async function updateContentBody(input: {
          and not (${anchorMapJson}::jsonb ? after_anchor_id))
         or (target_anchor_id is not null
             and not (${anchorMapJson}::jsonb ? target_anchor_id))
+        or kind = 'bulk'
       )
-    returning id
+    returning id, status_reason as reason
   `;
   const staledProposalIds = staleRows.map((r) => r.id);
 
-  for (const id of staledProposalIds) {
+  for (const row of staleRows) {
     await emitOutboxEvent({
       topic: `talk:${updated.talk_id}`,
       eventType: 'content_proposal_stale',
       payload: {
         contentId: updated.id,
-        proposalId: id,
-        reason: 'anchor_removed',
+        proposalId: row.id,
+        reason: row.reason,
       },
       ownerIds: [updated.owner_id],
     });
@@ -490,6 +500,11 @@ export async function createProposal(
   }
   if (input.kind === 'replace') {
     if (targetAnchorId === null) return { kind: 'invalid_kind_anchors' };
+    if (input.afterAnchorId !== null) return { kind: 'invalid_kind_anchors' };
+  }
+  if (input.kind === 'bulk') {
+    // Bulk replaces the whole body — no anchors involved.
+    if (targetAnchorId !== null) return { kind: 'invalid_kind_anchors' };
     if (input.afterAnchorId !== null) return { kind: 'invalid_kind_anchors' };
   }
 
@@ -673,7 +688,39 @@ export async function acceptProposal(input: {
   const interestedAnchorId =
     proposal.kind === 'append'
       ? proposal.after_anchor_id
-      : proposal.target_anchor_id;
+      : proposal.kind === 'replace'
+        ? proposal.target_anchor_id
+        : null;
+
+  // Bulk proposes a whole-doc replacement against base_content_version.
+  // If the doc has moved since the proposal was made, accepting would
+  // silently overwrite user (or other agent) edits made in the meantime.
+  // updateContentBody auto-stales bulks on user edits, but other accept
+  // paths don't, so the explicit check guards the agent-accept-then-
+  // agent-accept race. Force the user to refresh and re-evaluate.
+  if (
+    proposal.kind === 'bulk' &&
+    proposal.base_content_version !== content.body_version
+  ) {
+    await db`
+      update public.content_proposals
+      set status = 'stale',
+          status_reason = 'doc_changed_since_bulk_proposal',
+          resolved_at = now()
+      where id = ${proposal.id}::uuid
+    `;
+    await emitOutboxEvent({
+      topic: `talk:${content.talk_id}`,
+      eventType: 'content_proposal_stale',
+      payload: {
+        contentId: content.id,
+        proposalId: proposal.id,
+        reason: 'doc_changed_since_bulk_proposal',
+      },
+      ownerIds: [content.owner_id],
+    });
+    return { kind: 'proposal_stale' };
+  }
 
   if (interestedAnchorId !== null) {
     const idx = findBlockIndexByAnchor(parsedStamped, interestedAnchorId);
@@ -763,8 +810,7 @@ export async function acceptProposal(input: {
     nextDoc = (insertResult as { doc: RichTextDocument }).doc;
     appliedAnchorIds = (insertResult as { appliedAnchorIds: string[] })
       .appliedAnchorIds;
-  } else {
-    // replace
+  } else if (proposal.kind === 'replace') {
     const replaceResult = replaceBlockByAnchor({
       doc: parsedStamped,
       targetAnchorId: proposal.target_anchor_id!,
@@ -779,6 +825,19 @@ export async function acceptProposal(input: {
     nextDoc = (replaceResult as { doc: RichTextDocument }).doc;
     appliedAnchorIds = (replaceResult as { appliedAnchorIds: string[] })
       .appliedAnchorIds;
+  } else {
+    // bulk: insertedNodes IS the entire new body. Clear any anchor
+    // attrs leaking from the markdown parser, then let ensureAnchorIds
+    // stamp fresh unique IDs across every block.
+    const cleaned = insertedNodes.map((node) => {
+      const attrs = { ...(node.attrs ?? {}) };
+      delete attrs[ANCHOR_ATTR_KEY];
+      return { ...node, attrs };
+    });
+    nextDoc = ensureAnchorIds({ ...parsedStamped, content: cleaned });
+    appliedAnchorIds = (nextDoc.content ?? [])
+      .map((node) => getAnchorId(node))
+      .filter((id): id is string => id !== null);
   }
 
   const nextMarkdown = tiptapJsonToMarkdown(nextDoc);
@@ -861,6 +920,33 @@ export async function acceptProposal(input: {
           contentId: updated.id,
           proposalId: id,
           reason: 'target_replaced',
+        },
+        ownerIds: [updated.owner_id],
+      });
+    }
+  } else if (proposal.kind === 'bulk') {
+    // A bulk replaces the whole document. Every other pending
+    // proposal (append, replace, bulk) was authored against the old
+    // body — they can no longer apply meaningfully. Stale them all.
+    const siblingRows = await db<{ id: string }[]>`
+      update public.content_proposals
+      set status = 'stale',
+          status_reason = 'superseded_by_bulk',
+          resolved_at = now()
+      where content_id = ${input.contentId}::uuid
+        and status = 'pending'
+        and id <> ${proposal.id}::uuid
+      returning id
+    `;
+    staledSiblingProposalIds = siblingRows.map((r) => r.id);
+    for (const id of staledSiblingProposalIds) {
+      await emitOutboxEvent({
+        topic: `talk:${updated.talk_id}`,
+        eventType: 'content_proposal_stale',
+        payload: {
+          contentId: updated.id,
+          proposalId: id,
+          reason: 'superseded_by_bulk',
         },
         ownerIds: [updated.owner_id],
       });

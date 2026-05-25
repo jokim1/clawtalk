@@ -201,9 +201,10 @@ describe('ProposalCard', () => {
     expect(onCopy).toHaveBeenCalledTimes(1);
   });
 
-  it('tool-card-registry resolves propose_content_append + propose_content_replace to ProposalCard', () => {
+  it('tool-card-registry resolves all three propose_* tools to ProposalCard', () => {
     expect(getToolCard('propose_content_append')).toBe(ProposalCard);
     expect(getToolCard('propose_content_replace')).toBe(ProposalCard);
+    expect(getToolCard('propose_content_bulk')).toBe(ProposalCard);
     expect(getToolCard('unknown_tool')).toBeNull();
   });
 
@@ -289,5 +290,65 @@ describe('ProposalCard', () => {
     expect(
       screen.getByText(/Target block no longer in document/),
     ).toBeTruthy();
+  });
+
+  it('renders the pending bulk card with summary only, no body preview', () => {
+    const state: ProposalCardState = {
+      kind: 'pending',
+      proposal: makeProposal({
+        kind: 'bulk',
+        afterAnchorId: null,
+        targetAnchorId: null,
+        rationale: 'Tighten sections 2-3 and add a closing CTA.',
+        insertedMarkdown:
+          '# Whole new body\n\nFull rewrite goes here, spanning many paragraphs.',
+      }),
+      acceptInFlight: false,
+      acceptDisabled: false,
+    };
+    render(<ProposalCard agent={agent} state={state} />);
+    expect(screen.getByText('Rewrite proposal')).toBeTruthy();
+    expect(
+      screen.getByText('Tighten sections 2-3 and add a closing CTA.'),
+    ).toBeTruthy();
+    expect(
+      screen.getByText(/Accepting will replace the entire document body/),
+    ).toBeTruthy();
+    // The full body markdown must NOT be rendered for bulk.
+    expect(screen.queryByText(/Full rewrite goes here/)).toBeNull();
+  });
+
+  it('renders the accepted bulk summary as "rewrote the doc"', () => {
+    const state: ProposalCardState = {
+      kind: 'accepted',
+      proposal: makeProposal({
+        kind: 'bulk',
+        afterAnchorId: null,
+        targetAnchorId: null,
+        status: 'accepted',
+        resolvedAt: '2026-05-25T18:00:00Z',
+      }),
+    };
+    render(<ProposalCard agent={agent} state={state} />);
+    expect(screen.getByText(/Marcus rewrote the doc/)).toBeTruthy();
+  });
+
+  it('renders the bulk stale card with a "doc changed" label and no preview', () => {
+    const state: ProposalCardState = {
+      kind: 'stale',
+      proposal: makeProposal({
+        kind: 'bulk',
+        afterAnchorId: null,
+        targetAnchorId: null,
+        status: 'stale',
+        statusReason: 'doc_changed_since_bulk_proposal',
+        insertedMarkdown: 'whole new body...',
+      }),
+    };
+    render(<ProposalCard agent={agent} state={state} />);
+    expect(
+      screen.getByText(/Doc changed since this rewrite was proposed/),
+    ).toBeTruthy();
+    expect(screen.queryByText('whole new body...')).toBeNull();
   });
 });

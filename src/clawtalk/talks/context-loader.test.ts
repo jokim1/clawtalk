@@ -70,7 +70,7 @@ describe('buildContentOutline', () => {
   });
 
   it('respects the byte budget by truncating from the bottom at block boundaries', () => {
-    const blocks = Array.from({ length: 100 }, (_, i) => {
+    const blocks = Array.from({ length: 200 }, (_, i) => {
       const anchor = `anchor${i.toString().padStart(6, '0')}`;
       return `<!-- anchor:${anchor} -->\n${'A'.repeat(50)}`;
     });
@@ -78,8 +78,9 @@ describe('buildContentOutline', () => {
       bodyMarkdown: blocks.join('\n\n'),
     });
     // 4096-byte budget — generous enough to fit the header + footer
-    // (which grew with the Kimi-prior hardening) plus a handful of
-    // blocks, while still forcing truncation of the rest.
+    // (which grew with the Kimi-prior hardening plus the bulk-tool
+    // registration) and a handful of blocks, while still forcing
+    // truncation of the rest.
     const outline = buildContentOutline(content, 4096);
     expect(new TextEncoder().encode(outline).byteLength).toBeLessThanOrEqual(
       4096,

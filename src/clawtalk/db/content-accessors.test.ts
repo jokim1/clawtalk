@@ -1046,6 +1046,225 @@ describe('content-accessors (postgres + RLS)', () => {
     });
   });
 
+  it('createProposal: bulk happy path stores whole-body markdown + rationale', async () => {
+    const contentId = await withUserContext(USER_A_ID, async () => {
+      const c = await createContent({
+        ownerId: USER_A_ID,
+        talkId: TALK_A_ID,
+        title: 'Doc',
+        createdByUserId: USER_A_ID,
+      });
+      return c.id;
+    });
+
+    await withUserContext(USER_A_ID, async () => {
+      const ok = await createProposal({
+        contentId,
+        ownerId: USER_A_ID,
+        kind: 'bulk',
+        afterAnchorId: null,
+        targetAnchorId: null,
+        insertedMarkdown:
+          '# New title\n\nFull rewrite body across multiple paragraphs.\n\nClosing sentence.',
+        rationale: 'Tighten and restructure the whole doc.',
+      });
+      expect(ok.kind).toBe('ok');
+      if (ok.kind !== 'ok') return;
+      expect(ok.proposal.kind).toBe('bulk');
+      expect(ok.proposal.afterAnchorId).toBeNull();
+      expect(ok.proposal.targetAnchorId).toBeNull();
+      expect(ok.proposal.insertedMarkdown).toContain('Full rewrite body');
+      expect(ok.proposal.rationale).toContain('Tighten and restructure');
+    });
+  });
+
+  it('createProposal: bulk rejects when anchors are passed', async () => {
+    const contentId = await withUserContext(USER_A_ID, async () => {
+      const c = await createContent({
+        ownerId: USER_A_ID,
+        talkId: TALK_A_ID,
+        title: 'Doc',
+        createdByUserId: USER_A_ID,
+      });
+      return c.id;
+    });
+
+    await withUserContext(USER_A_ID, async () => {
+      const withTarget = await createProposal({
+        contentId,
+        ownerId: USER_A_ID,
+        kind: 'bulk',
+        afterAnchorId: null,
+        targetAnchorId: 'someAnchor',
+        insertedMarkdown: 'new body',
+      });
+      expect(withTarget.kind).toBe('invalid_kind_anchors');
+
+      const withAfter = await createProposal({
+        contentId,
+        ownerId: USER_A_ID,
+        kind: 'bulk',
+        afterAnchorId: 'someAnchor',
+        targetAnchorId: null,
+        insertedMarkdown: 'new body',
+      });
+      expect(withAfter.kind).toBe('invalid_kind_anchors');
+    });
+  });
+
+  it('acceptProposal: bulk replaces the whole body and stales every other pending proposal', async () => {
+    const { contentId, bulkId, anchorA, appendId, replaceId } =
+      await withUserContext(USER_A_ID, async () => {
+        const c = await createContent({
+          ownerId: USER_A_ID,
+          talkId: TALK_A_ID,
+          title: 'Doc',
+          createdByUserId: USER_A_ID,
+        });
+        const anchorA = freshAnchorId();
+        const seedBody = tiptapJsonToMarkdown(
+          docFor([
+            { anchor: anchorA, text: 'Original block A' },
+            { anchor: freshAnchorId(), text: 'Original block B' },
+          ]),
+        );
+        const upd = await updateContentBody({
+          contentId: c.id,
+          ownerId: USER_A_ID,
+          expectedVersion: 1,
+          bodyMarkdown: seedBody,
+        });
+        if (upd.kind !== 'ok') throw new Error('seed save failed');
+
+        // Two siblings: one append, one replace on anchorA.
+        const appendProp = await createProposal({
+          contentId: c.id,
+          ownerId: USER_A_ID,
+          kind: 'append',
+          afterAnchorId: anchorA,
+          insertedMarkdown: 'A small new block.',
+        });
+        const replaceProp = await createProposal({
+          contentId: c.id,
+          ownerId: USER_A_ID,
+          kind: 'replace',
+          afterAnchorId: null,
+          targetAnchorId: anchorA,
+          insertedMarkdown: 'A surgical replacement.',
+        });
+        const bulkProp = await createProposal({
+          contentId: c.id,
+          ownerId: USER_A_ID,
+          kind: 'bulk',
+          afterAnchorId: null,
+          targetAnchorId: null,
+          insertedMarkdown:
+            '# Brand new\n\nWholesale rewrite that replaces everything.',
+          rationale: 'Whole-doc rewrite.',
+        });
+        if (
+          appendProp.kind !== 'ok' ||
+          replaceProp.kind !== 'ok' ||
+          bulkProp.kind !== 'ok'
+        )
+          throw new Error('proposal create failed');
+        return {
+          contentId: c.id,
+          bulkId: bulkProp.proposal.id,
+          anchorA,
+          appendId: appendProp.proposal.id,
+          replaceId: replaceProp.proposal.id,
+        };
+      });
+    void anchorA;
+
+    await withUserContext(USER_A_ID, async () => {
+      const accepted = await acceptProposal({
+        contentId,
+        proposalId: bulkId,
+        userId: USER_A_ID,
+        expectedContentVersion: 2,
+      });
+      expect(accepted.kind).toBe('ok');
+      if (accepted.kind !== 'ok') return;
+      // Doc body is replaced wholesale.
+      expect(accepted.content.bodyMarkdown).toContain('Brand new');
+      expect(accepted.content.bodyMarkdown).toContain('Wholesale rewrite');
+      expect(accepted.content.bodyMarkdown).not.toContain('Original block A');
+      expect(accepted.content.bodyMarkdown).not.toContain('Original block B');
+      // Both siblings auto-staled.
+      expect(accepted.staledSiblingProposalIds.sort()).toEqual(
+        [appendId, replaceId].sort(),
+      );
+      // Every applied anchor is freshly generated (12-char anchors).
+      expect(accepted.proposal.appliedAnchorIds.length).toBeGreaterThan(0);
+      for (const id of accepted.proposal.appliedAnchorIds) {
+        expect(id.length).toBe(12);
+        expect(id).not.toBe(anchorA);
+      }
+    });
+
+    await withUserContext(USER_A_ID, async () => {
+      const append = await getProposalById(appendId);
+      expect(append?.status).toBe('stale');
+      expect(append?.statusReason).toBe('superseded_by_bulk');
+      const replace = await getProposalById(replaceId);
+      expect(replace?.status).toBe('stale');
+      expect(replace?.statusReason).toBe('superseded_by_bulk');
+    });
+  });
+
+  it('updateContentBody: pending bulk proposals auto-stale when the doc changes', async () => {
+    const { contentId, bulkId } = await withUserContext(USER_A_ID, async () => {
+      const c = await createContent({
+        ownerId: USER_A_ID,
+        talkId: TALK_A_ID,
+        title: 'Doc',
+        createdByUserId: USER_A_ID,
+      });
+      const anchorA = freshAnchorId();
+      const body = tiptapJsonToMarkdown(
+        docFor([{ anchor: anchorA, text: 'Original' }]),
+      );
+      const upd = await updateContentBody({
+        contentId: c.id,
+        ownerId: USER_A_ID,
+        expectedVersion: 1,
+        bodyMarkdown: body,
+      });
+      if (upd.kind !== 'ok') throw new Error('seed save failed');
+      const bulkProp = await createProposal({
+        contentId: c.id,
+        ownerId: USER_A_ID,
+        kind: 'bulk',
+        afterAnchorId: null,
+        targetAnchorId: null,
+        insertedMarkdown: '# Agent rewrite',
+        rationale: 'A rewrite.',
+      });
+      if (bulkProp.kind !== 'ok') throw new Error('create failed');
+      return { contentId: c.id, bulkId: bulkProp.proposal.id };
+    });
+
+    // User edits the doc — the pending bulk must auto-stale.
+    await withUserContext(USER_A_ID, async () => {
+      const upd = await updateContentBody({
+        contentId,
+        ownerId: USER_A_ID,
+        expectedVersion: 2,
+        bodyMarkdown: 'Manually rewritten by the user',
+      });
+      if (upd.kind !== 'ok') throw new Error('user edit failed');
+      expect(upd.staledProposalIds).toContain(bulkId);
+    });
+
+    await withUserContext(USER_A_ID, async () => {
+      const refetch = await getProposalById(bulkId);
+      expect(refetch?.status).toBe('stale');
+      expect(refetch?.statusReason).toBe('doc_changed_since_bulk_proposal');
+    });
+  });
+
   it('listPendingProposalsByContentId returns only pending in created order', async () => {
     const { contentId, p1, p2, p3 } = await withUserContext(
       USER_A_ID,

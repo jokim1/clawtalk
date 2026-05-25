@@ -181,6 +181,7 @@ async function executeBrowserTool(
 import { executeGoogleDriveTalkTool } from './google-drive-tools.js';
 import {
   executeProposeContentAppend,
+  executeProposeContentBulk,
   executeProposeContentReplace,
 } from './content-tool-handlers.js';
 async function executeContainerAgentTurn(
@@ -959,6 +960,16 @@ export function buildToolExecutor(
 
     if (toolName === 'propose_content_replace') {
       return executeProposeContentReplace({
+        talkId,
+        userId,
+        runId,
+        agentId: agentId ?? null,
+        args,
+      });
+    }
+
+    if (toolName === 'propose_content_bulk') {
+      return executeProposeContentBulk({
         talkId,
         userId,
         runId,
