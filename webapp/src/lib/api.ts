@@ -1374,6 +1374,55 @@ export async function patchContent(input: {
   );
 }
 
+export async function getContentProposal(input: {
+  contentId: string;
+  proposalId: string;
+}): Promise<ContentProposalSummary> {
+  const envelope = await apiRequest<{ proposal: ContentProposalSummary }>(
+    `/api/v1/contents/${encodeURIComponent(input.contentId)}/proposals/${encodeURIComponent(input.proposalId)}`,
+  );
+  return envelope.proposal;
+}
+
+export async function acceptContentProposal(input: {
+  contentId: string;
+  proposalId: string;
+  expectedContentVersion: number;
+}): Promise<{
+  content: Content;
+  proposal: ContentProposalSummary;
+  driftDetected: boolean;
+}> {
+  return apiMutationRequest<{
+    content: Content;
+    proposal: ContentProposalSummary;
+    driftDetected: boolean;
+  }>(
+    `/api/v1/contents/${encodeURIComponent(input.contentId)}/proposals/${encodeURIComponent(input.proposalId)}/accept`,
+    {
+      method: 'POST',
+      includeJson: true,
+      body: JSON.stringify({
+        expectedContentVersion: input.expectedContentVersion,
+      }),
+    },
+  );
+}
+
+export async function rejectContentProposal(input: {
+  contentId: string;
+  proposalId: string;
+}): Promise<{ proposal: ContentProposalSummary }> {
+  return apiMutationRequest<{ proposal: ContentProposalSummary }>(
+    `/api/v1/contents/${encodeURIComponent(input.contentId)}/proposals/${encodeURIComponent(input.proposalId)}/reject`,
+    {
+      method: 'POST',
+      includeJson: true,
+      body: '{}',
+    },
+  );
+}
+
 export async function getTalkPolicy(talkId: string): Promise<TalkPolicy> {
   return apiRequest<TalkPolicy>(
     `/api/v1/talks/${encodeURIComponent(talkId)}/policy`,
