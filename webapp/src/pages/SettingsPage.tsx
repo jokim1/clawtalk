@@ -2664,22 +2664,41 @@ function ConnectorsTab({
           </p>
         ) : (
           <ConnectorTable
-            rows={channels.map((channel) => ({
-              id: channel.id,
-              kindLabel: CHANNEL_KIND_LABELS[channel.kind],
-              displayName: channel.displayName,
-              subtitle: resolveConnectorSubtitle(channel.kind, channel.config),
-              boundTalkCount: channel.boundTalkCount,
-              enabled: channel.enabled,
-              hasCredential: channel.hasCredential,
-              onEdit: isAdmin
-                ? () => setModal({ kind: 'edit-channel', channel })
-                : undefined,
-              onDelete: isAdmin
-                ? () => setDeleteState({ kind: 'channel', channel })
-                : undefined,
-              labelNoun: 'Slack/Telegram channel',
-            }))}
+            rows={channels.map((channel) => {
+              // Slack channel credentials live on the workspace install
+              // (workspace_slack_installs.ciphertext), not the per-channel
+              // row. A slack channel has a credential iff its workspace_id
+              // matches a connected install. Non-slack kinds keep the
+              // row-level hasCredential check.
+              const installedTeamIds = new Set(
+                slackInstalls.map((i) => i.teamId),
+              );
+              const channelWorkspaceId =
+                typeof channel.config.workspace_id === 'string'
+                  ? channel.config.workspace_id
+                  : null;
+              const hasCredential =
+                channel.kind === 'slack'
+                  ? channelWorkspaceId !== null &&
+                    installedTeamIds.has(channelWorkspaceId)
+                  : channel.hasCredential;
+              return {
+                id: channel.id,
+                kindLabel: CHANNEL_KIND_LABELS[channel.kind],
+                displayName: channel.displayName,
+                subtitle: resolveConnectorSubtitle(channel.kind, channel.config),
+                boundTalkCount: channel.boundTalkCount,
+                enabled: channel.enabled,
+                hasCredential,
+                onEdit: isAdmin
+                  ? () => setModal({ kind: 'edit-channel', channel })
+                  : undefined,
+                onDelete: isAdmin
+                  ? () => setDeleteState({ kind: 'channel', channel })
+                  : undefined,
+                labelNoun: 'Slack/Telegram channel',
+              };
+            })}
           />
         )}
       </section>
