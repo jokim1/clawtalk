@@ -179,7 +179,10 @@ async function executeBrowserTool(
   throw new Error('Browser tool is disabled (chassis removed).');
 }
 import { executeGoogleDriveTalkTool } from './google-drive-tools.js';
-import { executeProposeContentAppend } from './content-tool-handlers.js';
+import {
+  executeProposeContentAppend,
+  executeProposeContentReplace,
+} from './content-tool-handlers.js';
 async function executeContainerAgentTurn(
   ..._args: unknown[]
 ): Promise<ContainerTurnResultStub> {
@@ -946,6 +949,16 @@ export function buildToolExecutor(
 
     if (toolName === 'propose_content_append') {
       return executeProposeContentAppend({
+        talkId,
+        userId,
+        runId,
+        agentId: agentId ?? null,
+        args,
+      });
+    }
+
+    if (toolName === 'propose_content_replace') {
+      return executeProposeContentReplace({
         talkId,
         userId,
         runId,

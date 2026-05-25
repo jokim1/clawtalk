@@ -294,6 +294,7 @@ export async function acceptContentProposalRoute(input: {
     content: Content;
     proposal: ContentProposal;
     driftDetected: boolean;
+    staledSiblingProposalIds: string[];
   }>
 > {
   return await withUserContext(input.auth.userId, async () => {
@@ -337,6 +338,7 @@ export async function acceptContentProposalRoute(input: {
               content: result.content,
               proposal: result.proposal,
               driftDetected: result.driftDetected,
+              staledSiblingProposalIds: result.staledSiblingProposalIds,
             },
           },
         };

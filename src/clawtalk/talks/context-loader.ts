@@ -15,6 +15,13 @@
 import { getDbPg, type Sql } from '../../db.js';
 import { listTalkStateEntries } from '../db/context-accessors.js';
 import { getContentByTalkId, type Content } from '../db/content-accessors.js';
+import {
+  ensureAnchorIds,
+  getAnchorId,
+  markdownToTiptapJson,
+  plainTextOf,
+  sanitizeRichTextDocument,
+} from '../../shared/rich-text/index.js';
 import type { EffectiveToolAccess } from '../db/agent-accessors.js';
 import {
   type LlmToolDefinition,
@@ -193,7 +200,10 @@ const OUTPUT_RESERVE = 4096; // Tokens to reserve for model output
 const TOOL_SCHEMA_RESERVE = 2000; // Tokens to reserve for tool definitions
 const STATE_SNAPSHOT_RESERVE = 2000; // Tokens reserved for bounded Talk state
 const RETRIEVAL_SECTION_RESERVE = 1200; // Tokens reserved for targeted retrieval
-const CONTENT_OUTLINE_BUDGET_BYTES = 2048; // Hard byte budget for the doc outline
+// 20KB budget for the inlined doc — large enough to give the agent the
+// actual prose it's being asked to edit, while truncating from the
+// bottom on really long docs. Read-block tool is the v2 escape hatch.
+const CONTENT_OUTLINE_BUDGET_BYTES = 20_480;
 const CHARS_TO_TOKENS = 0.25; // Simple estimation: 1 char ≈ 0.25 tokens
 const SMALL_SOURCE_THRESHOLD = 250; // Max tokens to inline a source
 const MAX_RETRIEVED_STATE_ENTRIES = 3;
@@ -745,63 +755,108 @@ function buildConnectorTools(
 // ---------------------------------------------------------------------------
 
 /**
+ * Sanitize block content before inlining into the agent's system
+ * prompt. Newlines + control characters can change the prompt's
+ * structural meaning when concatenated with surrounding markdown.
+ * Replace bare newlines inside the block with `\n` literals, drop
+ * other control characters, and escape backticks so a single block
+ * can't break out of the surrounding `code-fence` framing the agent
+ * may use to address it. The agent still sees the full plain text;
+ * only the prompt-injection-relevant edges are neutralized.
+ */
+function sanitizeBlockForPrompt(text: string): string {
+  const normalized = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+  let out = '';
+  for (let i = 0; i < normalized.length; i++) {
+    const code = normalized.charCodeAt(i);
+    if (code === 0x0a || code === 0x09) {
+      out += normalized[i];
+      continue;
+    }
+    if (code < 0x20 || code === 0x7f) continue;
+    out += normalized[i];
+  }
+  return out;
+}
+
+/**
  * Build the outline section for the agent's system prompt.
  *
- * Format per block: `[anchor:<id>] <kind> "<first 60 chars>"`. Blocks
- * are emitted in document order. If the outline would exceed the byte
- * budget, truncate from the bottom and append `[… N more blocks not
- * shown]`. The 60-char preview lives in `anchor_map_json` already, so
- * this is a pure projection — no re-tokenization of the body.
+ * Each block is rendered inline as its full plain-text content,
+ * prefixed with `<!-- anchor:<id> -->` so the agent can copy the
+ * anchor ID verbatim into a `propose_content_*` call. Blocks are
+ * emitted in document order. If the cumulative size would exceed the
+ * byte budget, truncation happens at a block boundary and a
+ * `[… N more blocks omitted; ask the user to narrow scope]` footer
+ * is appended. The 60-char preview previously stored here was too
+ * coarse for replace proposals — agents need the actual prose they're
+ * being asked to rewrite, not its first sentence.
  */
 export function buildContentOutline(
   content: Content,
   budgetBytes: number = CONTENT_OUTLINE_BUDGET_BYTES,
 ): string {
-  const entries = Object.entries(content.anchorMap)
-    .map(([anchorId, entry]) => ({ anchorId, ...entry }))
-    .sort((a, b) => a.sort_order - b.sort_order);
+  // Parse the canonical body once so we can render full block content.
+  const parsed = sanitizeRichTextDocument(
+    markdownToTiptapJson(content.bodyMarkdown),
+  );
+  const stamped = ensureAnchorIds(parsed);
+
+  const blocks = (stamped.content ?? []).map((node) => {
+    const anchorId = getAnchorId(node) ?? '';
+    const text = sanitizeBlockForPrompt(plainTextOf(node));
+    return { anchorId, kind: node.type, text };
+  });
 
   const header = [
     `**The Doc — this Talk's attached document:** "${content.title}" (v${content.bodyVersion})`,
     '',
-    'This Talk has exactly one long-form document attached, and the outline below IS that document. When the user says "the doc", "the document", "this doc", "summarize the doc", or anything similar, they mean THIS document — the one outlined below. The user can also reference it explicitly with the literal token `@doc` in their message — when you see `@doc` anywhere in the latest user turn, treat it as a deterministic reference to THIS section. Do NOT look for a Google Doc binding. Do NOT search [S1]/[S2]/etc. Do NOT inspect chat attachments whose filename happens to match this title (the user often uploads a draft .md before promoting it into the doc — those are stale source material, not the live document). The outline below is the canonical, current copy.',
+    'This Talk has exactly one long-form document attached, and the block listing below IS that document — full prose, in order, prefixed with the block kind and anchor ID for each. When the user says "the doc", "the document", "this doc", "summarize the doc", or anything similar, they mean THIS document. The user can also reference it explicitly with the literal token `@doc` in their message — when you see `@doc` anywhere in the latest user turn, treat it as a deterministic reference to THIS section. Do NOT look for a Google Doc binding. Do NOT search [S1]/[S2]/etc. Do NOT inspect chat attachments whose filename happens to match this title (the user often uploads a draft .md before promoting it into the doc — those are stale source material, not the live document). The blocks below are the canonical, current copy.',
   ].join('\n');
-  const footer =
-    'To suggest a new block on this document, call `propose_content_append({ after_anchor_id, markdown, rationale })`. The user reviews and accepts or rejects in the Talk UI; you are not editing the document directly.';
+
+  const footer = [
+    'To suggest changes to this document:',
+    '- Add new blocks with `propose_content_append({ after_anchor_id, markdown, rationale })` (use `after_anchor_id: null` to prepend at the top).',
+    '- Replace existing blocks with `propose_content_replace({ target_anchor_id, markdown, rationale })`.',
+    '',
+    'When `@doc` appears in the latest user turn AND the request is to change the document (rewrite, edit, fix, polish, expand, shorten, summarize-into-the-doc, etc.), USE these tools — do NOT write substantive new prose into chat. Brief acknowledgements, clarifying questions, and refusals stay in chat. The user reviews and accepts or rejects each proposal in the Talk UI; you are not editing the document directly.',
+  ].join('\n');
 
   const encoder = new TextEncoder();
   const headerBytes = encoder.encode(header).byteLength;
   const footerBytes = encoder.encode(`\n\n${footer}`).byteLength;
   const truncationTemplate = (n: number): string =>
-    `[… ${n} more blocks not shown]`;
+    `[… ${n} more blocks omitted; ask the user to narrow scope]`;
   const maxTruncationBytes = encoder.encode(
-    truncationTemplate(entries.length),
+    truncationTemplate(blocks.length),
   ).byteLength;
 
   let usedBytes = headerBytes + footerBytes;
   const lines: string[] = [];
   let included = 0;
 
-  for (const entry of entries) {
-    const preview = entry.preview.replace(/"/g, '\\"');
-    const line = `[anchor:${entry.anchorId}] ${entry.kind} "${preview}"`;
-    const lineBytes = encoder.encode(`\n${line}`).byteLength;
-    const remaining = entries.length - included - 1;
+  for (const block of blocks) {
+    const anchorTag = `<!-- anchor:${block.anchorId} -->`;
+    const kindTag = `[${block.kind}]`;
+    const body = block.text.length > 0 ? block.text : '(empty block)';
+    const rendered = `${anchorTag}\n${kindTag} ${body}`;
+    const blockBytes = encoder.encode(`\n\n${rendered}`).byteLength;
+    const remaining = blocks.length - included - 1;
     const reserveForTruncation =
       remaining > 0
-        ? encoder.encode(`\n${truncationTemplate(remaining)}`).byteLength
+        ? encoder.encode(`\n\n${truncationTemplate(remaining)}`).byteLength
         : 0;
-    if (usedBytes + lineBytes + reserveForTruncation > budgetBytes) break;
-    lines.push(line);
-    usedBytes += lineBytes;
+    if (usedBytes + blockBytes + reserveForTruncation > budgetBytes) break;
+    lines.push(rendered);
+    usedBytes += blockBytes;
     included += 1;
   }
 
-  const remaining = entries.length - included;
+  const remaining = blocks.length - included;
   const truncationLine = remaining > 0 ? truncationTemplate(remaining) : null;
 
   const parts: string[] = [header];
-  if (lines.length > 0) parts.push(lines.join('\n'));
+  if (lines.length > 0) parts.push(lines.join('\n\n'));
   if (truncationLine) parts.push(truncationLine);
   parts.push(footer);
 
@@ -809,7 +864,7 @@ export function buildContentOutline(
   // unusually large (long title). Trim from the bottom up.
   let assembled = parts.join('\n\n');
   if (encoder.encode(assembled).byteLength > budgetBytes && included > 0) {
-    return `${header}\n\n${truncationTemplate(entries.length)}\n\n${footer}`;
+    return `${header}\n\n${truncationTemplate(blocks.length)}\n\n${footer}`;
   }
   // Suppress unused warning when zero blocks fit but budget allows header+footer.
   void maxTruncationBytes;
@@ -1166,41 +1221,74 @@ function buildContextTools(
     );
   }
 
-  // Content document tool (PR 5) — only register when this Talk has an
-  // attached doc, so agents in chat-only Talks aren't tempted to call it
-  // and fall into "no document" errors.
+  // Content document tools — only register when this Talk has an
+  // attached doc, so agents in chat-only Talks aren't tempted to call
+  // them and fall into "no document" errors.
   if (hasContent) {
-    tools.push({
-      name: 'propose_content_append',
-      description: [
-        "Propose appending a new block to the Talk's attached document.",
-        '',
-        'Anchor IDs come from the **Document Outline** in your system prompt. Pass `after_anchor_id` to insert immediately after a specific block, or `null` to prepend at the very top. The user reviews and accepts or rejects the proposal in the Talk UI — your call writes a pending proposal, not the document itself.',
-        '',
-        'Use this when the user asks you to add to, extend, draft, or continue the doc. For now this is append-only — there is no replace or delete surface; smaller proposals (one or two blocks) review better than long ones.',
-      ].join('\n'),
-      inputSchema: {
-        type: 'object',
-        properties: {
-          after_anchor_id: {
-            type: ['string', 'null'],
-            description:
-              'Anchor ID of the block to insert AFTER, copied from the Document Outline. Pass null to prepend at the top.',
+    tools.push(
+      {
+        name: 'propose_content_append',
+        description: [
+          "Propose appending one or more new blocks to the Talk's attached document.",
+          '',
+          'Anchor IDs come from THE DOC block listing in your system prompt. Pass `after_anchor_id` to insert immediately after a specific block, or `null` to prepend at the very top. The user reviews and accepts or rejects the proposal in the Talk UI — your call writes a pending proposal, not the document itself.',
+          '',
+          'This is the correct tool when the user asks you to add to, extend, draft, or continue the doc — do NOT write the extension into chat. For per-block edits to existing prose, use `propose_content_replace` instead. Smaller proposals (one or two blocks) review better than long ones.',
+        ].join('\n'),
+        inputSchema: {
+          type: 'object',
+          properties: {
+            after_anchor_id: {
+              type: ['string', 'null'],
+              description:
+                'Anchor ID of the block to insert AFTER, copied verbatim from THE DOC block listing. Pass null to prepend at the top.',
+            },
+            markdown: {
+              type: 'string',
+              description:
+                'The new block(s) as GitHub-flavored markdown. Keep it tight — one or two blocks reviews better than a wall of text.',
+            },
+            rationale: {
+              type: 'string',
+              description:
+                "Optional one-sentence explanation shown on the proposal card so the user knows why you're suggesting this block.",
+            },
           },
-          markdown: {
-            type: 'string',
-            description:
-              'The new block(s) as GitHub-flavored markdown. Keep it tight — one or two blocks reviews better than a wall of text.',
-          },
-          rationale: {
-            type: 'string',
-            description:
-              "Optional one-sentence explanation shown on the proposal card so the user knows why you're suggesting this block.",
-          },
+          required: ['markdown'],
         },
-        required: ['markdown'],
       },
-    });
+      {
+        name: 'propose_content_replace',
+        description: [
+          "Propose replacing an existing block in the Talk's attached document with new markdown.",
+          '',
+          'Anchor IDs come from THE DOC block listing in your system prompt. `target_anchor_id` MUST be an anchor that exists in the current document — copy it verbatim from the listing. The replacement `markdown` can be one or more blocks; if you supply multiple blocks they substitute the single target block as a sequence. The user reviews and accepts or rejects the proposal in the Talk UI — your call writes a pending proposal, not the document itself.',
+          '',
+          'This is the correct tool when the user asks you to rewrite, edit, fix, polish, shorten, or otherwise modify an existing part of the doc — do NOT write the rewrite into chat. For brand-new content that does not replace anything, use `propose_content_append` instead. Replace one block at a time; multiple small proposals are easier for the user to review and accept than one giant one.',
+        ].join('\n'),
+        inputSchema: {
+          type: 'object',
+          properties: {
+            target_anchor_id: {
+              type: 'string',
+              description:
+                'Anchor ID of the block to REPLACE, copied verbatim from THE DOC block listing. Must exist in the current document.',
+            },
+            markdown: {
+              type: 'string',
+              description:
+                "The replacement block(s) as GitHub-flavored markdown. Replaces the target block's contents wholesale; structure as one or two blocks for easier review.",
+            },
+            rationale: {
+              type: 'string',
+              description:
+                "Optional one-sentence explanation shown on the proposal card so the user knows why you're suggesting this rewrite.",
+            },
+          },
+          required: ['target_anchor_id', 'markdown'],
+        },
+      },
+    );
   }
 
   return tools;

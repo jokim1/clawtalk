@@ -149,17 +149,26 @@ import {
   RichTextEditor,
   type RichTextEditorSaveStatus,
 } from '../components/rich-text/RichTextEditor';
-import { getToolCard } from '../components/proposal-card/tool-card-registry';
+import {
+  getToolCard,
+  toolNameForProposal,
+} from '../components/proposal-card/tool-card-registry';
 import {
   type ProposalCardAgent,
   type ProposalCardProps,
   type ProposalCardState,
+  type ProposalCardTargetPreview,
 } from '../components/proposal-card/ProposalCard';
 import {
   computeAnchorMap,
   ensureAnchorIds,
+  findBlockIndexByAnchor,
+  getAnchorId,
   insertAfterAnchor,
   markdownToTiptapJson,
+  plainTextOf,
+  replaceBlockByAnchor,
+  sanitizeRichTextDocument,
   tiptapJsonToMarkdown,
   type RichTextNode,
 } from '../../../src/shared/rich-text/index.js';
@@ -3308,13 +3317,44 @@ export function TalkDetailPage({
     try {
       const payload = await getTalkContent(talkId);
       setTalkContent(payload.content);
+      const serverPendingIds = new Set(
+        payload.pendingProposals.map((p) => p.id),
+      );
+      // Reconcile cross-client state: a proposal that's no longer in
+      // the server's pending list must have been accepted, rejected,
+      // or staled by another tab. Fetch its current state so the local
+      // store matches.
+      const stalePendingLocalIds: string[] = [];
       setProposalsById((prev) => {
         const next = { ...prev };
         for (const proposal of payload.pendingProposals) {
           next[proposal.id] = proposal;
         }
+        for (const [id, proposal] of Object.entries(prev)) {
+          if (proposal.status === 'pending' && !serverPendingIds.has(id)) {
+            stalePendingLocalIds.push(id);
+          }
+        }
         return next;
       });
+      if (payload.content && stalePendingLocalIds.length > 0) {
+        const contentId = payload.content.id;
+        await Promise.all(
+          stalePendingLocalIds.map((proposalId) =>
+            getContentProposal({ contentId, proposalId })
+              .then((proposal) => {
+                setProposalsById((prev) => ({
+                  ...prev,
+                  [proposalId]: proposal,
+                }));
+              })
+              .catch(() => {
+                // Best effort — leave the local card in place if the
+                // server can't tell us its state right now.
+              }),
+          ),
+        );
+      }
       setTalkContentError(null);
       return payload.content;
     } catch (err) {
@@ -4524,10 +4564,12 @@ export function TalkDetailPage({
       });
 
       // Optimistic mutation (per Liveblocks § "Optimistic mutations as
-      // the default" + T21): apply the proposal's inserted markdown to
-      // the local doc state right away. The editor reacts to the new
+      // the default" + T21): apply the proposal's patch to the local
+      // doc state right away. The editor reacts to the new
       // bodyMarkdown via its sync effect; the green-fade highlight is
-      // driven by data-just-inserted on the new block(s).
+      // driven by data-just-inserted on the new block(s). Replace
+      // proposals splice-replace by anchor; append proposals splice
+      // after the anchor.
       const previousContent = content;
       const previousProposal = proposal;
       try {
@@ -4536,13 +4578,20 @@ export function TalkDetailPage({
         );
         const insertedDoc = markdownToTiptapJson(proposal.insertedMarkdown);
         const insertedNodes: RichTextNode[] = insertedDoc.content ?? [];
-        const insertResult = insertAfterAnchor({
-          doc: currentDoc,
-          afterAnchorId: proposal.afterAnchorId,
-          insertedNodes,
-        });
-        if (!('kind' in insertResult)) {
-          const nextDoc = insertResult.doc;
+        const patchResult =
+          proposal.kind === 'replace' && proposal.targetAnchorId
+            ? replaceBlockByAnchor({
+                doc: currentDoc,
+                targetAnchorId: proposal.targetAnchorId,
+                replacementNodes: insertedNodes,
+              })
+            : insertAfterAnchor({
+                doc: currentDoc,
+                afterAnchorId: proposal.afterAnchorId,
+                insertedNodes,
+              });
+        if (!('kind' in patchResult)) {
+          const nextDoc = patchResult.doc;
           const nextMarkdown = tiptapJsonToMarkdown(nextDoc);
           const nextAnchorMap = await computeAnchorMap(nextDoc);
           setTalkContent({
@@ -4551,7 +4600,7 @@ export function TalkDetailPage({
             bodyVersion: content.bodyVersion + 1,
             anchorMap: nextAnchorMap,
           });
-          setJustInsertedAnchorIds(insertResult.appliedAnchorIds);
+          setJustInsertedAnchorIds(patchResult.appliedAnchorIds);
         }
       } catch {
         // Optimistic step is best-effort. If it throws, fall back to
@@ -4565,10 +4614,22 @@ export function TalkDetailPage({
           expectedContentVersion: previousContent.bodyVersion,
         });
         setTalkContent(response.content);
-        setProposalsById((prev) => ({
-          ...prev,
-          [proposalId]: response.proposal,
-        }));
+        setProposalsById((prev) => {
+          const next = { ...prev, [proposalId]: response.proposal };
+          // Same-target replace siblings were auto-staled server-side;
+          // reflect that in the local store so the cards repaint.
+          for (const id of response.staledSiblingProposalIds ?? []) {
+            const existing = next[id];
+            if (existing && existing.status === 'pending') {
+              next[id] = {
+                ...existing,
+                status: 'stale' as const,
+                statusReason: 'target_replaced',
+              };
+            }
+          }
+          return next;
+        });
         // Keep the highlight on the inserted anchors the server settled
         // on (these may differ from the optimistic IDs).
         if (response.proposal.appliedAnchorIds.length > 0) {
@@ -4718,6 +4779,33 @@ export function TalkDetailPage({
       };
     },
     [agents, agentLabelById],
+  );
+
+  const buildProposalTargetPreview = useCallback(
+    (anchorId: string): ProposalCardTargetPreview => {
+      const current = talkContentRef.current;
+      if (!current) return null;
+      try {
+        const parsed = sanitizeRichTextDocument(
+          markdownToTiptapJson(current.bodyMarkdown),
+        );
+        const stamped = ensureAnchorIds(parsed);
+        const idx = findBlockIndexByAnchor(stamped, anchorId);
+        if (idx === -1) return null;
+        const node = stamped.content[idx];
+        if (!node) return null;
+        const ownAnchor = getAnchorId(node) ?? anchorId;
+        const rawText = plainTextOf(node);
+        return {
+          anchorId: ownAnchor,
+          kind: node.type ?? null,
+          text: rawText.replace(/\s+/g, ' ').trim(),
+        };
+      } catch {
+        return null;
+      }
+    },
+    [],
   );
 
   const orchestrationMode: TalkOrchestrationMode =
@@ -10143,7 +10231,9 @@ export function TalkDetailPage({
                         if (entry.kind === 'proposal') {
                           const proposal = proposalsById[entry.proposalId];
                           if (!proposal) return null;
-                          const Card = getToolCard('propose_content_append');
+                          const Card = getToolCard(
+                            toolNameForProposal(proposal),
+                          );
                           if (!Card) return null;
                           const agent = resolveProposalAgent(
                             proposal.proposedByAgentId,
@@ -10154,6 +10244,13 @@ export function TalkDetailPage({
                           );
                           let cardState: ProposalCardState;
                           if (proposal.status === 'pending') {
+                            const targetPreview =
+                              proposal.kind === 'replace' &&
+                              proposal.targetAnchorId
+                                ? buildProposalTargetPreview(
+                                    proposal.targetAnchorId,
+                                  )
+                                : null;
                             cardState = {
                               kind: 'pending',
                               proposal,
@@ -10165,9 +10262,14 @@ export function TalkDetailPage({
                                 : talkContentConflict
                                   ? 'Reload the document before accepting'
                                   : undefined,
+                              targetPreview,
                             };
                           } else if (proposal.status === 'accepted') {
-                            cardState = { kind: 'accepted', proposal };
+                            cardState = {
+                              kind: 'accepted',
+                              proposal,
+                              driftDetected: proposal.driftDetected,
+                            };
                           } else if (proposal.status === 'rejected') {
                             cardState = { kind: 'rejected', proposal };
                           } else {

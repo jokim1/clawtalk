@@ -31,6 +31,7 @@ function makeProposal(
     proposedByMessageId: 'msg-1',
     kind: 'append',
     afterAnchorId: 'anchor-1',
+    targetAnchorId: null,
     insertedMarkdown: '## New section\n\nSome body text here.',
     rationale: 'Captures the missing summary.',
     status: 'pending',
@@ -38,6 +39,7 @@ function makeProposal(
     baseContentVersion: 1,
     baseAnchorContentHash: null,
     appliedAnchorIds: [],
+    driftDetected: false,
     createdAt: '2026-05-25T00:00:00Z',
     resolvedAt: null,
     resolvedByUserId: null,
@@ -199,8 +201,93 @@ describe('ProposalCard', () => {
     expect(onCopy).toHaveBeenCalledTimes(1);
   });
 
-  it('tool-card-registry resolves propose_content_append to ProposalCard', () => {
+  it('tool-card-registry resolves propose_content_append + propose_content_replace to ProposalCard', () => {
     expect(getToolCard('propose_content_append')).toBe(ProposalCard);
+    expect(getToolCard('propose_content_replace')).toBe(ProposalCard);
     expect(getToolCard('unknown_tool')).toBeNull();
+  });
+
+  it('renders the pending replace card with the target preview line', () => {
+    const state: ProposalCardState = {
+      kind: 'pending',
+      proposal: makeProposal({
+        kind: 'replace',
+        afterAnchorId: null,
+        targetAnchorId: 'anchor-target',
+        rationale: 'Tighten the intro.',
+        insertedMarkdown: 'A crisper opening paragraph.',
+      }),
+      acceptInFlight: false,
+      acceptDisabled: false,
+      targetPreview: {
+        anchorId: 'anchor-target',
+        kind: 'paragraph',
+        text: 'The original meandering intro that goes on for a while.',
+      },
+    };
+    render(<ProposalCard agent={agent} state={state} />);
+    expect(screen.getByText('Replacement proposal')).toBeTruthy();
+    expect(screen.getByText('Replaces:')).toBeTruthy();
+    expect(
+      screen.getByText(/The original meandering intro/),
+    ).toBeTruthy();
+  });
+
+  it('renders the pre-accept drift warning when a replace target has been edited', () => {
+    const state: ProposalCardState = {
+      kind: 'pending',
+      proposal: makeProposal({
+        kind: 'replace',
+        afterAnchorId: null,
+        targetAnchorId: 'anchor-target',
+        driftDetected: true,
+        insertedMarkdown: 'A crisper opening paragraph.',
+      }),
+      acceptInFlight: false,
+      acceptDisabled: false,
+      targetPreview: {
+        anchorId: 'anchor-target',
+        kind: 'paragraph',
+        text: 'Edited target.',
+      },
+    };
+    render(<ProposalCard agent={agent} state={state} />);
+    expect(
+      screen.getByText(/Accepting will overwrite your changes/),
+    ).toBeTruthy();
+  });
+
+  it('renders the post-accept amber pill for replace drift', () => {
+    const state: ProposalCardState = {
+      kind: 'accepted',
+      proposal: makeProposal({
+        kind: 'replace',
+        afterAnchorId: null,
+        targetAnchorId: 'anchor-target',
+        status: 'accepted',
+        resolvedAt: '2026-05-25T12:43:00Z',
+      }),
+      driftDetected: true,
+    };
+    render(<ProposalCard agent={agent} state={state} />);
+    expect(screen.getByText(/Marcus rewrote a section/)).toBeTruthy();
+    expect(screen.getByText(/Your edit was overwritten/)).toBeTruthy();
+  });
+
+  it('renders the replace stale card with a target-block label', () => {
+    const state: ProposalCardState = {
+      kind: 'stale',
+      proposal: makeProposal({
+        kind: 'replace',
+        afterAnchorId: null,
+        targetAnchorId: 'anchor-target',
+        status: 'stale',
+        statusReason: 'target_anchor_missing',
+      }),
+    };
+    render(<ProposalCard agent={agent} state={state} />);
+    expect(
+      screen.getByText(/Target block no longer in document/),
+    ).toBeTruthy();
   });
 });
