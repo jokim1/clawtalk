@@ -651,6 +651,401 @@ describe('content-accessors (postgres + RLS)', () => {
     ).rejects.toThrow();
   });
 
+  it('createProposal: replace happy path snapshots baseline JSON', async () => {
+    const { contentId, anchorA } = await withUserContext(
+      USER_A_ID,
+      async () => {
+        const c = await createContent({
+          ownerId: USER_A_ID,
+          talkId: TALK_A_ID,
+          title: 'Doc',
+          createdByUserId: USER_A_ID,
+        });
+        const anchorA = freshAnchorId();
+        const md = tiptapJsonToMarkdown(
+          docFor([{ anchor: anchorA, text: 'Existing prose to rewrite.' }]),
+        );
+        const upd = await updateContentBody({
+          contentId: c.id,
+          ownerId: USER_A_ID,
+          expectedVersion: 1,
+          bodyMarkdown: md,
+        });
+        if (upd.kind !== 'ok') throw new Error('seed save failed');
+        return { contentId: c.id, anchorA };
+      },
+    );
+
+    await withUserContext(USER_A_ID, async () => {
+      const ok = await createProposal({
+        contentId,
+        ownerId: USER_A_ID,
+        kind: 'replace',
+        afterAnchorId: null,
+        targetAnchorId: anchorA,
+        insertedMarkdown: 'A crisper rewrite.',
+      });
+      expect(ok.kind).toBe('ok');
+      if (ok.kind !== 'ok') return;
+      expect(ok.proposal.kind).toBe('replace');
+      expect(ok.proposal.targetAnchorId).toBe(anchorA);
+      expect(ok.proposal.afterAnchorId).toBeNull();
+      expect(ok.proposal.baseAnchorContentHash).not.toBeNull();
+      expect(ok.proposal.targetAnchorBaselineJson).not.toBeNull();
+      expect(ok.proposal.driftDetected).toBe(false);
+    });
+  });
+
+  it('createProposal: rejects invalid kind/anchor combinations', async () => {
+    const contentId = await withUserContext(USER_A_ID, async () => {
+      const c = await createContent({
+        ownerId: USER_A_ID,
+        talkId: TALK_A_ID,
+        title: 'Doc',
+        createdByUserId: USER_A_ID,
+      });
+      return c.id;
+    });
+
+    await withUserContext(USER_A_ID, async () => {
+      const appendWithTarget = await createProposal({
+        contentId,
+        ownerId: USER_A_ID,
+        kind: 'append',
+        afterAnchorId: null,
+        targetAnchorId: 'x',
+        insertedMarkdown: 'whatever',
+      });
+      expect(appendWithTarget.kind).toBe('invalid_kind_anchors');
+
+      const replaceMissingTarget = await createProposal({
+        contentId,
+        ownerId: USER_A_ID,
+        kind: 'replace',
+        afterAnchorId: null,
+        targetAnchorId: null,
+        insertedMarkdown: 'whatever',
+      });
+      expect(replaceMissingTarget.kind).toBe('invalid_kind_anchors');
+
+      const replaceWithAfter = await createProposal({
+        contentId,
+        ownerId: USER_A_ID,
+        kind: 'replace',
+        afterAnchorId: 'a',
+        targetAnchorId: 'b',
+        insertedMarkdown: 'whatever',
+      });
+      expect(replaceWithAfter.kind).toBe('invalid_kind_anchors');
+    });
+  });
+
+  it('createProposal: empty_after_sanitize rejects HTML-only payloads', async () => {
+    const contentId = await withUserContext(USER_A_ID, async () => {
+      const c = await createContent({
+        ownerId: USER_A_ID,
+        talkId: TALK_A_ID,
+        title: 'Doc',
+        createdByUserId: USER_A_ID,
+      });
+      return c.id;
+    });
+
+    await withUserContext(USER_A_ID, async () => {
+      // After sanitize: HTML tags are stripped to '', producing an
+      // empty document tree.
+      const result = await createProposal({
+        contentId,
+        ownerId: USER_A_ID,
+        kind: 'append',
+        afterAnchorId: null,
+        insertedMarkdown: '<iframe></iframe>',
+      });
+      expect(result.kind).toBe('empty_after_sanitize');
+    });
+  });
+
+  it('createProposal: anchor hijacking via inserted_markdown is neutralized', async () => {
+    const { contentId, anchorA } = await withUserContext(
+      USER_A_ID,
+      async () => {
+        const c = await createContent({
+          ownerId: USER_A_ID,
+          talkId: TALK_A_ID,
+          title: 'Doc',
+          createdByUserId: USER_A_ID,
+        });
+        const anchorA = freshAnchorId();
+        const md = tiptapJsonToMarkdown(
+          docFor([{ anchor: anchorA, text: 'Existing.' }]),
+        );
+        const upd = await updateContentBody({
+          contentId: c.id,
+          ownerId: USER_A_ID,
+          expectedVersion: 1,
+          bodyMarkdown: md,
+        });
+        if (upd.kind !== 'ok') throw new Error('seed save failed');
+        return { contentId: c.id, anchorA };
+      },
+    );
+
+    // The agent tries to smuggle a chosen anchor by embedding the
+    // <!-- anchor:... --> comment syntax into inserted_markdown.
+    const hijack = `<!-- anchor:${anchorA} -->\nHostile rewrite that hijacks anchorA's identity.`;
+    await withUserContext(USER_A_ID, async () => {
+      const ok = await createProposal({
+        contentId,
+        ownerId: USER_A_ID,
+        kind: 'append',
+        afterAnchorId: anchorA,
+        insertedMarkdown: hijack,
+      });
+      expect(ok.kind).toBe('ok');
+      if (ok.kind !== 'ok') return;
+      // The stored sanitized markdown must not contain the hijack
+      // anchor comment.
+      expect(ok.proposal.insertedMarkdown).not.toContain(`anchor:${anchorA}`);
+    });
+  });
+
+  it('acceptProposal: replace happy path overwrites the target block', async () => {
+    const { contentId, anchorA, anchorB } = await withUserContext(
+      USER_A_ID,
+      async () => {
+        const c = await createContent({
+          ownerId: USER_A_ID,
+          talkId: TALK_A_ID,
+          title: 'Doc',
+          createdByUserId: USER_A_ID,
+        });
+        const anchorA = freshAnchorId();
+        const anchorB = freshAnchorId();
+        const md = tiptapJsonToMarkdown(
+          docFor([
+            { anchor: anchorA, text: 'Original A' },
+            { anchor: anchorB, text: 'Tail B' },
+          ]),
+        );
+        const upd = await updateContentBody({
+          contentId: c.id,
+          ownerId: USER_A_ID,
+          expectedVersion: 1,
+          bodyMarkdown: md,
+        });
+        if (upd.kind !== 'ok') throw new Error('seed save failed');
+        return { contentId: c.id, anchorA, anchorB };
+      },
+    );
+
+    const proposalId = await withUserContext(USER_A_ID, async () => {
+      const r = await createProposal({
+        contentId,
+        ownerId: USER_A_ID,
+        kind: 'replace',
+        afterAnchorId: null,
+        targetAnchorId: anchorA,
+        insertedMarkdown: 'Rewritten A.',
+      });
+      if (r.kind !== 'ok') throw new Error('create failed');
+      return r.proposal.id;
+    });
+
+    await withUserContext(USER_A_ID, async () => {
+      const accepted = await acceptProposal({
+        contentId,
+        proposalId,
+        userId: USER_A_ID,
+        expectedContentVersion: 2,
+      });
+      expect(accepted.kind).toBe('ok');
+      if (accepted.kind !== 'ok') return;
+      expect(accepted.content.bodyMarkdown).toContain('Rewritten A.');
+      expect(accepted.content.bodyMarkdown).not.toContain('Original A');
+      // anchorB survives untouched.
+      expect(accepted.content.bodyMarkdown).toContain('Tail B');
+      // The replacement single block inherits anchorA's identity so
+      // downstream references survive.
+      expect(accepted.proposal.appliedAnchorIds).toContain(anchorA);
+      expect(accepted.driftDetected).toBe(false);
+    });
+  });
+
+  it('acceptProposal: version_conflict when expectedContentVersion is stale', async () => {
+    const { contentId, anchorA, proposalId } = await withUserContext(
+      USER_A_ID,
+      async () => {
+        const c = await createContent({
+          ownerId: USER_A_ID,
+          talkId: TALK_A_ID,
+          title: 'Doc',
+          createdByUserId: USER_A_ID,
+        });
+        const anchorA = freshAnchorId();
+        const md = tiptapJsonToMarkdown(
+          docFor([{ anchor: anchorA, text: 'Initial' }]),
+        );
+        const upd = await updateContentBody({
+          contentId: c.id,
+          ownerId: USER_A_ID,
+          expectedVersion: 1,
+          bodyMarkdown: md,
+        });
+        if (upd.kind !== 'ok') throw new Error('seed save failed');
+        const r = await createProposal({
+          contentId: c.id,
+          ownerId: USER_A_ID,
+          kind: 'append',
+          afterAnchorId: anchorA,
+          insertedMarkdown: 'New.',
+        });
+        if (r.kind !== 'ok') throw new Error('create failed');
+        return { contentId: c.id, anchorA, proposalId: r.proposal.id };
+      },
+    );
+
+    await withUserContext(USER_A_ID, async () => {
+      const result = await acceptProposal({
+        contentId,
+        proposalId,
+        userId: USER_A_ID,
+        expectedContentVersion: 999,
+      });
+      expect(result.kind).toBe('version_conflict');
+    });
+  });
+
+  it('acceptProposal: structural drift triggers driftDetected even when text matches', async () => {
+    // Seed a paragraph with anchorA.
+    const { contentId, anchorA, proposalId } = await withUserContext(
+      USER_A_ID,
+      async () => {
+        const c = await createContent({
+          ownerId: USER_A_ID,
+          talkId: TALK_A_ID,
+          title: 'Doc',
+          createdByUserId: USER_A_ID,
+        });
+        const anchorA = freshAnchorId();
+        const md = tiptapJsonToMarkdown(
+          docFor([{ anchor: anchorA, text: 'The same text' }]),
+        );
+        const upd = await updateContentBody({
+          contentId: c.id,
+          ownerId: USER_A_ID,
+          expectedVersion: 1,
+          bodyMarkdown: md,
+        });
+        if (upd.kind !== 'ok') throw new Error('seed save failed');
+        const r = await createProposal({
+          contentId: c.id,
+          ownerId: USER_A_ID,
+          kind: 'replace',
+          afterAnchorId: null,
+          targetAnchorId: anchorA,
+          insertedMarkdown: 'Rewritten.',
+        });
+        if (r.kind !== 'ok') throw new Error('create failed');
+        return { contentId: c.id, anchorA, proposalId: r.proposal.id };
+      },
+    );
+
+    // Now flip the block from paragraph to heading without changing the
+    // plain text — content_hash matches but structuralFingerprint won't.
+    await withUserContext(USER_A_ID, async () => {
+      const md = tiptapJsonToMarkdown(
+        docFor([{ anchor: anchorA, text: 'The same text', type: 'heading' }]),
+      );
+      const upd = await updateContentBody({
+        contentId,
+        ownerId: USER_A_ID,
+        expectedVersion: 2,
+        bodyMarkdown: md,
+      });
+      if (upd.kind !== 'ok') throw new Error('drift save failed');
+    });
+
+    await withUserContext(USER_A_ID, async () => {
+      const accepted = await acceptProposal({
+        contentId,
+        proposalId,
+        userId: USER_A_ID,
+      });
+      expect(accepted.kind).toBe('ok');
+      if (accepted.kind !== 'ok') return;
+      expect(accepted.driftDetected).toBe(true);
+      // Drift gets persisted on the row so the amber pill survives reload.
+      expect(accepted.proposal.driftDetected).toBe(true);
+    });
+  });
+
+  it('acceptProposal: siblings targeting the same anchor go stale on replace accept', async () => {
+    const { contentId, anchorA, acceptedId, siblingId } = await withUserContext(
+      USER_A_ID,
+      async () => {
+        const c = await createContent({
+          ownerId: USER_A_ID,
+          talkId: TALK_A_ID,
+          title: 'Doc',
+          createdByUserId: USER_A_ID,
+        });
+        const anchorA = freshAnchorId();
+        const md = tiptapJsonToMarkdown(
+          docFor([{ anchor: anchorA, text: 'Original' }]),
+        );
+        const upd = await updateContentBody({
+          contentId: c.id,
+          ownerId: USER_A_ID,
+          expectedVersion: 1,
+          bodyMarkdown: md,
+        });
+        if (upd.kind !== 'ok') throw new Error('seed save failed');
+        const a = await createProposal({
+          contentId: c.id,
+          ownerId: USER_A_ID,
+          kind: 'replace',
+          afterAnchorId: null,
+          targetAnchorId: anchorA,
+          insertedMarkdown: 'First rewrite.',
+        });
+        const b = await createProposal({
+          contentId: c.id,
+          ownerId: USER_A_ID,
+          kind: 'replace',
+          afterAnchorId: null,
+          targetAnchorId: anchorA,
+          insertedMarkdown: 'Competing rewrite.',
+        });
+        if (a.kind !== 'ok' || b.kind !== 'ok')
+          throw new Error('create failed');
+        return {
+          contentId: c.id,
+          anchorA,
+          acceptedId: a.proposal.id,
+          siblingId: b.proposal.id,
+        };
+      },
+    );
+    void anchorA;
+
+    await withUserContext(USER_A_ID, async () => {
+      const accepted = await acceptProposal({
+        contentId,
+        proposalId: acceptedId,
+        userId: USER_A_ID,
+      });
+      expect(accepted.kind).toBe('ok');
+      if (accepted.kind !== 'ok') return;
+      expect(accepted.staledSiblingProposalIds).toContain(siblingId);
+    });
+
+    await withUserContext(USER_A_ID, async () => {
+      const sibling = await getProposalById(siblingId);
+      expect(sibling?.status).toBe('stale');
+      expect(sibling?.statusReason).toBe('target_replaced');
+    });
+  });
+
   it('listPendingProposalsByContentId returns only pending in created order', async () => {
     const { contentId, p1, p2, p3 } = await withUserContext(
       USER_A_ID,

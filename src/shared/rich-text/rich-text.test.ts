@@ -13,9 +13,12 @@ import {
   insertAfterAnchor,
   markdownToTiptapJson,
   plainTextOf,
+  replaceBlockByAnchor,
   sanitizeMarkdown,
   sanitizeRichTextDocument,
   sha256Hex,
+  stripAnchorCommentsFromMarkdown,
+  structuralFingerprint,
   tiptapJsonToMarkdown,
   type RichTextDocument,
 } from './index.js';
@@ -378,6 +381,151 @@ describe('sanitizer policy', () => {
     const inline = out.content[0].content ?? [];
     expect(inline[0].marks?.length ?? 0).toBe(0);
     expect(inline[1].marks?.[0]?.attrs?.href).toBe('https://x.com/');
+  });
+});
+
+describe('replaceBlockByAnchor', () => {
+  it('substitutes a single block and inherits the target anchor', () => {
+    const start = doc([
+      {
+        type: 'paragraph',
+        attrs: { [ANCHOR_ATTR_KEY]: 'a' },
+        content: [{ type: 'text', text: 'before' }],
+      },
+      {
+        type: 'paragraph',
+        attrs: { [ANCHOR_ATTR_KEY]: 'b' },
+        content: [{ type: 'text', text: 'target' }],
+      },
+      {
+        type: 'paragraph',
+        attrs: { [ANCHOR_ATTR_KEY]: 'c' },
+        content: [{ type: 'text', text: 'after' }],
+      },
+    ]);
+    const result = replaceBlockByAnchor({
+      doc: start,
+      targetAnchorId: 'b',
+      replacementNodes: [
+        {
+          type: 'paragraph',
+          content: [{ type: 'text', text: 'rewritten' }],
+        },
+      ],
+    });
+    if ('kind' in result) throw new Error('expected ok');
+    expect(result.doc.content.length).toBe(3);
+    expect(plainTextOf(result.doc.content[1])).toBe('rewritten');
+    expect(result.doc.content[1].attrs?.[ANCHOR_ATTR_KEY]).toBe('b');
+    expect(result.appliedAnchorIds).toEqual(['b']);
+  });
+
+  it('stamps fresh anchors on every replacement when multiple nodes are supplied', () => {
+    const start = doc([
+      {
+        type: 'paragraph',
+        attrs: { [ANCHOR_ATTR_KEY]: 'target' },
+        content: [{ type: 'text', text: 'old' }],
+      },
+    ]);
+    const result = replaceBlockByAnchor({
+      doc: start,
+      targetAnchorId: 'target',
+      replacementNodes: [
+        {
+          type: 'paragraph',
+          attrs: { [ANCHOR_ATTR_KEY]: 'attempted-hijack' },
+          content: [{ type: 'text', text: 'hijack-one' }],
+        },
+        {
+          type: 'paragraph',
+          content: [{ type: 'text', text: 'two' }],
+        },
+      ],
+    });
+    if ('kind' in result) throw new Error('expected ok');
+    expect(result.doc.content.length).toBe(2);
+    // Multi-node replacement never inherits — fresh anchors throughout.
+    expect(result.doc.content[0].attrs?.[ANCHOR_ATTR_KEY]).not.toBe('target');
+    expect(result.doc.content[0].attrs?.[ANCHOR_ATTR_KEY]).not.toBe(
+      'attempted-hijack',
+    );
+    expect(result.doc.content[1].attrs?.[ANCHOR_ATTR_KEY]).not.toBe('target');
+  });
+
+  it('returns anchor_missing for unknown target', () => {
+    const result = replaceBlockByAnchor({
+      doc: doc([]),
+      targetAnchorId: 'nope',
+      replacementNodes: [
+        { type: 'paragraph', content: [{ type: 'text', text: 'x' }] },
+      ],
+    });
+    expect('kind' in result && result.kind).toBe('anchor_missing');
+  });
+});
+
+describe('structuralFingerprint', () => {
+  it('changes when node type changes even if text stays the same', () => {
+    const para = {
+      type: 'paragraph',
+      attrs: { [ANCHOR_ATTR_KEY]: 'a' },
+      content: [{ type: 'text', text: 'hello' }],
+    };
+    const heading = {
+      type: 'heading',
+      attrs: { [ANCHOR_ATTR_KEY]: 'a', level: 1 },
+      content: [{ type: 'text', text: 'hello' }],
+    };
+    expect(structuralFingerprint(para)).not.toBe(
+      structuralFingerprint(heading),
+    );
+  });
+
+  it('ignores the anchor attribute so the same shape with a different anchor matches', () => {
+    const a = {
+      type: 'paragraph',
+      attrs: { [ANCHOR_ATTR_KEY]: 'a' },
+      content: [{ type: 'text', text: 'hi' }],
+    };
+    const b = {
+      type: 'paragraph',
+      attrs: { [ANCHOR_ATTR_KEY]: 'b' },
+      content: [{ type: 'text', text: 'hi' }],
+    };
+    expect(structuralFingerprint(a)).toBe(structuralFingerprint(b));
+  });
+
+  it('reflects mark changes', () => {
+    const plain = {
+      type: 'paragraph',
+      content: [{ type: 'text', text: 'word' }],
+    };
+    const bold = {
+      type: 'paragraph',
+      content: [{ type: 'text', text: 'word', marks: [{ type: 'bold' }] }],
+    };
+    expect(structuralFingerprint(plain)).not.toBe(structuralFingerprint(bold));
+  });
+});
+
+describe('stripAnchorCommentsFromMarkdown', () => {
+  it('removes anchor comments from agent-supplied markdown', () => {
+    const md =
+      '<!-- anchor:legit -->\nUser text and <!-- anchor:hijack --> here.';
+    const out = stripAnchorCommentsFromMarkdown(md);
+    expect(out).not.toContain('anchor:legit');
+    expect(out).not.toContain('anchor:hijack');
+    expect(out).toContain('User text and');
+  });
+
+  it('returns empty string for empty input', () => {
+    expect(stripAnchorCommentsFromMarkdown('')).toBe('');
+  });
+
+  it('leaves non-anchor HTML comments alone (sanitizeMarkdown handles those next)', () => {
+    const out = stripAnchorCommentsFromMarkdown('<!-- not an anchor -->\nbody');
+    expect(out).toContain('<!-- not an anchor -->');
   });
 });
 

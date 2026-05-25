@@ -1,17 +1,18 @@
-// ProposalCard — agent's `propose_content_append` tool call rendered
-// as a UI surface inline in the chat timeline. Five states drive the
-// render branch: streaming (tool_call_started before result),
-// pending (full card awaiting user decision), accepted (1-line summary),
-// rejected (1-line summary), and stale (anchor no longer in doc).
+// ProposalCard — agent's `propose_content_append` and
+// `propose_content_replace` tool calls rendered as a UI surface inline
+// in the chat timeline. Five states drive the render branch:
+// streaming (tool_call_started before result), pending (full card
+// awaiting user decision), accepted (1-line summary), rejected
+// (1-line summary), and stale (target/anchor no longer in doc).
 //
 // The card is the visible end of the agent ↔ user handshake state
 // machine; Accept calls into the optimistic flow in TalkDetailPage,
-// which applies the inserted_markdown to the local doc immediately
-// and reconciles on the server response.
+// which applies the patch to the local doc immediately and reconciles
+// on the server response.
 //
 // Sibling: `tool-card-registry.ts` (lookup keyed by tool name).
 
-import { Copy, FileEdit, FilePlus } from 'lucide-react';
+import { Copy, FileEdit, FilePlus, Replace } from 'lucide-react';
 import {
   useCallback,
   useEffect,
@@ -28,6 +29,12 @@ export type ProposalCardAgent = {
   colorToken: string;
 };
 
+export type ProposalCardTargetPreview = {
+  anchorId: string;
+  kind: string | null;
+  text: string;
+} | null;
+
 export type ProposalCardState =
   | { kind: 'streaming'; toolName: string }
   | {
@@ -36,6 +43,7 @@ export type ProposalCardState =
       acceptInFlight: boolean;
       acceptDisabled: boolean;
       acceptDisabledReason?: string;
+      targetPreview?: ProposalCardTargetPreview;
     }
   | {
       kind: 'accepted';
@@ -125,15 +133,19 @@ export function ProposalCard({
   }, [state.kind]);
 
   if (state.kind === 'streaming') {
+    const isReplace = state.toolName === 'propose_content_replace';
+    const StreamingIcon = isReplace ? Replace : FileEdit;
     return (
       <div className="proposal-card proposal-card-streaming" role="status">
         <div className="proposal-card-header">
-          <FileEdit
+          <StreamingIcon
             size={14}
             className="proposal-card-icon"
             aria-hidden="true"
           />
-          <span className="proposal-card-label">Proposal</span>
+          <span className="proposal-card-label">
+            {isReplace ? 'Replacement proposal' : 'Proposal'}
+          </span>
           <AgentMonogram agent={agent} />
           <span className="proposal-card-agent-name">{agent.label}</span>
         </div>
@@ -156,21 +168,32 @@ export function ProposalCard({
 
   if (state.kind === 'accepted') {
     const { proposal, driftDetected } = state;
+    const isReplace = proposal.kind === 'replace';
+    const verbPhrase = isReplace ? 'rewrote a section' : 'added a section';
+    const driftLabel =
+      isReplace && driftDetected
+        ? 'Your edit was overwritten'
+        : 'Surroundings shifted';
+    const driftTitle =
+      isReplace && driftDetected
+        ? "You edited this block between when the proposal was written and when you accepted it. The agent's version overwrote yours."
+        : 'Surrounding text changed since the proposal was written';
     return (
       <div className="proposal-card proposal-card-accepted">
         <div className="proposal-card-summary-row">
           <AgentMonogram agent={agent} />
           <span className="proposal-card-summary-text">
-            {agent.label} added a section
+            {agent.label} {verbPhrase}
             {proposal.rationale ? `: ${proposal.rationale}` : ''} — accepted{' '}
             {formatResolvedTime(proposal.resolvedAt)}
           </span>
           {driftDetected ? (
             <span
               className="proposal-card-drift-pill"
-              title="Surrounding text changed since the proposal was written"
+              data-replace={isReplace ? 'true' : 'false'}
+              title={driftTitle}
             >
-              Surroundings shifted
+              {driftLabel}
             </span>
           ) : null}
         </div>
@@ -191,20 +214,25 @@ export function ProposalCard({
 
   if (state.kind === 'stale') {
     const { proposal } = state;
+    const isReplace = proposal.kind === 'replace';
+    const StaleIcon = isReplace ? Replace : FilePlus;
+    const staleLabel = isReplace
+      ? 'Target block no longer in document'
+      : 'Anchor no longer in document';
     return (
       <div className="proposal-card proposal-card-stale" aria-disabled="true">
         <div className="proposal-card-header">
-          <FilePlus
+          <StaleIcon
             size={14}
             className="proposal-card-icon"
             aria-hidden="true"
           />
-          <span className="proposal-card-label">Proposal</span>
+          <span className="proposal-card-label">
+            {isReplace ? 'Replacement proposal' : 'Proposal'}
+          </span>
           <AgentMonogram agent={agent} />
           <span className="proposal-card-agent-name">{agent.label}</span>
-          <span className="proposal-card-stale-pill">
-            Anchor no longer in document
-          </span>
+          <span className="proposal-card-stale-pill">{staleLabel}</span>
         </div>
         {proposal.rationale ? (
           <p className="proposal-card-rationale">{proposal.rationale}</p>
@@ -224,8 +252,15 @@ export function ProposalCard({
     );
   }
 
-  const { proposal, acceptInFlight, acceptDisabled, acceptDisabledReason } =
-    state;
+  const {
+    proposal,
+    acceptInFlight,
+    acceptDisabled,
+    acceptDisabledReason,
+    targetPreview,
+  } = state;
+  const isReplace = proposal.kind === 'replace';
+  const PendingIcon = isReplace ? Replace : FilePlus;
   const titleId = `proposal-card-title-${proposal.id}`;
   const rationaleId = proposal.rationale
     ? `proposal-card-rationale-${proposal.id}`
@@ -238,11 +273,18 @@ export function ProposalCard({
     .slice(0, 6)
     .join(' ');
   const acceptAriaLabel = `Accept proposal from ${agent.label}: ${previewFirstWords || 'new content'}`;
+  const targetTextTrimmed = targetPreview?.text?.trim() ?? '';
+  // Pre-accept drift warning: target block's text doesn't match what the
+  // agent saw (target_anchor_baseline_json was a different shape). The
+  // amber post-accept pill covers structural drift the server detects.
+  const showPreAcceptDriftWarning =
+    isReplace && proposal.targetAnchorId !== null && proposal.driftDetected;
 
   return (
     <div
       ref={cardRef}
       className="proposal-card proposal-card-pending"
+      data-kind={proposal.kind}
       role="article"
       aria-labelledby={titleId}
       aria-describedby={rationaleId}
@@ -250,13 +292,13 @@ export function ProposalCard({
       onKeyDown={handleKeyDown}
     >
       <div className="proposal-card-header">
-        <FilePlus
+        <PendingIcon
           size={14}
           className="proposal-card-icon"
           aria-hidden="true"
         />
         <span className="proposal-card-label" id={titleId}>
-          Proposal
+          {isReplace ? 'Replacement proposal' : 'Proposal'}
         </span>
         <AgentMonogram agent={agent} />
         <span className="proposal-card-agent-name">{agent.label}</span>
@@ -264,6 +306,22 @@ export function ProposalCard({
       {proposal.rationale ? (
         <p className="proposal-card-rationale" id={rationaleId}>
           {proposal.rationale}
+        </p>
+      ) : null}
+      {isReplace && targetPreview ? (
+        <div className="proposal-card-target-preview">
+          <span className="proposal-card-target-label">Replaces:</span>
+          <span className="proposal-card-target-text" title={targetTextTrimmed}>
+            {targetTextTrimmed.length > 120
+              ? `${targetTextTrimmed.slice(0, 117)}…`
+              : targetTextTrimmed || '(empty block)'}
+          </span>
+        </div>
+      ) : null}
+      {showPreAcceptDriftWarning ? (
+        <p className="proposal-card-drift-warning" role="status">
+          You edited this block after the agent wrote this proposal. Accepting
+          will overwrite your changes.
         </p>
       ) : null}
       <PreviewMarkdown markdown={proposal.insertedMarkdown} />

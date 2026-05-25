@@ -25,7 +25,10 @@ import {
   tiptapJsonToMarkdown,
   type RichTextDocument,
 } from '../../shared/rich-text/index.js';
-import { executeProposeContentAppend } from './content-tool-handlers.js';
+import {
+  executeProposeContentAppend,
+  executeProposeContentReplace,
+} from './content-tool-handlers.js';
 
 const USER_A_ID = '0c44ee44-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
 const USER_B_ID = '0c44ee44-bbbb-bbbb-bbbb-bbbbbbbbbbbb';
@@ -260,6 +263,184 @@ describe('executeProposeContentAppend', () => {
         args: {},
       });
       expect(missing.isError).toBe(true);
+    });
+  });
+});
+
+describe('executeProposeContentReplace', () => {
+  beforeAll(async () => {
+    await initPgDatabase();
+    await seedAuthUser(USER_A_ID, 'tool-a@clawtalk.local', 'Tool A');
+    await seedAuthUser(USER_B_ID, 'tool-b@clawtalk.local', 'Tool B');
+    await seedTalk(TALK_A_ID, USER_A_ID);
+    await seedTalk(TALK_B_ID, USER_B_ID);
+  });
+
+  afterAll(async () => {
+    const db = getDbPg();
+    await db`
+      delete from auth.users where id in (${USER_A_ID}::uuid, ${USER_B_ID}::uuid)
+    `;
+    await closePgDatabase();
+  });
+
+  beforeEach(async () => {
+    await purge();
+  });
+
+  it('happy path writes a pending replace proposal and surfaces target_anchor_id', async () => {
+    await withUserContext(USER_A_ID, async () => {
+      const created = await createContent({
+        ownerId: USER_A_ID,
+        talkId: TALK_A_ID,
+        title: 'Doc',
+        createdByUserId: USER_A_ID,
+      });
+      const body = tiptapJsonToMarkdown(
+        docFor([
+          { anchor: 'replaceaaaaaa', text: 'The original block.' },
+          { anchor: 'tailbbbbbbb1', text: 'A tail block.' },
+        ]),
+      );
+      const update = await updateContentBody({
+        contentId: created.id,
+        ownerId: USER_A_ID,
+        expectedVersion: 1,
+        bodyMarkdown: body,
+        updatedByUserId: USER_A_ID,
+      });
+      expect(update.kind).toBe('ok');
+
+      const result = await executeProposeContentReplace({
+        talkId: TALK_A_ID,
+        userId: USER_A_ID,
+        runId: RUN_ID,
+        agentId: AGENT_ID,
+        args: {
+          target_anchor_id: 'replaceaaaaaa',
+          markdown: 'A crisper rewrite.',
+          rationale: 'Tightens the original.',
+        },
+      });
+
+      expect(result.isError).toBeFalsy();
+      const parsed = JSON.parse(result.result) as {
+        proposalId: string;
+        status: string;
+        kind: string;
+        targetAnchorId: string;
+        contentId: string;
+      };
+      expect(parsed.kind).toBe('replace');
+      expect(parsed.targetAnchorId).toBe('replaceaaaaaa');
+      expect(parsed.status).toBe('pending');
+      expect(parsed.contentId).toBe(created.id);
+
+      const pending = await listPendingProposalsByContentId(created.id);
+      expect(pending).toHaveLength(1);
+      expect(pending[0].kind).toBe('replace');
+      expect(pending[0].targetAnchorId).toBe('replaceaaaaaa');
+      expect(pending[0].afterAnchorId).toBeNull();
+      expect(pending[0].targetAnchorBaselineJson).not.toBeNull();
+    });
+  });
+
+  it('returns a tool error when target_anchor_id is missing or empty', async () => {
+    await withUserContext(USER_A_ID, async () => {
+      await createContent({
+        ownerId: USER_A_ID,
+        talkId: TALK_A_ID,
+        title: 'Doc',
+        createdByUserId: USER_A_ID,
+      });
+      const missing = await executeProposeContentReplace({
+        talkId: TALK_A_ID,
+        userId: USER_A_ID,
+        runId: RUN_ID,
+        agentId: AGENT_ID,
+        args: { markdown: 'replacement' },
+      });
+      expect(missing.isError).toBe(true);
+
+      const empty = await executeProposeContentReplace({
+        talkId: TALK_A_ID,
+        userId: USER_A_ID,
+        runId: RUN_ID,
+        agentId: AGENT_ID,
+        args: { target_anchor_id: '', markdown: 'replacement' },
+      });
+      expect(empty.isError).toBe(true);
+    });
+  });
+
+  it('returns a tool error when the target anchor is not in the document', async () => {
+    await withUserContext(USER_A_ID, async () => {
+      await createContent({
+        ownerId: USER_A_ID,
+        talkId: TALK_A_ID,
+        title: 'Doc',
+        createdByUserId: USER_A_ID,
+      });
+      const result = await executeProposeContentReplace({
+        talkId: TALK_A_ID,
+        userId: USER_A_ID,
+        runId: RUN_ID,
+        agentId: AGENT_ID,
+        args: {
+          target_anchor_id: 'doesnotexist',
+          markdown: 'replacement',
+        },
+      });
+      expect(result.isError).toBe(true);
+      expect(result.result.toLowerCase()).toContain('anchor');
+    });
+  });
+
+  it('returns a tool error when the Talk has no attached document', async () => {
+    await withUserContext(USER_A_ID, async () => {
+      const result = await executeProposeContentReplace({
+        talkId: TALK_A_ID,
+        userId: USER_A_ID,
+        runId: RUN_ID,
+        agentId: AGENT_ID,
+        args: { target_anchor_id: 'whatever', markdown: 'replacement' },
+      });
+      expect(result.isError).toBe(true);
+      expect(result.result.toLowerCase()).toContain('document');
+    });
+  });
+
+  it('rejects HTML-only payloads as empty after sanitize', async () => {
+    await withUserContext(USER_A_ID, async () => {
+      const created = await createContent({
+        ownerId: USER_A_ID,
+        talkId: TALK_A_ID,
+        title: 'Doc',
+        createdByUserId: USER_A_ID,
+      });
+      const body = tiptapJsonToMarkdown(
+        docFor([{ anchor: 'anchorbbbbbb', text: 'Block.' }]),
+      );
+      await updateContentBody({
+        contentId: created.id,
+        ownerId: USER_A_ID,
+        expectedVersion: 1,
+        bodyMarkdown: body,
+        updatedByUserId: USER_A_ID,
+      });
+
+      const result = await executeProposeContentReplace({
+        talkId: TALK_A_ID,
+        userId: USER_A_ID,
+        runId: RUN_ID,
+        agentId: AGENT_ID,
+        args: {
+          target_anchor_id: 'anchorbbbbbb',
+          markdown: '<iframe></iframe>',
+        },
+      });
+      expect(result.isError).toBe(true);
+      expect(result.result.toLowerCase()).toContain('empty');
     });
   });
 });

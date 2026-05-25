@@ -1278,8 +1278,9 @@ export type ContentProposalSummary = {
   proposedByRunId: string | null;
   proposedByAgentId: string | null;
   proposedByMessageId: string | null;
-  kind: 'append';
+  kind: 'append' | 'replace';
   afterAnchorId: string | null;
+  targetAnchorId: string | null;
   insertedMarkdown: string;
   rationale: string | null;
   status: 'pending' | 'accepted' | 'rejected' | 'stale';
@@ -1287,6 +1288,7 @@ export type ContentProposalSummary = {
   baseContentVersion: number;
   baseAnchorContentHash: string | null;
   appliedAnchorIds: string[];
+  driftDetected: boolean;
   createdAt: string;
   resolvedAt: string | null;
   resolvedByUserId: string | null;
@@ -1360,11 +1362,13 @@ export async function acceptContentProposal(input: {
   content: Content;
   proposal: ContentProposalSummary;
   driftDetected: boolean;
+  staledSiblingProposalIds: string[];
 }> {
   return apiMutationRequest<{
     content: Content;
     proposal: ContentProposalSummary;
     driftDetected: boolean;
+    staledSiblingProposalIds: string[];
   }>(
     `/api/v1/contents/${encodeURIComponent(input.contentId)}/proposals/${encodeURIComponent(input.proposalId)}/accept`,
     {

@@ -1,7 +1,10 @@
 // Unit tests for the pure helpers in context-loader.ts.
 //
-// PR 5 added buildContentOutline. The full loadTalkContext is integration-tested
-// end-to-end through the executor + worker; this file isolates the cheap parts.
+// buildContentOutline now renders the inlined doc (full block text +
+// anchor comments) rather than 60-char previews — the agent needs to
+// see the prose it's being asked to rewrite. The full loadTalkContext
+// is integration-tested end-to-end through the executor + worker; this
+// file isolates the cheap parts.
 
 import { describe, expect, it } from 'vitest';
 
@@ -12,22 +15,9 @@ import type { AnchorMap } from '../../shared/rich-text/index.js';
 function makeContent(input: {
   title?: string;
   bodyVersion?: number;
-  blocks: Array<{
-    anchorId: string;
-    kind: string;
-    preview: string;
-    sortOrder: number;
-  }>;
+  bodyMarkdown: string;
+  anchorMap?: AnchorMap;
 }): Content {
-  const anchorMap: AnchorMap = {};
-  for (const b of input.blocks) {
-    anchorMap[b.anchorId] = {
-      kind: b.kind,
-      sort_order: b.sortOrder,
-      preview: b.preview,
-      content_hash: 'deadbeef',
-    };
-  }
   return {
     id: '11111111-1111-1111-1111-111111111111',
     ownerId: '22222222-2222-2222-2222-222222222222',
@@ -35,9 +25,9 @@ function makeContent(input: {
     title: input.title ?? 'Doc',
     contentKind: 'document',
     contentFormat: 'markdown',
-    bodyMarkdown: '',
+    bodyMarkdown: input.bodyMarkdown,
     bodyVersion: input.bodyVersion ?? 1,
-    anchorMap,
+    anchorMap: input.anchorMap ?? {},
     createdAt: '2026-05-25T00:00:00Z',
     updatedAt: '2026-05-25T00:00:00Z',
     createdByUserId: null,
@@ -47,24 +37,18 @@ function makeContent(input: {
 }
 
 describe('buildContentOutline', () => {
-  it('emits one line per block in sort_order with anchor + kind + preview', () => {
+  it('inlines full block content with anchor markers in document order', () => {
+    const md = [
+      '<!-- anchor:aaaa11112222 -->',
+      '# The Audience Trap',
+      '',
+      '<!-- anchor:bbbb11112222 -->',
+      'Why the hardest problem is the one no one budgets for',
+    ].join('\n');
     const content = makeContent({
       title: 'Why Fortnite UEFN Failed',
       bodyVersion: 3,
-      blocks: [
-        {
-          anchorId: 'aaaa11112222',
-          kind: 'heading',
-          preview: 'The Audience Trap',
-          sortOrder: 0,
-        },
-        {
-          anchorId: 'bbbb11112222',
-          kind: 'paragraph',
-          preview: 'Why the hardest problem is the one no one budgets for',
-          sortOrder: 1,
-        },
-      ],
+      bodyMarkdown: md,
     });
 
     const outline = buildContentOutline(content);
@@ -72,69 +56,66 @@ describe('buildContentOutline', () => {
     expect(outline).toContain('"Why Fortnite UEFN Failed" (v3)');
     expect(outline.toLowerCase()).toContain('google doc');
     expect(outline).toContain('@doc');
+    expect(outline).toContain('<!-- anchor:aaaa11112222 -->');
+    expect(outline).toContain('[heading] The Audience Trap');
+    expect(outline).toContain('<!-- anchor:bbbb11112222 -->');
     expect(outline).toContain(
-      '[anchor:aaaa11112222] heading "The Audience Trap"',
-    );
-    expect(outline).toContain(
-      '[anchor:bbbb11112222] paragraph "Why the hardest problem is the one no one budgets for"',
+      '[paragraph] Why the hardest problem is the one no one budgets for',
     );
     expect(outline.indexOf('aaaa11112222')).toBeLessThan(
       outline.indexOf('bbbb11112222'),
     );
     expect(outline).toContain('propose_content_append');
+    expect(outline).toContain('propose_content_replace');
   });
 
-  it('escapes embedded double quotes in the preview so the format stays parseable', () => {
-    const content = makeContent({
-      blocks: [
-        {
-          anchorId: 'cccc11112222',
-          kind: 'paragraph',
-          preview: 'They said "no" and meant it',
-          sortOrder: 0,
-        },
-      ],
+  it('respects the byte budget by truncating from the bottom at block boundaries', () => {
+    const blocks = Array.from({ length: 100 }, (_, i) => {
+      const anchor = `anchor${i.toString().padStart(6, '0')}`;
+      return `<!-- anchor:${anchor} -->\n${'A'.repeat(50)}`;
     });
-    const outline = buildContentOutline(content);
-    expect(outline).toContain('\\"no\\"');
-  });
-
-  it('respects the 2KB byte budget by truncating from the bottom', () => {
-    // 100 blocks at ~80 bytes each = ~8KB → must truncate.
-    const blocks = Array.from({ length: 100 }, (_, i) => ({
-      anchorId: `anchor${i.toString().padStart(6, '0')}`,
-      kind: 'paragraph',
-      preview: 'A'.repeat(50),
-      sortOrder: i,
-    }));
-    const content = makeContent({ blocks });
+    const content = makeContent({
+      bodyMarkdown: blocks.join('\n\n'),
+    });
     const outline = buildContentOutline(content, 2048);
     expect(new TextEncoder().encode(outline).byteLength).toBeLessThanOrEqual(
       2048,
     );
-    expect(outline).toMatch(/\[… \d+ more blocks not shown\]/);
+    expect(outline).toMatch(/\[… \d+ more blocks omitted/);
   });
 
   it('emits no truncation suffix when every block fits', () => {
     const content = makeContent({
-      blocks: [
-        {
-          anchorId: 'dddd11112222',
-          kind: 'paragraph',
-          preview: 'Only block',
-          sortOrder: 0,
-        },
-      ],
+      bodyMarkdown: '<!-- anchor:dddd11112222 -->\nOnly block',
     });
     const outline = buildContentOutline(content);
-    expect(outline).not.toContain('more blocks not shown');
+    expect(outline).not.toContain('more blocks omitted');
   });
 
   it('emits a header + footer even when there are zero blocks', () => {
-    const content = makeContent({ title: 'Empty Doc', blocks: [] });
+    const content = makeContent({ title: 'Empty Doc', bodyMarkdown: '' });
     const outline = buildContentOutline(content);
     expect(outline).toContain('**The Doc');
     expect(outline).toContain('"Empty Doc"');
     expect(outline).toContain('propose_content_append');
+    expect(outline).toContain('propose_content_replace');
+  });
+
+  it('strips ASCII control characters from inlined block content', () => {
+    // Embed a NUL byte and a bell character (0x07) inside the block.
+    const dirty = `<!-- anchor:eeee11112222 -->\nclean${String.fromCharCode(0, 7)}body`;
+    const content = makeContent({ bodyMarkdown: dirty });
+    const outline = buildContentOutline(content);
+    expect(outline).toContain('cleanbody');
+    expect(outline).not.toContain(String.fromCharCode(0));
+    expect(outline).not.toContain(String.fromCharCode(7));
+  });
+
+  it('mentions @doc + the directive to use tools instead of chat', () => {
+    const content = makeContent({
+      bodyMarkdown: '<!-- anchor:ffff11112222 -->\nSome prose.',
+    });
+    const outline = buildContentOutline(content);
+    expect(outline).toContain('do NOT write substantive new prose into chat');
   });
 });

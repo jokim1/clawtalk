@@ -1,4 +1,4 @@
-// Content feature PR 1 — typed accessors for the `contents` and
+// Content feature — typed accessors for the `contents` and
 // `content_proposals` tables.
 //
 // Caller contract: every function below must run inside a
@@ -20,17 +20,20 @@ import {
   computeAnchorMap,
   ensureAnchorIds,
   findBlockIndexByAnchor,
-  getAnchorId,
   insertAfterAnchor,
   markdownToTiptapJson,
+  plainTextOf,
+  replaceBlockByAnchor,
   sanitizeMarkdown,
   sanitizeRichTextDocument,
+  stripAnchorCommentsFromMarkdown,
+  structuralFingerprint,
   tiptapJsonToMarkdown,
 } from '../../shared/rich-text/index.js';
 import { emitOutboxEvent } from '../talks/outbox-emit.js';
 
 export const CONTENT_BODY_BYTE_LIMIT = 512_000;
-export type ProposalKind = 'append';
+export type ProposalKind = 'append' | 'replace';
 export type ProposalStatus = 'pending' | 'accepted' | 'rejected' | 'stale';
 
 export interface ContentRecord {
@@ -76,13 +79,16 @@ export interface ContentProposalRecord {
   proposed_by_message_id: string | null;
   kind: ProposalKind;
   after_anchor_id: string | null;
+  target_anchor_id: string | null;
   inserted_markdown: string;
   rationale: string | null;
   status: ProposalStatus;
   status_reason: string | null;
   base_content_version: number;
   base_anchor_content_hash: string | null;
+  target_anchor_baseline_json: RichTextNode | null;
   applied_anchor_ids: string[];
+  drift_detected: boolean;
   created_at: string;
   resolved_at: string | null;
   resolved_by_user_id: string | null;
@@ -96,17 +102,31 @@ export interface ContentProposal {
   proposedByMessageId: string | null;
   kind: ProposalKind;
   afterAnchorId: string | null;
+  targetAnchorId: string | null;
   insertedMarkdown: string;
   rationale: string | null;
   status: ProposalStatus;
   statusReason: string | null;
   baseContentVersion: number;
   baseAnchorContentHash: string | null;
+  targetAnchorBaselineJson: RichTextNode | null;
   appliedAnchorIds: string[];
+  driftDetected: boolean;
   createdAt: string;
   resolvedAt: string | null;
   resolvedByUserId: string | null;
 }
+
+const PROPOSAL_COLUMNS = `
+  id, content_id, owner_id, proposed_by_run_id,
+  proposed_by_agent_id, proposed_by_message_id,
+  kind, after_anchor_id, target_anchor_id,
+  inserted_markdown, rationale,
+  status, status_reason, base_content_version,
+  base_anchor_content_hash, target_anchor_baseline_json,
+  applied_anchor_ids, drift_detected,
+  created_at, resolved_at, resolved_by_user_id
+`;
 
 function toContent(row: ContentRecord): Content {
   return {
@@ -136,13 +156,16 @@ function toProposal(row: ContentProposalRecord): ContentProposal {
     proposedByMessageId: row.proposed_by_message_id,
     kind: row.kind,
     afterAnchorId: row.after_anchor_id,
+    targetAnchorId: row.target_anchor_id,
     insertedMarkdown: row.inserted_markdown,
     rationale: row.rationale,
     status: row.status,
     statusReason: row.status_reason,
     baseContentVersion: row.base_content_version,
     baseAnchorContentHash: row.base_anchor_content_hash,
+    targetAnchorBaselineJson: row.target_anchor_baseline_json,
     appliedAnchorIds: row.applied_anchor_ids ?? [],
+    driftDetected: row.drift_detected ?? false,
     createdAt: row.created_at,
     resolvedAt: row.resolved_at,
     resolvedByUserId: row.resolved_by_user_id,
@@ -157,6 +180,22 @@ function normalizeTitle(title: string): string {
 
 function byteLengthOf(text: string): number {
   return new TextEncoder().encode(text).byteLength;
+}
+
+function nodeIsEmpty(node: RichTextNode | undefined): boolean {
+  if (!node) return true;
+  const text = plainTextOf(node).trim();
+  if (text.length > 0) return false;
+  // hr / empty paragraph after sanitize still counts as a real block if
+  // structurally distinct, but for our "no-op proposal" guard we treat
+  // a doc whose blocks all produce no plain text as empty.
+  return true;
+}
+
+function documentIsEmpty(doc: RichTextDocument): boolean {
+  const blocks = doc.content ?? [];
+  if (blocks.length === 0) return true;
+  return blocks.every(nodeIsEmpty);
 }
 
 // ── content CRUD ─────────────────────────────────────────────────
@@ -336,10 +375,12 @@ export async function updateContentBody(input: {
   }
 
   // In the same transaction, mark stale any pending proposal whose
-  // after_anchor_id no longer exists in the new anchor map.
-  // The `?` operator tests jsonb key existence at the top level —
-  // anchor_map_json is shaped `{ anchorId: { ... } }`, so this checks
-  // whether the anchor key is present.
+  // anchor (after_anchor_id for append, target_anchor_id for replace)
+  // no longer exists in the new anchor map. The `?` operator tests
+  // jsonb key existence at the top level — anchor_map_json is shaped
+  // `{ anchorId: { ... } }`, so this checks whether the anchor key is
+  // present.
+  const anchorMapJson = db.json(anchorMap as never);
   const staleRows = await db<{ id: string }[]>`
     update public.content_proposals
     set status = 'stale',
@@ -347,8 +388,12 @@ export async function updateContentBody(input: {
         resolved_at = now()
     where content_id = ${input.contentId}::uuid
       and status = 'pending'
-      and after_anchor_id is not null
-      and not (${db.json(anchorMap as never)}::jsonb ? after_anchor_id)
+      and (
+        (after_anchor_id is not null
+         and not (${anchorMapJson}::jsonb ? after_anchor_id))
+        or (target_anchor_id is not null
+            and not (${anchorMapJson}::jsonb ? target_anchor_id))
+      )
     returning id
   `;
   const staledProposalIds = staleRows.map((r) => r.id);
@@ -391,12 +436,7 @@ export async function getProposalById(
 ): Promise<ContentProposal | null> {
   const db = getDbPg();
   const rows = await db<ContentProposalRecord[]>`
-    select id, content_id, owner_id, proposed_by_run_id,
-           proposed_by_agent_id, proposed_by_message_id,
-           kind, after_anchor_id, inserted_markdown, rationale,
-           status, status_reason, base_content_version,
-           base_anchor_content_hash, applied_anchor_ids,
-           created_at, resolved_at, resolved_by_user_id
+    select ${db.unsafe(PROPOSAL_COLUMNS)}
     from public.content_proposals
     where id = ${proposalId}::uuid
     limit 1
@@ -409,12 +449,7 @@ export async function listPendingProposalsByContentId(
 ): Promise<ContentProposal[]> {
   const db = getDbPg();
   const rows = await db<ContentProposalRecord[]>`
-    select id, content_id, owner_id, proposed_by_run_id,
-           proposed_by_agent_id, proposed_by_message_id,
-           kind, after_anchor_id, inserted_markdown, rationale,
-           status, status_reason, base_content_version,
-           base_anchor_content_hash, applied_anchor_ids,
-           created_at, resolved_at, resolved_by_user_id
+    select ${db.unsafe(PROPOSAL_COLUMNS)}
     from public.content_proposals
     where content_id = ${contentId}::uuid
       and status = 'pending'
@@ -428,6 +463,7 @@ export interface CreateProposalInput {
   ownerId: string;
   kind: ProposalKind;
   afterAnchorId: string | null;
+  targetAnchorId?: string | null;
   insertedMarkdown: string;
   rationale?: string | null;
   proposedByRunId?: string | null;
@@ -439,11 +475,24 @@ export type CreateProposalResult =
   | { kind: 'ok'; proposal: ContentProposal }
   | { kind: 'content_not_found' }
   | { kind: 'anchor_missing'; anchorId: string }
+  | { kind: 'empty_after_sanitize' }
+  | { kind: 'invalid_kind_anchors' }
   | { kind: 'doc_size_limit'; wouldBeBytes: number };
 
 export async function createProposal(
   input: CreateProposalInput,
 ): Promise<CreateProposalResult> {
+  // Kind/anchor pairing — match the DB constraint client-side so we
+  // surface a useful error code rather than a generic SQL violation.
+  const targetAnchorId = input.targetAnchorId ?? null;
+  if (input.kind === 'append' && targetAnchorId !== null) {
+    return { kind: 'invalid_kind_anchors' };
+  }
+  if (input.kind === 'replace') {
+    if (targetAnchorId === null) return { kind: 'invalid_kind_anchors' };
+    if (input.afterAnchorId !== null) return { kind: 'invalid_kind_anchors' };
+  }
+
   if (byteLengthOf(input.insertedMarkdown) > CONTENT_BODY_BYTE_LIMIT) {
     return {
       kind: 'doc_size_limit',
@@ -464,43 +513,74 @@ export async function createProposal(
   const content = contentRows[0];
   if (!content) return { kind: 'content_not_found' };
 
-  // Derive base_anchor_content_hash from the content's current anchor
-  // map so callers (tool handlers, test code) don't have to recompute
-  // it. content_hash on the map is the canonical "anchor block's
-  // plain text at last save" value; the accept path compares against
-  // it for drift detection.
-  const anchorMap = content.anchor_map_json ?? {};
-  let baseAnchorContentHash: string | null = null;
-  if (input.afterAnchorId !== null) {
-    const entry = anchorMap[input.afterAnchorId];
-    if (!entry) {
-      return { kind: 'anchor_missing', anchorId: input.afterAnchorId };
-    }
-    baseAnchorContentHash = entry.content_hash ?? null;
+  // Strip agent-supplied anchor comments BEFORE sanitize so the agent
+  // can't smuggle an anchor ID of its choosing through markdown comment
+  // syntax; sanitizeMarkdown preserves anchor comments for the trusted
+  // user-edit path, so it must not see them in agent input.
+  const stripped = stripAnchorCommentsFromMarkdown(input.insertedMarkdown);
+  const sanitizedInsert = sanitizeMarkdown(stripped);
+
+  // Post-sanitize empty check: catches inputs like `<script></script>`
+  // whose raw form trims non-empty but is empty once HTML is stripped
+  // and parsed.
+  const parsedInsert = sanitizeRichTextDocument(
+    markdownToTiptapJson(sanitizedInsert),
+  );
+  if (documentIsEmpty(parsedInsert)) {
+    return { kind: 'empty_after_sanitize' };
   }
 
-  const sanitizedInsert = sanitizeMarkdown(input.insertedMarkdown);
+  // Derive base_anchor_content_hash + target_anchor_baseline_json from
+  // the content's current anchor block so the accept path can detect
+  // both plain-text and structural drift.
+  const anchorMap = content.anchor_map_json ?? {};
+  let baseAnchorContentHash: string | null = null;
+  let targetAnchorBaselineJson: RichTextNode | null = null;
+  const anchorOfInterest =
+    input.kind === 'append' ? input.afterAnchorId : targetAnchorId;
+
+  if (anchorOfInterest !== null) {
+    const entry = anchorMap[anchorOfInterest];
+    if (!entry) {
+      return { kind: 'anchor_missing', anchorId: anchorOfInterest };
+    }
+    baseAnchorContentHash = entry.content_hash ?? null;
+
+    // Snapshot the target block's full Tiptap JSON so the accept path
+    // can compare structural fingerprints, not just plain-text hashes.
+    // Replace requires a baseline; append only stores it when an
+    // anchor is present (for symmetric drift reporting downstream).
+    const parsedCurrent = sanitizeRichTextDocument(
+      markdownToTiptapJson(content.body_markdown),
+    );
+    const stampedCurrent = ensureAnchorIds(parsedCurrent);
+    const idx = findBlockIndexByAnchor(stampedCurrent, anchorOfInterest);
+    if (idx !== -1) {
+      targetAnchorBaselineJson = stampedCurrent.content[idx] ?? null;
+    }
+  }
+
+  const baselineJsonArg =
+    targetAnchorBaselineJson === null
+      ? null
+      : db.json(targetAnchorBaselineJson as never);
 
   const rows = await db<ContentProposalRecord[]>`
     insert into public.content_proposals
       (content_id, owner_id, proposed_by_run_id, proposed_by_agent_id,
-       proposed_by_message_id, kind, after_anchor_id, inserted_markdown,
-       rationale, status, base_content_version, base_anchor_content_hash)
+       proposed_by_message_id, kind, after_anchor_id, target_anchor_id,
+       inserted_markdown, rationale, status, base_content_version,
+       base_anchor_content_hash, target_anchor_baseline_json)
     values
       (${input.contentId}::uuid, ${input.ownerId}::uuid,
        ${input.proposedByRunId ?? null}::uuid,
        ${input.proposedByAgentId ?? null}::uuid,
        ${input.proposedByMessageId ?? null}::uuid,
-       ${input.kind}, ${input.afterAnchorId},
+       ${input.kind}, ${input.afterAnchorId}, ${targetAnchorId},
        ${sanitizedInsert}, ${input.rationale ?? null},
        'pending', ${content.body_version},
-       ${baseAnchorContentHash})
-    returning id, content_id, owner_id, proposed_by_run_id,
-              proposed_by_agent_id, proposed_by_message_id,
-              kind, after_anchor_id, inserted_markdown, rationale,
-              status, status_reason, base_content_version,
-              base_anchor_content_hash, applied_anchor_ids,
-              created_at, resolved_at, resolved_by_user_id
+       ${baseAnchorContentHash}, ${baselineJsonArg})
+    returning ${db.unsafe(PROPOSAL_COLUMNS)}
   `;
   const proposal = toProposal(rows[0]);
 
@@ -511,7 +591,9 @@ export async function createProposal(
       contentId: content.id,
       proposalId: proposal.id,
       messageId: proposal.proposedByMessageId,
+      kind: proposal.kind,
       afterAnchorId: proposal.afterAnchorId,
+      targetAnchorId: proposal.targetAnchorId,
       agentId: proposal.proposedByAgentId,
     },
     ownerIds: [content.owner_id],
@@ -526,6 +608,7 @@ export type AcceptProposalResult =
       content: Content;
       proposal: ContentProposal;
       driftDetected: boolean;
+      staledSiblingProposalIds: string[];
     }
   | { kind: 'not_found' }
   | { kind: 'proposal_already_resolved'; status: ProposalStatus }
@@ -543,12 +626,7 @@ export async function acceptProposal(input: {
   const db = getDbPg();
 
   const proposalRows = await db<ContentProposalRecord[]>`
-    select id, content_id, owner_id, proposed_by_run_id,
-           proposed_by_agent_id, proposed_by_message_id,
-           kind, after_anchor_id, inserted_markdown, rationale,
-           status, status_reason, base_content_version,
-           base_anchor_content_hash, applied_anchor_ids,
-           created_at, resolved_at, resolved_by_user_id
+    select ${db.unsafe(PROPOSAL_COLUMNS)}
     from public.content_proposals
     where id = ${input.proposalId}::uuid
       and content_id = ${input.contentId}::uuid
@@ -572,21 +650,42 @@ export async function acceptProposal(input: {
   const content = contentRows[0];
   if (!content) return { kind: 'not_found' };
 
+  // Enforce CAS up-front when the client supplied a version. Lets the
+  // UI detect "your view is stale, refetch" before we do parse + insert
+  // work that we'd have to throw away on conflict.
+  if (
+    input.expectedContentVersion !== undefined &&
+    content.body_version !== input.expectedContentVersion
+  ) {
+    return {
+      kind: 'version_conflict',
+      currentVersion: content.body_version,
+    };
+  }
+
   // Parse the canonical body so we can locate the anchor block and
-  // splice the proposal's inserted nodes after it.
+  // splice / replace.
   const parsedCurrent = sanitizeRichTextDocument(
     markdownToTiptapJson(content.body_markdown),
   );
   const parsedStamped = ensureAnchorIds(parsedCurrent);
 
-  if (proposal.after_anchor_id !== null) {
-    const idx = findBlockIndexByAnchor(parsedStamped, proposal.after_anchor_id);
+  const interestedAnchorId =
+    proposal.kind === 'append'
+      ? proposal.after_anchor_id
+      : proposal.target_anchor_id;
+
+  if (interestedAnchorId !== null) {
+    const idx = findBlockIndexByAnchor(parsedStamped, interestedAnchorId);
     if (idx === -1) {
-      // Anchor truly gone — mark stale and return.
+      const staleReason =
+        proposal.kind === 'replace'
+          ? 'target_anchor_missing'
+          : 'anchor_missing';
       await db`
         update public.content_proposals
         set status = 'stale',
-            status_reason = 'anchor_missing',
+            status_reason = ${staleReason},
             resolved_at = now()
         where id = ${proposal.id}::uuid
       `;
@@ -596,7 +695,7 @@ export async function acceptProposal(input: {
         payload: {
           contentId: content.id,
           proposalId: proposal.id,
-          reason: 'anchor_missing',
+          reason: staleReason,
         },
         ownerIds: [content.owner_id],
       });
@@ -604,43 +703,83 @@ export async function acceptProposal(input: {
     }
   }
 
-  // Drift detection: compare the proposal's captured hash against the
-  // current anchor_map entry. The map's content_hash is kept fresh by
-  // every save, so this is the canonical "did the block change since
-  // proposal time" check.
+  // Drift detection. Plain-text content_hash catches text edits; the
+  // structural fingerprint compare catches heading-level / list-marker
+  // / mark-structure changes the hash misses.
   let driftDetected = false;
-  if (proposal.after_anchor_id !== null && proposal.base_anchor_content_hash) {
-    const currentEntry = (content.anchor_map_json ?? {})[
-      proposal.after_anchor_id
-    ];
-    if (currentEntry?.content_hash) {
-      driftDetected =
-        currentEntry.content_hash !== proposal.base_anchor_content_hash;
+  if (interestedAnchorId !== null) {
+    if (proposal.base_anchor_content_hash) {
+      const currentEntry = (content.anchor_map_json ?? {})[interestedAnchorId];
+      if (
+        currentEntry?.content_hash &&
+        currentEntry.content_hash !== proposal.base_anchor_content_hash
+      ) {
+        driftDetected = true;
+      }
+    }
+    if (!driftDetected && proposal.target_anchor_baseline_json) {
+      const idx = findBlockIndexByAnchor(parsedStamped, interestedAnchorId);
+      if (idx !== -1) {
+        const currentFingerprint = structuralFingerprint(
+          parsedStamped.content[idx],
+        );
+        const baselineFingerprint = structuralFingerprint(
+          proposal.target_anchor_baseline_json,
+        );
+        if (currentFingerprint !== baselineFingerprint) {
+          driftDetected = true;
+        }
+      }
     }
   }
 
-  // Apply the insert.
+  // Apply the patch. Inserted markdown was already sanitized at
+  // createProposal time, but we re-strip anchor comments + re-sanitize
+  // here so a hypothetical row inserted by some other path can't
+  // smuggle anchors past the parse step.
+  const cleanedInserted = stripAnchorCommentsFromMarkdown(
+    proposal.inserted_markdown,
+  );
   const insertedDocSanitized = sanitizeRichTextDocument(
-    markdownToTiptapJson(sanitizeMarkdown(proposal.inserted_markdown)),
+    markdownToTiptapJson(sanitizeMarkdown(cleanedInserted)),
   );
   const insertedNodes: RichTextNode[] = insertedDocSanitized.content ?? [];
 
-  const insertResult = insertAfterAnchor({
-    doc: parsedStamped,
-    afterAnchorId: proposal.after_anchor_id,
-    insertedNodes,
-  });
-  if ('kind' in insertResult && insertResult.kind === 'anchor_missing') {
-    // Shouldn't happen — we just checked. Belt-and-braces.
-    return {
-      kind: 'anchor_missing',
-      anchorId: proposal.after_anchor_id ?? '',
-    };
+  let nextDoc: RichTextDocument;
+  let appliedAnchorIds: string[];
+
+  if (proposal.kind === 'append') {
+    const insertResult = insertAfterAnchor({
+      doc: parsedStamped,
+      afterAnchorId: proposal.after_anchor_id,
+      insertedNodes,
+    });
+    if ('kind' in insertResult && insertResult.kind === 'anchor_missing') {
+      return {
+        kind: 'anchor_missing',
+        anchorId: proposal.after_anchor_id ?? '',
+      };
+    }
+    nextDoc = (insertResult as { doc: RichTextDocument }).doc;
+    appliedAnchorIds = (insertResult as { appliedAnchorIds: string[] })
+      .appliedAnchorIds;
+  } else {
+    // replace
+    const replaceResult = replaceBlockByAnchor({
+      doc: parsedStamped,
+      targetAnchorId: proposal.target_anchor_id!,
+      replacementNodes: insertedNodes,
+    });
+    if ('kind' in replaceResult && replaceResult.kind === 'anchor_missing') {
+      return {
+        kind: 'anchor_missing',
+        anchorId: proposal.target_anchor_id ?? '',
+      };
+    }
+    nextDoc = (replaceResult as { doc: RichTextDocument }).doc;
+    appliedAnchorIds = (replaceResult as { appliedAnchorIds: string[] })
+      .appliedAnchorIds;
   }
-  const { doc: nextDoc, appliedAnchorIds } = insertResult as {
-    doc: RichTextDocument;
-    appliedAnchorIds: string[];
-  };
 
   const nextMarkdown = tiptapJsonToMarkdown(nextDoc);
   if (byteLengthOf(nextMarkdown) > CONTENT_BODY_BYTE_LIMIT) {
@@ -683,15 +822,50 @@ export async function acceptProposal(input: {
     set status = 'accepted',
         resolved_at = now(),
         resolved_by_user_id = ${input.userId}::uuid,
-        applied_anchor_ids = ${appliedAnchorIds}
+        applied_anchor_ids = ${appliedAnchorIds},
+        drift_detected = ${driftDetected}
     where id = ${proposal.id}::uuid
-    returning id, content_id, owner_id, proposed_by_run_id,
-              proposed_by_agent_id, proposed_by_message_id,
-              kind, after_anchor_id, inserted_markdown, rationale,
-              status, status_reason, base_content_version,
-              base_anchor_content_hash, applied_anchor_ids,
-              created_at, resolved_at, resolved_by_user_id
+    returning ${db.unsafe(PROPOSAL_COLUMNS)}
   `;
+
+  // Sibling-stale: when a replace lands, any other pending proposal
+  // targeting the same anchor (replace) or anchored after it (append)
+  // is now operating on stale terrain. The anchor_map check in
+  // updateContentBody catches removed anchors, but a replace doesn't
+  // necessarily remove the anchor (single-node replace inherits the
+  // target's anchor ID). Mark same-anchor siblings explicitly.
+  //
+  // For append-on-anchor, the sibling's hash drifted but the anchor
+  // is still present — we leave those pending so the user can
+  // explicitly review them. Only same-target-anchor proposals get
+  // auto-staled.
+  let staledSiblingProposalIds: string[] = [];
+  if (proposal.kind === 'replace' && proposal.target_anchor_id) {
+    const siblingRows = await db<{ id: string }[]>`
+      update public.content_proposals
+      set status = 'stale',
+          status_reason = 'target_replaced',
+          resolved_at = now()
+      where content_id = ${input.contentId}::uuid
+        and status = 'pending'
+        and id <> ${proposal.id}::uuid
+        and target_anchor_id = ${proposal.target_anchor_id}
+      returning id
+    `;
+    staledSiblingProposalIds = siblingRows.map((r) => r.id);
+    for (const id of staledSiblingProposalIds) {
+      await emitOutboxEvent({
+        topic: `talk:${updated.talk_id}`,
+        eventType: 'content_proposal_stale',
+        payload: {
+          contentId: updated.id,
+          proposalId: id,
+          reason: 'target_replaced',
+        },
+        ownerIds: [updated.owner_id],
+      });
+    }
+  }
 
   await emitOutboxEvent({
     topic: `talk:${updated.talk_id}`,
@@ -709,6 +883,7 @@ export async function acceptProposal(input: {
     content: toContent(updated),
     proposal: toProposal(resolvedRows[0]),
     driftDetected,
+    staledSiblingProposalIds,
   };
 }
 
@@ -723,12 +898,7 @@ export async function rejectProposal(input: {
 }): Promise<RejectProposalResult> {
   const db = getDbPg();
   const existing = await db<ContentProposalRecord[]>`
-    select id, content_id, owner_id, proposed_by_run_id,
-           proposed_by_agent_id, proposed_by_message_id,
-           kind, after_anchor_id, inserted_markdown, rationale,
-           status, status_reason, base_content_version,
-           base_anchor_content_hash, applied_anchor_ids,
-           created_at, resolved_at, resolved_by_user_id
+    select ${db.unsafe(PROPOSAL_COLUMNS)}
     from public.content_proposals
     where id = ${input.proposalId}::uuid
     limit 1
@@ -747,12 +917,7 @@ export async function rejectProposal(input: {
         resolved_by_user_id = ${input.userId}::uuid
     where id = ${input.proposalId}::uuid
       and status = 'pending'
-    returning id, content_id, owner_id, proposed_by_run_id,
-              proposed_by_agent_id, proposed_by_message_id,
-              kind, after_anchor_id, inserted_markdown, rationale,
-              status, status_reason, base_content_version,
-              base_anchor_content_hash, applied_anchor_ids,
-              created_at, resolved_at, resolved_by_user_id
+    returning ${db.unsafe(PROPOSAL_COLUMNS)}
   `;
   if (!rows[0]) {
     // Concurrent resolution — refetch and report.
