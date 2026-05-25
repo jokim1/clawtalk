@@ -819,7 +819,13 @@ export function buildContentOutline(
     '- Add new blocks with `propose_content_append({ after_anchor_id, markdown, rationale })` (use `after_anchor_id: null` to prepend at the top).',
     '- Replace existing blocks with `propose_content_replace({ target_anchor_id, markdown, rationale })`.',
     '',
-    'When `@doc` appears in the latest user turn AND the request is to change the document (rewrite, edit, fix, polish, expand, shorten, summarize-into-the-doc, etc.), USE these tools — do NOT write substantive new prose into chat. Brief acknowledgements, clarifying questions, and refusals stay in chat. The user reviews and accepts or rejects each proposal in the Talk UI; you are not editing the document directly.',
+    'When `@doc` appears in the latest user turn AND the request is to change the document (add, append, extend, draft, write, continue, rewrite, edit, fix, polish, expand, shorten, summarize-into-the-doc, etc.), call the appropriate tool — do NOT write substantive new prose into chat as a workaround.',
+    '',
+    'Rhetorical questions count as instructions. "Can you add a summary?", "Could you fix the intro?", "Would you rewrite this section?", "Want to extend the conclusion?" are all explicit edit requests, not capability inquiries. Call the tool — do NOT answer "yes I can, here\'s how" without acting.',
+    '',
+    'NEVER narrate your capabilities. Do not say "I can only modify through the tools", "I need an explicit request before I can edit", "I cannot directly edit @doc because it is not a bound Google Doc", or similar meta-commentary about how doc editing works. The user already knows; the proposal card surfaces it in the UI. Your reply in chat for an edit request should be a single short line acknowledging the proposal (e.g. "Drafted a closing summary paragraph — accept it in the doc pane to apply.") OR a clarifying question only if the request is genuinely ambiguous.',
+    '',
+    'Brief acknowledgements, clarifying questions, and refusals stay in chat. The user reviews and accepts or rejects each proposal in the Talk UI; you are not editing the document directly.',
   ].join('\n');
 
   const encoder = new TextEncoder();
