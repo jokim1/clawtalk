@@ -255,6 +255,17 @@ export function SavedSourcesPanel({
                 fileInputRef.current?.click();
               }
             }}
+            // Intercept dragEnter alongside the other handlers so files
+            // dragged onto this dropzone don't bubble to the page-level
+            // "Drop files to attach" overlay — that overlay would be
+            // misleading here (this drop saves a source, not a message
+            // attachment) and would survive past the drop because our
+            // own onDrop stops propagation.
+            onDragEnter={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              setDropActive(true);
+            }}
             onDragOver={(e) => {
               e.preventDefault();
               e.stopPropagation();
