@@ -2343,6 +2343,50 @@ a {
   min-width: 0;
 }
 
+/* Talk-scoped tool toggle chips (above composer). The "on" chip is
+   filled; the "off" chip is outlined-only so the active set is visible
+   at a glance. */
+.tool-chips-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  padding: 0.4rem 0;
+}
+
+.tool-chip {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid #d2dced;
+  border-radius: 999px;
+  padding: 0.25rem 0.6rem;
+  font-size: 0.78rem;
+  line-height: 1.15;
+  background: #fff;
+  color: #6b7591;
+  cursor: pointer;
+  transition:
+    background 0.12s ease,
+    border-color 0.12s ease,
+    color 0.12s ease;
+}
+
+.tool-chip:hover:not(:disabled) {
+  border-color: #aec4f0;
+  color: #2d3954;
+}
+
+.tool-chip-on {
+  border-color: #aec4f0;
+  background: #eef5ff;
+  color: #1d4ca1;
+}
+
+.tool-chip-pending,
+.tool-chip:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
 .message-live {
   border-style: dashed;
 }
