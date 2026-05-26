@@ -182,6 +182,10 @@ describe('buildTalkThreadEventFilter', () => {
       'content_updated',
       'content_proposal_created',
       'content_proposal_stale',
+      'content_edit_run_started',
+      'content_edit_run_aborted',
+      'content_edit_applied',
+      'content_edit_resolved',
     ]) {
       it(`accepts ${event_type} regardless of payload threadId`, () => {
         // Content is 1:1 with the Talk, not the thread — every thread
