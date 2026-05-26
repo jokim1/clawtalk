@@ -363,6 +363,11 @@ export async function updateContentBody(input: {
     nextMarkdown = canonicalMarkdown;
     nextAnchorMap = await computeAnchorMap(stamped);
   } else if (existing.content_format === 'html' && wantsHtml) {
+    // Sanitize first (storage truth = sanitized), then stamp anchors
+    // on every top-level block so the AI sees a stable outline next
+    // turn, then compute the anchor_map_json sidecar from the stamped
+    // HTML so server-side validators can resolve `target_anchor_id`
+    // without re-parsing the body.
     const { clean } = sanitizeHtmlServer(input.bodyHtml as string);
     if (byteLengthOf(clean) > CONTENT_BODY_BYTE_LIMIT) {
       return {
@@ -370,9 +375,24 @@ export async function updateContentBody(input: {
         wouldBeBytes: byteLengthOf(clean),
       };
     }
-    nextHtml = clean;
-    // anchor_map_json stays at the existing value — HTML anchor
-    // stamping is a PR B concern (see plan T13 + html-anchors module).
+    const stamped = insertAnchors(clean);
+    if (!stamped.ok) {
+      // Defensive — sanitize-html returns valid HTML, so linkedom
+      // should always parse it. Fall back to the unsstamped clean
+      // string so a malformed-output edge case still persists rather
+      // than dropping the user's edit.
+      nextHtml = clean;
+    } else {
+      if (byteLengthOf(stamped.value) > CONTENT_BODY_BYTE_LIMIT) {
+        return {
+          kind: 'doc_size_limit',
+          wouldBeBytes: byteLengthOf(stamped.value),
+        };
+      }
+      nextHtml = stamped.value;
+      const computed = await computeHtmlAnchorMap(stamped.value);
+      if (computed !== null) nextAnchorMap = computed;
+    }
   }
 
   if (existing.body_version !== input.expectedVersion) {
