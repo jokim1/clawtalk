@@ -509,12 +509,14 @@ function buildAnthropicRequest(
   tools: LlmToolDefinition[] | undefined,
   maxOutputTokens: number | undefined,
   credentialKind: 'api_key' | 'subscription' = 'api_key',
+  forceToolUse: boolean = false,
 ): {
   model: string;
   max_tokens: number;
   system?: string | Array<{ type: 'text'; text: string }>;
   messages: AnthropicMessage[];
   tools?: AnthropicToolDefinition[];
+  tool_choice?: { type: 'any' } | { type: 'auto' };
   stream: boolean;
 } {
   let systemText = '';
@@ -600,19 +602,27 @@ function buildAnthropicRequest(
         ? systemText
         : undefined;
 
+  const hasTools = !!(tools && tools.length > 0);
   return {
     model: modelId,
     max_tokens: maxOutputTokens || 1024,
     ...(systemField !== undefined ? { system: systemField } : {}),
     messages: conversationMessages,
-    ...(tools && tools.length > 0
+    ...(hasTools
       ? {
-          tools: tools.map((tool) => ({
+          tools: tools!.map((tool) => ({
             name: tool.name,
             description: tool.description,
             input_schema: tool.inputSchema,
           })),
         }
+      : {}),
+    // tool_choice 'any' on Anthropic forces the model to call SOME
+    // tool (it picks which). Only emit when both forceToolUse is on
+    // and at least one tool is registered — sending tool_choice with
+    // no tools is a 400 from the API.
+    ...(forceToolUse && hasTools
+      ? { tool_choice: { type: 'any' as const } }
       : {}),
     stream: true,
   };
@@ -640,11 +650,13 @@ export function buildOpenAiRequest(
   messages: LlmMessage[],
   tools: LlmToolDefinition[] | undefined,
   maxOutputTokens: number | undefined,
+  forceToolUse: boolean = false,
 ): {
   model: string;
   max_tokens: number;
   messages: OpenAiMessage[];
   tools?: OpenAiToolDefinition[];
+  tool_choice?: 'auto' | 'required' | 'none';
   stream: boolean;
   stream_options: { include_usage: boolean };
   thinking?: { type: 'disabled' };
@@ -700,13 +712,14 @@ export function buildOpenAiRequest(
     }
   }
 
+  const hasTools = !!(tools && tools.length > 0);
   return {
     model: modelId,
     max_tokens: maxOutputTokens || 1024,
     messages: conversationMessages,
-    ...(tools && tools.length > 0
+    ...(hasTools
       ? {
-          tools: tools.map((tool) => ({
+          tools: tools!.map((tool) => ({
             type: 'function' as const,
             function: {
               name: tool.name,
@@ -716,6 +729,11 @@ export function buildOpenAiRequest(
           })),
         }
       : {}),
+    // OpenAI/NVIDIA-compatible: tool_choice='required' forces the model
+    // to call one of the listed tools (it picks which). Only emit when
+    // both forceToolUse is on and at least one tool is registered —
+    // sending tool_choice with no tools is a 400 from most backends.
+    ...(forceToolUse && hasTools ? { tool_choice: 'required' as const } : {}),
     stream: true,
     stream_options: { include_usage: true },
     ...(provider.providerId === 'provider.nvidia' &&
@@ -1128,6 +1146,16 @@ export async function* streamLlmResponse(
     tools?: LlmToolDefinition[];
     maxOutputTokens?: number;
     signal?: AbortSignal;
+    /**
+     * When true, set provider-specific `tool_choice=required` (Anthropic
+     * `{ type: 'any' }`) on the request so the model MUST call one of
+     * the registered tools and cannot reply in chat. Used by the
+     * Content edit-intent gate when the user turn matches @doc + an
+     * edit verb. Caller is responsible for ensuring at least one tool
+     * is registered when this is set; otherwise the provider will
+     * reject the request.
+     */
+    forceToolUse?: boolean;
   },
 ): AsyncGenerator<LlmStreamEvent> {
   const controller = new AbortController();
@@ -1164,6 +1192,7 @@ export async function* streamLlmResponse(
         options?.tools,
         options?.maxOutputTokens,
         credentialKind,
+        options?.forceToolUse ?? false,
       );
 
       // Subscription requests need Claude Code's user-agent + OAuth betas.
@@ -1223,6 +1252,7 @@ export async function* streamLlmResponse(
         messages,
         options?.tools,
         options?.maxOutputTokens,
+        options?.forceToolUse ?? false,
       );
 
       const response = await fetchWithUpstreamRetry(
@@ -1283,6 +1313,7 @@ export async function* streamLlmResponse(
           tools: options?.tools,
           maxOutputTokens: options?.maxOutputTokens,
           stream: true,
+          forceToolUse: options?.forceToolUse ?? false,
         }),
       );
 
@@ -1366,6 +1397,7 @@ export async function callLlm(
     tools?: LlmToolDefinition[];
     maxOutputTokens?: number;
     signal?: AbortSignal;
+    forceToolUse?: boolean;
   },
 ): Promise<LlmResponse> {
   let content = '';

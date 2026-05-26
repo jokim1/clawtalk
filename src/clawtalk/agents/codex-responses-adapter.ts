@@ -149,6 +149,12 @@ export interface CodexBuildOptions {
   sessionId?: string;
   reasoningEffort?: 'minimal' | 'low' | 'medium' | 'high';
   stream?: boolean;
+  /**
+   * When true and at least one tool is registered, set tool_choice to
+   * 'required' so the model MUST call a tool rather than reply in
+   * chat. Used by the Content edit-intent gate.
+   */
+  forceToolUse?: boolean;
 }
 
 /**
@@ -502,7 +508,7 @@ export function buildCodexRequestBody(
 
   if (tools) {
     body.tools = tools;
-    body.tool_choice = 'auto';
+    body.tool_choice = opts.forceToolUse ? 'required' : 'auto';
     body.parallel_tool_calls = true;
   }
 

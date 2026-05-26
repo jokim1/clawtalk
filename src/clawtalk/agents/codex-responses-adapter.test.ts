@@ -249,6 +249,37 @@ describe('buildCodexRequestBody', () => {
     expect(withTools.parallel_tool_calls).toBe(true);
   });
 
+  it('sets tool_choice="required" when forceToolUse is on and tools are present', () => {
+    const body = buildCodexRequestBody({
+      model: 'gpt-5.4',
+      systemPrompt: 'be helpful',
+      messages: [{ role: 'user', content: 'hi' }],
+      tools: [{ name: 's', description: '', inputSchema: { type: 'object' } }],
+      forceToolUse: true,
+    });
+    expect(body.tool_choice).toBe('required');
+  });
+
+  it('keeps tool_choice="auto" when forceToolUse is off (default)', () => {
+    const body = buildCodexRequestBody({
+      model: 'gpt-5.4',
+      systemPrompt: 'be helpful',
+      messages: [{ role: 'user', content: 'hi' }],
+      tools: [{ name: 's', description: '', inputSchema: { type: 'object' } }],
+    });
+    expect(body.tool_choice).toBe('auto');
+  });
+
+  it('does not emit tool_choice when no tools registered, even with forceToolUse=true', () => {
+    const body = buildCodexRequestBody({
+      model: 'gpt-5.4',
+      systemPrompt: 'be helpful',
+      messages: [{ role: 'user', content: 'hi' }],
+      forceToolUse: true,
+    });
+    expect(body.tool_choice).toBeUndefined();
+  });
+
   it('forwards prompt_cache_key and stream when set, and drops max_output_tokens', () => {
     const body = buildCodexRequestBody({
       model: 'gpt-5.4',
