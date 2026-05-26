@@ -176,4 +176,62 @@ describe('buildTalkThreadEventFilter', () => {
     );
     expect(filter(makeEvent('talk_response_invalid', {}))).toBe(false);
   });
+
+  describe('Content-feature events (Talk-level, thread-agnostic)', () => {
+    for (const event_type of [
+      'content_updated',
+      'content_proposal_created',
+      'content_proposal_stale',
+    ]) {
+      it(`accepts ${event_type} regardless of payload threadId`, () => {
+        // Content is 1:1 with the Talk, not the thread — every thread
+        // of the Talk needs to receive these updates so the doc pane +
+        // ProposalCard render correctly no matter which thread the
+        // tool-call originated in.
+        expect(filter(makeEvent(event_type, { contentId: 'content-1' }))).toBe(
+          true,
+        );
+        expect(
+          filter(
+            makeEvent(event_type, {
+              contentId: 'content-1',
+              threadId: 'thread-Z',
+            }),
+          ),
+        ).toBe(true);
+      });
+    }
+  });
+
+  describe('tool_call_started', () => {
+    it('accepts tool_call_started when threadId matches', () => {
+      expect(
+        filter(
+          makeEvent('tool_call_started', {
+            threadId: 'thread-A',
+            toolName: 'propose_content_append',
+          }),
+        ),
+      ).toBe(true);
+    });
+    it('rejects tool_call_started when threadId is a different thread', () => {
+      expect(
+        filter(
+          makeEvent('tool_call_started', {
+            threadId: 'thread-B',
+            toolName: 'propose_content_append',
+          }),
+        ),
+      ).toBe(false);
+    });
+    it('accepts tool_call_started when threadId is absent (talk-wide)', () => {
+      expect(
+        filter(
+          makeEvent('tool_call_started', {
+            toolName: 'propose_content_append',
+          }),
+        ),
+      ).toBe(true);
+    });
+  });
 });
