@@ -16,8 +16,11 @@ import { getDbPg, type Sql } from '../../db.js';
 import { listTalkStateEntries } from '../db/context-accessors.js';
 import { getContentByTalkId, type Content } from '../db/content-accessors.js';
 import {
+  ALLOWED_TAGS,
   ensureAnchorIds,
+  extractOutline,
   getAnchorId,
+  insertAnchors,
   markdownToTiptapJson,
   plainTextOf,
   sanitizeRichTextDocument,
@@ -1098,6 +1101,37 @@ function sanitizeBlockForPrompt(text: string): string {
   return out;
 }
 
+interface OutlineBlock {
+  anchorId: string;
+  kind: string;
+  text: string;
+}
+
+function buildMarkdownOutlineBlocks(bodyMarkdown: string): OutlineBlock[] {
+  const parsed = sanitizeRichTextDocument(markdownToTiptapJson(bodyMarkdown));
+  const stamped = ensureAnchorIds(parsed);
+  return (stamped.content ?? []).map((node) => {
+    const anchorId = getAnchorId(node) ?? '';
+    const text = sanitizeBlockForPrompt(plainTextOf(node));
+    return { anchorId, kind: node.type, text };
+  });
+}
+
+function buildHtmlOutlineBlocks(bodyHtml: string): OutlineBlock[] {
+  if (!bodyHtml || bodyHtml.trim().length === 0) return [];
+  // Re-stamp anchors before extracting so the AI always sees fresh
+  // IDs — even if a recent user-edit stripped a block's attr.
+  const stamped = insertAnchors(bodyHtml);
+  if (!stamped.ok) return [];
+  const outline = extractOutline(stamped.value);
+  if (!outline.ok) return [];
+  return outline.value.map((entry) => ({
+    anchorId: entry.anchorId,
+    kind: entry.tag,
+    text: sanitizeBlockForPrompt(entry.textExcerpt),
+  }));
+}
+
 /**
  * Build the outline section for the agent's system prompt.
  *
@@ -1107,31 +1141,42 @@ function sanitizeBlockForPrompt(text: string): string {
  * emitted in document order. If the cumulative size would exceed the
  * byte budget, truncation happens at a block boundary and a
  * `[… N more blocks omitted; ask the user to narrow scope]` footer is
- * appended. The 60-char preview previously stored here was too coarse
- * for replace edits — agents need the actual prose they're being asked
- * to rewrite, not its first sentence.
+ * appended.
+ *
+ * Format-aware: HTML docs route through `extractOutline` (after a
+ * defensive `insertAnchors` re-stamp so the AI sees fresh anchors even
+ * if a recent user-edit stripped some), markdown docs use the Tiptap
+ * AST as before. Both formats produce the same shape of `[kind] text`
+ * lines anchored by `<!-- anchor:id -->`; only the editor instructions
+ * + allowed-tag/banned-tag reminders differ in the footer.
  */
 export function buildContentOutline(
   content: Content,
   budgetBytes: number = CONTENT_OUTLINE_BUDGET_BYTES,
 ): string {
-  // Parse the canonical body once so we can render full block content.
-  const parsed = sanitizeRichTextDocument(
-    markdownToTiptapJson(content.bodyMarkdown),
-  );
-  const stamped = ensureAnchorIds(parsed);
+  const isHtml = content.contentFormat === 'html';
 
-  const blocks = (stamped.content ?? []).map((node) => {
-    const anchorId = getAnchorId(node) ?? '';
-    const text = sanitizeBlockForPrompt(plainTextOf(node));
-    return { anchorId, kind: node.type, text };
-  });
+  const blocks = isHtml
+    ? buildHtmlOutlineBlocks(content.bodyHtml ?? '')
+    : buildMarkdownOutlineBlocks(content.bodyMarkdown);
 
+  const headerLine = isHtml
+    ? `**The Doc — this Talk's attached document:** "${content.title}" (v${content.bodyVersion}, HTML format)`
+    : `**The Doc — this Talk's attached document:** "${content.title}" (v${content.bodyVersion})`;
   const header = [
-    `**The Doc — this Talk's attached document:** "${content.title}" (v${content.bodyVersion})`,
+    headerLine,
     '',
     'This Talk has exactly one long-form document attached, and the block listing below IS that document — full prose, in order, prefixed with the block kind and anchor ID for each. When the user says "the doc", "the document", "this doc", "summarize the doc", or anything similar, they mean THIS document. The user can also reference it explicitly with the literal token `@doc` in their message — when you see `@doc` anywhere in the latest user turn, treat it as a deterministic reference to THIS section. Do NOT look for a Google Doc binding. Do NOT search [S1]/[S2]/etc. Do NOT inspect chat attachments whose filename happens to match this title (the user often uploads a draft .md before promoting it into the doc — those are stale source material, not the live document). The blocks below are the canonical, current copy.',
   ].join('\n');
+
+  const formatStanza = isHtml
+    ? [
+        '',
+        '**HTML payload required for THIS doc.** This doc is HTML format — the `markdown` field of `apply_content_edit` carries HTML, not markdown. Wrap every block in real tags: paragraphs `<p>...</p>`, headings `<h1>...</h1>`–`<h6>`, lists `<ul><li>...</li></ul>` / `<ol>`, blockquotes `<blockquote>...</blockquote>`, code `<pre><code>...</code></pre>`. Plain text or markdown is rejected.',
+        '',
+        `Allowed tags (server allowlist): ${ALLOWED_TAGS.join(', ')}. Inline \`<style>\` blocks + CSS animations + the sanitized SVG subset are allowed. **Banned**: \`<script>\`, \`<iframe>\`, \`<form>\`, \`on*\` event handlers, \`javascript:\` URLs, \`<foreignObject>\`, \`<animate>\` SVG elements — these are stripped server-side. Use \`data-anchor-id="..."\` on the target block (copied verbatim from the listing above) to address an edit.`,
+      ].join('\n')
+    : '';
 
   const footer = [
     'To change this document, call `apply_content_edit({ kind, anchor?, markdown, rationale? })`. Your edit lands in the doc immediately as a *pending change* the user can Accept or Reject from the doc pane. There is no propose step, no card to wait on — you edit, the user reviews afterward.',
@@ -1143,7 +1188,10 @@ export function buildContentOutline(
     'When `@doc` appears in the latest user turn AND the request is to change the document (add, append, extend, draft, continue, rewrite, edit, fix, polish, expand, shorten, delete, etc.), you MUST call `apply_content_edit` — do NOT write substantive new prose into chat as a workaround. Rhetorical questions count as instructions: "Can you add a summary?", "Could you fix the intro?", "Want to rewrite this section?" are all explicit edit requests.',
     '',
     'NEVER narrate your capabilities ("I can only modify through tools", "I cannot directly edit @doc", etc.). Your reply in chat for an edit request should be a single short acknowledgement after the call ("Replaced paragraph 2 and added a closing CTA — review in the doc pane.") OR a clarifying question only if the request is genuinely ambiguous.',
-  ].join('\n');
+    formatStanza,
+  ]
+    .filter((s) => s.length > 0)
+    .join('\n');
 
   const encoder = new TextEncoder();
   const headerBytes = encoder.encode(header).byteLength;

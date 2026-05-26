@@ -257,8 +257,22 @@ describe('content-accessors (postgres + RLS)', () => {
         expect(result.content.contentFormat).toBe('html');
         expect(result.content.bodyVersion).toBe(content.bodyVersion + 1);
         expect(result.content.bodyHtml).not.toBeNull();
-        expect(result.content.bodyHtml).toContain('<p>safe</p>');
+        // Sanitizer keeps the <p> + text, strips <script>. PR B also
+        // stamps `data-anchor-id` on the top-level block so the AI sees
+        // a stable outline on the next turn — assert both the surviving
+        // markup and that the anchor stamp landed.
+        expect(result.content.bodyHtml).toContain('<p');
+        expect(result.content.bodyHtml).toContain('>safe</p>');
+        expect(result.content.bodyHtml).toContain('data-anchor-id=');
         expect(result.content.bodyHtml).not.toContain('<script');
+        // The anchor map sidecar should now have exactly one entry that
+        // matches the stamped block, so the apply-handler can resolve
+        // `target_anchor_id` without re-parsing body_html.
+        const anchorIds = Object.keys(result.content.anchorMap);
+        expect(anchorIds.length).toBe(1);
+        const entry = result.content.anchorMap[anchorIds[0]];
+        expect(entry.kind).toBe('p');
+        expect(entry.preview).toBe('safe');
       }
     });
   });

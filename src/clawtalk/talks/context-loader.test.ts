@@ -69,6 +69,32 @@ function makeContent(input: {
   };
 }
 
+function makeHtmlContent(input: {
+  title?: string;
+  bodyVersion?: number;
+  bodyHtml: string;
+  anchorMap?: AnchorMap;
+}): Content {
+  return {
+    id: '55555555-5555-5555-5555-555555555555',
+    ownerId: '66666666-6666-6666-6666-666666666666',
+    talkId: '77777777-7777-7777-7777-777777777777',
+    threadId: '88888888-8888-8888-8888-888888888888',
+    title: input.title ?? 'HTML Doc',
+    contentKind: 'document',
+    contentFormat: 'html',
+    bodyMarkdown: '',
+    bodyHtml: input.bodyHtml,
+    bodyVersion: input.bodyVersion ?? 1,
+    anchorMap: input.anchorMap ?? {},
+    createdAt: '2026-05-26T00:00:00Z',
+    updatedAt: '2026-05-26T00:00:00Z',
+    createdByUserId: null,
+    updatedByUserId: null,
+    updatedByRunId: null,
+  };
+}
+
 describe('buildContentOutline', () => {
   it('inlines full block content with anchor markers in document order', () => {
     const md = [
@@ -179,6 +205,50 @@ describe('buildContentOutline', () => {
     const outline = buildContentOutline(content);
     expect(outline).toContain('NEVER narrate your capabilities');
     expect(outline).toContain('I cannot directly edit @doc');
+  });
+
+  // ── HTML format branch (PR B) ──────────────────────────────────────
+
+  it('renders an HTML doc outline with HTML format tag + tag-named blocks', () => {
+    const content = makeHtmlContent({
+      title: 'HTML Report',
+      bodyVersion: 2,
+      bodyHtml:
+        '<h1 data-anchor-id="h1-id">Heading</h1>' +
+        '<p data-anchor-id="p1-id">First paragraph.</p>',
+    });
+    const outline = buildContentOutline(content);
+    expect(outline).toContain('"HTML Report" (v2, HTML format)');
+    // Anchors come through verbatim from extractOutline, prefixed with
+    // the same `<!-- anchor:... -->` marker as the markdown branch.
+    expect(outline).toContain('<!-- anchor:h1-id -->');
+    expect(outline).toContain('[h1] Heading');
+    expect(outline).toContain('<!-- anchor:p1-id -->');
+    expect(outline).toContain('[p] First paragraph.');
+    // The HTML-specific stanza about format + allowed tags is appended
+    // to the footer for HTML docs only.
+    expect(outline).toContain('HTML payload required');
+    expect(outline.toLowerCase()).toContain('allowed tags');
+    expect(outline).toContain('data-anchor-id');
+    expect(outline).toContain('apply_content_edit');
+  });
+
+  it('re-stamps missing anchors before extracting the HTML outline', () => {
+    // A user-edit may strip a `data-anchor-id` from a block. The outline
+    // builder must re-stamp before extracting so the AI sees an anchor
+    // for every top-level block — even the stripped one.
+    const content = makeHtmlContent({
+      bodyHtml: '<h1>Stripped</h1><p data-anchor-id="kept">Kept.</p>',
+    });
+    const outline = buildContentOutline(content);
+    // The "kept" anchor is preserved verbatim.
+    expect(outline).toContain('<!-- anchor:kept -->');
+    expect(outline).toContain('[p] Kept.');
+    // The stripped block also appears with a freshly-stamped anchor.
+    expect(outline).toContain('[h1] Stripped');
+    // At least two anchor markers should now appear in the outline.
+    const markers = outline.match(/<!-- anchor:/g) ?? [];
+    expect(markers.length).toBeGreaterThanOrEqual(2);
   });
 });
 

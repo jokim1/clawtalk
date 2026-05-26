@@ -52,6 +52,12 @@ function toEditRow(summary: ContentEditSummary): ContentEditRow {
     baseContentVersion: summary.baseContentVersion,
     targetAnchorId: summary.targetAnchorId,
     newMarkdown: summary.newMarkdown,
+    // PR B adds newHtml to the row shape. The webapp's pending-edit
+    // summary only carries newMarkdown today (markdown is the only
+    // format with a Tiptap renderer wired up); the HTML pending-edit
+    // viz is queued as follow-up work. Default to null so the type
+    // matches and the markdown path stays untouched.
+    newHtml: null,
     rationale: summary.rationale,
     createdAt: summary.createdAt,
   };

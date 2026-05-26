@@ -467,6 +467,142 @@ describe('content-edits-accessors (postgres + RLS)', () => {
     });
   });
 
+  // ── HTML format integration (PR B) ─────────────────────────────────
+
+  async function seedHtmlDoc(
+    ownerId: string,
+    talkId: string,
+  ): Promise<{
+    contentId: string;
+    bodyVersion: number;
+    anchors: Record<string, string>;
+  }> {
+    return await withUserContext(ownerId, async () => {
+      const db = getDbPg();
+      const existing = await db<{ id: string }[]>`
+        select id from public.talk_threads
+        where talk_id = ${talkId}::uuid and is_default = true
+        limit 1
+      `;
+      const threadId =
+        existing[0]?.id ??
+        (
+          await db<{ id: string }[]>`
+            insert into public.talk_threads
+              (talk_id, owner_id, title, is_default, is_internal)
+            values
+              (${talkId}::uuid, ${ownerId}::uuid, null, true, false)
+            returning id
+          `
+        )[0].id;
+      const created = await createContent({
+        ownerId,
+        talkId,
+        threadId,
+        title: 'HTML Doc',
+        format: 'html',
+        createdByUserId: ownerId,
+      });
+      const updated = await updateContentBody({
+        contentId: created.id,
+        ownerId,
+        expectedVersion: created.bodyVersion,
+        bodyHtml:
+          '<h1>Heading</h1><p>First paragraph.</p><p>Second paragraph.</p>',
+        updatedByUserId: ownerId,
+      });
+      if (updated.kind !== 'ok') {
+        throw new Error('expected ok updateContentBody (html)');
+      }
+      const anchorIds = Object.keys(updated.content.anchorMap);
+      const anchors: Record<string, string> = {};
+      const sorted = anchorIds
+        .map((id) => ({ id, entry: updated.content.anchorMap[id] }))
+        .sort((a, b) => a.entry.sort_order - b.entry.sort_order);
+      anchors.h1 = sorted[0].id;
+      anchors.p1 = sorted[1].id;
+      anchors.p2 = sorted[2].id;
+      return {
+        contentId: created.id,
+        bodyVersion: updated.content.bodyVersion,
+        anchors,
+      };
+    });
+  }
+
+  it('executeApplyContentEdit (html): inserts a pending edit with newHtml + null newMarkdown', async () => {
+    const { contentId, anchors } = await seedHtmlDoc(USER_A_ID, TALK_A_ID);
+    await withUserContext(USER_A_ID, async () => {
+      const result = await executeApplyContentEdit({
+        talkId: TALK_A_ID,
+        userId: USER_A_ID,
+        runId: 'html-run-1',
+        agentId: null,
+        agentNickname: 'HtmlAgent',
+        messageId: null,
+        args: {
+          kind: 'replace',
+          anchor: anchors.p1,
+          markdown: '<p>Replaced via HTML payload.</p>',
+        },
+      });
+      expect(result.isError).not.toBe(true);
+      const edits = await getPendingEditsByContent(contentId);
+      expect(edits.length).toBe(1);
+      const edit = edits[0];
+      expect(edit.kind).toBe('replace');
+      expect(edit.targetAnchorId).toBe(anchors.p1);
+      expect(edit.newMarkdown).toBeNull();
+      expect(edit.newHtml).not.toBeNull();
+      expect(edit.newHtml).toContain('Replaced via HTML payload.');
+    });
+  });
+
+  it('executeApplyContentEdit (html) guard: rejects payload that looks like plain text', async () => {
+    const { anchors } = await seedHtmlDoc(USER_A_ID, TALK_A_ID);
+    await withUserContext(USER_A_ID, async () => {
+      const result = await executeApplyContentEdit({
+        talkId: TALK_A_ID,
+        userId: USER_A_ID,
+        runId: 'html-bad-1',
+        agentId: null,
+        agentNickname: null,
+        messageId: null,
+        args: {
+          kind: 'replace',
+          anchor: anchors.p1,
+          markdown: 'this is plain text with no tags',
+        },
+      });
+      expect(result.isError).toBe(true);
+      expect(result.result.toLowerCase()).toContain('html');
+      expect(result.result.toLowerCase()).toContain('allowed tags');
+    });
+  });
+
+  it('executeApplyContentEdit (html) guard: rejects when sanitizer strips every tag', async () => {
+    const { anchors } = await seedHtmlDoc(USER_A_ID, TALK_A_ID);
+    await withUserContext(USER_A_ID, async () => {
+      const result = await executeApplyContentEdit({
+        talkId: TALK_A_ID,
+        userId: USER_A_ID,
+        runId: 'html-bad-2',
+        agentId: null,
+        agentNickname: null,
+        messageId: null,
+        args: {
+          kind: 'replace',
+          anchor: anchors.p1,
+          // <script> is the only "tag" in the payload; sanitize-html
+          // strips it entirely, leaving an empty clean string.
+          markdown: '<script>alert(1)</script>',
+        },
+      });
+      expect(result.isError).toBe(true);
+      expect(result.result.toLowerCase()).toContain('stripped');
+    });
+  });
+
   it('RLS: user B cannot read user A pending edits', async () => {
     const { contentId, bodyVersion, anchors } = await seedDoc(
       USER_A_ID,

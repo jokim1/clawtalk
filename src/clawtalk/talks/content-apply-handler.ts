@@ -20,6 +20,7 @@
 
 import {
   CONTENT_BODY_BYTE_LIMIT,
+  computeHtmlAnchorMap,
   getContentByTalkId,
 } from '../db/content-accessors.js';
 import {
@@ -32,12 +33,16 @@ import {
 } from '../db/content-edits-accessors.js';
 import { getDbPg } from '../../db.js';
 import {
+  ALLOWED_TAGS,
   type ContentEditKind,
   type ContentEditRow,
   computeAnchorMap,
   ensureAnchorIds,
+  insertAnchors,
   markdownToTiptapJson,
   materializeEdits,
+  materializeEditsHtml,
+  sanitizeHtmlServer,
   sanitizeMarkdown,
   sanitizeRichTextDocument,
   stripAnchorCommentsFromMarkdown,
@@ -63,7 +68,7 @@ export type ToolResult = {
 const EDIT_COLUMNS_SELECT = `
   id, content_id, run_id, agent_id, agent_nickname,
   message_id, kind, base_content_version,
-  target_anchor_id, new_markdown, rationale, created_at
+  target_anchor_id, new_markdown, new_html, rationale, created_at
 `;
 
 function byteLengthOf(text: string): number {
@@ -82,6 +87,7 @@ function toEditRow(record: ContentEditRecord): ContentEditRow {
     baseContentVersion: record.base_content_version,
     targetAnchorId: record.target_anchor_id,
     newMarkdown: record.new_markdown,
+    newHtml: record.new_html ?? null,
     rationale: record.rationale,
     createdAt: record.created_at,
   };
@@ -177,29 +183,50 @@ export async function executeApplyContentEdit(
     };
   }
 
-  // Sanitize agent-supplied markdown (strip smuggled anchor comments
-  // first, then sanitize HTML, then check non-empty after parse).
+  // Sanitize the agent's payload. Format-aware:
+  //   - markdown docs route through stripAnchorCommentsFromMarkdown
+  //     + sanitizeMarkdown + Tiptap parse + non-empty check.
+  //   - HTML docs route through validateHtmlPayload (server sanitizer
+  //     plus two guards: format-mismatch on plain-text input and
+  //     empty-after-sanitize when every tag is stripped).
   let sanitizedMarkdown: string | null = null;
+  let sanitizedHtml: string | null = null;
   if (internalKind !== 'delete') {
-    const stripped = stripAnchorCommentsFromMarkdown(
-      typeof rawMarkdown === 'string' ? rawMarkdown : '',
-    );
-    sanitizedMarkdown = sanitizeMarkdown(stripped);
-    const parsed = sanitizeRichTextDocument(
-      markdownToTiptapJson(sanitizedMarkdown),
-    );
-    if (parsed.content.length === 0) {
-      return {
-        result:
-          'Error: the supplied markdown is empty after sanitization. Provide real content.',
-        isError: true,
-      };
-    }
-    if (byteLengthOf(sanitizedMarkdown) > CONTENT_BODY_BYTE_LIMIT) {
-      return {
-        result: `Error: the supplied markdown exceeds the document size limit (${byteLengthOf(sanitizedMarkdown)} bytes).`,
-        isError: true,
-      };
+    if (content.contentFormat === 'html') {
+      const validation = validateHtmlPayload(
+        typeof rawMarkdown === 'string' ? rawMarkdown : '',
+      );
+      if (!validation.ok) {
+        return { result: validation.error, isError: true };
+      }
+      sanitizedHtml = validation.sanitized;
+      if (byteLengthOf(sanitizedHtml) > CONTENT_BODY_BYTE_LIMIT) {
+        return {
+          result: `Error: the supplied HTML exceeds the document size limit (${byteLengthOf(sanitizedHtml)} bytes).`,
+          isError: true,
+        };
+      }
+    } else {
+      const stripped = stripAnchorCommentsFromMarkdown(
+        typeof rawMarkdown === 'string' ? rawMarkdown : '',
+      );
+      sanitizedMarkdown = sanitizeMarkdown(stripped);
+      const parsed = sanitizeRichTextDocument(
+        markdownToTiptapJson(sanitizedMarkdown),
+      );
+      if (parsed.content.length === 0) {
+        return {
+          result:
+            'Error: the supplied markdown is empty after sanitization. Provide real content.',
+          isError: true,
+        };
+      }
+      if (byteLengthOf(sanitizedMarkdown) > CONTENT_BODY_BYTE_LIMIT) {
+        return {
+          result: `Error: the supplied markdown exceeds the document size limit (${byteLengthOf(sanitizedMarkdown)} bytes).`,
+          isError: true,
+        };
+      }
     }
   }
 
@@ -236,29 +263,72 @@ export async function executeApplyContentEdit(
   );
 
   // Auto-accept any prior run BEFORE inserting our new edit so the
-  // "one pending run per doc" invariant holds.
-  let workingBody = content.bodyMarkdown;
+  // "one pending run per doc" invariant holds. The materialized body
+  // shape depends on the parent content's format — markdown round-trips
+  // through Tiptap, HTML through linkedom + the shared sanitizer + the
+  // idempotent anchor stamp.
+  let workingMarkdown = content.bodyMarkdown;
+  let workingHtml = content.bodyHtml ?? '';
   let workingVersion = content.bodyVersion;
 
   for (const priorRunId of priorRunIds) {
     const priorEdits = existing.filter((e) => e.runId === priorRunId);
     if (priorEdits.length === 0) continue;
 
-    const nextDoc = ensureAnchorIds(materializeEdits(workingBody, priorEdits));
-    const nextMarkdown = tiptapJsonToMarkdown(nextDoc);
-    if (byteLengthOf(nextMarkdown) > CONTENT_BODY_BYTE_LIMIT) {
-      // Prior edits accept would exceed the budget. Bail and surface
-      // the error — the user still owns the prior pending run.
-      return {
-        result: `Error: auto-accepting the prior pending run would push the document past the size limit (${byteLengthOf(nextMarkdown)} bytes). Resolve the prior run manually first.`,
-        isError: true,
-      };
+    let nextMarkdown = workingMarkdown;
+    let nextHtml: string | null = workingHtml;
+    let nextAnchorMap: Record<string, unknown> = {};
+
+    if (content.contentFormat === 'html') {
+      const materialized = materializeEditsHtml(workingHtml, priorEdits);
+      if (!materialized.ok) {
+        return {
+          result: `Error: server could not parse the HTML body while auto-accepting the prior pending run (${materialized.message}). Resolve manually.`,
+          isError: true,
+        };
+      }
+      const sanitized = sanitizeHtmlServer(materialized.html);
+      const stamped = insertAnchors(sanitized.clean);
+      if (!stamped.ok) {
+        return {
+          result: `Error: server could not stamp HTML anchors after auto-accept (${stamped.message}). Resolve manually.`,
+          isError: true,
+        };
+      }
+      const computed = await computeHtmlAnchorMap(stamped.value);
+      if (computed === null) {
+        return {
+          result:
+            'Error: server could not build the HTML anchor map after auto-accept. Resolve manually.',
+          isError: true,
+        };
+      }
+      if (byteLengthOf(stamped.value) > CONTENT_BODY_BYTE_LIMIT) {
+        return {
+          result: `Error: auto-accepting the prior pending run would push the document past the size limit (${byteLengthOf(stamped.value)} bytes). Resolve the prior run manually first.`,
+          isError: true,
+        };
+      }
+      nextHtml = stamped.value;
+      nextAnchorMap = computed;
+    } else {
+      const nextDoc = ensureAnchorIds(
+        materializeEdits(workingMarkdown, priorEdits),
+      );
+      nextMarkdown = tiptapJsonToMarkdown(nextDoc);
+      if (byteLengthOf(nextMarkdown) > CONTENT_BODY_BYTE_LIMIT) {
+        return {
+          result: `Error: auto-accepting the prior pending run would push the document past the size limit (${byteLengthOf(nextMarkdown)} bytes). Resolve the prior run manually first.`,
+          isError: true,
+        };
+      }
+      nextAnchorMap = await computeAnchorMap(nextDoc);
     }
-    const nextAnchorMap = await computeAnchorMap(nextDoc);
 
     const updatedRows = await db<{ body_version: number; talk_id: string }[]>`
       update public.contents
       set body_markdown = ${nextMarkdown},
+          body_html = ${nextHtml},
           body_version = body_version + 1,
           anchor_map_json = ${db.json(nextAnchorMap as never)},
           updated_at = now(),
@@ -275,7 +345,8 @@ export async function executeApplyContentEdit(
         isError: true,
       };
     }
-    workingBody = nextMarkdown;
+    workingMarkdown = nextMarkdown;
+    workingHtml = nextHtml ?? '';
     workingVersion = updatedRows[0].body_version;
 
     const priorEditIds = await deletePendingEditsByRun({
@@ -350,12 +421,14 @@ export async function executeApplyContentEdit(
   let resultingEditId: string;
 
   if (sameRunSameAnchor && internalKind !== 'bulk') {
-    // Collapse into the existing row.
+    // Collapse into the existing row. Format-aware payload — exactly
+    // one of sanitizedMarkdown / sanitizedHtml is non-null per call.
     const collapsed = collapseEdit(
       sameRunSameAnchor,
       internalKind,
-      sanitizedMarkdown,
+      content.contentFormat === 'html' ? sanitizedHtml : sanitizedMarkdown,
       typeof rawRationale === 'string' ? rawRationale : null,
+      content.contentFormat,
     );
     if (collapsed === null) {
       // Net no-op (insert→delete): drop the existing row.
@@ -386,6 +459,7 @@ export async function executeApplyContentEdit(
       kind: collapsed.kind,
       targetAnchorId: collapsed.targetAnchorId,
       newMarkdown: collapsed.newMarkdown,
+      newHtml: collapsed.newHtml,
       rationale: collapsed.rationale,
     });
     if (!updated) {
@@ -406,7 +480,14 @@ export async function executeApplyContentEdit(
       kind: internalKind,
       baseContentVersion: workingVersion,
       targetAnchorId,
-      newMarkdown: internalKind === 'delete' ? null : sanitizedMarkdown,
+      newMarkdown:
+        internalKind === 'delete' || content.contentFormat === 'html'
+          ? null
+          : sanitizedMarkdown,
+      newHtml:
+        internalKind === 'delete' || content.contentFormat !== 'html'
+          ? null
+          : sanitizedHtml,
       rationale: typeof rawRationale === 'string' ? rawRationale : null,
     });
     resultingEditId = inserted.id;
@@ -443,22 +524,39 @@ interface CollapsedEdit {
   kind: ContentEditKind;
   targetAnchorId: string | null;
   newMarkdown: string | null;
+  newHtml: string | null;
   rationale: string | null;
+}
+
+function payloadFields(
+  format: 'markdown' | 'html',
+  payload: string | null,
+): { newMarkdown: string | null; newHtml: string | null } {
+  return format === 'html'
+    ? { newMarkdown: null, newHtml: payload }
+    : { newMarkdown: payload, newHtml: null };
 }
 
 function collapseEdit(
   existing: ContentEditRow,
   newKind: ContentEditKind,
-  newMarkdown: string | null,
+  newPayload: string | null,
   newRationale: string | null,
+  format: 'markdown' | 'html',
 ): CollapsedEdit | null {
   const rationale = newRationale ?? existing.rationale;
+  const payload = payloadFields(format, newPayload);
+  const noPayload = { newMarkdown: null, newHtml: null };
+  const existingPayload = {
+    newMarkdown: existing.newMarkdown,
+    newHtml: existing.newHtml,
+  };
 
   if (existing.kind === 'insert' && newKind === 'replace') {
     return {
       kind: 'insert',
       targetAnchorId: existing.targetAnchorId,
-      newMarkdown,
+      ...payload,
       rationale,
     };
   }
@@ -469,7 +567,7 @@ function collapseEdit(
     return {
       kind: 'replace',
       targetAnchorId: existing.targetAnchorId,
-      newMarkdown,
+      ...payload,
       rationale,
     };
   }
@@ -477,7 +575,7 @@ function collapseEdit(
     return {
       kind: 'delete',
       targetAnchorId: existing.targetAnchorId,
-      newMarkdown: null,
+      ...noPayload,
       rationale,
     };
   }
@@ -485,7 +583,7 @@ function collapseEdit(
     return {
       kind: 'replace',
       targetAnchorId: existing.targetAnchorId,
-      newMarkdown,
+      ...payload,
       rationale,
     };
   }
@@ -495,7 +593,7 @@ function collapseEdit(
     return {
       kind: 'replace',
       targetAnchorId: existing.targetAnchorId,
-      newMarkdown,
+      ...payload,
       rationale,
     };
   }
@@ -505,7 +603,7 @@ function collapseEdit(
     return {
       kind: 'insert',
       targetAnchorId: existing.targetAnchorId,
-      newMarkdown,
+      ...payload,
       rationale,
     };
   }
@@ -513,7 +611,7 @@ function collapseEdit(
     return {
       kind: 'delete',
       targetAnchorId: existing.targetAnchorId,
-      newMarkdown: null,
+      ...noPayload,
       rationale,
     };
   }
@@ -522,9 +620,63 @@ function collapseEdit(
   return {
     kind: existing.kind,
     targetAnchorId: existing.targetAnchorId,
-    newMarkdown: existing.newMarkdown,
+    ...existingPayload,
     rationale,
   };
+}
+
+// ── HTML payload validation (PR B guards) ────────────────────────────
+
+interface HtmlValidationOk {
+  ok: true;
+  sanitized: string;
+}
+
+interface HtmlValidationErr {
+  ok: false;
+  error: string;
+}
+
+// Reasonable heuristic: a payload that contains zero `<tag>` opens
+// (after trimming) is plain text, not HTML. Catches the common AI
+// regression where Kimi/etc. forget the format and dump markdown into
+// the `markdown` field on an HTML doc.
+function looksLikePlainText(input: string): boolean {
+  // The smallest valid block payload is "<x>" — three chars. Anything
+  // shorter, or anything with no tag opening at all, is plain text.
+  return !/<\s*[a-zA-Z]/.test(input);
+}
+
+function validateHtmlPayload(
+  input: string,
+): HtmlValidationOk | HtmlValidationErr {
+  const trimmed = input.trim();
+  if (trimmed.length === 0) {
+    return {
+      ok: false,
+      error: 'Error: the supplied HTML payload is empty. Provide real content.',
+    };
+  }
+  if (looksLikePlainText(trimmed)) {
+    return {
+      ok: false,
+      error:
+        'Error: this document is HTML format but the payload looks like plain text. Re-emit as HTML — for a paragraph use `<p>...</p>`, for a heading use `<h1>...</h1>`, etc. Allowed tags: ' +
+        ALLOWED_TAGS.join(', ') +
+        '. Banned: <script>, <iframe>, <form>.',
+    };
+  }
+  const { clean } = sanitizeHtmlServer(input);
+  if (clean.trim().length === 0) {
+    return {
+      ok: false,
+      error:
+        'Error: every tag in the HTML payload was stripped by the server sanitizer. Allowed tags: ' +
+        ALLOWED_TAGS.join(', ') +
+        '. Banned: <script>, <iframe>, <form>, on*-event handlers, javascript: URLs. Re-emit using allowed tags.',
+    };
+  }
+  return { ok: true, sanitized: clean };
 }
 
 // Internal compile-time-only re-export so the unused-import linter
