@@ -1230,51 +1230,49 @@ function buildContextTools(
   // attached doc, so agents in chat-only Talks aren't tempted to call
   // them and fall into "no document" errors.
   if (hasContent) {
-    tools.push(
-      {
-        name: 'apply_content_edit',
-        description: [
-          "Edit the Talk's attached document directly. Your edit applies immediately as a *pending* change the user can Accept or Reject from the doc pane — there is no propose step, no card to wait on.",
-          '',
-          "Pick `kind` for the scope: `'append'` adds new block(s) AFTER `anchor` (omit `anchor` to prepend at the top); `'replace'` overwrites the single block at `anchor`; `'delete'` removes the block at `anchor`; `'bulk'` swaps the entire body (`markdown` is the COMPLETE new doc, omit `anchor`).",
-          '',
-          'Anchors come verbatim from THE DOC block listing in your system prompt. Call this tool as many times as you need in one turn — every edit you make this turn is grouped into one pending edit run the user accepts or rejects as a single unit. Smaller, targeted edits review better than one giant bulk; reserve bulk for when most of the doc actually changes.',
-          '',
-          'When `@doc` appears in the latest user turn AND the request is to change the document, you MUST call this tool — do not narrate the change in chat. A brief acknowledgement after the call is fine ("Replaced paragraph 2 and added a closing CTA."); a long restatement of the edit in chat is not.',
-        ].join('\n'),
-        inputSchema: {
-          type: 'object',
-          properties: {
-            kind: {
-              type: 'string',
-              enum: ['append', 'replace', 'delete', 'bulk'],
-              description:
-                "Edit scope. 'append' = add new block(s) after `anchor` (or at top if omitted). 'replace' = overwrite the block at `anchor`. 'delete' = remove the block at `anchor`. 'bulk' = replace the entire body with `markdown` (omit `anchor`).",
-            },
-            anchor: {
-              // Single-string type (not the JSON Schema array form
-              // `['string', 'null']`) — NVIDIA NIM's Python backend
-              // crashes with `unhashable type: 'list'` when it tries
-              // to cache schemas containing array-of-types.
-              type: 'string',
-              description:
-                "Anchor ID of the target block, copied verbatim from THE DOC block listing. For 'append': insert AFTER this block (omit to prepend at top). For 'replace'/'delete': the block to act on. Omit for 'bulk'.",
-            },
-            markdown: {
-              type: 'string',
-              description:
-                "For 'append'/'replace': the new block(s) as GitHub-flavored markdown. For 'bulk': the COMPLETE new document body. For 'delete': omit.",
-            },
-            rationale: {
-              type: 'string',
-              description:
-                'Optional one-line note shown in the edit-run banner so the user knows why you made this edit.',
-            },
+    tools.push({
+      name: 'apply_content_edit',
+      description: [
+        "Edit the Talk's attached document directly. Your edit applies immediately as a *pending* change the user can Accept or Reject from the doc pane — there is no propose step, no card to wait on.",
+        '',
+        "Pick `kind` for the scope: `'append'` adds new block(s) AFTER `anchor` (omit `anchor` to prepend at the top); `'replace'` overwrites the single block at `anchor`; `'delete'` removes the block at `anchor`; `'bulk'` swaps the entire body (`markdown` is the COMPLETE new doc, omit `anchor`).",
+        '',
+        'Anchors come verbatim from THE DOC block listing in your system prompt. Call this tool as many times as you need in one turn — every edit you make this turn is grouped into one pending edit run the user accepts or rejects as a single unit. Smaller, targeted edits review better than one giant bulk; reserve bulk for when most of the doc actually changes.',
+        '',
+        'When `@doc` appears in the latest user turn AND the request is to change the document, you MUST call this tool — do not narrate the change in chat. A brief acknowledgement after the call is fine ("Replaced paragraph 2 and added a closing CTA."); a long restatement of the edit in chat is not.',
+      ].join('\n'),
+      inputSchema: {
+        type: 'object',
+        properties: {
+          kind: {
+            type: 'string',
+            enum: ['append', 'replace', 'delete', 'bulk'],
+            description:
+              "Edit scope. 'append' = add new block(s) after `anchor` (or at top if omitted). 'replace' = overwrite the block at `anchor`. 'delete' = remove the block at `anchor`. 'bulk' = replace the entire body with `markdown` (omit `anchor`).",
           },
-          required: ['kind'],
+          anchor: {
+            // Single-string type (not the JSON Schema array form
+            // `['string', 'null']`) — NVIDIA NIM's Python backend
+            // crashes with `unhashable type: 'list'` when it tries
+            // to cache schemas containing array-of-types.
+            type: 'string',
+            description:
+              "Anchor ID of the target block, copied verbatim from THE DOC block listing. For 'append': insert AFTER this block (omit to prepend at top). For 'replace'/'delete': the block to act on. Omit for 'bulk'.",
+          },
+          markdown: {
+            type: 'string',
+            description:
+              "For 'append'/'replace': the new block(s) as GitHub-flavored markdown. For 'bulk': the COMPLETE new document body. For 'delete': omit.",
+          },
+          rationale: {
+            type: 'string',
+            description:
+              'Optional one-line note shown in the edit-run banner so the user knows why you made this edit.',
+          },
         },
+        required: ['kind'],
       },
-    );
+    });
   }
 
   return tools;
