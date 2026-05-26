@@ -1,16 +1,19 @@
 // Content feature — typed accessors for the `contents` and
-// `content_proposals` tables.
+// `content_edits` tables.
 //
 // Caller contract: every function below must run inside a
 // `withUserContext(userId, ...)` block. RLS on both tables gates by
-// `owner_id = auth.uid()`; the surrounding `withRequestScopedDb`
-// scope opens the notify queue so outbox emits get flushed
-// post-commit.
+// thread-owner = auth.uid() (joined via talk_threads); the surrounding
+// `withRequestScopedDb` scope opens the notify queue so outbox emits
+// get flushed post-commit.
 //
-// The accept/update paths route the body through the shared
+// The accept/update paths route the markdown body through the shared
 // `src/shared/rich-text/` module: markdown → Tiptap JSON → AST
 // mutation → markdown. The anchor map is recomputed from the
-// resulting JSON; the body and the map always ship together.
+// resulting JSON. For HTML content the writer runs the shared
+// `sanitizeHtmlServer` and writes the cleaned HTML; HTML anchor
+// stamping is deferred to PR B (anchor_map_json stays `{}` for
+// HTML rows in PR A).
 
 import { getDbPg } from '../../db.js';
 import {
@@ -21,6 +24,7 @@ import {
   ensureAnchorIds,
   markdownToTiptapJson,
   plainTextOf,
+  sanitizeHtmlServer,
   sanitizeMarkdown,
   sanitizeRichTextDocument,
   tiptapJsonToMarkdown,
@@ -29,14 +33,25 @@ import { emitOutboxEvent } from '../talks/outbox-emit.js';
 
 export const CONTENT_BODY_BYTE_LIMIT = 512_000;
 
+export type ContentFormat = 'markdown' | 'html';
+
+const CONTENT_RECORD_COLUMNS = `
+  id, owner_id, talk_id, thread_id, title, content_kind, content_format,
+  body_markdown, body_html, body_version, anchor_map_json,
+  created_at, updated_at,
+  created_by_user_id, updated_by_user_id, updated_by_run_id
+`;
+
 export interface ContentRecord {
   id: string;
   owner_id: string;
   talk_id: string;
+  thread_id: string;
   title: string;
   content_kind: string;
-  content_format: string;
+  content_format: ContentFormat;
   body_markdown: string;
+  body_html: string | null;
   body_version: number;
   anchor_map_json: AnchorMap;
   created_at: string;
@@ -50,10 +65,12 @@ export interface Content {
   id: string;
   ownerId: string;
   talkId: string;
+  threadId: string;
   title: string;
   contentKind: string;
-  contentFormat: string;
+  contentFormat: ContentFormat;
   bodyMarkdown: string;
+  bodyHtml: string | null;
   bodyVersion: number;
   anchorMap: AnchorMap;
   createdAt: string;
@@ -68,10 +85,12 @@ function toContent(row: ContentRecord): Content {
     id: row.id,
     ownerId: row.owner_id,
     talkId: row.talk_id,
+    threadId: row.thread_id,
     title: row.title,
     contentKind: row.content_kind,
     contentFormat: row.content_format,
     bodyMarkdown: row.body_markdown,
+    bodyHtml: row.body_html,
     bodyVersion: row.body_version,
     anchorMap: row.anchor_map_json ?? {},
     createdAt: row.created_at,
@@ -90,6 +109,10 @@ function normalizeTitle(title: string): string {
 
 function byteLengthOf(text: string): number {
   return new TextEncoder().encode(text).byteLength;
+}
+
+function isValidFormat(format: unknown): format is ContentFormat {
+  return format === 'markdown' || format === 'html';
 }
 
 function nodeIsEmpty(node: RichTextNode | undefined): boolean {
@@ -113,27 +136,37 @@ function documentIsEmpty(doc: RichTextDocument): boolean {
 export async function createContent(input: {
   ownerId: string;
   talkId: string;
+  threadId: string;
   title: string;
+  format?: ContentFormat;
   createdByUserId?: string | null;
 }): Promise<Content> {
   const title = normalizeTitle(input.title);
+  const format: ContentFormat = input.format ?? 'markdown';
+  if (!isValidFormat(format)) {
+    throw new Error(`Invalid content format: ${String(input.format)}`);
+  }
+  // For markdown docs we keep the existing default — body_markdown='',
+  // body_html=null. For HTML docs we set body_html='' (the
+  // body-matches-format CHECK requires it to be non-null when
+  // content_format='html'). body_markdown stays at its default ''.
+  const initialMarkdown = '';
+  const initialHtml: string | null = format === 'html' ? '' : null;
   const db = getDbPg();
   const rows = await db<ContentRecord[]>`
     insert into public.contents
-      (owner_id, talk_id, title, content_kind, content_format,
-       body_markdown, body_version, anchor_map_json,
+      (owner_id, talk_id, thread_id, title, content_kind, content_format,
+       body_markdown, body_html, body_version, anchor_map_json,
        created_by_user_id, updated_by_user_id, updated_by_run_id)
     values
-      (${input.ownerId}::uuid, ${input.talkId}::uuid, ${title},
-       'document', 'markdown',
-       '', 1, '{}'::jsonb,
+      (${input.ownerId}::uuid, ${input.talkId}::uuid,
+       ${input.threadId}::uuid, ${title},
+       'document', ${format},
+       ${initialMarkdown}, ${initialHtml}, 1, '{}'::jsonb,
        ${input.createdByUserId ?? null}::uuid,
        ${input.createdByUserId ?? null}::uuid,
        null)
-    returning id, owner_id, talk_id, title, content_kind, content_format,
-              body_markdown, body_version, anchor_map_json,
-              created_at, updated_at,
-              created_by_user_id, updated_by_user_id, updated_by_run_id
+    returning ${db.unsafe(CONTENT_RECORD_COLUMNS)}
   `;
   return toContent(rows[0]);
 }
@@ -157,15 +190,36 @@ export async function listContentsForSidebar(): Promise<
   return rows;
 }
 
+/**
+ * Look up the content row attached to a thread. Each thread can host
+ * at most one content row (unique index on `contents.thread_id`).
+ */
+export async function getContentByThreadId(
+  threadId: string,
+): Promise<Content | null> {
+  const db = getDbPg();
+  const rows = await db<ContentRecord[]>`
+    select ${db.unsafe(CONTENT_RECORD_COLUMNS)}
+    from public.contents
+    where thread_id = ${threadId}::uuid
+    limit 1
+  `;
+  return rows[0] ? toContent(rows[0]) : null;
+}
+
+/**
+ * Thin shim: resolve to the talk's default thread and look up the
+ * content row attached to it. This is the legacy entrypoint that
+ * predates the thread move — callers that don't yet know which thread
+ * to ask about route through here. New callers should use
+ * `getContentByThreadId` directly.
+ */
 export async function getContentByTalkId(
   talkId: string,
 ): Promise<Content | null> {
   const db = getDbPg();
   const rows = await db<ContentRecord[]>`
-    select id, owner_id, talk_id, title, content_kind, content_format,
-           body_markdown, body_version, anchor_map_json,
-           created_at, updated_at,
-           created_by_user_id, updated_by_user_id, updated_by_run_id
+    select ${db.unsafe(CONTENT_RECORD_COLUMNS)}
     from public.contents
     where talk_id = ${talkId}::uuid
     limit 1
@@ -178,10 +232,7 @@ export async function getContentById(
 ): Promise<Content | null> {
   const db = getDbPg();
   const rows = await db<ContentRecord[]>`
-    select id, owner_id, talk_id, title, content_kind, content_format,
-           body_markdown, body_version, anchor_map_json,
-           created_at, updated_at,
-           created_by_user_id, updated_by_user_id, updated_by_run_id
+    select ${db.unsafe(CONTENT_RECORD_COLUMNS)}
     from public.contents
     where id = ${contentId}::uuid
     limit 1
@@ -193,13 +244,28 @@ export type UpdateContentResult =
   | { kind: 'ok'; content: Content }
   | { kind: 'conflict'; current: Content }
   | { kind: 'not_found' }
+  | { kind: 'format_mismatch'; format: ContentFormat }
   | { kind: 'doc_size_limit'; wouldBeBytes: number };
 
+/**
+ * Update the body of an existing content row.
+ *
+ * For markdown content: pass `bodyMarkdown`. The body is sanitized,
+ * round-tripped through the Tiptap AST, anchor-stamped, and persisted.
+ * For HTML content: pass `bodyHtml`. The body is sanitized via the
+ * shared server allowlist (storage truth) and persisted as-is.
+ * `anchor_map_json` stays at `{}` for HTML rows in PR A — server-side
+ * HTML anchor stamping lands in PR B (plan T13).
+ *
+ * Passing the wrong body kind for the row's format returns
+ * `format_mismatch`. Passing neither leaves the body unchanged.
+ */
 export async function updateContentBody(input: {
   contentId: string;
   ownerId: string;
   expectedVersion: number;
-  bodyMarkdown: string;
+  bodyMarkdown?: string;
+  bodyHtml?: string;
   title?: string;
   updatedByUserId?: string | null;
   updatedByRunId?: string | null;
@@ -208,39 +274,68 @@ export async function updateContentBody(input: {
     throw new Error('expectedVersion must be a positive integer');
   }
 
-  const sanitized = sanitizeMarkdown(input.bodyMarkdown);
-  if (byteLengthOf(sanitized) > CONTENT_BODY_BYTE_LIMIT) {
-    return {
-      kind: 'doc_size_limit',
-      wouldBeBytes: byteLengthOf(sanitized),
-    };
-  }
-
-  // Parse → re-stamp anchors → re-serialize so the markdown reflects
-  // the canonical anchored shape regardless of what the client sent.
-  const parsed = sanitizeRichTextDocument(markdownToTiptapJson(sanitized));
-  const stamped = ensureAnchorIds(parsed);
-  const canonicalMarkdown = tiptapJsonToMarkdown(stamped);
-  if (byteLengthOf(canonicalMarkdown) > CONTENT_BODY_BYTE_LIMIT) {
-    return {
-      kind: 'doc_size_limit',
-      wouldBeBytes: byteLengthOf(canonicalMarkdown),
-    };
-  }
-  const anchorMap = await computeAnchorMap(stamped);
-
   const db = getDbPg();
   const existingRows = await db<ContentRecord[]>`
-    select id, owner_id, talk_id, title, content_kind, content_format,
-           body_markdown, body_version, anchor_map_json,
-           created_at, updated_at,
-           created_by_user_id, updated_by_user_id, updated_by_run_id
+    select ${db.unsafe(CONTENT_RECORD_COLUMNS)}
     from public.contents
     where id = ${input.contentId}::uuid
     limit 1
   `;
   const existing = existingRows[0];
   if (!existing) return { kind: 'not_found' };
+
+  const wantsMarkdown = typeof input.bodyMarkdown === 'string';
+  const wantsHtml = typeof input.bodyHtml === 'string';
+
+  // Format-mismatch guard: a caller sending the wrong body shape for
+  // the row's format gets a 400-like rejection. Returning early keeps
+  // the body untouched so a misrouted PATCH can't drop content.
+  if (existing.content_format === 'markdown' && wantsHtml && !wantsMarkdown) {
+    return { kind: 'format_mismatch', format: existing.content_format };
+  }
+  if (existing.content_format === 'html' && wantsMarkdown && !wantsHtml) {
+    return { kind: 'format_mismatch', format: existing.content_format };
+  }
+
+  let nextMarkdown = existing.body_markdown;
+  let nextHtml = existing.body_html;
+  let nextAnchorMap: AnchorMap = existing.anchor_map_json ?? {};
+
+  if (existing.content_format === 'markdown' && wantsMarkdown) {
+    const sanitized = sanitizeMarkdown(input.bodyMarkdown as string);
+    if (byteLengthOf(sanitized) > CONTENT_BODY_BYTE_LIMIT) {
+      return {
+        kind: 'doc_size_limit',
+        wouldBeBytes: byteLengthOf(sanitized),
+      };
+    }
+
+    // Parse → re-stamp anchors → re-serialize so the markdown reflects
+    // the canonical anchored shape regardless of what the client sent.
+    const parsed = sanitizeRichTextDocument(markdownToTiptapJson(sanitized));
+    const stamped = ensureAnchorIds(parsed);
+    const canonicalMarkdown = tiptapJsonToMarkdown(stamped);
+    if (byteLengthOf(canonicalMarkdown) > CONTENT_BODY_BYTE_LIMIT) {
+      return {
+        kind: 'doc_size_limit',
+        wouldBeBytes: byteLengthOf(canonicalMarkdown),
+      };
+    }
+    nextMarkdown = canonicalMarkdown;
+    nextAnchorMap = await computeAnchorMap(stamped);
+  } else if (existing.content_format === 'html' && wantsHtml) {
+    const { clean } = sanitizeHtmlServer(input.bodyHtml as string);
+    if (byteLengthOf(clean) > CONTENT_BODY_BYTE_LIMIT) {
+      return {
+        kind: 'doc_size_limit',
+        wouldBeBytes: byteLengthOf(clean),
+      };
+    }
+    nextHtml = clean;
+    // anchor_map_json stays at the existing value — HTML anchor
+    // stamping is a PR B concern (see plan T13 + html-anchors module).
+  }
+
   if (existing.body_version !== input.expectedVersion) {
     return { kind: 'conflict', current: toContent(existing) };
   }
@@ -250,28 +345,23 @@ export async function updateContentBody(input: {
 
   const updatedRows = await db<ContentRecord[]>`
     update public.contents
-    set body_markdown = ${canonicalMarkdown},
+    set body_markdown = ${nextMarkdown},
+        body_html = ${nextHtml},
         body_version = body_version + 1,
-        anchor_map_json = ${db.json(anchorMap as never)},
+        anchor_map_json = ${db.json(nextAnchorMap as never)},
         title = ${nextTitle},
         updated_at = now(),
         updated_by_user_id = ${input.updatedByUserId ?? null}::uuid,
         updated_by_run_id = ${input.updatedByRunId ?? null}::uuid
     where id = ${input.contentId}::uuid
       and body_version = ${input.expectedVersion}
-    returning id, owner_id, talk_id, title, content_kind, content_format,
-              body_markdown, body_version, anchor_map_json,
-              created_at, updated_at,
-              created_by_user_id, updated_by_user_id, updated_by_run_id
+    returning ${db.unsafe(CONTENT_RECORD_COLUMNS)}
   `;
   const updated = updatedRows[0];
   if (!updated) {
     // CAS lost. Refetch for the caller.
     const refetch = await db<ContentRecord[]>`
-      select id, owner_id, talk_id, title, content_kind, content_format,
-             body_markdown, body_version, anchor_map_json,
-             created_at, updated_at,
-             created_by_user_id, updated_by_user_id, updated_by_run_id
+      select ${db.unsafe(CONTENT_RECORD_COLUMNS)}
       from public.contents
       where id = ${input.contentId}::uuid
       limit 1
@@ -286,6 +376,7 @@ export async function updateContentBody(input: {
     payload: {
       contentId: updated.id,
       version: updated.body_version,
+      format: updated.content_format,
       appliedAnchorIds: [],
     },
     ownerIds: [updated.owner_id],
