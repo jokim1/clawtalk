@@ -7354,11 +7354,17 @@ export function TalkDetailPage({
   }, []);
 
   useEffect(() => {
-    if (currentTab !== 'talk') {
-      dragCounterRef.current = 0;
-      setIsDragOver(false);
-      return;
-    }
+    // Always start a tab visit with a clean drag-overlay state — even
+    // when we just switched TO 'talk'. The workspace dragCounter can
+    // stick at >0 if a child dropzone in another tab (e.g. the Context
+    // tab's SavedSourcesPanel) stops propagation on its own drop,
+    // leaving the workspace's matching dragLeave unfired. Without this
+    // reset, switching back to the Talk tab would re-render the
+    // overlay with no live drag in progress.
+    dragCounterRef.current = 0;
+    setIsDragOver(false);
+
+    if (currentTab !== 'talk') return;
 
     const preventWindowFileNavigation = (event: DragEvent) => {
       if (!hasFileTransfer(event.dataTransfer)) return;
