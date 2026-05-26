@@ -5188,6 +5188,57 @@ a {
   border-color: #3b82f6;
 }
 
+.doc-promote-modal-format {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.doc-promote-modal-format > legend {
+  padding: 0;
+  margin-bottom: 0.25rem;
+}
+
+.doc-promote-modal-format-option {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.9rem;
+  color: #1d2433;
+  cursor: pointer;
+}
+
+.doc-promote-modal-format-option input[type='radio'] {
+  margin: 0;
+}
+
+.talk-tab-mobile-show-doc {
+  margin-left: auto;
+  border-radius: 8px;
+  border: 1px solid #d8dfec;
+  background: #fdfbf6;
+  color: #1d2433;
+  font: inherit;
+  font-size: 0.85rem;
+  padding: 0.3rem 0.7rem;
+  cursor: pointer;
+}
+
+.talk-tab-mobile-show-doc:hover {
+  background: #f3eee1;
+}
+
+.talk-tab-doc-body-wrap {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+
 .doc-promote-modal-error {
   margin: 0;
   font-size: 0.85rem;

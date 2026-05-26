@@ -77,13 +77,17 @@ export type TalkSidebarTree = {
   contents: ContentSidebarItem[];
 };
 
+export type ContentFormat = 'markdown' | 'html';
+
 export type Content = {
   id: string;
   talkId: string;
+  threadId: string;
   title: string;
   contentKind: string;
-  contentFormat: string;
+  contentFormat: ContentFormat;
   bodyMarkdown: string;
+  bodyHtml: string | null;
   bodyVersion: number;
   anchorMap: Record<string, unknown>;
   createdAt: string;
@@ -1297,16 +1301,47 @@ export async function getTalkContent(talkId: string): Promise<{
   }>(`/api/v1/talks/${encodeURIComponent(talkId)}/content`);
 }
 
+export async function getThreadContent(threadId: string): Promise<{
+  content: Content | null;
+  pendingEdits: ContentEditSummary[];
+}> {
+  return apiRequest<{
+    content: Content | null;
+    pendingEdits: ContentEditSummary[];
+  }>(`/api/v1/threads/${encodeURIComponent(threadId)}/content`);
+}
+
 export async function createTalkContent(input: {
   talkId: string;
   title: string;
+  format?: ContentFormat;
 }): Promise<Content> {
+  const body: Record<string, unknown> = { title: input.title };
+  if (input.format) body.format = input.format;
   const envelope = await apiMutationRequest<{ content: Content }>(
     `/api/v1/talks/${encodeURIComponent(input.talkId)}/content`,
     {
       method: 'POST',
       includeJson: true,
-      body: JSON.stringify({ title: input.title }),
+      body: JSON.stringify(body),
+    },
+  );
+  return envelope.content;
+}
+
+export async function createThreadContent(input: {
+  threadId: string;
+  title: string;
+  format?: ContentFormat;
+}): Promise<Content> {
+  const body: Record<string, unknown> = { title: input.title };
+  if (input.format) body.format = input.format;
+  const envelope = await apiMutationRequest<{ content: Content }>(
+    `/api/v1/threads/${encodeURIComponent(input.threadId)}/content`,
+    {
+      method: 'POST',
+      includeJson: true,
+      body: JSON.stringify(body),
     },
   );
   return envelope.content;
@@ -1316,6 +1351,7 @@ export async function patchContent(input: {
   contentId: string;
   expectedVersion: number;
   bodyMarkdown?: string;
+  bodyHtml?: string;
   title?: string;
   acceptPendingEditIds?: string[];
 }): Promise<{ content: Content; acceptedPendingEditIds?: string[] }> {
@@ -1324,6 +1360,9 @@ export async function patchContent(input: {
   };
   if (typeof input.bodyMarkdown === 'string') {
     body.bodyMarkdown = input.bodyMarkdown;
+  }
+  if (typeof input.bodyHtml === 'string') {
+    body.bodyHtml = input.bodyHtml;
   }
   if (typeof input.title === 'string') {
     body.title = input.title;
@@ -1410,7 +1449,6 @@ export async function rejectContentEditRun(input: {
     },
   );
 }
-
 
 export async function getTalkPolicy(talkId: string): Promise<TalkPolicy> {
   return apiRequest<TalkPolicy>(
@@ -4210,7 +4248,9 @@ export async function connectWorkspaceSlackInstall(input?: {
   );
 }
 
-export async function deleteWorkspaceSlackInstall(teamId: string): Promise<void> {
+export async function deleteWorkspaceSlackInstall(
+  teamId: string,
+): Promise<void> {
   await apiMutationRequest<{ deleted: boolean }>(
     `/api/v1/workspace/connectors/slack/installs/${encodeURIComponent(teamId)}`,
     {

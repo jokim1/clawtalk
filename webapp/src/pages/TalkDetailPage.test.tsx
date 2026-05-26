@@ -19,6 +19,8 @@ import type {
   ChannelConnection,
   ChannelQueueFailure,
   ChannelTarget,
+  Content,
+  ContentSidebarItem,
   ContextRule,
   ContextSource,
   TalkContext,
@@ -43,6 +45,51 @@ const ORCHESTRATION_MODE_TOOLTIP =
 
 vi.mock('../lib/talkStream', () => ({
   openTalkStream: vi.fn(),
+}));
+
+// CodeMirror's contentEditable can't drive in jsdom — swap it for a
+// textarea so the lazy-loaded HtmlSourceEditor renders synchronously
+// in tests and we can drive its onChange via fireEvent.change.
+vi.mock('@uiw/react-codemirror', async () => {
+  const { forwardRef } = await import('react');
+  const FakeCodeMirror = forwardRef<
+    HTMLTextAreaElement,
+    {
+      value?: string;
+      onChange?: (next: string) => void;
+      placeholder?: string;
+      editable?: boolean;
+      readOnly?: boolean;
+    }
+  >(function FakeCodeMirror(props, ref) {
+    return (
+      <textarea
+        ref={ref}
+        data-testid="cm-textarea"
+        value={props.value ?? ''}
+        placeholder={props.placeholder}
+        readOnly={props.readOnly}
+        disabled={props.editable === false}
+        onChange={(e) => props.onChange?.(e.target.value)}
+      />
+    );
+  });
+  return {
+    default: FakeCodeMirror,
+    EditorView: {
+      lineWrapping: { extension: 'mock-lineWrapping' },
+    },
+  };
+});
+
+vi.mock('@codemirror/lang-html', () => ({
+  html: () => ({ extension: 'mock-lang-html' }),
+}));
+
+vi.mock('@codemirror/view', () => ({
+  EditorView: {
+    lineWrapping: { extension: 'mock-lineWrapping' },
+  },
 }));
 
 type StreamCallbacks = Parameters<typeof openTalkStream>[0];
@@ -2860,8 +2907,7 @@ describe('TalkDetailPage', () => {
         runId: 'run-streamed',
         role: 'assistant',
         createdBy: null,
-        content:
-          'Yes — Thomas Massie did **not lose his seat immediately**…',
+        content: 'Yes — Thomas Massie did **not lose his seat immediately**…',
         createdAt: '2026-03-06T00:00:05.000Z',
         agentId: 'agent-claude',
         agentNickname: 'Claude Sonnet 4.6',
@@ -2870,9 +2916,7 @@ describe('TalkDetailPage', () => {
     // After MESSAGE_APPENDED, "Done" pill is gone (panel was replaced).
     expect(screen.queryByText('Done')).toBeNull();
     // The persisted assistant bubble now shows the same text.
-    expect(
-      screen.getByText(/Thomas Massie did/),
-    ).toBeTruthy();
+    expect(screen.getByText(/Thomas Massie did/)).toBeTruthy();
   });
 
   it('refetches the active thread when MESSAGE_APPENDED never lands after RUN_COMPLETED', async () => {
@@ -2897,7 +2941,9 @@ describe('TalkDetailPage', () => {
         messages: [userMsg],
         onListMessages: () => {
           listMessagesCallCount += 1;
-          return listMessagesCallCount === 1 ? [userMsg] : [userMsg, assistantMsg];
+          return listMessagesCallCount === 1
+            ? [userMsg]
+            : [userMsg, assistantMsg];
         },
       });
 
@@ -3545,9 +3591,270 @@ describe('TalkDetailPage', () => {
       expect(screen.getAllByText(repeatedPrompt)).toHaveLength(1),
     );
   });
+
+  // ── PR-A A3: Hybrid MD+HTML doc-pane integration ──────────────────
+  it('renders the doc modal with a format radio and POSTs format=html on submit', async () => {
+    const user = userEvent.setup();
+    const onCreateContent = vi.fn(({ title, format }) =>
+      buildContent({
+        id: 'content-new',
+        threadId: DEFAULT_THREAD_ID,
+        title,
+        contentFormat: (format as Content['contentFormat']) ?? 'markdown',
+      }),
+    );
+    installTalkDetailFetch({ onCreateContent });
+    renderDetailPage('/app/talks/talk-1/talk', {
+      sidebarContents: [],
+    });
+
+    await screen.findByPlaceholderText('Send a message to this thread');
+
+    // Open the + Doc modal via the existing add-doc button.
+    const addDocButton = await screen.findByRole('button', {
+      name: /add a document|\+ doc/i,
+    });
+    await user.click(addDocButton);
+
+    // Title input + format radio render.
+    const titleInput = await screen.findByLabelText('Title');
+    await user.type(titleInput, 'HTML Doc');
+    const htmlRadio = screen.getByRole('radio', { name: 'HTML' });
+    const mdRadio = screen.getByRole('radio', { name: 'Markdown' });
+    expect(mdRadio).toBeChecked();
+    await user.click(htmlRadio);
+    expect(htmlRadio).toBeChecked();
+
+    await user.click(screen.getByRole('button', { name: /create document/i }));
+
+    await waitFor(() =>
+      expect(onCreateContent).toHaveBeenCalledWith(
+        expect.objectContaining({ title: 'HTML Doc', format: 'html' }),
+      ),
+    );
+  });
+
+  it('renders an HTML doc via SafeHtml in Preview mode', async () => {
+    installTalkDetailFetch({
+      contentByThreadId: {
+        [DEFAULT_THREAD_ID]: buildContent({
+          id: 'content-html',
+          threadId: DEFAULT_THREAD_ID,
+          title: 'My HTML',
+          contentFormat: 'html',
+          bodyHtml:
+            '<p data-testid="html-body">Hello <strong>world</strong></p>',
+        }),
+      },
+    });
+    renderDetailPage('/app/talks/talk-1/talk?doc=1', {
+      sidebarContents: [
+        {
+          id: 'content-html',
+          talkId: 'talk-1',
+          title: 'My HTML',
+          updatedAt: '2026-03-06T00:00:00.000Z',
+        },
+      ],
+    });
+
+    // SafeHtml renders the sanitized body as actual HTML.
+    const para = await screen.findByTestId('html-body');
+    expect(para.textContent).toContain('Hello');
+    expect(para.querySelector('strong')?.textContent).toBe('world');
+    // The format pill says HTML.
+    expect(screen.getByText('HTML')).toBeInTheDocument();
+  });
+
+  it('toggles between Preview and Source mode for HTML docs', async () => {
+    const user = userEvent.setup();
+    installTalkDetailFetch({
+      contentByThreadId: {
+        [DEFAULT_THREAD_ID]: buildContent({
+          id: 'content-html',
+          threadId: DEFAULT_THREAD_ID,
+          title: 'Mode toggle',
+          contentFormat: 'html',
+          bodyHtml: '<p>preview text</p>',
+        }),
+      },
+    });
+    renderDetailPage('/app/talks/talk-1/talk?doc=1', {
+      sidebarContents: [
+        {
+          id: 'content-html',
+          talkId: 'talk-1',
+          title: 'Mode toggle',
+          updatedAt: '2026-03-06T00:00:00.000Z',
+        },
+      ],
+    });
+
+    // Doc loaded — both Preview and Source tabs are present.
+    const sourceTab = await screen.findByRole('tab', { name: /source/i });
+    await user.click(sourceTab);
+
+    // Lazy-loaded CodeMirror swap (mocked as textarea) appears.
+    const ta = await screen.findByTestId('cm-textarea');
+    expect((ta as HTMLTextAreaElement).value).toBe('<p>preview text</p>');
+
+    // Switch back to Preview — textarea unmounts, SafeHtml renders.
+    const previewTab = screen.getByRole('tab', { name: /preview/i });
+    await user.click(previewTab);
+    await waitFor(() =>
+      expect(screen.queryByTestId('cm-textarea')).not.toBeInTheDocument(),
+    );
+  });
+
+  it('hides the doc pane via the hide button, shows it via the edge tab, and persists state in localStorage', async () => {
+    const user = userEvent.setup();
+    window.localStorage.clear();
+    installTalkDetailFetch({
+      contentByThreadId: {
+        [DEFAULT_THREAD_ID]: buildContent({
+          id: 'content-hide',
+          threadId: DEFAULT_THREAD_ID,
+          title: 'Hide me',
+          contentFormat: 'markdown',
+          bodyMarkdown: '',
+        }),
+      },
+    });
+    renderDetailPage('/app/talks/talk-1/talk?doc=1', {
+      sidebarContents: [
+        {
+          id: 'content-hide',
+          talkId: 'talk-1',
+          title: 'Hide me',
+          updatedAt: '2026-03-06T00:00:00.000Z',
+        },
+      ],
+    });
+
+    const hideBtn = await screen.findByRole('button', {
+      name: /hide document pane/i,
+    });
+    await user.click(hideBtn);
+
+    // Edge tab appears with the doc title.
+    const edgeTab = await screen.findByRole('button', {
+      name: /show hide me document/i,
+    });
+    expect(edgeTab).toBeInTheDocument();
+
+    // Persisted to localStorage.
+    const raw = window.localStorage.getItem(
+      `clawtalk_doc_state:${DEFAULT_THREAD_ID}`,
+    );
+    expect(raw).not.toBeNull();
+    expect(JSON.parse(raw as string)).toMatchObject({ hidden: true });
+
+    // Click edge tab restores the pane.
+    await user.click(edgeTab);
+    await waitFor(() =>
+      expect(
+        screen.queryByRole('button', { name: /show hide me document/i }),
+      ).not.toBeInTheDocument(),
+    );
+  });
+
+  it('auto-flips an empty HTML doc from Source to Preview on first content_edit_applied', async () => {
+    installTalkDetailFetch({
+      contentByThreadId: {
+        [DEFAULT_THREAD_ID]: buildContent({
+          id: 'content-empty-html',
+          threadId: DEFAULT_THREAD_ID,
+          title: 'Auto-flip',
+          contentFormat: 'html',
+          bodyHtml: '',
+        }),
+      },
+    });
+    window.localStorage.clear();
+    renderDetailPage('/app/talks/talk-1/talk?doc=1', {
+      sidebarContents: [
+        {
+          id: 'content-empty-html',
+          talkId: 'talk-1',
+          title: 'Auto-flip',
+          updatedAt: '2026-03-06T00:00:00.000Z',
+        },
+      ],
+    });
+
+    // Wait for the doc pane to render so we know the content has
+    // hydrated; the empty-HTML auto-source effect runs in the same
+    // commit batch.
+    const doc = await screen.findByLabelText('Talk document');
+    expect(doc).toBeInTheDocument();
+    // Wait for loading to clear so the auto-source effect has had a
+    // chance to run.
+    await waitFor(() =>
+      expect(within(doc).queryByText('Loading…')).not.toBeInTheDocument(),
+    );
+    // Empty HTML doc opens in Source — CodeMirror textarea is present.
+    const ta = (await screen.findByTestId(
+      'cm-textarea',
+    )) as HTMLTextAreaElement;
+    expect(ta).toBeInTheDocument();
+
+    // Fire a content_edit_applied event — this is the first AI edit.
+    await act(async () => {
+      streamInput?.onContentEditApplied?.({
+        contentId: 'content-empty-html',
+        runId: 'run-edit-1',
+        editIds: ['edit-1'],
+        agentId: 'agent-1',
+        agentNickname: 'Claude',
+        messageId: null,
+      });
+    });
+
+    // After the refetch completes the mode flipped to Preview, so the
+    // editor mounts off and the SafeHtml div renders.
+    await waitFor(() =>
+      expect(screen.queryByTestId('cm-textarea')).not.toBeInTheDocument(),
+    );
+  });
+
+  it('renders a markdown doc via PendingEditDocSurface (regression — no swap to SafeHtml)', async () => {
+    installTalkDetailFetch({
+      contentByThreadId: {
+        [DEFAULT_THREAD_ID]: buildContent({
+          id: 'content-md',
+          threadId: DEFAULT_THREAD_ID,
+          title: 'Markdown doc',
+          contentFormat: 'markdown',
+          bodyMarkdown: '# Hello',
+        }),
+      },
+    });
+    renderDetailPage('/app/talks/talk-1/talk?doc=1', {
+      sidebarContents: [
+        {
+          id: 'content-md',
+          talkId: 'talk-1',
+          title: 'Markdown doc',
+          updatedAt: '2026-03-06T00:00:00.000Z',
+        },
+      ],
+    });
+
+    // Format pill says MD; no Preview/Source toggle for markdown docs.
+    expect(await screen.findByText('MD')).toBeInTheDocument();
+    expect(
+      screen.queryByRole('tab', { name: /source/i }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole('tab', { name: /preview/i }),
+    ).not.toBeInTheDocument();
+  });
 });
 
-function renderDetailPage(initialEntry: string): ReturnType<typeof render> {
+function renderDetailPage(
+  initialEntry: string,
+  options?: { sidebarContents?: ContentSidebarItem[] },
+): ReturnType<typeof render> {
   return render(
     <MemoryRouter initialEntries={[initialEntry]}>
       <Routes>
@@ -3561,7 +3868,7 @@ function renderDetailPage(initialEntry: string): ReturnType<typeof render> {
               onRenameDraftCancel={vi.fn()}
               onRenameDraftCommit={vi.fn().mockResolvedValue(undefined)}
               onSidebarChanged={vi.fn().mockResolvedValue(undefined)}
-              sidebarContents={[]}
+              sidebarContents={options?.sidebarContents ?? []}
             />
           }
         />
@@ -3686,10 +3993,8 @@ function buildRegisteredAgent(
       surface: 'main',
       backend: 'direct_http',
       authPath: input.providerId === 'provider.anthropic' ? 'api_key' : null,
-      selectedMode:
-        input.providerId === 'provider.anthropic' ? 'api' : null,
-      transport:
-        input.providerId === 'provider.anthropic' ? 'direct' : null,
+      selectedMode: input.providerId === 'provider.anthropic' ? 'api' : null,
+      transport: input.providerId === 'provider.anthropic' ? 'direct' : null,
       reasonCode: null,
       routeReason: 'normal',
       ready: true,
@@ -4000,6 +4305,31 @@ function buildChannelQueueFailure(
   };
 }
 
+function buildContent(input: Partial<Content> = {}): Content {
+  return {
+    id: input.id ?? 'content-default',
+    talkId: input.talkId ?? 'talk-1',
+    threadId: input.threadId ?? DEFAULT_THREAD_ID,
+    title: input.title ?? 'Untitled doc',
+    contentKind: input.contentKind ?? 'document',
+    contentFormat: input.contentFormat ?? 'markdown',
+    bodyMarkdown: input.bodyMarkdown ?? '',
+    bodyHtml:
+      input.bodyHtml === undefined
+        ? input.contentFormat === 'html'
+          ? ''
+          : null
+        : input.bodyHtml,
+    bodyVersion: input.bodyVersion ?? 1,
+    anchorMap: input.anchorMap ?? {},
+    createdAt: input.createdAt ?? '2026-03-06T00:00:00.000Z',
+    updatedAt: input.updatedAt ?? '2026-03-06T00:00:00.000Z',
+    createdByUserId: input.createdByUserId ?? null,
+    updatedByUserId: input.updatedByUserId ?? null,
+    updatedByRunId: input.updatedByRunId ?? null,
+  };
+}
+
 function buildContextSource(input: Partial<ContextSource> = {}): ContextSource {
   return {
     id: input.id ?? 'source-1',
@@ -4194,6 +4524,22 @@ function installTalkDetailFetch(input?: {
   ingressFailures?: ChannelQueueFailure[];
   deliveryFailures?: ChannelQueueFailure[];
   aiAgents?: AiAgentsPageData;
+  // Doc-pane integration: pre-existing content keyed by threadId, plus
+  // optional spies so tests can assert on POST and PATCH bodies.
+  contentByThreadId?: Record<string, Content>;
+  onCreateContent?: (body: {
+    talkId: string | null;
+    threadId: string | null;
+    title: string;
+    format?: string;
+  }) => Content;
+  onPatchContent?: (body: {
+    contentId: string;
+    expectedVersion: number;
+    title?: string;
+    bodyMarkdown?: string;
+    bodyHtml?: string;
+  }) => Content;
   onPutAgents?: (body: SavedTalkAgentRequest) => TalkAgent[];
   onGetContext?: () => TalkContext;
   onCreateContextSource?: (body: {
@@ -4355,6 +4701,9 @@ function installTalkDetailFetch(input?: {
     }),
   ];
   const aiAgents = input?.aiAgents ?? buildAiAgentsData();
+  const contentByThreadId: Record<string, Content> = {
+    ...(input?.contentByThreadId ?? {}),
+  };
 
   vi.stubGlobal(
     'fetch',
@@ -4902,9 +5251,7 @@ function installTalkDetailFetch(input?: {
         method === 'PATCH'
       ) {
         const jobId = path.split('/api/v1/talks/talk-1/jobs/')[1];
-        const body = JSON.parse(
-          String(init?.body || '{}'),
-        ) as Partial<TalkJob>;
+        const body = JSON.parse(String(init?.body || '{}')) as Partial<TalkJob>;
         jobs = jobs.map((job) =>
           job.id === jobId ? buildTalkJob({ ...job, ...body }) : job,
         );
@@ -5773,6 +6120,116 @@ function installTalkDetailFetch(input?: {
         return jsonResponse(200, {
           ok: true,
           data: { source: updated },
+        });
+      }
+
+      // ── Content (doc-pane) routes ────────────────────────────────
+      if (path === '/api/v1/talks/talk-1/content' && method === 'GET') {
+        // Talk-scoped GET resolves to the default thread's content.
+        const content = contentByThreadId[DEFAULT_THREAD_ID] ?? null;
+        return jsonResponse(200, {
+          ok: true,
+          data: { content, pendingEdits: [] },
+        });
+      }
+      if (path === '/api/v1/talks/talk-1/content' && method === 'POST') {
+        const body = JSON.parse(String(init?.body || '{}')) as {
+          title: string;
+          format?: string;
+        };
+        const content =
+          input?.onCreateContent?.({
+            talkId: 'talk-1',
+            threadId: null,
+            title: body.title,
+            format: body.format,
+          }) ??
+          buildContent({
+            id: 'content-default',
+            talkId: 'talk-1',
+            threadId: DEFAULT_THREAD_ID,
+            title: body.title,
+            contentFormat:
+              (body.format as Content['contentFormat']) ?? 'markdown',
+          });
+        contentByThreadId[content.threadId] = content;
+        return jsonResponse(201, { ok: true, data: { content } });
+      }
+      const threadContentMatch = path.match(
+        /^\/api\/v1\/threads\/([^/]+)\/content$/,
+      );
+      if (threadContentMatch && method === 'GET') {
+        const threadId = decodeURIComponent(threadContentMatch[1]);
+        const content = contentByThreadId[threadId] ?? null;
+        return jsonResponse(200, {
+          ok: true,
+          data: { content, pendingEdits: [] },
+        });
+      }
+      if (threadContentMatch && method === 'POST') {
+        const threadId = decodeURIComponent(threadContentMatch[1]);
+        const body = JSON.parse(String(init?.body || '{}')) as {
+          title: string;
+          format?: string;
+        };
+        const content =
+          input?.onCreateContent?.({
+            talkId: null,
+            threadId,
+            title: body.title,
+            format: body.format,
+          }) ??
+          buildContent({
+            id: `content-${threadId}`,
+            talkId: 'talk-1',
+            threadId,
+            title: body.title,
+            contentFormat:
+              (body.format as Content['contentFormat']) ?? 'markdown',
+          });
+        contentByThreadId[threadId] = content;
+        return jsonResponse(201, { ok: true, data: { content } });
+      }
+      const patchContentMatch = path.match(/^\/api\/v1\/contents\/([^/]+)$/);
+      if (patchContentMatch && method === 'PATCH') {
+        const contentId = decodeURIComponent(patchContentMatch[1]);
+        const body = JSON.parse(String(init?.body || '{}')) as {
+          expectedVersion: number;
+          title?: string;
+          bodyMarkdown?: string;
+          bodyHtml?: string;
+        };
+        // Resolve the row by id and apply the patch in memory.
+        const threadId = Object.keys(contentByThreadId).find(
+          (tid) => contentByThreadId[tid].id === contentId,
+        );
+        if (!threadId) {
+          return jsonResponse(404, {
+            ok: false,
+            error: { code: 'not_found', message: 'Content not found.' },
+          });
+        }
+        const current = contentByThreadId[threadId];
+        const next: Content = input?.onPatchContent?.({
+          contentId,
+          expectedVersion: body.expectedVersion,
+          title: body.title,
+          bodyMarkdown: body.bodyMarkdown,
+          bodyHtml: body.bodyHtml,
+        }) ?? {
+          ...current,
+          title: body.title ?? current.title,
+          bodyMarkdown: body.bodyMarkdown ?? current.bodyMarkdown,
+          bodyHtml:
+            typeof body.bodyHtml === 'string'
+              ? body.bodyHtml
+              : current.bodyHtml,
+          bodyVersion: current.bodyVersion + 1,
+        };
+        contentByThreadId[threadId] = next;
+        return jsonResponse(200, {
+          ok: true,
+          data: { content: next, acceptedPendingEditIds: [] },
         });
       }
 
