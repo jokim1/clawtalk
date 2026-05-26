@@ -84,6 +84,64 @@ describe('buildOpenAiRequest — moonshot thinking-disabled allowlist', () => {
   });
 });
 
+describe('buildOpenAiRequest — tool_choice gating', () => {
+  const tools = [
+    {
+      name: 'propose_content_append',
+      description: 'x',
+      inputSchema: { type: 'object', properties: {}, required: [] },
+    },
+  ];
+
+  it('does not set tool_choice when forceToolUse is false (default)', () => {
+    const req = buildOpenAiRequest(
+      openaiProvider,
+      'gpt-5-mini',
+      messages,
+      tools,
+      1024,
+    );
+    expect(req.tool_choice).toBeUndefined();
+  });
+
+  it('sets tool_choice="required" when forceToolUse and tools are present', () => {
+    const req = buildOpenAiRequest(
+      openaiProvider,
+      'gpt-5-mini',
+      messages,
+      tools,
+      1024,
+      true,
+    );
+    expect(req.tool_choice).toBe('required');
+  });
+
+  it('does NOT set tool_choice when forceToolUse is true but tools are absent', () => {
+    // Sending tool_choice with no tools is a 400 from most backends.
+    const req = buildOpenAiRequest(
+      openaiProvider,
+      'gpt-5-mini',
+      messages,
+      undefined,
+      1024,
+      true,
+    );
+    expect(req.tool_choice).toBeUndefined();
+  });
+
+  it('does NOT set tool_choice when forceToolUse is true but tools array is empty', () => {
+    const req = buildOpenAiRequest(
+      openaiProvider,
+      'gpt-5-mini',
+      messages,
+      [],
+      1024,
+      true,
+    );
+    expect(req.tool_choice).toBeUndefined();
+  });
+});
+
 describe('classifyHttpFailure', () => {
   it('returns upstream_timeout for 502/503/504/524', () => {
     expect(classifyHttpFailure(502, '')).toBe('upstream_timeout');

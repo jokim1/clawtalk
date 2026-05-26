@@ -184,6 +184,7 @@ import {
   executeProposeContentBulk,
   executeProposeContentReplace,
 } from './content-tool-handlers.js';
+import { isContentEditIntent } from './content-edit-intent.js';
 async function executeContainerAgentTurn(
   ..._args: unknown[]
 ): Promise<ContainerTurnResultStub> {
@@ -2232,6 +2233,23 @@ export class CleanTalkExecutor implements TalkExecutor {
         directUserMessageBase,
         contextPackage.contextImageSources,
       );
+
+      // Content edit-intent gate. If the latest user turn matches
+      // `@doc` + an edit verb, force the agent to call a tool on the
+      // first iteration so it can't reply in chat with "I cannot
+      // edit @doc" or otherwise refuse to fire propose_content_*.
+      // Only fire when propose_content_* is in the tool list — i.e.
+      // the Talk has a Content attached and tools are registered.
+      const proposeToolsRegistered = (contextPackage.contextTools ?? []).some(
+        (tool) =>
+          tool.name === 'propose_content_append' ||
+          tool.name === 'propose_content_replace' ||
+          tool.name === 'propose_content_bulk',
+      );
+      const forceToolUseOnFirstIteration =
+        proposeToolsRegistered &&
+        isContentEditIntent(orderedStep.userMessageText ?? '');
+
       const result = await executeWithAgent(
         activeAgent.id,
         {
@@ -2250,6 +2268,7 @@ export class CleanTalkExecutor implements TalkExecutor {
             }
           },
           executeToolCall: toolExecutor,
+          forceToolUseOnFirstIteration,
         },
       );
 

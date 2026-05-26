@@ -243,6 +243,15 @@ export async function executeWithAgent(
     alwaysAllowedContextToolNames?: string[];
     maxToolIterations?: number;
     toolIterationLimitFallback?: string;
+    /**
+     * When true, set provider-specific `tool_choice=required` on the
+     * FIRST iteration of the tool-calling loop. Subsequent iterations
+     * fall back to the default 'auto' — once the agent has made its
+     * forced tool call, we let it decide whether to call more tools or
+     * settle on a final assistant turn. Used by the Content edit-intent
+     * gate (see content-edit-intent.ts).
+     */
+    forceToolUseOnFirstIteration?: boolean;
   },
 ): Promise<AgentExecutionResult> {
   const emit = options.emit || (() => {});
@@ -415,6 +424,14 @@ export async function executeWithAgent(
 
   try {
     for (let iteration = 0; iteration < maxToolIterations; iteration++) {
+      // Force a tool call only on the FIRST iteration. Once the agent
+      // has been pushed into picking a tool, subsequent iterations
+      // resolve normally (the agent may need to call more tools or
+      // settle into a final assistant turn).
+      const forceToolUseThisTurn =
+        iteration === 0 &&
+        (options.forceToolUseOnFirstIteration ?? false) &&
+        tools.length > 0;
       const stream = streamLlmResponse(
         providerConfig,
         secret,
@@ -424,6 +441,7 @@ export async function executeWithAgent(
           tools,
           maxOutputTokens: defaultMaxOutputTokens,
           signal: options.signal,
+          forceToolUse: forceToolUseThisTurn,
         },
       );
 
