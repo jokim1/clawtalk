@@ -2218,18 +2218,21 @@ export class CleanTalkExecutor implements TalkExecutor {
         contextPackage.contextImageSources,
       );
 
-      // Content edit-intent gate (plan locked decision #11): the
-      // tool_choice=required gate is removed. Trust the system-prompt
-      // directive to steer the agent at apply_content_edit. Manual
-      // cross-provider smoke (verification step 12) is the regression
-      // signal — restore the gate in a follow-up PR if a provider
-      // regresses.
+      // Content edit-intent gate (locked decision #11 noted-risk
+      // fallback path — restored after Kimi 2.6 regressed to chat-
+      // rewrites on `@doc rewrite paragraph 2` without firing
+      // apply_content_edit). When `@doc` + an edit verb appears in the
+      // latest user turn AND apply_content_edit is registered, set
+      // tool_choice=required on the first iteration so the model can't
+      // narrate the edit in chat — it has to call the tool.
       const applyToolRegistered = (contextPackage.contextTools ?? []).some(
         (tool) => tool.name === 'apply_content_edit',
       );
       const editIntentDetected = isContentEditIntent(
         orderedStep.userMessageText ?? '',
       );
+      const forceToolUseOnFirstIteration =
+        applyToolRegistered && editIntentDetected;
 
       // Track whether the agent called `apply_content_edit` this turn so
       // we can emit `content_edit_run_aborted` if the turn ends without
@@ -2280,6 +2283,7 @@ export class CleanTalkExecutor implements TalkExecutor {
             }
           },
           executeToolCall: wrappedToolExecutor,
+          forceToolUseOnFirstIteration,
         },
       );
 
