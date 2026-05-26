@@ -63,6 +63,21 @@ export function buildTalkThreadEventFilter(
         return isStringArray(payload.threadIds)
           ? payload.threadIds.includes(threadId)
           : false;
+      // Content-feature events: doc/proposal updates are scoped to the
+      // Talk-level Content (1:1 with the Talk), not to any individual
+      // thread — every thread of the Talk needs to see them so the
+      // ProposalCard renders inline regardless of which thread the
+      // tool-call originated in.
+      case 'content_updated':
+      case 'content_proposal_created':
+      case 'content_proposal_stale':
+        return true;
+      // `tool_call_started` carries threadId in the payload (per the
+      // executor emit) so it can route to the originating thread.
+      // Without the thread match, a streaming placeholder would appear
+      // in every thread of the Talk on every tool call.
+      case 'tool_call_started':
+        return payload.threadId === undefined || payload.threadId === threadId;
       default:
         // New event types must be added to this switch to be visible in
         // thread-scoped streams. Unknown events are excluded by default.
