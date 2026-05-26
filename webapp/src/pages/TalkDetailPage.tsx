@@ -37,6 +37,7 @@ import {
   ChannelTarget,
   ChannelTargetListPage,
   Content,
+  ContentEditSummary,
   ContentProposalSummary,
   ContentSidebarItem,
   ContextGoal,
@@ -128,6 +129,7 @@ import {
   UnauthorizedError,
 } from '../lib/api';
 import { BrowserBlockedRunCard } from '../components/BrowserBlockedRunCard';
+import { PendingEditDocSurface } from '../components/PendingEditDocSurface';
 import { ExecutionDecisionSummary } from '../components/ExecutionDecisionSummary';
 import { LiveResponsePanel } from '../components/LiveResponsePanel';
 import { InlineEditableTitle } from '../components/InlineEditableTitle';
@@ -176,6 +178,10 @@ import type {
   TalkBrowserBlockedEvent,
   TalkBrowserUnblockedEvent,
   MessageAppendedEvent,
+  TalkContentEditAppliedEvent,
+  TalkContentEditResolvedEvent,
+  TalkContentEditRunAbortedEvent,
+  TalkContentEditRunStartedEvent,
   TalkContentProposalCreatedEvent,
   TalkContentProposalStaleEvent,
   TalkContentUpdatedEvent,
@@ -2974,6 +2980,14 @@ export function TalkDetailPage({
   const [talkContent, setTalkContent] = useState<Content | null>(null);
   const [talkContentLoading, setTalkContentLoading] = useState(false);
   const [talkContentError, setTalkContentError] = useState<string | null>(null);
+  const [talkContentPendingEdits, setTalkContentPendingEdits] = useState<
+    ContentEditSummary[]
+  >([]);
+  const [pendingEditStreamingByRunId, setPendingEditStreamingByRunId] =
+    useState<Map<string, string | null>>(() => new Map());
+  const [pendingEditInFlight, setPendingEditInFlight] = useState<Set<string>>(
+    () => new Set(),
+  );
   // @doc mention typeahead state. Tracks the index of the live `@` in
   // the composer draft so we can replace it with `@doc ` on selection.
   const [docMentionState, setDocMentionState] = useState<{
@@ -3310,6 +3324,9 @@ export function TalkDetailPage({
     setTalkContentError(null);
     setTalkContentConflict(false);
     setTalkContentSaveStatus('idle');
+    setTalkContentPendingEdits([]);
+    setPendingEditStreamingByRunId(new Map());
+    setPendingEditInFlight(new Set());
   }, [talkId]);
 
   const refetchTalkContent = useCallback(async (): Promise<Content | null> => {
@@ -3317,6 +3334,7 @@ export function TalkDetailPage({
     try {
       const payload = await getTalkContent(talkId);
       setTalkContent(payload.content);
+      setTalkContentPendingEdits(payload.pendingEdits ?? []);
       const serverPendingIds = new Set(
         payload.pendingProposals.map((p) => p.id),
       );
@@ -3378,6 +3396,7 @@ export function TalkDetailPage({
       .then((payload) => {
         if (cancelled) return;
         setTalkContent(payload.content);
+        setTalkContentPendingEdits(payload.pendingEdits ?? []);
         setProposalsById((prev) => {
           const next = { ...prev };
           for (const proposal of payload.pendingProposals) {
@@ -4365,6 +4384,50 @@ export function TalkDetailPage({
             },
           };
         });
+      },
+      onContentEditRunStarted: (event: TalkContentEditRunStartedEvent) => {
+        const current = talkContentRef.current;
+        if (!current || current.id !== event.contentId) return;
+        setPendingEditStreamingByRunId((prev) => {
+          if (prev.has(event.runId)) return prev;
+          const next = new Map(prev);
+          next.set(event.runId, event.agentNickname ?? null);
+          return next;
+        });
+      },
+      onContentEditRunAborted: (event: TalkContentEditRunAbortedEvent) => {
+        const current = talkContentRef.current;
+        if (!current || current.id !== event.contentId) return;
+        setPendingEditStreamingByRunId((prev) => {
+          if (!prev.has(event.runId)) return prev;
+          const next = new Map(prev);
+          next.delete(event.runId);
+          return next;
+        });
+      },
+      onContentEditApplied: (event: TalkContentEditAppliedEvent) => {
+        const current = talkContentRef.current;
+        if (!current || current.id !== event.contentId) return;
+        // Refetch the doc so we have authoritative pending edits + body.
+        setPendingEditStreamingByRunId((prev) => {
+          if (!prev.has(event.runId)) return prev;
+          const next = new Map(prev);
+          next.delete(event.runId);
+          return next;
+        });
+        void refetchTalkContent();
+      },
+      onContentEditResolved: (event: TalkContentEditResolvedEvent) => {
+        const current = talkContentRef.current;
+        if (!current || current.id !== event.contentId) return;
+        // Drop the resolved edits from local state; refetch picks up
+        // the materialized body if the resolution was accept.
+        setTalkContentPendingEdits((prev) =>
+          prev.filter((edit) => !event.editIds.includes(edit.id)),
+        );
+        if (event.resolution !== 'rejected') {
+          void refetchTalkContent();
+        }
       },
       onToolCallStarted: (event: TalkToolCallStartedEvent) => {
         if (event.talkId !== talkId) return;
@@ -10770,31 +10833,26 @@ export function TalkDetailPage({
                     </p>
                   ) : (
                     <div className="talk-tab-doc-body">
-                      <RichTextEditor
-                        bodyMarkdown={talkContent.bodyMarkdown}
-                        editable={canEditDoc && !talkContentConflict}
-                        autosave={
-                          canEditDoc
-                            ? {
-                                contentId: talkContent.id,
-                                bodyVersion: talkContent.bodyVersion,
-                                onSaved: ({ content }) => {
-                                  setTalkContent((current) =>
-                                    current && current.id === content.id
-                                      ? content
-                                      : current,
-                                  );
-                                },
-                                onConflict: () => {
-                                  setTalkContentConflict(true);
-                                },
-                                onError: (err) => {
-                                  setTalkContentError(err.message);
-                                },
-                                onStatusChange: setTalkContentSaveStatus,
-                              }
-                            : undefined
+                      <PendingEditDocSurface
+                        content={talkContent}
+                        pendingEdits={talkContentPendingEdits}
+                        streamingByRunId={pendingEditStreamingByRunId}
+                        inFlightEditIds={pendingEditInFlight}
+                        canEditDoc={canEditDoc}
+                        conflict={talkContentConflict}
+                        onSaved={(content) =>
+                          setTalkContent((current) =>
+                            current && current.id === content.id
+                              ? content
+                              : current,
+                          )
                         }
+                        onConflict={() => setTalkContentConflict(true)}
+                        onError={(err) => setTalkContentError(err.message)}
+                        onStatusChange={setTalkContentSaveStatus}
+                        setPendingEdits={setTalkContentPendingEdits}
+                        setInFlightEditIds={setPendingEditInFlight}
+                        refetchTalkContent={refetchTalkContent}
                       />
                     </div>
                   )}

@@ -472,9 +472,7 @@ export async function acceptContentEditRoute(input: {
   contentId: string;
   editId: string;
   expectedContentVersion?: unknown;
-}): Promise<
-  RouteResult<{ content: Content; editId: string; runId: string }>
-> {
+}): Promise<RouteResult<{ content: Content; editId: string; runId: string }>> {
   return await withUserContext(input.auth.userId, async () => {
     const content = await getContentById(input.contentId);
     if (!content) return notFound('Content not found.');

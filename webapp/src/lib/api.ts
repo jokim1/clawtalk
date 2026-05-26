@@ -1294,13 +1294,30 @@ export type ContentProposalSummary = {
   resolvedByUserId: string | null;
 };
 
+export type ContentEditSummary = {
+  id: string;
+  contentId: string;
+  runId: string;
+  agentId: string | null;
+  agentNickname: string | null;
+  messageId: string | null;
+  kind: 'insert' | 'replace' | 'delete' | 'bulk';
+  baseContentVersion: number;
+  targetAnchorId: string | null;
+  newMarkdown: string | null;
+  rationale: string | null;
+  createdAt: string;
+};
+
 export async function getTalkContent(talkId: string): Promise<{
   content: Content | null;
   pendingProposals: ContentProposalSummary[];
+  pendingEdits: ContentEditSummary[];
 }> {
   return apiRequest<{
     content: Content | null;
     pendingProposals: ContentProposalSummary[];
+    pendingEdits: ContentEditSummary[];
   }>(`/api/v1/talks/${encodeURIComponent(talkId)}/content`);
 }
 
@@ -1324,7 +1341,12 @@ export async function patchContent(input: {
   expectedVersion: number;
   bodyMarkdown?: string;
   title?: string;
-}): Promise<{ content: Content; staledProposalIds: string[] }> {
+  acceptPendingEditIds?: string[];
+}): Promise<{
+  content: Content;
+  staledProposalIds: string[];
+  acceptedPendingEditIds?: string[];
+}> {
   const body: Record<string, unknown> = {
     expectedVersion: input.expectedVersion,
   };
@@ -1334,12 +1356,86 @@ export async function patchContent(input: {
   if (typeof input.title === 'string') {
     body.title = input.title;
   }
-  return apiMutationRequest<{ content: Content; staledProposalIds: string[] }>(
-    `/api/v1/contents/${encodeURIComponent(input.contentId)}`,
+  if (Array.isArray(input.acceptPendingEditIds)) {
+    body.acceptPendingEditIds = input.acceptPendingEditIds;
+  }
+  return apiMutationRequest<{
+    content: Content;
+    staledProposalIds: string[];
+    acceptedPendingEditIds?: string[];
+  }>(`/api/v1/contents/${encodeURIComponent(input.contentId)}`, {
+    method: 'PATCH',
+    includeJson: true,
+    body: JSON.stringify(body),
+  });
+}
+
+export async function acceptContentEdit(input: {
+  contentId: string;
+  editId: string;
+  expectedContentVersion: number;
+}): Promise<{ content: Content; editId: string; runId: string }> {
+  return apiMutationRequest<{
+    content: Content;
+    editId: string;
+    runId: string;
+  }>(
+    `/api/v1/contents/${encodeURIComponent(input.contentId)}/edits/${encodeURIComponent(input.editId)}/accept`,
     {
-      method: 'PATCH',
+      method: 'POST',
       includeJson: true,
-      body: JSON.stringify(body),
+      body: JSON.stringify({
+        expectedContentVersion: input.expectedContentVersion,
+      }),
+    },
+  );
+}
+
+export async function rejectContentEdit(input: {
+  contentId: string;
+  editId: string;
+}): Promise<{ editId: string; runId: string }> {
+  return apiMutationRequest<{ editId: string; runId: string }>(
+    `/api/v1/contents/${encodeURIComponent(input.contentId)}/edits/${encodeURIComponent(input.editId)}/reject`,
+    {
+      method: 'POST',
+      includeJson: true,
+      body: '{}',
+    },
+  );
+}
+
+export async function acceptContentEditRun(input: {
+  contentId: string;
+  runId: string;
+  expectedContentVersion: number;
+}): Promise<{ content: Content; runId: string; editIds: string[] }> {
+  return apiMutationRequest<{
+    content: Content;
+    runId: string;
+    editIds: string[];
+  }>(
+    `/api/v1/contents/${encodeURIComponent(input.contentId)}/runs/${encodeURIComponent(input.runId)}/accept`,
+    {
+      method: 'POST',
+      includeJson: true,
+      body: JSON.stringify({
+        expectedContentVersion: input.expectedContentVersion,
+      }),
+    },
+  );
+}
+
+export async function rejectContentEditRun(input: {
+  contentId: string;
+  runId: string;
+}): Promise<{ runId: string; editIds: string[] }> {
+  return apiMutationRequest<{ runId: string; editIds: string[] }>(
+    `/api/v1/contents/${encodeURIComponent(input.contentId)}/runs/${encodeURIComponent(input.runId)}/reject`,
+    {
+      method: 'POST',
+      includeJson: true,
+      body: '{}',
     },
   );
 }
