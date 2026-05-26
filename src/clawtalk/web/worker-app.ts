@@ -43,6 +43,10 @@
 //   /api/v1/talks/:talkId/attachments[/...] — talk-attachments.ts
 //   /api/v1/talks/:talkId/threads[/...]     — talk-threads.ts (list +
 //                                         create + PATCH + DELETE)
+//   /api/v1/threads/:threadId/content       — talk-contents.ts (GET +
+//                                         POST; talk-scoped /content
+//                                         routes resolve to the thread's
+//                                         default thread and delegate)
 //   /api/v1/events                  — events-upgrade.ts (user-scope
 //                                         WebSocket forwarded to the
 //                                         UserEventHub DO)
@@ -169,7 +173,9 @@ import {
   acceptContentEditRoute,
   acceptContentEditRunRoute,
   createTalkContentRoute,
+  createThreadContentRoute,
   getTalkContentRoute,
+  getThreadContentRoute,
   patchContentRoute,
   rejectContentEditRoute,
   rejectContentEditRunRoute,
@@ -333,6 +339,7 @@ function buildApp(): Hono<{ Variables: Variables }> {
   app.use('/api/v1/talks', requireAuthMiddleware);
   app.use('/api/v1/talks/*', requireAuthMiddleware);
   app.use('/api/v1/contents/*', requireAuthMiddleware);
+  app.use('/api/v1/threads/*', requireAuthMiddleware);
   app.use('/api/v1/talk-folders', requireAuthMiddleware);
   app.use('/api/v1/talk-folders/*', requireAuthMiddleware);
   app.use('/api/v1/user/*', requireAuthMiddleware);
@@ -1502,12 +1509,48 @@ function buildApp(): Hono<{ Variables: Variables }> {
     if (!rl.allowed) return rateLimitedResponse(c, rl);
     const csrfFail = checkCsrf(c, auth);
     if (csrfFail) return csrfFail;
-    const payload = await readJsonBody<{ title?: unknown }>(c);
+    const payload = await readJsonBody<{ title?: unknown; format?: unknown }>(
+      c,
+    );
     if (!payload.ok) return invalidJsonResponse(c, payload.error);
     const result = await createTalkContentRoute({
       auth,
       talkId: c.req.param('talkId'),
       title: payload.data.title,
+      format: payload.data.format,
+    });
+    return jsonResponse(result);
+  });
+
+  // Thread-scoped content endpoints — created with the hybrid MD+HTML
+  // content move (1 doc per thread). Existing talkId-scoped routes
+  // resolve via the default thread.
+  app.get('/api/v1/threads/:threadId/content', async (c) => {
+    const auth = c.get('auth');
+    const rl = checkRateLimit({ principalId: auth.userId, bucket: 'read' });
+    if (!rl.allowed) return rateLimitedResponse(c, rl);
+    const result = await getThreadContentRoute({
+      auth,
+      threadId: c.req.param('threadId'),
+    });
+    return jsonResponse(result);
+  });
+
+  app.post('/api/v1/threads/:threadId/content', async (c) => {
+    const auth = c.get('auth');
+    const rl = checkRateLimit({ principalId: auth.userId, bucket: 'write' });
+    if (!rl.allowed) return rateLimitedResponse(c, rl);
+    const csrfFail = checkCsrf(c, auth);
+    if (csrfFail) return csrfFail;
+    const payload = await readJsonBody<{ title?: unknown; format?: unknown }>(
+      c,
+    );
+    if (!payload.ok) return invalidJsonResponse(c, payload.error);
+    const result = await createThreadContentRoute({
+      auth,
+      threadId: c.req.param('threadId'),
+      title: payload.data.title,
+      format: payload.data.format,
     });
     return jsonResponse(result);
   });
@@ -1521,6 +1564,7 @@ function buildApp(): Hono<{ Variables: Variables }> {
     const payload = await readJsonBody<{
       expectedVersion?: unknown;
       bodyMarkdown?: unknown;
+      bodyHtml?: unknown;
       title?: unknown;
       acceptPendingEditIds?: unknown;
     }>(c);
@@ -1530,6 +1574,7 @@ function buildApp(): Hono<{ Variables: Variables }> {
       contentId: c.req.param('contentId'),
       expectedVersion: payload.data.expectedVersion,
       bodyMarkdown: payload.data.bodyMarkdown,
+      bodyHtml: payload.data.bodyHtml,
       title: payload.data.title,
       acceptPendingEditIds: payload.data.acceptPendingEditIds,
     });

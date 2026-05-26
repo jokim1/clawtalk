@@ -76,12 +76,14 @@ interface ContentRecord {
   id: string;
   owner_id: string;
   talk_id: string;
+  thread_id: string;
   body_markdown: string;
+  body_html: string | null;
   body_version: number;
 }
 
 const CONTENT_MIN_COLUMNS = `
-  id, owner_id, talk_id, body_markdown, body_version
+  id, owner_id, talk_id, thread_id, body_markdown, body_html, body_version
 `;
 
 // Loaded from content-accessors.ts to mirror its full toContent shape
@@ -90,7 +92,7 @@ const CONTENT_MIN_COLUMNS = `
 interface FullContentRecord extends ContentRecord {
   title: string;
   content_kind: string;
-  content_format: string;
+  content_format: 'markdown' | 'html';
   anchor_map_json: Record<string, unknown>;
   created_at: string;
   updated_at: string;
@@ -104,10 +106,12 @@ function rowToContent(row: FullContentRecord): Content {
     id: row.id,
     ownerId: row.owner_id,
     talkId: row.talk_id,
+    threadId: row.thread_id,
     title: row.title,
     contentKind: row.content_kind,
     contentFormat: row.content_format,
     bodyMarkdown: row.body_markdown,
+    bodyHtml: row.body_html,
     bodyVersion: row.body_version,
     anchorMap: (row.anchor_map_json ?? {}) as Content['anchorMap'],
     createdAt: row.created_at,

@@ -4,9 +4,12 @@ import {
   createContent,
   getContentById,
   getContentByTalkId,
+  getContentByThreadId,
+  getOrCreateDefaultThread,
   getTalkForUser,
   updateContentBody,
   type Content,
+  type ContentFormat,
 } from '../../db/index.js';
 import {
   acceptPendingEdit,
@@ -19,6 +22,7 @@ import {
 import type { ContentEditRow } from '../../../shared/rich-text/index.js';
 import { canEditTalk } from '../middleware/acl.js';
 import { ApiEnvelope, AuthContext } from '../types.js';
+import { getDbPg } from '../../../db.js';
 
 interface RouteResult<T> {
   statusCode: number;
@@ -91,6 +95,39 @@ function docSizeLimit(wouldBeBytes: number): RouteResult<never> {
   };
 }
 
+function formatMismatch(format: ContentFormat): RouteResult<never> {
+  return {
+    statusCode: 400,
+    body: {
+      ok: false,
+      error: {
+        code: 'format_mismatch',
+        message: `This content is ${format}-format; cannot accept body in a different format.`,
+        details: { format },
+      },
+    },
+  };
+}
+
+/**
+ * Resolve a thread row to (talkId, ownerId) without going through the
+ * RLS-shaped accessors that don't expose talk_id directly. RLS still
+ * gates this lookup — a thread the caller can't see returns null.
+ */
+async function loadThread(
+  threadId: string,
+): Promise<{ id: string; talkId: string } | null> {
+  const db = getDbPg();
+  const rows = await db<{ id: string; talk_id: string }[]>`
+    select id, talk_id
+    from public.talk_threads
+    where id = ${threadId}::uuid
+    limit 1
+  `;
+  if (!rows[0]) return null;
+  return { id: rows[0].id, talkId: rows[0].talk_id };
+}
+
 export async function getTalkContentRoute(input: {
   auth: AuthContext;
   talkId: string;
@@ -119,10 +156,44 @@ export async function getTalkContentRoute(input: {
   });
 }
 
+export async function getThreadContentRoute(input: {
+  auth: AuthContext;
+  threadId: string;
+}): Promise<
+  RouteResult<{
+    content: Content | null;
+    pendingEdits: ContentEditRow[];
+  }>
+> {
+  return await withUserContext(input.auth.userId, async () => {
+    const thread = await loadThread(input.threadId);
+    if (!thread) return notFound('Thread not found.');
+
+    // Talk-level access check ensures the caller can read the parent
+    // talk; RLS on talk_threads already enforced the thread fetch.
+    const talk = await getTalkForUser(thread.talkId);
+    if (!talk) return notFound('Thread not found.');
+
+    const content = await getContentByThreadId(input.threadId);
+    if (!content) {
+      return {
+        statusCode: 200,
+        body: { ok: true, data: { content: null, pendingEdits: [] } },
+      };
+    }
+    const pendingEdits = await getPendingEditsByContent(content.id);
+    return {
+      statusCode: 200,
+      body: { ok: true, data: { content, pendingEdits } },
+    };
+  });
+}
+
 export async function createTalkContentRoute(input: {
   auth: AuthContext;
   talkId: string;
   title?: unknown;
+  format?: unknown;
 }): Promise<RouteResult<{ content: Content }>> {
   return await withUserContext(input.auth.userId, async () => {
     const talk = await getTalkForUser(input.talkId);
@@ -134,8 +205,27 @@ export async function createTalkContentRoute(input: {
     if (typeof input.title !== 'string' || !input.title.trim()) {
       return badRequest('title_required', 'Content title is required.');
     }
+    const format =
+      input.format === undefined || input.format === null
+        ? 'markdown'
+        : input.format;
+    if (format !== 'markdown' && format !== 'html') {
+      return badRequest(
+        'invalid_format',
+        'Content format must be "markdown" or "html".',
+      );
+    }
 
-    const existing = await getContentByTalkId(input.talkId);
+    // Resolve the talk's default thread — the canonical home for the
+    // talk-scoped legacy /api/v1/talks/:talkId/content endpoint. This
+    // shim keeps existing webapp callers working while new callers
+    // route through /threads/:threadId/content directly.
+    const threadId = await getOrCreateDefaultThread({
+      talkId: input.talkId,
+      ownerId: input.auth.userId,
+    });
+
+    const existing = await getContentByThreadId(threadId);
     if (existing) {
       return {
         statusCode: 409,
@@ -143,7 +233,7 @@ export async function createTalkContentRoute(input: {
           ok: false,
           error: {
             code: 'content_already_exists',
-            message: 'This talk already has a content document.',
+            message: 'This thread already has a content document.',
             details: { contentId: existing.id },
           },
         },
@@ -154,7 +244,74 @@ export async function createTalkContentRoute(input: {
       const content = await createContent({
         ownerId: input.auth.userId,
         talkId: input.talkId,
+        threadId,
         title: input.title,
+        format,
+        createdByUserId: input.auth.userId,
+      });
+      return {
+        statusCode: 201,
+        body: { ok: true, data: { content } },
+      };
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : 'Failed to create content.';
+      return badRequest('invalid_content', message);
+    }
+  });
+}
+
+export async function createThreadContentRoute(input: {
+  auth: AuthContext;
+  threadId: string;
+  title?: unknown;
+  format?: unknown;
+}): Promise<RouteResult<{ content: Content }>> {
+  return await withUserContext(input.auth.userId, async () => {
+    const thread = await loadThread(input.threadId);
+    if (!thread) return notFound('Thread not found.');
+    const talk = await getTalkForUser(thread.talkId);
+    if (!talk) return notFound('Thread not found.');
+    if (!(await canEditTalk(thread.talkId))) {
+      return forbidden('You do not have permission to edit this talk.');
+    }
+
+    if (typeof input.title !== 'string' || !input.title.trim()) {
+      return badRequest('title_required', 'Content title is required.');
+    }
+    const format =
+      input.format === undefined || input.format === null
+        ? 'markdown'
+        : input.format;
+    if (format !== 'markdown' && format !== 'html') {
+      return badRequest(
+        'invalid_format',
+        'Content format must be "markdown" or "html".',
+      );
+    }
+
+    const existing = await getContentByThreadId(input.threadId);
+    if (existing) {
+      return {
+        statusCode: 409,
+        body: {
+          ok: false,
+          error: {
+            code: 'content_already_exists',
+            message: 'This thread already has a content document.',
+            details: { contentId: existing.id },
+          },
+        },
+      };
+    }
+
+    try {
+      const content = await createContent({
+        ownerId: input.auth.userId,
+        talkId: thread.talkId,
+        threadId: input.threadId,
+        title: input.title,
+        format,
         createdByUserId: input.auth.userId,
       });
       return {
@@ -174,6 +331,7 @@ export async function patchContentRoute(input: {
   contentId: string;
   expectedVersion?: unknown;
   bodyMarkdown?: unknown;
+  bodyHtml?: unknown;
   title?: unknown;
   acceptPendingEditIds?: unknown;
 }): Promise<
@@ -202,14 +360,24 @@ export async function patchContentRoute(input: {
         )
       : [];
 
+    const wantsMarkdown = typeof input.bodyMarkdown === 'string';
+    const wantsHtml = typeof input.bodyHtml === 'string';
+    if (wantsMarkdown && wantsHtml) {
+      return badRequest(
+        'invalid_patch',
+        'PATCH cannot include both bodyMarkdown and bodyHtml.',
+      );
+    }
+
     if (
-      typeof input.bodyMarkdown !== 'string' &&
+      !wantsMarkdown &&
+      !wantsHtml &&
       typeof input.title !== 'string' &&
       requestedAcceptIds.length === 0
     ) {
       return badRequest(
         'empty_patch',
-        'PATCH must include bodyMarkdown, title, or acceptPendingEditIds.',
+        'PATCH must include bodyMarkdown, bodyHtml, title, or acceptPendingEditIds.',
       );
     }
 
@@ -221,7 +389,7 @@ export async function patchContentRoute(input: {
 
     try {
       // Per-block implicit accept: materialize any pending edits the
-      // client says the user typed over BEFORE we apply the bodyMarkdown
+      // client says the user typed over BEFORE we apply the body
       // update so the base body the autosave PATCH writes against is
       // already up-to-date. Each acceptPendingEdit call CAS-bumps the
       // body, so iterate sequentially and advance the expectedVersion.
@@ -250,12 +418,11 @@ export async function patchContentRoute(input: {
         acceptedEditIds.push(acceptResult.editId);
       }
 
-      // Decide whether the autosave PATCH itself needs to fire — if the
-      // client only sent acceptPendingEditIds (no body / title change),
-      // we're done after the materializations above.
+      // Decide whether the body PATCH itself needs to fire — if the
+      // client only sent acceptPendingEditIds (no body / title
+      // change), we're done after the materializations above.
       const wantsBodyUpdate =
-        typeof input.bodyMarkdown === 'string' ||
-        typeof input.title === 'string';
+        wantsMarkdown || wantsHtml || typeof input.title === 'string';
       if (!wantsBodyUpdate) {
         const refreshed = await getContentById(input.contentId);
         if (!refreshed) return notFound('Content not found.');
@@ -275,10 +442,10 @@ export async function patchContentRoute(input: {
         contentId: input.contentId,
         ownerId: input.auth.userId,
         expectedVersion: runningVersion,
-        bodyMarkdown:
-          typeof input.bodyMarkdown === 'string'
-            ? input.bodyMarkdown
-            : existing.bodyMarkdown,
+        bodyMarkdown: wantsMarkdown
+          ? (input.bodyMarkdown as string)
+          : undefined,
+        bodyHtml: wantsHtml ? (input.bodyHtml as string) : undefined,
         title: typeof input.title === 'string' ? input.title : undefined,
         updatedByUserId: input.auth.userId,
       });
@@ -288,6 +455,9 @@ export async function patchContentRoute(input: {
       }
       if (result.kind === 'doc_size_limit') {
         return docSizeLimit(result.wouldBeBytes);
+      }
+      if (result.kind === 'format_mismatch') {
+        return formatMismatch(result.format);
       }
       return {
         statusCode: 200,

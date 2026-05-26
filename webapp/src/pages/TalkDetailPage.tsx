@@ -10,11 +10,14 @@ import {
 } from '@dnd-kit/core';
 import { CSS } from '@dnd-kit/utilities';
 import {
+  Component,
   FormEvent,
   KeyboardEvent as ReactKeyboardEvent,
   type MouseEvent as ReactMouseEvent,
   type ReactNode,
   type TextareaHTMLAttributes,
+  Suspense,
+  lazy,
   useCallback,
   useEffect,
   useMemo,
@@ -37,11 +40,15 @@ import {
   ChannelTargetListPage,
   Content,
   ContentEditSummary,
+  ContentFormat,
   ContentSidebarItem,
   ContextGoal,
   ContextRule,
   ContextSource,
   createTalkContent,
+  createThreadContent,
+  getThreadContent,
+  patchContent,
   createTalkThread,
   createTalkChannel,
   createTalkContextRule,
@@ -125,7 +132,11 @@ import {
   UnauthorizedError,
 } from '../lib/api';
 import { BrowserBlockedRunCard } from '../components/BrowserBlockedRunCard';
+import { CopyExportMenu } from '../components/CopyExportMenu';
+import { DocPaneHeader, type DocPaneMode } from '../components/DocPaneHeader';
+import { DocPaneEdgeTab } from '../components/DocPaneEdgeTab';
 import { PendingEditDocSurface } from '../components/PendingEditDocSurface';
+import { SafeHtml } from '../components/SafeHtml';
 import { ExecutionDecisionSummary } from '../components/ExecutionDecisionSummary';
 import { LiveResponsePanel } from '../components/LiveResponsePanel';
 import { InlineEditableTitle } from '../components/InlineEditableTitle';
@@ -2798,6 +2809,49 @@ function haveSameTalkAgentDraftState(
   return true;
 }
 
+// Lazy-loaded raw-HTML editor for the Source-mode pane. CodeMirror is
+// heavyweight enough that we don't want to bundle it on the main route.
+// The HtmlSourceEditor module exports both a named export and a default;
+// React.lazy needs the default.
+const LazyHtmlSourceEditor = lazy(() =>
+  import('../components/HtmlSourceEditor').then((mod) => ({
+    default: mod.HtmlSourceEditor,
+  })),
+);
+
+// Error boundary specifically for the lazy CodeMirror import. If the
+// dynamic import fails (network blip, code-split chunk missing), show
+// a graceful inline message with a reload escape hatch instead of
+// crashing the whole TalkDetailPage tree.
+class HtmlEditorErrorBoundary extends Component<
+  { children: ReactNode },
+  { hasError: boolean }
+> {
+  state = { hasError: false };
+  static getDerivedStateFromError(): { hasError: boolean } {
+    return { hasError: true };
+  }
+  render(): ReactNode {
+    if (this.state.hasError) {
+      return (
+        <div className="talk-tab-doc-body" role="alert">
+          Editor failed to load.{' '}
+          <button
+            type="button"
+            className="talk-tab-doc-conflict-button"
+            onClick={() => {
+              if (typeof window !== 'undefined') window.location.reload();
+            }}
+          >
+            Reload
+          </button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
 export function TalkDetailPage({
   onUnauthorized,
   titleOverride,
@@ -2899,6 +2953,8 @@ export function TalkDetailPage({
   const orchestrationMenuRef = useRef<HTMLDivElement | null>(null);
   const [docModalOpen, setDocModalOpen] = useState(false);
   const [docModalTitle, setDocModalTitle] = useState('');
+  const [docModalFormat, setDocModalFormat] =
+    useState<ContentFormat>('markdown');
   const [docModalSubmitting, setDocModalSubmitting] = useState(false);
   const [docModalError, setDocModalError] = useState<string | null>(null);
   const docModalInputRef = useRef<HTMLInputElement | null>(null);
@@ -2929,6 +2985,25 @@ export function TalkDetailPage({
   useEffect(() => {
     talkContentSaveStatusRef.current = talkContentSaveStatus;
   }, [talkContentSaveStatus]);
+  // Doc-pane visibility + HTML Preview/Source mode. Persisted per
+  // thread via localStorage key `clawtalk_doc_state:{threadId}` so the
+  // user's last layout choice survives reload + thread switch.
+  const [docPaneHidden, setDocPaneHidden] = useState<boolean>(false);
+  const [htmlMode, setHtmlMode] = useState<DocPaneMode>('preview');
+  // Tracks whether we've already auto-flipped this doc from Source ➜
+  // Preview after the first AI generation. Sticky for the lifetime of
+  // the page mount — flips only once per doc.
+  const htmlAutoFlippedRef = useRef<Set<string>>(new Set());
+  // Local draft for the HTML source editor. The optimistic state
+  // sidesteps the lag between keystrokes and the debounced PATCH
+  // round-trip, so the editor always shows the latest characters.
+  const [htmlSourceDraft, setHtmlSourceDraft] = useState<string>('');
+  const htmlSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const htmlSavingRef = useRef<boolean>(false);
+  const htmlLastSavedRef = useRef<string>('');
+  const docBodyRef = useRef<HTMLDivElement | null>(null);
+  const docEdgeTabRef = useRef<HTMLButtonElement | null>(null);
+  const docNarrowShowBtnRef = useRef<HTMLButtonElement | null>(null);
   const [chatRatio, setChatRatio] = useState(0.5);
   const [isNarrowViewport, setIsNarrowViewport] = useState(() => {
     if (typeof window === 'undefined') return false;
@@ -3111,6 +3186,7 @@ export function TalkDetailPage({
 
   const openDocModal = useCallback(() => {
     setDocModalTitle('');
+    setDocModalFormat('markdown');
     setDocModalError(null);
     setDocModalOpen(true);
   }, []);
@@ -3133,7 +3209,23 @@ export function TalkDetailPage({
       setDocModalSubmitting(true);
       setDocModalError(null);
       try {
-        await createTalkContent({ talkId, title: trimmed });
+        // Prefer the thread-scoped endpoint when the active thread is
+        // known — the backend keys content rows on threadId and the
+        // /threads route works equally well for default threads. Fall
+        // back to talk-scoped if the thread list hasn't hydrated yet.
+        if (activeThreadId) {
+          await createThreadContent({
+            threadId: activeThreadId,
+            title: trimmed,
+            format: docModalFormat,
+          });
+        } else {
+          await createTalkContent({
+            talkId,
+            title: trimmed,
+            format: docModalFormat,
+          });
+        }
         await onSidebarChanged();
         setDocModalOpen(false);
         setDocModalTitle('');
@@ -3154,6 +3246,8 @@ export function TalkDetailPage({
       }
     },
     [
+      activeThreadId,
+      docModalFormat,
       docModalSubmitting,
       docModalTitle,
       navigate,
@@ -3178,10 +3272,248 @@ export function TalkDetailPage({
     setPendingEditInFlight(new Set());
   }, [talkId]);
 
+  // Combined doc-pane state lifecycle: hydrate once per thread, decide
+  // the initial HTML mode (Preview unless empty-HTML doc with no
+  // persisted preference → Source), then persist on every change. We
+  // do this in one effect chain (gated by per-thread refs) so the
+  // first persist doesn't race the auto-source decision.
+  const docStateHydratedForRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!activeThreadId) return;
+    if (typeof window === 'undefined') return;
+    if (docStateHydratedForRef.current === activeThreadId) return;
+    docStateHydratedForRef.current = activeThreadId;
+    try {
+      const raw = window.localStorage.getItem(
+        `clawtalk_doc_state:${activeThreadId}`,
+      );
+      if (raw) {
+        const parsed = JSON.parse(raw) as {
+          hidden?: boolean;
+          mode?: DocPaneMode;
+        };
+        setDocPaneHidden(parsed.hidden === true);
+        setHtmlMode(parsed.mode === 'source' ? 'source' : 'preview');
+        return;
+      }
+    } catch {
+      // Malformed entry — fall through to defaults.
+    }
+    setDocPaneHidden(false);
+    setHtmlMode('preview');
+  }, [activeThreadId]);
+
+  // Auto-flip an empty HTML doc into Source mode, BUT only when there
+  // is no persisted preference for this thread. The ref guard ensures
+  // we only attempt this once per content id so the user can later
+  // manually toggle to Preview while the body is still empty.
+  // ALWAYS sets the ref (even for markdown / non-empty HTML / persisted
+  // preference cases) so the persist effect's gate opens after the
+  // initial decision is made.
+  const docFirstLoadModeAppliedRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!talkContent) return;
+    if (docFirstLoadModeAppliedRef.current === talkContent.id) return;
+    docFirstLoadModeAppliedRef.current = talkContent.id;
+    if (talkContent.contentFormat !== 'html') return;
+    const body = talkContent.bodyHtml ?? '';
+    if (body.length > 0) return;
+    if (typeof window === 'undefined') return;
+    try {
+      const raw = window.localStorage.getItem(
+        `clawtalk_doc_state:${talkContent.threadId}`,
+      );
+      if (raw) return;
+    } catch {
+      // Ignore localStorage read failures.
+    }
+    setHtmlMode('source');
+    // Write the same value to localStorage immediately so the hydrate
+    // effect (which may fire later when activeThreadId arrives in a
+    // separate commit) sees the auto-source preference and doesn't
+    // overwrite it back to Preview.
+    try {
+      window.localStorage.setItem(
+        `clawtalk_doc_state:${talkContent.threadId}`,
+        JSON.stringify({ hidden: false, mode: 'source' }),
+      );
+    } catch {
+      // Quota / private mode — silently ignore.
+    }
+  }, [talkContent]);
+
+  // Persist doc-pane state to localStorage on user-initiated changes.
+  // Gated on "we've already done initial hydration AND first-load
+  // auto-source for this content" so the very first commit doesn't
+  // overwrite the auto-source choice with the default `preview`.
+  useEffect(() => {
+    if (!talkContent) return;
+    if (typeof window === 'undefined') return;
+    // Only persist after both hydration and first-load auto-source
+    // have settled for the active thread/content. Otherwise the first
+    // commit (where htmlMode is still the stale `'preview'` closure
+    // captured before either of those effects fired) clobbers the
+    // newly-computed mode.
+    if (!activeThreadId) return;
+    if (docStateHydratedForRef.current !== activeThreadId) return;
+    if (docFirstLoadModeAppliedRef.current !== talkContent.id) return;
+    try {
+      window.localStorage.setItem(
+        `clawtalk_doc_state:${talkContent.threadId}`,
+        JSON.stringify({ hidden: docPaneHidden, mode: htmlMode }),
+      );
+    } catch {
+      // Quota / private mode — silently ignore.
+    }
+  }, [activeThreadId, docPaneHidden, htmlMode, talkContent]);
+
+  // Keep the local HTML draft in sync with the server-side content body
+  // so server-driven changes (initial fetch, AI edits, conflict reloads)
+  // land in the editor.
+  useEffect(() => {
+    if (!talkContent) {
+      setHtmlSourceDraft('');
+      htmlLastSavedRef.current = '';
+      return;
+    }
+    if (talkContent.contentFormat !== 'html') return;
+    const body = talkContent.bodyHtml ?? '';
+    setHtmlSourceDraft(body);
+    htmlLastSavedRef.current = body;
+  }, [talkContent]);
+
+  // Cancel any in-flight HTML autosave debounce on unmount.
+  useEffect(() => {
+    return () => {
+      if (htmlSaveTimerRef.current !== null) {
+        clearTimeout(htmlSaveTimerRef.current);
+        htmlSaveTimerRef.current = null;
+      }
+    };
+  }, []);
+
+  // Persist an HTML source edit. Mirrors the markdown autosave shape:
+  // PATCH with bodyHtml, swap to 'saving', then 'saved' / 'error'. On
+  // version_conflict we surface the same reload banner the markdown
+  // path uses.
+  const performHtmlSave = useCallback(
+    async (next: string): Promise<void> => {
+      const cur = talkContentRef.current;
+      if (!cur) return;
+      if (cur.contentFormat !== 'html') return;
+      if (next === htmlLastSavedRef.current) return;
+      if (htmlSavingRef.current) return;
+      htmlSavingRef.current = true;
+      setTalkContentSaveStatus('saving');
+      try {
+        const result = await patchContent({
+          contentId: cur.id,
+          expectedVersion: cur.bodyVersion,
+          bodyHtml: next,
+        });
+        htmlLastSavedRef.current = result.content.bodyHtml ?? '';
+        setTalkContent(result.content);
+        setTalkContentSaveStatus('saved');
+      } catch (err) {
+        if (err instanceof ApiError && err.code === 'version_conflict') {
+          setTalkContentConflict(true);
+          setTalkContentSaveStatus('error');
+          return;
+        }
+        if (err instanceof UnauthorizedError) {
+          onUnauthorized();
+          return;
+        }
+        setTalkContentSaveStatus('error');
+        setTalkContentError(
+          err instanceof Error ? err.message : 'Failed to save document.',
+        );
+      } finally {
+        htmlSavingRef.current = false;
+      }
+    },
+    [onUnauthorized],
+  );
+
+  const handleHtmlSourceChange = useCallback((next: string) => {
+    setHtmlSourceDraft(next);
+    setTalkContentSaveStatus('pending');
+  }, []);
+
+  const handleHtmlSourceSave = useCallback(
+    (next: string) => {
+      // HtmlSourceEditor already debounces; this just fires the PATCH.
+      void performHtmlSave(next);
+    },
+    [performHtmlSave],
+  );
+
+  // PATCH the doc title from the header's InlineEditableTitle. Throws
+  // on error so InlineEditableTitle can surface the message inline.
+  const handleDocTitleSave = useCallback(
+    async (nextTitle: string): Promise<void> => {
+      const cur = talkContentRef.current;
+      if (!cur) return;
+      const trimmed = nextTitle.trim();
+      if (!trimmed) throw new Error('Title cannot be empty.');
+      if (trimmed === cur.title) return;
+      try {
+        const result = await patchContent({
+          contentId: cur.id,
+          expectedVersion: cur.bodyVersion,
+          title: trimmed,
+        });
+        setTalkContent(result.content);
+        // Sidebar shows the title — refresh so the rename propagates.
+        void onSidebarChanged();
+      } catch (err) {
+        if (err instanceof UnauthorizedError) {
+          onUnauthorized();
+          return;
+        }
+        if (err instanceof ApiError && err.code === 'version_conflict') {
+          setTalkContentConflict(true);
+          throw new Error('Document changed elsewhere. Reload to retry.');
+        }
+        throw err instanceof Error ? err : new Error('Failed to update title.');
+      }
+    },
+    [onSidebarChanged, onUnauthorized],
+  );
+
+  // Hide / show the doc pane. The button is rendered both in the
+  // header (hide) and as an edge-tab (show) — both share this setter
+  // so the localStorage write effect fires either way.
+  const handleHideDocPane = useCallback(() => {
+    setDocPaneHidden(true);
+    // Move focus to the edge tab (or narrow-viewport "Show doc" btn)
+    // so keyboard users don't lose their place.
+    requestAnimationFrame(() => {
+      docEdgeTabRef.current?.focus();
+      docNarrowShowBtnRef.current?.focus();
+    });
+  }, []);
+
+  const handleShowDocPane = useCallback(() => {
+    setDocPaneHidden(false);
+    requestAnimationFrame(() => {
+      docBodyRef.current?.focus();
+    });
+  }, []);
+
   const refetchTalkContent = useCallback(async (): Promise<Content | null> => {
     if (!talkId) return null;
     try {
-      const payload = await getTalkContent(talkId);
+      // Prefer thread-scoped fetch when we know the active thread.
+      // /threads/:threadId/content works for the default thread too,
+      // so we can keep a single code path once threads have hydrated.
+      // Read the activeThreadId via ref so this callback stays stable
+      // — the openTalkStream effect depends on it and we don't want
+      // to tear the WebSocket down every time the thread changes.
+      const threadId = activeThreadIdRef.current;
+      const payload = threadId
+        ? await getThreadContent(threadId)
+        : await getTalkContent(talkId);
       setTalkContent(payload.content);
       setTalkContentPendingEdits(payload.pendingEdits ?? []);
       setTalkContentError(null);
@@ -3203,7 +3535,10 @@ export function TalkDetailPage({
     let cancelled = false;
     setTalkContentLoading(true);
     setTalkContentError(null);
-    getTalkContent(talkId)
+    const fetchPromise = activeThreadId
+      ? getThreadContent(activeThreadId)
+      : getTalkContent(talkId);
+    fetchPromise
       .then((payload) => {
         if (cancelled) return;
         setTalkContent(payload.content);
@@ -3225,7 +3560,7 @@ export function TalkDetailPage({
     return () => {
       cancelled = true;
     };
-  }, [currentTalkHasContent, onUnauthorized, talkId]);
+  }, [activeThreadId, currentTalkHasContent, onUnauthorized, talkId]);
 
   useEffect(() => {
     if (!talkId) return;
@@ -4150,6 +4485,20 @@ export function TalkDetailPage({
           next.delete(event.runId);
           return next;
         });
+        // First AI edit on an empty HTML doc auto-flips Source ➜
+        // Preview so the user immediately sees the rendered result.
+        // Sticky: each doc id only flips once per page mount.
+        const cur = talkContentRef.current;
+        if (
+          cur &&
+          cur.id === event.contentId &&
+          cur.contentFormat === 'html' &&
+          (cur.bodyHtml ?? '').length === 0 &&
+          !htmlAutoFlippedRef.current.has(cur.id)
+        ) {
+          htmlAutoFlippedRef.current.add(cur.id);
+          setHtmlMode('preview');
+        }
         void refetchTalkContent();
       },
       onContentEditResolved: (event: TalkContentEditResolvedEvent) => {
@@ -4509,6 +4858,15 @@ export function TalkDetailPage({
           talkId: state.talk.id,
           threadId: thread.id,
         });
+        // Garbage-collect this thread's doc-pane layout state so we
+        // don't leave a stale localStorage record behind.
+        if (typeof window !== 'undefined') {
+          try {
+            window.localStorage.removeItem(`clawtalk_doc_state:${thread.id}`);
+          } catch {
+            // Quota / private mode — ignore.
+          }
+        }
         const remaining = sortThreads(
           threadState.threads.filter((candidate) => candidate.id !== thread.id),
         );
@@ -8998,7 +9356,8 @@ export function TalkDetailPage({
                         {talkStateStatus.message}
                       </p>
                     ) : null}
-                    {talkStateStatus.status === 'loading' && !talkStateLoaded ? (
+                    {talkStateStatus.status === 'loading' &&
+                    !talkStateLoaded ? (
                       <p className="page-state">Loading state…</p>
                     ) : talkStateEntries.length > 0 ? (
                       <div className="talk-state-list">
@@ -9225,10 +9584,29 @@ export function TalkDetailPage({
                         ? ' talk-tab-mobile-toggle-btn-active'
                         : ''
                     }`}
-                    onClick={() => setMobilePane('doc')}
+                    onClick={() => {
+                      // Switching to the doc tab also un-hides the
+                      // doc pane — the narrow-viewport "Show doc"
+                      // button does the same thing more explicitly.
+                      if (docPaneHidden) setDocPaneHidden(false);
+                      setMobilePane('doc');
+                    }}
                   >
                     Doc
                   </button>
+                  {docPaneHidden && mobilePane === 'chat' ? (
+                    <button
+                      ref={docNarrowShowBtnRef}
+                      type="button"
+                      className="talk-tab-mobile-show-doc"
+                      onClick={() => {
+                        setDocPaneHidden(false);
+                        setMobilePane('doc');
+                      }}
+                    >
+                      Show doc
+                    </button>
+                  ) : null}
                 </div>
               ) : null}
               <div
@@ -9248,798 +9626,825 @@ export function TalkDetailPage({
               >
                 <div className="talk-thread-shell">
                   <aside className="talk-thread-rail" aria-label="Talk threads">
-                <div className="talk-thread-rail-header">
-                  <h2>Threads</h2>
-                  <ThreadStartButton
-                    onClick={() => void handleCreateThread()}
-                  />
-                </div>
-                <form
-                  className="talk-thread-search"
-                  onSubmit={(event) => {
-                    event.preventDefault();
-                    void handleSearch();
-                  }}
-                >
-                  <input
-                    type="search"
-                    value={searchQuery}
-                    onChange={(event) => setSearchQuery(event.target.value)}
-                    placeholder="Search threads"
-                    aria-label="Search Talk messages"
-                  />
-                  <button
-                    type="submit"
-                    className="secondary-btn"
-                    disabled={searchLoading}
-                  >
-                    {searchLoading ? 'Searching…' : 'Search'}
-                  </button>
-                </form>
-                {searchError ? (
-                  <p className="talk-thread-search-error" role="alert">
-                    {searchError}
-                  </p>
-                ) : null}
-                {searchResults.length > 0 ? (
-                  <ul className="talk-thread-search-results">
-                    {searchResults.map((result) => (
-                      <li key={result.messageId}>
+                    <div className="talk-thread-rail-header">
+                      <h2>Threads</h2>
+                      <ThreadStartButton
+                        onClick={() => void handleCreateThread()}
+                      />
+                    </div>
+                    <form
+                      className="talk-thread-search"
+                      onSubmit={(event) => {
+                        event.preventDefault();
+                        void handleSearch();
+                      }}
+                    >
+                      <input
+                        type="search"
+                        value={searchQuery}
+                        onChange={(event) => setSearchQuery(event.target.value)}
+                        placeholder="Search threads"
+                        aria-label="Search Talk messages"
+                      />
+                      <button
+                        type="submit"
+                        className="secondary-btn"
+                        disabled={searchLoading}
+                      >
+                        {searchLoading ? 'Searching…' : 'Search'}
+                      </button>
+                    </form>
+                    {searchError ? (
+                      <p className="talk-thread-search-error" role="alert">
+                        {searchError}
+                      </p>
+                    ) : null}
+                    {searchResults.length > 0 ? (
+                      <ul className="talk-thread-search-results">
+                        {searchResults.map((result) => (
+                          <li key={result.messageId}>
+                            <button
+                              type="button"
+                              className="talk-thread-search-result"
+                              onClick={() => handleSearchResultSelect(result)}
+                            >
+                              <strong>
+                                {displayThreadTitle(result.threadTitle)}
+                              </strong>
+                              <span>{result.preview}</span>
+                            </button>
+                          </li>
+                        ))}
+                      </ul>
+                    ) : null}
+                    {threadState.error ? (
+                      <p className="page-state" role="alert">
+                        {threadState.error}
+                      </p>
+                    ) : null}
+                    {threadState.loading ? (
+                      <p className="page-state">Loading threads…</p>
+                    ) : sortedThreads.length === 0 ? (
+                      <p className="page-state">No threads yet.</p>
+                    ) : (
+                      <ul className="talk-thread-items">
+                        {sortedThreads.map((thread) => (
+                          <li key={thread.id}>
+                            {editingThreadId === thread.id ? (
+                              <div
+                                className={`talk-thread-item${
+                                  thread.id === activeThreadId
+                                    ? ' talk-thread-item-active'
+                                    : ''
+                                } talk-thread-item-editing`}
+                                onMouseDown={handleThreadSecondaryClick(
+                                  thread.id,
+                                )}
+                                onContextMenu={handleThreadContextMenu(
+                                  thread.id,
+                                )}
+                              >
+                                <ThreadRowTitleEditor
+                                  title={formatThreadLabel(thread)}
+                                  isEditing={true}
+                                  onSave={(title) =>
+                                    handleRenameThread(thread.id, title)
+                                  }
+                                  onCancel={() => setEditingThreadId(null)}
+                                  staticClassName="talk-thread-item-title"
+                                  inputClassName="thread-row-title-input"
+                                  errorClassName="thread-row-title-error"
+                                  leadingVisual={
+                                    thread.isPinned ? (
+                                      <ThreadPinIcon />
+                                    ) : undefined
+                                  }
+                                />
+                                <span className="talk-thread-item-meta">
+                                  {thread.messageCount} message
+                                  {thread.messageCount === 1 ? '' : 's'} ·{' '}
+                                  {formatDateTime(
+                                    thread.lastMessageAt || thread.createdAt,
+                                  )}
+                                </span>
+                              </div>
+                            ) : (
+                              <button
+                                type="button"
+                                className={`talk-thread-item${
+                                  thread.id === activeThreadId
+                                    ? ' talk-thread-item-active'
+                                    : ''
+                                }`}
+                                onClick={() => handleSelectThread(thread.id)}
+                                onMouseDown={handleThreadSecondaryClick(
+                                  thread.id,
+                                )}
+                                onContextMenu={handleThreadContextMenu(
+                                  thread.id,
+                                )}
+                              >
+                                <ThreadRowTitleEditor
+                                  title={formatThreadLabel(thread)}
+                                  isEditing={false}
+                                  onSave={() => undefined}
+                                  onCancel={() => undefined}
+                                  staticClassName="talk-thread-item-title"
+                                  inputClassName="thread-row-title-input"
+                                  errorClassName="thread-row-title-error"
+                                  leadingVisual={
+                                    thread.isPinned ? (
+                                      <ThreadPinIcon />
+                                    ) : undefined
+                                  }
+                                />
+                                <span className="talk-thread-item-meta">
+                                  {thread.messageCount} message
+                                  {thread.messageCount === 1 ? '' : 's'} ·{' '}
+                                  {formatDateTime(
+                                    thread.lastMessageAt || thread.createdAt,
+                                  )}
+                                </span>
+                              </button>
+                            )}
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </aside>
+
+                  <div className="talk-thread-detail">
+                    <div
+                      ref={timelineRef}
+                      className="talk-thread-scroll"
+                      aria-label="Talk timeline"
+                    >
+                      <div className="talk-thread-detail-header">
+                        <div>
+                          {activeThread ? (
+                            <InlineEditableTitle
+                              title={formatThreadLabel(activeThread)}
+                              onSave={handleRenameActiveThread}
+                              buttonClassName="thread-detail-title-button"
+                              inputClassName="thread-detail-title-input"
+                              errorClassName="thread-detail-title-error"
+                            />
+                          ) : (
+                            <h2>New thread</h2>
+                          )}
+                          <p className="policy-muted">
+                            Use <code>/edit</code> or the button here to remove
+                            old messages from this thread.
+                          </p>
+                        </div>
                         <button
                           type="button"
-                          className="talk-thread-search-result"
-                          onClick={() => handleSearchResultSelect(result)}
+                          className="secondary-btn"
+                          onClick={openHistoryEditor}
+                          disabled={!canEditHistory}
                         >
-                          <strong>
-                            {displayThreadTitle(result.threadTitle)}
-                          </strong>
-                          <span>{result.preview}</span>
+                          Edit history
                         </button>
-                      </li>
-                    ))}
-                  </ul>
-                ) : null}
-                {threadState.error ? (
-                  <p className="page-state" role="alert">
-                    {threadState.error}
-                  </p>
-                ) : null}
-                {threadState.loading ? (
-                  <p className="page-state">Loading threads…</p>
-                ) : sortedThreads.length === 0 ? (
-                  <p className="page-state">No threads yet.</p>
-                ) : (
-                  <ul className="talk-thread-items">
-                    {sortedThreads.map((thread) => (
-                      <li key={thread.id}>
-                        {editingThreadId === thread.id ? (
-                          <div
-                            className={`talk-thread-item${
-                              thread.id === activeThreadId
-                                ? ' talk-thread-item-active'
-                                : ''
-                            } talk-thread-item-editing`}
-                            onMouseDown={handleThreadSecondaryClick(thread.id)}
-                            onContextMenu={handleThreadContextMenu(thread.id)}
-                          >
-                            <ThreadRowTitleEditor
-                              title={formatThreadLabel(thread)}
-                              isEditing={true}
-                              onSave={(title) =>
-                                handleRenameThread(thread.id, title)
-                              }
-                              onCancel={() => setEditingThreadId(null)}
-                              staticClassName="talk-thread-item-title"
-                              inputClassName="thread-row-title-input"
-                              errorClassName="thread-row-title-error"
-                              leadingVisual={
-                                thread.isPinned ? <ThreadPinIcon /> : undefined
-                              }
-                            />
-                            <span className="talk-thread-item-meta">
-                              {thread.messageCount} message
-                              {thread.messageCount === 1 ? '' : 's'} ·{' '}
-                              {formatDateTime(
-                                thread.lastMessageAt || thread.createdAt,
-                              )}
-                            </span>
-                          </div>
-                        ) : (
-                          <button
-                            type="button"
-                            className={`talk-thread-item${
-                              thread.id === activeThreadId
-                                ? ' talk-thread-item-active'
-                                : ''
-                            }`}
-                            onClick={() => handleSelectThread(thread.id)}
-                            onMouseDown={handleThreadSecondaryClick(thread.id)}
-                            onContextMenu={handleThreadContextMenu(thread.id)}
-                          >
-                            <ThreadRowTitleEditor
-                              title={formatThreadLabel(thread)}
-                              isEditing={false}
-                              onSave={() => undefined}
-                              onCancel={() => undefined}
-                              staticClassName="talk-thread-item-title"
-                              inputClassName="thread-row-title-input"
-                              errorClassName="thread-row-title-error"
-                              leadingVisual={
-                                thread.isPinned ? <ThreadPinIcon /> : undefined
-                              }
-                            />
-                            <span className="talk-thread-item-meta">
-                              {thread.messageCount} message
-                              {thread.messageCount === 1 ? '' : 's'} ·{' '}
-                              {formatDateTime(
-                                thread.lastMessageAt || thread.createdAt,
-                              )}
-                            </span>
-                          </button>
-                        )}
-                      </li>
-                    ))}
-                  </ul>
-                )}
-              </aside>
-
-              <div className="talk-thread-detail">
-                <div
-                  ref={timelineRef}
-                  className="talk-thread-scroll"
-                  aria-label="Talk timeline"
-                >
-                  <div className="talk-thread-detail-header">
-                    <div>
-                      {activeThread ? (
-                        <InlineEditableTitle
-                          title={formatThreadLabel(activeThread)}
-                          onSave={handleRenameActiveThread}
-                          buttonClassName="thread-detail-title-button"
-                          inputClassName="thread-detail-title-input"
-                          errorClassName="thread-detail-title-error"
-                        />
-                      ) : (
-                        <h2>New thread</h2>
-                      )}
-                      <p className="policy-muted">
-                        Use <code>/edit</code> or the button here to remove old
-                        messages from this thread.
-                      </p>
-                    </div>
-                    <button
-                      type="button"
-                      className="secondary-btn"
-                      onClick={openHistoryEditor}
-                      disabled={!canEditHistory}
-                    >
-                      Edit history
-                    </button>
-                  </div>
-
-                  {activeOrderedProgress ? (
-                    <div className="talk-ordered-progress" role="status">
-                      {activeOrderedProgress.label}
-                    </div>
-                  ) : null}
-                  {latestOrderedRound ? (
-                    <section
-                      className="talk-ordered-summary"
-                      aria-label="Ordered round summary"
-                    >
-                      <div className="talk-ordered-summary-header">
-                        <strong className="talk-ordered-summary-title">
-                          {latestOrderedRound.heading}
-                        </strong>
-                        {latestOrderedRound.note ? (
-                          <span className="talk-ordered-summary-note">
-                            {latestOrderedRound.note}
-                          </span>
-                        ) : null}
-                        {latestOrderedRound.retryRunId ? (
-                          <button
-                            type="button"
-                            className="run-history-link"
-                            onClick={() =>
-                              void handleRetryAgentRun(
-                                latestOrderedRound.retryRunId!,
-                              )
-                            }
-                            disabled={
-                              retryRunState?.runId ===
-                                latestOrderedRound.retryRunId &&
-                              retryRunState.status === 'posting'
-                            }
-                          >
-                            {retryRunState?.runId ===
-                              latestOrderedRound.retryRunId &&
-                            retryRunState.status === 'posting'
-                              ? 'Retrying…'
-                              : 'Retry agent'}
-                          </button>
-                        ) : null}
                       </div>
-                      <div className="talk-ordered-summary-steps">
-                        {latestOrderedRound.steps.map((step) => (
-                          <span
-                            key={step.runId}
-                            className={`talk-ordered-step talk-ordered-step-${step.tone}${
-                              step.isCurrent ? ' talk-ordered-step-current' : ''
-                            }`}
-                            aria-current={step.isCurrent ? 'step' : undefined}
-                          >
-                            <span className="talk-ordered-step-index">
-                              {step.stepNumber}
-                            </span>
-                            <span className="talk-ordered-step-label">
-                              {step.label}
-                            </span>
-                            {step.isSynthesis ? (
-                              <span className="talk-ordered-step-tag">
-                                Synthesis
+
+                      {activeOrderedProgress ? (
+                        <div className="talk-ordered-progress" role="status">
+                          {activeOrderedProgress.label}
+                        </div>
+                      ) : null}
+                      {latestOrderedRound ? (
+                        <section
+                          className="talk-ordered-summary"
+                          aria-label="Ordered round summary"
+                        >
+                          <div className="talk-ordered-summary-header">
+                            <strong className="talk-ordered-summary-title">
+                              {latestOrderedRound.heading}
+                            </strong>
+                            {latestOrderedRound.note ? (
+                              <span className="talk-ordered-summary-note">
+                                {latestOrderedRound.note}
                               </span>
                             ) : null}
-                            <span className="talk-ordered-step-status">
-                              {step.statusLabel}
-                            </span>
-                          </span>
-                        ))}
-                      </div>
-                      {latestOrderedRound.retryRunId &&
-                      retryRunState?.runId === latestOrderedRound.retryRunId &&
-                      retryRunState.status === 'error' ? (
-                        <p className="run-history-error">
-                          {retryRunState.message}
-                        </p>
-                      ) : null}
-                    </section>
-                  ) : null}
-
-                  <div className="timeline talk-thread-timeline">
-                    {state.messagesLoading ? (
-                      <p className="page-state">Loading thread…</p>
-                    ) : !activeThread ? (
-                      <p className="page-state">No thread selected.</p>
-                    ) : talkTimeline.length === 0 ? (
-                      <div className="talk-onboarding-banner">
-                        <p>
-                          This Talk is using the default agent with all tools
-                          enabled.{' '}
-                          <Link
-                            to={agentsTabHref}
-                            className="talk-onboarding-link"
-                          >
-                            Customize →
-                          </Link>
-                        </p>
-                        <p className="page-state">No messages yet.</p>
-                      </div>
-                    ) : (
-                      talkTimeline.map((entry) => {
-                        if (entry.kind === 'message') {
-                          const { message } = entry;
-                          const isSynthesis =
-                            message.metadata?.isSynthesis === true;
-                          const orderedRun = message.runId
-                            ? state.runsById[message.runId]
-                            : null;
-                          const orderedGroupSize = orderedRun?.responseGroupId
-                            ? (orderedGroupSizesById[
-                                orderedRun.responseGroupId
-                              ] ?? null)
-                            : null;
-                          const orderedStepLabel =
-                            orderedRun?.sequenceIndex != null &&
-                            orderedGroupSize &&
-                            orderedGroupSize > 1
-                              ? `Step ${orderedRun.sequenceIndex + 1} of ${orderedGroupSize}`
-                              : null;
-                          const agentLabel =
-                            (message.agentId &&
-                              agentLabelById[message.agentId]) ||
-                            message.agentNickname ||
-                            null;
-                          const headerActorLabel =
-                            message.role === 'assistant' && agentLabel
-                              ? agentLabel
-                              : agentLabel
-                                ? `${agentLabel} · ${message.role}`
-                                : message.role;
-                          return (
-                            <article
-                              key={entry.key}
-                              id={`message-${message.id}`}
-                              ref={(element) =>
-                                setMessageElementRef(message.id, element)
-                              }
-                              className={`message message-${message.role}${
-                                isSynthesis ? ' message-synthesis' : ''
-                              }`}
-                            >
-                              <header>
-                                <strong>{headerActorLabel}</strong>
-                                {orderedStepLabel ? (
-                                  <span className="message-sequence-badge">
-                                    {orderedStepLabel}
-                                  </span>
-                                ) : null}
-                                {isSynthesis ? (
-                                  <span className="message-synthesis-badge">
+                            {latestOrderedRound.retryRunId ? (
+                              <button
+                                type="button"
+                                className="run-history-link"
+                                onClick={() =>
+                                  void handleRetryAgentRun(
+                                    latestOrderedRound.retryRunId!,
+                                  )
+                                }
+                                disabled={
+                                  retryRunState?.runId ===
+                                    latestOrderedRound.retryRunId &&
+                                  retryRunState.status === 'posting'
+                                }
+                              >
+                                {retryRunState?.runId ===
+                                  latestOrderedRound.retryRunId &&
+                                retryRunState.status === 'posting'
+                                  ? 'Retrying…'
+                                  : 'Retry agent'}
+                              </button>
+                            ) : null}
+                          </div>
+                          <div className="talk-ordered-summary-steps">
+                            {latestOrderedRound.steps.map((step) => (
+                              <span
+                                key={step.runId}
+                                className={`talk-ordered-step talk-ordered-step-${step.tone}${
+                                  step.isCurrent
+                                    ? ' talk-ordered-step-current'
+                                    : ''
+                                }`}
+                                aria-current={
+                                  step.isCurrent ? 'step' : undefined
+                                }
+                              >
+                                <span className="talk-ordered-step-index">
+                                  {step.stepNumber}
+                                </span>
+                                <span className="talk-ordered-step-label">
+                                  {step.label}
+                                </span>
+                                {step.isSynthesis ? (
+                                  <span className="talk-ordered-step-tag">
                                     Synthesis
                                   </span>
                                 ) : null}
-                                <time>
-                                  {new Date(message.createdAt).toLocaleString()}
-                                </time>
-                              </header>
-                              <p>
-                                {linkifyText(
-                                  message.role === 'assistant'
-                                    ? stripInternalAssistantText(
-                                        message.content,
-                                      )
-                                    : message.content,
-                                )}
-                              </p>
-                              {message.attachments &&
-                              message.attachments.length > 0 ? (
-                                <div className="message-attachments">
-                                  {message.attachments.map((att) => (
-                                    <div
-                                      key={att.id}
-                                      className="message-attachment-item"
-                                    >
-                                      {isRenderableImageAttachment(
-                                        att.mimeType,
-                                      ) ? (
-                                        <a
-                                          href={buildTalkAttachmentContentUrl(
-                                            talkId,
-                                            att.id,
-                                          )}
-                                          target="_blank"
-                                          rel="noreferrer"
-                                          className="message-attachment-image-link"
-                                        >
-                                          <img
-                                            src={buildTalkAttachmentContentUrl(
-                                              talkId,
-                                              att.id,
-                                            )}
-                                            alt={att.fileName}
-                                            className="message-attachment-image"
-                                          />
-                                        </a>
-                                      ) : null}
-                                      <span
-                                        className="message-attachment-chip"
-                                        title={att.mimeType}
-                                      >
-                                        {att.fileName}
-                                        <span className="message-attachment-size">
-                                          {' '}
-                                          {att.fileSize < 1024
-                                            ? `${att.fileSize} B`
-                                            : att.fileSize < 1048576
-                                              ? `${(att.fileSize / 1024).toFixed(1)} KB`
-                                              : `${(att.fileSize / 1048576).toFixed(1)} MB`}
-                                        </span>
+                                <span className="talk-ordered-step-status">
+                                  {step.statusLabel}
+                                </span>
+                              </span>
+                            ))}
+                          </div>
+                          {latestOrderedRound.retryRunId &&
+                          retryRunState?.runId ===
+                            latestOrderedRound.retryRunId &&
+                          retryRunState.status === 'error' ? (
+                            <p className="run-history-error">
+                              {retryRunState.message}
+                            </p>
+                          ) : null}
+                        </section>
+                      ) : null}
+
+                      <div className="timeline talk-thread-timeline">
+                        {state.messagesLoading ? (
+                          <p className="page-state">Loading thread…</p>
+                        ) : !activeThread ? (
+                          <p className="page-state">No thread selected.</p>
+                        ) : talkTimeline.length === 0 ? (
+                          <div className="talk-onboarding-banner">
+                            <p>
+                              This Talk is using the default agent with all
+                              tools enabled.{' '}
+                              <Link
+                                to={agentsTabHref}
+                                className="talk-onboarding-link"
+                              >
+                                Customize →
+                              </Link>
+                            </p>
+                            <p className="page-state">No messages yet.</p>
+                          </div>
+                        ) : (
+                          talkTimeline.map((entry) => {
+                            if (entry.kind === 'message') {
+                              const { message } = entry;
+                              const isSynthesis =
+                                message.metadata?.isSynthesis === true;
+                              const orderedRun = message.runId
+                                ? state.runsById[message.runId]
+                                : null;
+                              const orderedGroupSize =
+                                orderedRun?.responseGroupId
+                                  ? (orderedGroupSizesById[
+                                      orderedRun.responseGroupId
+                                    ] ?? null)
+                                  : null;
+                              const orderedStepLabel =
+                                orderedRun?.sequenceIndex != null &&
+                                orderedGroupSize &&
+                                orderedGroupSize > 1
+                                  ? `Step ${orderedRun.sequenceIndex + 1} of ${orderedGroupSize}`
+                                  : null;
+                              const agentLabel =
+                                (message.agentId &&
+                                  agentLabelById[message.agentId]) ||
+                                message.agentNickname ||
+                                null;
+                              const headerActorLabel =
+                                message.role === 'assistant' && agentLabel
+                                  ? agentLabel
+                                  : agentLabel
+                                    ? `${agentLabel} · ${message.role}`
+                                    : message.role;
+                              return (
+                                <article
+                                  key={entry.key}
+                                  id={`message-${message.id}`}
+                                  ref={(element) =>
+                                    setMessageElementRef(message.id, element)
+                                  }
+                                  className={`message message-${message.role}${
+                                    isSynthesis ? ' message-synthesis' : ''
+                                  }`}
+                                >
+                                  <header>
+                                    <strong>{headerActorLabel}</strong>
+                                    {orderedStepLabel ? (
+                                      <span className="message-sequence-badge">
+                                        {orderedStepLabel}
                                       </span>
+                                    ) : null}
+                                    {isSynthesis ? (
+                                      <span className="message-synthesis-badge">
+                                        Synthesis
+                                      </span>
+                                    ) : null}
+                                    <time>
+                                      {new Date(
+                                        message.createdAt,
+                                      ).toLocaleString()}
+                                    </time>
+                                  </header>
+                                  <p>
+                                    {linkifyText(
+                                      message.role === 'assistant'
+                                        ? stripInternalAssistantText(
+                                            message.content,
+                                          )
+                                        : message.content,
+                                    )}
+                                  </p>
+                                  {message.attachments &&
+                                  message.attachments.length > 0 ? (
+                                    <div className="message-attachments">
+                                      {message.attachments.map((att) => (
+                                        <div
+                                          key={att.id}
+                                          className="message-attachment-item"
+                                        >
+                                          {isRenderableImageAttachment(
+                                            att.mimeType,
+                                          ) ? (
+                                            <a
+                                              href={buildTalkAttachmentContentUrl(
+                                                talkId,
+                                                att.id,
+                                              )}
+                                              target="_blank"
+                                              rel="noreferrer"
+                                              className="message-attachment-image-link"
+                                            >
+                                              <img
+                                                src={buildTalkAttachmentContentUrl(
+                                                  talkId,
+                                                  att.id,
+                                                )}
+                                                alt={att.fileName}
+                                                className="message-attachment-image"
+                                              />
+                                            </a>
+                                          ) : null}
+                                          <span
+                                            className="message-attachment-chip"
+                                            title={att.mimeType}
+                                          >
+                                            {att.fileName}
+                                            <span className="message-attachment-size">
+                                              {' '}
+                                              {att.fileSize < 1024
+                                                ? `${att.fileSize} B`
+                                                : att.fileSize < 1048576
+                                                  ? `${(att.fileSize / 1024).toFixed(1)} KB`
+                                                  : `${(att.fileSize / 1048576).toFixed(1)} MB`}
+                                            </span>
+                                          </span>
+                                        </div>
+                                      ))}
                                     </div>
-                                  ))}
-                                </div>
-                              ) : null}
-                            </article>
-                          );
-                        }
+                                  ) : null}
+                                </article>
+                              );
+                            }
 
-                        if (entry.kind === 'browser-run') {
-                          const { run } = entry;
-                          return run.browserBlock ? (
-                            <article
-                              key={entry.key}
-                              className="message message-system main-run-chip"
-                            >
-                              <header>
-                                <strong>
-                                  {run.targetAgentNickname || 'Browser'}
-                                </strong>
-                                <time>
-                                  {new Date(
-                                    run.browserBlock.updatedAt || run.createdAt,
-                                  ).toLocaleString()}
-                                </time>
-                              </header>
-                              <BrowserBlockedRunCard
-                                runId={run.id}
-                                browserBlock={run.browserBlock}
-                                executionDecision={run.executionDecision}
-                                talkId={talkId}
-                                onUnauthorized={handleUnauthorized}
-                                onStateChanged={refreshBrowserRuns}
+                            if (entry.kind === 'browser-run') {
+                              const { run } = entry;
+                              return run.browserBlock ? (
+                                <article
+                                  key={entry.key}
+                                  className="message message-system main-run-chip"
+                                >
+                                  <header>
+                                    <strong>
+                                      {run.targetAgentNickname || 'Browser'}
+                                    </strong>
+                                    <time>
+                                      {new Date(
+                                        run.browserBlock.updatedAt ||
+                                          run.createdAt,
+                                      ).toLocaleString()}
+                                    </time>
+                                  </header>
+                                  <BrowserBlockedRunCard
+                                    runId={run.id}
+                                    browserBlock={run.browserBlock}
+                                    executionDecision={run.executionDecision}
+                                    talkId={talkId}
+                                    onUnauthorized={handleUnauthorized}
+                                    onStateChanged={refreshBrowserRuns}
+                                  />
+                                </article>
+                              ) : null;
+                            }
+
+                            const { response } = entry;
+                            const label =
+                              (response.agentId &&
+                                agentLabelById[response.agentId]) ||
+                              response.agentNickname ||
+                              'Assistant';
+                            const failedRun = state.runsById[response.runId];
+                            const canRetryAgent =
+                              response.terminalStatus === 'failed' &&
+                              failedRun?.errorCode === 'incomplete_response' &&
+                              Boolean(
+                                failedRun.triggerMessageId &&
+                                failedRun.targetAgentId,
+                              );
+                            const retryPosting =
+                              retryRunState?.runId === response.runId &&
+                              retryRunState.status === 'posting';
+                            const retryError =
+                              retryRunState?.runId === response.runId &&
+                              retryRunState.status === 'error'
+                                ? retryRunState.message
+                                : null;
+                            return (
+                              <LiveResponsePanel
+                                key={entry.key}
+                                panelKey={entry.key}
+                                response={response}
+                                run={failedRun}
+                                agentLabel={label}
+                                isDense={isDenseRound}
+                                now={nowTick}
+                                canRetryAgent={canRetryAgent}
+                                retryPosting={retryPosting}
+                                retryError={retryError}
+                                onRetry={() =>
+                                  void handleRetryAgentRun(response.runId)
+                                }
+                                onOpenRunHistory={() =>
+                                  handleOpenRunHistory(response.runId)
+                                }
                               />
-                            </article>
-                          ) : null;
-                        }
-
-                        const { response } = entry;
-                        const label =
-                          (response.agentId &&
-                            agentLabelById[response.agentId]) ||
-                          response.agentNickname ||
-                          'Assistant';
-                        const failedRun = state.runsById[response.runId];
-                        const canRetryAgent =
-                          response.terminalStatus === 'failed' &&
-                          failedRun?.errorCode === 'incomplete_response' &&
-                          Boolean(
-                            failedRun.triggerMessageId &&
-                            failedRun.targetAgentId,
-                          );
-                        const retryPosting =
-                          retryRunState?.runId === response.runId &&
-                          retryRunState.status === 'posting';
-                        const retryError =
-                          retryRunState?.runId === response.runId &&
-                          retryRunState.status === 'error'
-                            ? retryRunState.message
-                            : null;
-                        return (
-                          <LiveResponsePanel
-                            key={entry.key}
-                            panelKey={entry.key}
-                            response={response}
-                            run={failedRun}
-                            agentLabel={label}
-                            isDense={isDenseRound}
-                            now={nowTick}
-                            canRetryAgent={canRetryAgent}
-                            retryPosting={retryPosting}
-                            retryError={retryError}
-                            onRetry={() =>
-                              void handleRetryAgentRun(response.runId)
-                            }
-                            onOpenRunHistory={() =>
-                              handleOpenRunHistory(response.runId)
-                            }
-                          />
-                        );
-                      })
-                    )}
-                  </div>
-
-                  {state.hasUnreadBelow ? (
-                    <button
-                      type="button"
-                      className="timeline-new-indicator"
-                      onClick={handleClearUnread}
-                    >
-                      New messages
-                    </button>
-                  ) : null}
-
-                  <div ref={endRef} />
-                </div>
-
-                <form
-                  className="composer talk-workspace-composer"
-                  onSubmit={handleSend}
-                >
-                  <input
-                    ref={fileInputRef}
-                    type="file"
-                    multiple
-                    accept={ALLOWED_ATTACHMENT_EXTENSIONS}
-                    onChange={handleFileInputChange}
-                    style={{ display: 'none' }}
-                  />
-                  <div
-                    className="composer-targets"
-                    role="group"
-                    aria-label="Selected agents"
-                  >
-                    {effectiveAgents.map((agent) => {
-                      const selected = targetAgentIds.includes(agent.id);
-                      const guardrail =
-                        talkAgentExecutionGuardrailsById[agent.id];
-                      const hasGuardrailViolation =
-                        selectedGuardrailAgentIds.has(agent.id);
-                      return (
-                        <button
-                          key={agent.id}
-                          type="button"
-                          className={`composer-target-chip${
-                            selected ? ' composer-target-chip-selected' : ''
-                          }${
-                            hasGuardrailViolation
-                              ? ' composer-target-chip-warning'
-                              : ''
-                          }`}
-                          onClick={() => handleToggleTarget(agent.id)}
-                          disabled={state.sendState.status === 'posting'}
-                          aria-pressed={selected}
-                          aria-label={
-                            agent.isPrimary
-                              ? `${buildAgentLabel(agent)} Primary`
-                              : buildAgentLabel(agent)
-                          }
-                          title={guardrail?.message || undefined}
-                        >
-                          <span
-                            className={`talk-status-dot talk-status-dot-${agent.health}`}
-                            aria-hidden="true"
-                          />
-                          <span>{buildAgentChipLabel(agent)}</span>
-                          {guardrail?.badgeLabel ? (
-                            <span
-                              className={`talk-status-constraint talk-status-constraint-${guardrail.kind}`}
-                            >
-                              {guardrail.badgeLabel}
-                            </span>
-                          ) : null}
-                          {agent.isPrimary ? (
-                            <span className="talk-status-primary">Primary</span>
-                          ) : null}
-                        </button>
-                      );
-                    })}
-                  </div>
-                  <div className="composer-meta-row">
-                    <p className="composer-target-help">{composerTargetHelp}</p>
-                    <span className="composer-count">
-                      {draft.length}/{TALK_MESSAGE_MAX_CHARS}
-                    </span>
-                  </div>
-                  {composerGuardrailMessage ? (
-                    <div
-                      className="inline-banner inline-banner-warning"
-                      role="status"
-                      aria-live="polite"
-                    >
-                      {composerGuardrailMessage}
-                    </div>
-                  ) : null}
-
-                  <div className="composer-input-shell">
-                    {docMentionState && talkContent ? (
-                      <div
-                        className="doc-mention-menu"
-                        role="listbox"
-                        aria-label="Mentions"
-                      >
-                        <button
-                          type="button"
-                          role="option"
-                          aria-selected="true"
-                          className="doc-mention-menu-item"
-                          onMouseDown={(event) => event.preventDefault()}
-                          onClick={insertDocMention}
-                        >
-                          <span className="doc-mention-menu-prefix">@doc</span>
-                          <span className="doc-mention-menu-title">
-                            {talkContent.title}
-                          </span>
-                        </button>
+                            );
+                          })
+                        )}
                       </div>
-                    ) : null}
-                    <textarea
-                      ref={textareaRef}
-                      value={draft}
-                      onChange={(event) =>
-                        handleDraftChange(event.target.value)
-                      }
-                      onKeyDown={handleComposerKeyDown}
-                      placeholder="Send a message to this thread"
-                      rows={1}
-                      maxLength={TALK_MESSAGE_MAX_CHARS}
-                      disabled={
-                        state.sendState.status === 'posting' ||
-                        activeRound ||
-                        hasUnsavedAgentChanges ||
-                        !activeThreadId
-                      }
-                    />
 
-                    {pendingAttachments.length > 0 ? (
-                      <div className="composer-attachments">
-                        {pendingAttachments.map((att) => (
-                          <span
-                            key={att.localId}
-                            className={`composer-attachment-chip composer-attachment-${att.status}`}
-                            title={
-                              att.status === 'error'
-                                ? att.errorMessage
-                                : att.fileName
-                            }
-                          >
-                            {att.isImage && att.previewUrl ? (
-                              <img
-                                src={att.previewUrl}
-                                alt={att.fileName}
-                                className="composer-attachment-preview"
+                      {state.hasUnreadBelow ? (
+                        <button
+                          type="button"
+                          className="timeline-new-indicator"
+                          onClick={handleClearUnread}
+                        >
+                          New messages
+                        </button>
+                      ) : null}
+
+                      <div ref={endRef} />
+                    </div>
+
+                    <form
+                      className="composer talk-workspace-composer"
+                      onSubmit={handleSend}
+                    >
+                      <input
+                        ref={fileInputRef}
+                        type="file"
+                        multiple
+                        accept={ALLOWED_ATTACHMENT_EXTENSIONS}
+                        onChange={handleFileInputChange}
+                        style={{ display: 'none' }}
+                      />
+                      <div
+                        className="composer-targets"
+                        role="group"
+                        aria-label="Selected agents"
+                      >
+                        {effectiveAgents.map((agent) => {
+                          const selected = targetAgentIds.includes(agent.id);
+                          const guardrail =
+                            talkAgentExecutionGuardrailsById[agent.id];
+                          const hasGuardrailViolation =
+                            selectedGuardrailAgentIds.has(agent.id);
+                          return (
+                            <button
+                              key={agent.id}
+                              type="button"
+                              className={`composer-target-chip${
+                                selected ? ' composer-target-chip-selected' : ''
+                              }${
+                                hasGuardrailViolation
+                                  ? ' composer-target-chip-warning'
+                                  : ''
+                              }`}
+                              onClick={() => handleToggleTarget(agent.id)}
+                              disabled={state.sendState.status === 'posting'}
+                              aria-pressed={selected}
+                              aria-label={
+                                agent.isPrimary
+                                  ? `${buildAgentLabel(agent)} Primary`
+                                  : buildAgentLabel(agent)
+                              }
+                              title={guardrail?.message || undefined}
+                            >
+                              <span
+                                className={`talk-status-dot talk-status-dot-${agent.health}`}
+                                aria-hidden="true"
                               />
-                            ) : null}
-                            <span className="composer-attachment-name">
-                              {att.fileName}
-                            </span>
-                            {att.status === 'uploading' ? (
-                              <span className="composer-attachment-status">
-                                {' '}
-                                uploading…
-                              </span>
-                            ) : null}
-                            {att.status === 'error' ? (
-                              <span className="composer-attachment-status">
-                                {' '}
-                                failed
-                              </span>
-                            ) : null}
+                              <span>{buildAgentChipLabel(agent)}</span>
+                              {guardrail?.badgeLabel ? (
+                                <span
+                                  className={`talk-status-constraint talk-status-constraint-${guardrail.kind}`}
+                                >
+                                  {guardrail.badgeLabel}
+                                </span>
+                              ) : null}
+                              {agent.isPrimary ? (
+                                <span className="talk-status-primary">
+                                  Primary
+                                </span>
+                              ) : null}
+                            </button>
+                          );
+                        })}
+                      </div>
+                      <div className="composer-meta-row">
+                        <p className="composer-target-help">
+                          {composerTargetHelp}
+                        </p>
+                        <span className="composer-count">
+                          {draft.length}/{TALK_MESSAGE_MAX_CHARS}
+                        </span>
+                      </div>
+                      {composerGuardrailMessage ? (
+                        <div
+                          className="inline-banner inline-banner-warning"
+                          role="status"
+                          aria-live="polite"
+                        >
+                          {composerGuardrailMessage}
+                        </div>
+                      ) : null}
+
+                      <div className="composer-input-shell">
+                        {docMentionState && talkContent ? (
+                          <div
+                            className="doc-mention-menu"
+                            role="listbox"
+                            aria-label="Mentions"
+                          >
                             <button
                               type="button"
-                              className="composer-attachment-remove"
-                              onClick={() =>
-                                handleRemoveAttachment(att.localId)
-                              }
-                              aria-label={`Remove ${att.fileName}`}
+                              role="option"
+                              aria-selected="true"
+                              className="doc-mention-menu-item"
+                              onMouseDown={(event) => event.preventDefault()}
+                              onClick={insertDocMention}
                             >
-                              ×
+                              <span className="doc-mention-menu-prefix">
+                                @doc
+                              </span>
+                              <span className="doc-mention-menu-title">
+                                {talkContent.title}
+                              </span>
                             </button>
-                          </span>
-                        ))}
-                      </div>
-                    ) : null}
-
-                    <div className="composer-controls">
-                      <div className="composer-tool-buttons">
-                        <button
-                          type="button"
-                          className="composer-icon-btn composer-attach-btn"
-                          onClick={handleAttachButtonClick}
+                          </div>
+                        ) : null}
+                        <textarea
+                          ref={textareaRef}
+                          value={draft}
+                          onChange={(event) =>
+                            handleDraftChange(event.target.value)
+                          }
+                          onKeyDown={handleComposerKeyDown}
+                          placeholder="Send a message to this thread"
+                          rows={1}
+                          maxLength={TALK_MESSAGE_MAX_CHARS}
                           disabled={
                             state.sendState.status === 'posting' ||
                             activeRound ||
                             hasUnsavedAgentChanges ||
                             !activeThreadId
                           }
-                          aria-label="Attach"
-                          title="Attach files"
-                        >
-                          <ComposerAttachIcon />
-                        </button>
-                        {canEditAgents ? (
+                        />
+
+                        {pendingAttachments.length > 0 ? (
+                          <div className="composer-attachments">
+                            {pendingAttachments.map((att) => (
+                              <span
+                                key={att.localId}
+                                className={`composer-attachment-chip composer-attachment-${att.status}`}
+                                title={
+                                  att.status === 'error'
+                                    ? att.errorMessage
+                                    : att.fileName
+                                }
+                              >
+                                {att.isImage && att.previewUrl ? (
+                                  <img
+                                    src={att.previewUrl}
+                                    alt={att.fileName}
+                                    className="composer-attachment-preview"
+                                  />
+                                ) : null}
+                                <span className="composer-attachment-name">
+                                  {att.fileName}
+                                </span>
+                                {att.status === 'uploading' ? (
+                                  <span className="composer-attachment-status">
+                                    {' '}
+                                    uploading…
+                                  </span>
+                                ) : null}
+                                {att.status === 'error' ? (
+                                  <span className="composer-attachment-status">
+                                    {' '}
+                                    failed
+                                  </span>
+                                ) : null}
+                                <button
+                                  type="button"
+                                  className="composer-attachment-remove"
+                                  onClick={() =>
+                                    handleRemoveAttachment(att.localId)
+                                  }
+                                  aria-label={`Remove ${att.fileName}`}
+                                >
+                                  ×
+                                </button>
+                              </span>
+                            ))}
+                          </div>
+                        ) : null}
+
+                        <div className="composer-controls">
+                          <div className="composer-tool-buttons">
+                            <button
+                              type="button"
+                              className="composer-icon-btn composer-attach-btn"
+                              onClick={handleAttachButtonClick}
+                              disabled={
+                                state.sendState.status === 'posting' ||
+                                activeRound ||
+                                hasUnsavedAgentChanges ||
+                                !activeThreadId
+                              }
+                              aria-label="Attach"
+                              title="Attach files"
+                            >
+                              <ComposerAttachIcon />
+                            </button>
+                            {canEditAgents ? (
+                              <button
+                                type="button"
+                                className="composer-icon-btn composer-cancel-btn"
+                                onClick={handleCancelRuns}
+                                disabled={
+                                  state.cancelState.status === 'posting' ||
+                                  !activeRound
+                                }
+                                aria-label="Cancel Runs"
+                                title={
+                                  state.cancelState.status === 'posting'
+                                    ? 'Cancelling runs…'
+                                    : 'Cancel runs'
+                                }
+                              >
+                                <ComposerCancelRunsIcon />
+                              </button>
+                            ) : null}
+                          </div>
                           <button
-                            type="button"
-                            className="composer-icon-btn composer-cancel-btn"
-                            onClick={handleCancelRuns}
+                            type="submit"
+                            className="composer-icon-btn composer-send-btn"
                             disabled={
-                              state.cancelState.status === 'posting' ||
-                              !activeRound
+                              state.sendState.status === 'posting' ||
+                              activeRound ||
+                              hasUnsavedAgentChanges ||
+                              !activeThreadId ||
+                              sendBlockedByGuardrail
                             }
-                            aria-label="Cancel Runs"
+                            aria-label="Send"
                             title={
-                              state.cancelState.status === 'posting'
-                                ? 'Cancelling runs…'
-                                : 'Cancel runs'
+                              state.sendState.status === 'posting'
+                                ? 'Sending…'
+                                : 'Send'
                             }
                           >
-                            <ComposerCancelRunsIcon />
+                            <ComposerSendIcon />
                           </button>
-                        ) : null}
+                        </div>
                       </div>
-                      <button
-                        type="submit"
-                        className="composer-icon-btn composer-send-btn"
-                        disabled={
-                          state.sendState.status === 'posting' ||
-                          activeRound ||
-                          hasUnsavedAgentChanges ||
-                          !activeThreadId ||
-                          sendBlockedByGuardrail
-                        }
-                        aria-label="Send"
-                        title={
-                          state.sendState.status === 'posting'
-                            ? 'Sending…'
-                            : 'Send'
-                        }
-                      >
-                        <ComposerSendIcon />
-                      </button>
-                    </div>
+
+                      {activeRound ? (
+                        <div
+                          className="inline-banner inline-banner-warning"
+                          role="status"
+                        >
+                          Wait for the current round to finish or cancel it
+                          before sending another message.
+                        </div>
+                      ) : null}
+
+                      {!activeRound && hasUnsavedAgentChanges ? (
+                        <div
+                          className="inline-banner inline-banner-warning"
+                          role="status"
+                        >
+                          Save agent changes before sending a message.
+                        </div>
+                      ) : null}
+
+                      {state.sendState.status === 'error' ? (
+                        <div
+                          className="inline-banner inline-banner-error"
+                          role="alert"
+                        >
+                          {state.sendState.error || 'Unable to send message.'}
+                        </div>
+                      ) : null}
+
+                      {historyEditState.status === 'success' ? (
+                        <div
+                          className="inline-banner inline-banner-success"
+                          role="status"
+                        >
+                          {historyEditState.message}
+                        </div>
+                      ) : null}
+
+                      {historyEditState.status === 'error' ? (
+                        <div
+                          className="inline-banner inline-banner-error"
+                          role="alert"
+                        >
+                          {historyEditState.message}
+                        </div>
+                      ) : null}
+
+                      {state.cancelState.status === 'success' ? (
+                        <div
+                          className="inline-banner inline-banner-success"
+                          role="status"
+                        >
+                          {state.cancelState.message}
+                        </div>
+                      ) : null}
+
+                      {state.cancelState.status === 'error' ? (
+                        <div
+                          className="inline-banner inline-banner-error"
+                          role="alert"
+                        >
+                          {state.cancelState.message}
+                        </div>
+                      ) : null}
+                    </form>
                   </div>
-
-                  {activeRound ? (
-                    <div
-                      className="inline-banner inline-banner-warning"
-                      role="status"
-                    >
-                      Wait for the current round to finish or cancel it before
-                      sending another message.
-                    </div>
+                  {threadMenu && menuThread ? (
+                    <ThreadContextMenu
+                      x={threadMenu.x}
+                      y={threadMenu.y}
+                      isPinned={menuThread.isPinned}
+                      canDelete={!menuThread.isDefault}
+                      onClose={() => setThreadMenu(null)}
+                      onRename={() => setEditingThreadId(menuThread.id)}
+                      onTogglePin={() => {
+                        void updateThreadMetadata(menuThread.id, {
+                          pinned: !menuThread.isPinned,
+                        }).catch((err) => {
+                          setThreadState((current) => ({
+                            ...current,
+                            error:
+                              err instanceof Error
+                                ? err.message
+                                : 'Failed to update thread.',
+                          }));
+                        });
+                      }}
+                      onDelete={() => void handleDeleteThread(menuThread)}
+                    />
                   ) : null}
-
-                  {!activeRound && hasUnsavedAgentChanges ? (
-                    <div
-                      className="inline-banner inline-banner-warning"
-                      role="status"
-                    >
-                      Save agent changes before sending a message.
-                    </div>
-                  ) : null}
-
-                  {state.sendState.status === 'error' ? (
-                    <div
-                      className="inline-banner inline-banner-error"
-                      role="alert"
-                    >
-                      {state.sendState.error || 'Unable to send message.'}
-                    </div>
-                  ) : null}
-
-                  {historyEditState.status === 'success' ? (
-                    <div
-                      className="inline-banner inline-banner-success"
-                      role="status"
-                    >
-                      {historyEditState.message}
-                    </div>
-                  ) : null}
-
-                  {historyEditState.status === 'error' ? (
-                    <div
-                      className="inline-banner inline-banner-error"
-                      role="alert"
-                    >
-                      {historyEditState.message}
-                    </div>
-                  ) : null}
-
-                  {state.cancelState.status === 'success' ? (
-                    <div
-                      className="inline-banner inline-banner-success"
-                      role="status"
-                    >
-                      {state.cancelState.message}
-                    </div>
-                  ) : null}
-
-                  {state.cancelState.status === 'error' ? (
-                    <div
-                      className="inline-banner inline-banner-error"
-                      role="alert"
-                    >
-                      {state.cancelState.message}
-                    </div>
-                  ) : null}
-                </form>
-              </div>
-              {threadMenu && menuThread ? (
-                <ThreadContextMenu
-                  x={threadMenu.x}
-                  y={threadMenu.y}
-                  isPinned={menuThread.isPinned}
-                  canDelete={!menuThread.isDefault}
-                  onClose={() => setThreadMenu(null)}
-                  onRename={() => setEditingThreadId(menuThread.id)}
-                  onTogglePin={() => {
-                    void updateThreadMetadata(menuThread.id, {
-                      pinned: !menuThread.isPinned,
-                    }).catch((err) => {
-                      setThreadState((current) => ({
-                        ...current,
-                        error:
-                          err instanceof Error
-                            ? err.message
-                            : 'Failed to update thread.',
-                      }));
-                    });
-                  }}
-                  onDelete={() => void handleDeleteThread(menuThread)}
-                />
-              ) : null}
                 </div>
               </div>
-              {talkContent && !isNarrowViewport ? (
+              {talkContent && !isNarrowViewport && !docPaneHidden ? (
                 <div
                   ref={splitHandleRef}
                   className="talk-tab-split-handle"
@@ -10053,44 +10458,58 @@ export function TalkDetailPage({
                   onKeyDown={handleResizeHandleKeyDown}
                 />
               ) : null}
+              {talkContent && docPaneHidden && !isNarrowViewport ? (
+                <DocPaneEdgeTab
+                  docTitle={talkContent.title}
+                  format={talkContent.contentFormat}
+                  onClick={handleShowDocPane}
+                />
+              ) : null}
               {talkContent ? (
                 <section
                   className={[
                     'talk-tab-doc-pane',
-                    isNarrowViewport && mobilePane !== 'doc'
+                    (isNarrowViewport && mobilePane !== 'doc') ||
+                    (!isNarrowViewport && docPaneHidden)
                       ? 'talk-tab-pane-hidden'
                       : '',
                   ]
                     .filter(Boolean)
                     .join(' ')}
                   style={
-                    !isNarrowViewport
+                    !isNarrowViewport && !docPaneHidden
                       ? { flex: `${1 - chatRatio} 1 0` }
                       : undefined
                   }
                   aria-label="Talk document"
                 >
-                  <header className="talk-tab-doc-header">
-                    <h2 className="talk-tab-doc-title">{talkContent.title}</h2>
-                    {talkContentLoading ? (
-                      <span className="talk-tab-doc-status">Loading…</span>
-                    ) : (
-                      <span
-                        className={`talk-tab-doc-status talk-tab-doc-save-${talkContentSaveStatus}`}
-                        aria-live="polite"
-                      >
-                        {talkContentSaveStatus === 'saving'
-                          ? 'Saving…'
-                          : talkContentSaveStatus === 'pending'
-                            ? 'Unsaved changes'
-                            : talkContentSaveStatus === 'saved'
-                              ? 'Saved'
-                              : talkContentSaveStatus === 'error'
-                                ? 'Save failed'
-                                : ''}
-                      </span>
-                    )}
-                  </header>
+                  <DocPaneHeader
+                    title={talkContent.title}
+                    onTitleSave={handleDocTitleSave}
+                    format={talkContent.contentFormat}
+                    saveStatus={talkContentSaveStatus}
+                    loading={talkContentLoading}
+                    mode={
+                      talkContent.contentFormat === 'html'
+                        ? htmlMode
+                        : undefined
+                    }
+                    onModeChange={
+                      talkContent.contentFormat === 'html'
+                        ? setHtmlMode
+                        : undefined
+                    }
+                    copyExportSlot={
+                      <CopyExportMenu
+                        format={talkContent.contentFormat}
+                        bodyMarkdown={talkContent.bodyMarkdown}
+                        bodyHtml={talkContent.bodyHtml}
+                        documentTitle={talkContent.title}
+                      />
+                    }
+                    onHidePane={handleHideDocPane}
+                    sanitizeWarning={null}
+                  />
                   {talkContentConflict ? (
                     <div
                       className="talk-tab-doc-conflict"
@@ -10118,8 +10537,53 @@ export function TalkDetailPage({
                     <p className="page-state" role="alert">
                       {talkContentError}
                     </p>
+                  ) : talkContent.contentFormat === 'html' ? (
+                    htmlMode === 'source' ? (
+                      <HtmlEditorErrorBoundary>
+                        <Suspense
+                          fallback={
+                            <div className="talk-tab-doc-body" aria-busy="true">
+                              Loading editor…
+                            </div>
+                          }
+                        >
+                          <div
+                            className="talk-tab-doc-body"
+                            ref={docBodyRef}
+                            tabIndex={-1}
+                          >
+                            <LazyHtmlSourceEditor
+                              value={htmlSourceDraft}
+                              onChange={handleHtmlSourceChange}
+                              onSave={
+                                canEditDoc && !talkContentConflict
+                                  ? handleHtmlSourceSave
+                                  : undefined
+                              }
+                              readOnly={!canEditDoc || talkContentConflict}
+                              placeholder="Ask an agent to generate, or type HTML"
+                            />
+                          </div>
+                        </Suspense>
+                      </HtmlEditorErrorBoundary>
+                    ) : (
+                      <div
+                        ref={docBodyRef}
+                        tabIndex={-1}
+                        className="talk-tab-doc-body-wrap"
+                      >
+                        <SafeHtml
+                          html={talkContent.bodyHtml ?? ''}
+                          className="talk-tab-doc-body"
+                        />
+                      </div>
+                    )
                   ) : (
-                    <div className="talk-tab-doc-body">
+                    <div
+                      className="talk-tab-doc-body"
+                      ref={docBodyRef}
+                      tabIndex={-1}
+                    >
                       <PendingEditDocSurface
                         content={talkContent}
                         pendingEdits={talkContentPendingEdits}
@@ -10198,6 +10662,32 @@ export function TalkDetailPage({
                 }
               }}
             />
+            <fieldset
+              className="doc-promote-modal-format"
+              disabled={docModalSubmitting}
+            >
+              <legend className="doc-promote-modal-label">Format</legend>
+              <label className="doc-promote-modal-format-option">
+                <input
+                  type="radio"
+                  name="doc-promote-modal-format"
+                  value="markdown"
+                  checked={docModalFormat === 'markdown'}
+                  onChange={() => setDocModalFormat('markdown')}
+                />
+                Markdown
+              </label>
+              <label className="doc-promote-modal-format-option">
+                <input
+                  type="radio"
+                  name="doc-promote-modal-format"
+                  value="html"
+                  checked={docModalFormat === 'html'}
+                  onChange={() => setDocModalFormat('html')}
+                />
+                HTML
+              </label>
+            </fieldset>
             {docModalError ? (
               <p className="doc-promote-modal-error" role="alert">
                 {docModalError}

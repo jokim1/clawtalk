@@ -69,9 +69,29 @@ async function seedDoc(
   anchors: { h1: string; p1: string; p2: string };
 }> {
   return await withUserContext(ownerId, async () => {
+    // Resolve / lazily create the default thread so the new thread-
+    // scoped contents schema is satisfied.
+    const db = getDbPg();
+    const existing = await db<{ id: string }[]>`
+      select id from public.talk_threads
+      where talk_id = ${talkId}::uuid and is_default = true
+      limit 1
+    `;
+    const threadId =
+      existing[0]?.id ??
+      (
+        await db<{ id: string }[]>`
+          insert into public.talk_threads
+            (talk_id, owner_id, title, is_default, is_internal)
+          values
+            (${talkId}::uuid, ${ownerId}::uuid, null, true, false)
+          returning id
+        `
+      )[0].id;
     const created = await createContent({
       ownerId,
       talkId,
+      threadId,
       title: 'Edit Doc',
       createdByUserId: ownerId,
     });
