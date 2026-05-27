@@ -2973,6 +2973,10 @@ export function TalkDetailPage({
   const pendingComposerFocusRef = useRef(false);
   const pendingRunHistoryScrollRef = useRef<string | null>(null);
   const activeThreadIdRef = useRef<string | null>(null);
+  // Talk id for which `threadState.threads` was last loaded. Gates the
+  // routing-resolution effect so it can't run with a freshly-changed
+  // talkId but stale threadState (same-commit cross-talk navigation).
+  const threadStateTalkIdRef = useRef<string | null>(null);
   const threadSnapshotVersionRef = useRef(0);
   const deletedMessageIdsRef = useRef<Set<string>>(new Set());
   // Tracks every runId we've ever seen on MESSAGE_APPENDED. Used by the
@@ -4026,6 +4030,10 @@ export function TalkDetailPage({
 
   useEffect(() => {
     let cancelled = false;
+    // Invalidate the threadState-talkId tag synchronously so the
+    // routing-resolution effect, which fires in the same commit, can't
+    // read stale (previous-talk) threads under the new talkId.
+    threadStateTalkIdRef.current = null;
     dispatch({ type: 'BOOTSTRAP_LOADING' });
     messageElementRefs.current.clear();
     setThreadState({ threads: [], loading: true, error: null });
@@ -4090,6 +4098,7 @@ export function TalkDetailPage({
         setAgentDrafts(talkAgents);
         setTargetAgentIds(buildTargetSelection(talkAgents, []));
         setThreadState({ threads: sortedThreads, loading: false, error: null });
+        threadStateTalkIdRef.current = talkId;
         dispatch({ type: 'BOOTSTRAP_READY', talk, runs });
       } catch (err) {
         if (err instanceof UnauthorizedError) {
@@ -4128,6 +4137,11 @@ export function TalkDetailPage({
 
   useEffect(() => {
     if (threadState.loading) return;
+    // Bail when threadState was loaded for a different talkId — happens
+    // mid-commit during cross-talk sidebar navigation, where this effect
+    // fires before the bootstrap effect's state resets propagate.
+    // Without this gate we'd save Talk A's threads[0] under Talk B's key.
+    if (threadStateTalkIdRef.current !== talkId) return;
     if (threadState.threads.length === 0) {
       setActiveThreadId(null);
       return;
