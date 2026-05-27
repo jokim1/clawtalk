@@ -1038,7 +1038,6 @@ export async function deleteTalkThread(input: {
   talkId: string;
   threadId: string;
 }): Promise<boolean> {
-  // Refuse to delete the default thread — UI invariant.
   const db = getDbPg();
   const thread = await db<{ is_default: boolean }[]>`
     select is_default from public.talk_threads
@@ -1046,9 +1045,43 @@ export async function deleteTalkThread(input: {
     limit 1
   `;
   if (!thread[0]) return false;
-  if (thread[0].is_default) {
-    throw new Error('Cannot delete the default thread');
+
+  // Refuse if this would leave the talk with zero user-visible threads.
+  // Internal threads are hidden from the UI and don't count as a usable
+  // home for posting.
+  const remaining = await db<{ count: number }[]>`
+    select count(*)::int as count
+    from public.talk_threads
+    where talk_id = ${input.talkId}::uuid
+      and is_internal = false
+      and id <> ${input.threadId}::uuid
+  `;
+  if (remaining[0].count === 0) {
+    throw new ThreadDeleteConflictError(
+      'last_thread',
+      'Cannot delete the last thread in a talk.',
+    );
   }
+
+  // Preserve the "one default thread per talk" invariant that
+  // getOrCreateDefaultThread + the legacy talk-scoped content endpoint
+  // rely on: promote the oldest remaining non-internal thread to default
+  // before removing the current default.
+  if (thread[0].is_default) {
+    await db`
+      update public.talk_threads
+      set is_default = true, updated_at = now()
+      where id = (
+        select id from public.talk_threads
+        where talk_id = ${input.talkId}::uuid
+          and is_internal = false
+          and id <> ${input.threadId}::uuid
+        order by created_at asc, id asc
+        limit 1
+      )
+    `;
+  }
+
   const rows = await db<{ id: string }[]>`
     delete from public.talk_threads
     where id = ${input.threadId}::uuid and talk_id = ${input.talkId}::uuid
@@ -2086,12 +2119,14 @@ export class TalkThreadValidationError extends Error {
 
 export class ThreadDeleteConflictError extends Error {
   readonly code:
+    | 'last_thread'
     | 'default_thread'
     | 'internal_thread'
     | 'job_owned_thread'
     | 'thread_has_active_runs';
   constructor(
     code:
+      | 'last_thread'
       | 'default_thread'
       | 'internal_thread'
       | 'job_owned_thread'

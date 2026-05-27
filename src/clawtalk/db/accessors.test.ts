@@ -359,7 +359,7 @@ describe('accessors-pg slice 1: talks/folders/members/threads', () => {
 
   // ── Threads ────────────────────────────────────────────────────────
 
-  it('threads: create non-default, default heal-on-read, update metadata, delete refuses default', async () => {
+  it('threads: create non-default, default heal-on-read, update metadata, delete refuses last thread', async () => {
     await withUserContext(USER_A_ID, async () => {
       const t = await createTalk({ ownerId: USER_A_ID, topicTitle: 'T' });
       // createTalk already provisioned the default thread.
@@ -403,10 +403,10 @@ describe('accessors-pg slice 1: talks/folders/members/threads', () => {
         await deleteTalkThread({ talkId: t.id, threadId: second.id }),
       ).toBe(true);
 
-      // Delete default — refused.
+      // Delete the last remaining thread — refused.
       await expect(
         deleteTalkThread({ talkId: t.id, threadId: defaultThreadId }),
-      ).rejects.toThrow(/Cannot delete the default thread/);
+      ).rejects.toThrow(/Cannot delete the last thread/);
 
       // resolveThreadIdForTalk falls back to default.
       const resolved = await resolveThreadIdForTalk({
@@ -421,6 +421,59 @@ describe('accessors-pg slice 1: talks/folders/members/threads', () => {
         ownerId: USER_A_ID,
       });
       expect(def2).toBe(defaultThreadId);
+    });
+  });
+
+  it('threads: deleting the default thread promotes the oldest surviving non-internal thread to default', async () => {
+    await withUserContext(USER_A_ID, async () => {
+      const t = await createTalk({ ownerId: USER_A_ID, topicTitle: 'Promote' });
+      const initialThreads = await listTalkThreads({
+        talkId: t.id,
+        ownerId: USER_A_ID,
+      });
+      const defaultThreadId = initialThreads[0].id;
+
+      // Two non-default threads added after the default. The older one
+      // should win the promotion. now() in postgres is transaction-fixed,
+      // so we explicitly pin distinct created_at values to mirror the
+      // production case where each createTalkThread runs in its own txn.
+      const older = await createTalkThread({
+        ownerId: USER_A_ID,
+        talkId: t.id,
+        title: 'Older sibling',
+      });
+      const newer = await createTalkThread({
+        ownerId: USER_A_ID,
+        talkId: t.id,
+        title: 'Newer sibling',
+      });
+      expect(older.is_default).toBe(false);
+      expect(newer.is_default).toBe(false);
+
+      const sql = getDbPg();
+      await sql`
+        update public.talk_threads
+        set created_at = now() - interval '1 hour'
+        where id = ${older.id}::uuid
+      `;
+      await sql`
+        update public.talk_threads
+        set created_at = now()
+        where id = ${newer.id}::uuid
+      `;
+
+      // Delete the default thread — should succeed and promote `older`.
+      expect(
+        await deleteTalkThread({ talkId: t.id, threadId: defaultThreadId }),
+      ).toBe(true);
+
+      const after = await listTalkThreads({
+        talkId: t.id,
+        ownerId: USER_A_ID,
+      });
+      const defaults = after.filter((thread) => thread.is_default);
+      expect(defaults).toHaveLength(1);
+      expect(defaults[0].id).toBe(older.id);
     });
   });
 
