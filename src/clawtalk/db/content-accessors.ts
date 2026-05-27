@@ -218,6 +218,7 @@ export async function createContent(input: {
 export interface ContentSidebarRecord {
   id: string;
   talk_id: string;
+  thread_id: string;
   title: string;
   updated_at: string;
 }
@@ -227,7 +228,7 @@ export async function listContentsForSidebar(): Promise<
 > {
   const db = getDbPg();
   const rows = await db<ContentSidebarRecord[]>`
-    select id, talk_id, title, updated_at
+    select id, talk_id, thread_id, title, updated_at
     from public.contents
     order by updated_at desc, id
   `;
