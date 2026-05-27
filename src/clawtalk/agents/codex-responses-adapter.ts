@@ -29,6 +29,7 @@
 
 import { createHash } from 'crypto';
 
+import { logger } from '../../logger.js';
 import type {
   LlmContentBlock,
   LlmMessage,
@@ -290,11 +291,29 @@ function contentBlocksToResponsesParts(
       // `file_data` (no /files upload required, which is critical on
       // the chatgpt.com/backend-api/codex path where /files isn't
       // exposed to subscription credentials). Filename is required.
+      const dataUrl = `data:${block.mimeType};base64,${block.data}`;
       out.push({
         type: 'input_file',
         filename: block.title || 'document.pdf',
-        file_data: `data:${block.mimeType};base64,${block.data}`,
+        file_data: dataUrl,
       });
+      // Diagnostic: confirm input_file emission to Codex Responses.
+      // Joseph reported chat-attachment PDFs don't surface visual
+      // content to the model while Saved Source PDFs do — same shape,
+      // same model. Logging at the adapter boundary so we can confirm
+      // the input_file actually ships and what the wire-shape looks
+      // like. base64Len + first 40 chars of file_data prove the
+      // payload isn't truncated upstream.
+      logger.info(
+        {
+          role,
+          filename: block.title || 'document.pdf',
+          mimeType: block.mimeType,
+          base64Len: block.data.length,
+          fileDataPrefix: dataUrl.slice(0, 40),
+        },
+        'codex-responses: emitting input_file content part',
+      );
     }
   }
   return out;

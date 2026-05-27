@@ -2561,6 +2561,53 @@ export class CleanTalkExecutor implements TalkExecutor {
         contextPackage.contextImageSources,
       );
 
+      // Diagnostic: log the PDF document blocks attached to this user
+      // turn. Joseph reported chat-attachment PDFs on Codex Responses
+      // don't surface visual content to the model while Saved Source
+      // PDFs do — same model, same input_file shape. Logging at the
+      // executor boundary so we can compare the executor-side build
+      // (what we INTEND to send) against the adapter-side emit (what
+      // we ACTUALLY ship over the wire — see codex-responses-adapter
+      // input_file log).
+      if (
+        Array.isArray(directUserMessage) &&
+        directUserMessage.some((block) => block.type === 'document')
+      ) {
+        const docBlocks = directUserMessage.filter(
+          (b): b is Extract<LlmContentBlock, { type: 'document' }> =>
+            b.type === 'document',
+        );
+        const savedSourceTitles = new Set(
+          contextPackage.contextDocumentSources.map((s) => s.title),
+        );
+        logger.info(
+          {
+            talkId: input.talkId,
+            runId: input.runId,
+            providerId: activeAgent.provider_id,
+            modelId: activeAgent.model_id,
+            agentSupportsDocuments,
+            totalDocBlocks: docBlocks.length,
+            savedSourceDocBlocks: docBlocks.filter((b) =>
+              savedSourceTitles.has(b.title ?? ''),
+            ).length,
+            chatAttachmentDocBlocks: docBlocks.filter(
+              (b) => !savedSourceTitles.has(b.title ?? ''),
+            ).length,
+            docBlockSummaries: docBlocks.map((b) => ({
+              title: b.title,
+              mimeType: b.mimeType,
+              base64Len: b.data.length,
+              source: savedSourceTitles.has(b.title ?? '')
+                ? 'saved-source'
+                : 'chat-attachment',
+            })),
+            userBlockSequence: directUserMessage.map((b) => b.type),
+          },
+          'PDF document blocks attached to user turn',
+        );
+      }
+
       // Content edit-intent gate (locked decision #11 noted-risk
       // fallback path — restored after Kimi 2.6 regressed to chat-
       // rewrites on `@doc rewrite paragraph 2` without firing
