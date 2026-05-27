@@ -104,7 +104,12 @@ queue = "clawtalk-talk-runs"
 [[queues.consumers]]
 queue = "clawtalk-talk-runs"
 max_batch_size = 1
-max_batch_timeout = 5
+# T9 baseline (2026-05-27) observed ~5s between POST /chat and queue
+# consumer firing. CF docs claim max_batch_timeout caps the wait for a
+# partial batch, so with max_batch_size=1 it should be a no-op (every
+# batch is already "full"). Dropping to 0 tests whether the docs are
+# accurate or the 5s is actually load-bearing here.
+max_batch_timeout = 0
 max_retries = 3
 dead_letter_queue = "clawtalk-talk-runs-dlq"
 
