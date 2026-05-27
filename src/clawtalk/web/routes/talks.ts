@@ -97,6 +97,7 @@ interface SidebarTalkApiRecord {
 interface ContentSidebarApiRecord {
   id: string;
   talkId: string;
+  threadId: string;
   title: string;
   updatedAt: string;
 }
@@ -732,6 +733,7 @@ export async function listTalkSidebarRoute(input: {
     const contents: ContentSidebarApiRecord[] = tree.contents.map((row) => ({
       id: row.id,
       talkId: row.talk_id,
+      threadId: row.thread_id,
       title: row.title,
       updatedAt: row.updated_at,
     }));

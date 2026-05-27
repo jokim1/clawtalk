@@ -67,6 +67,7 @@ export type TalkSidebarItem = TalkSidebarTalk | TalkSidebarFolder;
 export type ContentSidebarItem = {
   id: string;
   talkId: string;
+  threadId: string;
   title: string;
   updatedAt: string;
 };

@@ -3652,6 +3652,7 @@ describe('TalkDetailPage', () => {
         {
           id: 'content-html',
           talkId: 'talk-1',
+          threadId: DEFAULT_THREAD_ID,
           title: 'My HTML',
           updatedAt: '2026-03-06T00:00:00.000Z',
         },
@@ -3684,6 +3685,7 @@ describe('TalkDetailPage', () => {
         {
           id: 'content-html',
           talkId: 'talk-1',
+          threadId: DEFAULT_THREAD_ID,
           title: 'Mode toggle',
           updatedAt: '2026-03-06T00:00:00.000Z',
         },
@@ -3725,6 +3727,7 @@ describe('TalkDetailPage', () => {
         {
           id: 'content-hide',
           talkId: 'talk-1',
+          threadId: DEFAULT_THREAD_ID,
           title: 'Hide me',
           updatedAt: '2026-03-06T00:00:00.000Z',
         },
@@ -3776,6 +3779,7 @@ describe('TalkDetailPage', () => {
         {
           id: 'content-empty-html',
           talkId: 'talk-1',
+          threadId: DEFAULT_THREAD_ID,
           title: 'Auto-flip',
           updatedAt: '2026-03-06T00:00:00.000Z',
         },
@@ -3834,6 +3838,7 @@ describe('TalkDetailPage', () => {
         {
           id: 'content-md',
           talkId: 'talk-1',
+          threadId: DEFAULT_THREAD_ID,
           title: 'Markdown doc',
           updatedAt: '2026-03-06T00:00:00.000Z',
         },

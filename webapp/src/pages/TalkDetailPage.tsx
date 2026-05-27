@@ -3215,9 +3215,11 @@ export function TalkDetailPage({
     [contextRules],
   );
 
-  const currentTalkHasContent = useMemo(
-    () => sidebarContents.some((c) => c.talkId === talkId),
-    [sidebarContents, talkId],
+  const currentThreadHasContent = useMemo(
+    () =>
+      activeThreadId !== null &&
+      sidebarContents.some((c) => c.threadId === activeThreadId),
+    [activeThreadId, sidebarContents],
   );
 
   const openDocModal = useCallback(() => {
@@ -3599,13 +3601,11 @@ export function TalkDetailPage({
   }, [onUnauthorized, talkId]);
 
   useEffect(() => {
-    if (!talkId || !currentTalkHasContent) return;
+    if (!talkId || !currentThreadHasContent || !activeThreadId) return;
     let cancelled = false;
     setTalkContentLoading(true);
     setTalkContentError(null);
-    const fetchPromise = activeThreadId
-      ? getThreadContent(activeThreadId)
-      : getTalkContent(talkId);
+    const fetchPromise = getThreadContent(activeThreadId);
     fetchPromise
       .then((payload) => {
         if (cancelled) return;
@@ -3628,7 +3628,7 @@ export function TalkDetailPage({
     return () => {
       cancelled = true;
     };
-  }, [activeThreadId, currentTalkHasContent, onUnauthorized, talkId]);
+  }, [activeThreadId, currentThreadHasContent, onUnauthorized, talkId]);
 
   useEffect(() => {
     if (!talkId) return;
@@ -3716,7 +3716,7 @@ export function TalkDetailPage({
       handle.removeEventListener('pointerup', onPointerUp);
       handle.removeEventListener('pointercancel', onPointerUp);
     };
-  }, [applyChatRatio, currentTalkHasContent, talkContent]);
+  }, [applyChatRatio, currentThreadHasContent, talkContent]);
 
   const isNearBottom = useCallback((): boolean => {
     const container = timelineRef.current;
@@ -8558,13 +8558,13 @@ export function TalkDetailPage({
                         ) : null}
                       </div>
                     ) : null}
-                    {!currentTalkHasContent ? (
+                    {!currentThreadHasContent ? (
                       <button
                         type="button"
                         className="talk-tabs-add-doc"
                         onClick={openDocModal}
-                        aria-label="Add a document to this talk"
-                        title="Add a document to this talk"
+                        aria-label="Add a document to this thread"
+                        title="Add a document to this thread"
                       >
                         + Doc
                       </button>

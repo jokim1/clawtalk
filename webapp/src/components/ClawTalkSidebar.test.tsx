@@ -197,7 +197,7 @@ describe('ClawTalkSidebar', () => {
     ).toBeTruthy();
   });
 
-  it('renders Content rows in given order and links to ?doc=1', () => {
+  it('renders Content rows in given order and links to the owning thread with ?doc=1', () => {
     const items: TalkSidebarItem[] = [
       {
         type: 'talk',
@@ -212,12 +212,14 @@ describe('ClawTalkSidebar', () => {
       {
         id: 'content-1',
         talkId: 'talk-with-doc',
+        threadId: 'thread-with-doc',
         title: 'Most recent doc',
         updatedAt: '2026-05-24T10:00:00.000Z',
       },
       {
         id: 'content-2',
         talkId: 'talk-other',
+        threadId: 'thread-other',
         title: 'Older doc',
         updatedAt: '2026-05-20T10:00:00.000Z',
       },
@@ -251,10 +253,12 @@ describe('ClawTalkSidebar', () => {
     const links = docList.querySelectorAll('a');
     expect(links).toHaveLength(2);
     expect(links[0].getAttribute('href')).toBe(
-      '/app/talks/talk-with-doc?doc=1',
+      '/app/talks/talk-with-doc?thread=thread-with-doc&doc=1',
     );
     expect(links[0].textContent).toContain('Most recent doc');
-    expect(links[1].getAttribute('href')).toBe('/app/talks/talk-other?doc=1');
+    expect(links[1].getAttribute('href')).toBe(
+      '/app/talks/talk-other?thread=thread-other&doc=1',
+    );
 
     expect(screen.getByLabelText('Has document')).toBeTruthy();
   });
