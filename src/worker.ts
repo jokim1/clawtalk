@@ -41,10 +41,12 @@ export interface Env {
   ASSETS: { fetch: (request: Request) => Promise<Response> };
   JWKS_CACHE: KVNamespace;
   ATTACHMENTS: R2Bucket;
+  CONTENT_IMAGES: R2Bucket;
   TALK_RUN_QUEUE: Queue;
   USER_EVENT_HUB: UserEventHubNamespace;
   SUPABASE_PROJECT_URL: string;
   DB_EVENT_HUB_URL: string;
+  APP_ORIGIN: string;
 }
 
 // Minimal KVNamespace + Queue types — pulled inline to avoid forcing
