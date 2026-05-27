@@ -52,7 +52,7 @@ begin
   where topic = 'talk:' || p_talk_id::text;
 
   return v_max;
-end
+end;
 $$;
 
 revoke all on function public.get_talk_snapshot_version(uuid) from public;

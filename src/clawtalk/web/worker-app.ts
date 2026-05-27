@@ -1372,7 +1372,7 @@ function buildApp(): Hono<{ Variables: Variables }> {
     if (!rl.allowed) return rateLimitedResponse(c, rl);
     const talkId = decodeIdParam(c, 'talkId');
     if (!talkId.ok) return talkId.response;
-    const threadId = (c.req.query('thread') || '').trim() || undefined;
+    const threadId = (c.req.query('threadId') || '').trim() || undefined;
     const result = await getTalkSnapshotRoute({
       auth,
       talkId: talkId.value,
