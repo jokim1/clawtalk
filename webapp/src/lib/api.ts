@@ -2027,6 +2027,8 @@ export async function setActiveWebSearchProvider(
 // Registered Agents
 // ---------------------------------------------------------------------------
 
+export type RegisteredAgentCredentialMode = 'api_key' | 'subscription';
+
 export type RegisteredAgent = {
   id: string;
   name: string;
@@ -2037,6 +2039,9 @@ export type RegisteredAgent = {
   systemPrompt: string | null;
   description: string | null;
   enabled: boolean;
+  // null = auto (resolver walks precedence). Non-null pins the agent
+  // to a specific credential mode for this provider.
+  credentialMode: RegisteredAgentCredentialMode | null;
   createdAt: string;
   updatedAt: string;
   executionPreview: {
@@ -2091,6 +2096,7 @@ export async function createRegisteredAgent(input: {
   personaRole?: string;
   systemPrompt?: string;
   description?: string;
+  credentialMode?: RegisteredAgentCredentialMode | null;
 }): Promise<RegisteredAgent> {
   return apiMutationRequest<RegisteredAgent>('/api/v1/registered-agents', {
     method: 'POST',
@@ -2109,6 +2115,7 @@ export async function updateRegisteredAgent(input: {
   systemPrompt?: string | null;
   description?: string | null;
   enabled?: boolean;
+  credentialMode?: RegisteredAgentCredentialMode | null;
 }): Promise<RegisteredAgent> {
   const { agentId, ...body } = input;
   return apiMutationRequest<RegisteredAgent>(

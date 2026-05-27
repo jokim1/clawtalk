@@ -8,6 +8,7 @@ import {
   deleteRegisteredAgent,
   type ExecutorSettings,
   type RegisteredAgent,
+  type RegisteredAgentCredentialMode,
   type AgentProviderCard,
   UnauthorizedError,
 } from '../lib/api';
@@ -34,7 +35,108 @@ type AgentDraft = {
   systemPrompt: string;
   toolPermissions: Record<string, boolean>;
   enabled: boolean;
+  // null = auto (resolver walks personal/workspace × api_key/sub
+  // precedence). Non-null pins the agent to one mode.
+  credentialMode: RegisteredAgentCredentialMode | null;
 };
+
+// Build the dropdown's selectable options for a provider. Returns one
+// entry per credential mode that the provider has a credential
+// configured for (personal OR workspace counts). Providers with no
+// credential render a single "(no credential)" entry tied to null so
+// the form still has a non-empty value.
+type ProviderOption = {
+  value: string;
+  label: string;
+  providerId: string;
+  credentialMode: RegisteredAgentCredentialMode | null;
+  disabled: boolean;
+};
+
+function providerOptionValue(
+  providerId: string,
+  credentialMode: RegisteredAgentCredentialMode | null,
+): string {
+  return `${providerId}::${credentialMode ?? 'auto'}`;
+}
+
+function buildProviderOptions(
+  providers: AgentProviderCard[],
+): ProviderOption[] {
+  const options: ProviderOption[] = [];
+  for (const provider of providers) {
+    const hasApiKey = provider.hasCredential || provider.workspaceHasCredential;
+    const hasSubscription =
+      provider.hasPersonalSubscription || provider.hasWorkspaceSubscription;
+    const disabled = !provider.enabled;
+    if (hasApiKey && hasSubscription) {
+      options.push({
+        value: providerOptionValue(provider.id, 'api_key'),
+        label: `${provider.name} — API key${disabled ? ' (disabled)' : ''}`,
+        providerId: provider.id,
+        credentialMode: 'api_key',
+        disabled,
+      });
+      options.push({
+        value: providerOptionValue(provider.id, 'subscription'),
+        label: `${provider.name} — Subscription${disabled ? ' (disabled)' : ''}`,
+        providerId: provider.id,
+        credentialMode: 'subscription',
+        disabled,
+      });
+      continue;
+    }
+    if (hasApiKey) {
+      options.push({
+        value: providerOptionValue(provider.id, null),
+        label: `${provider.name}${disabled ? ' (disabled)' : ''}`,
+        providerId: provider.id,
+        credentialMode: null,
+        disabled,
+      });
+      continue;
+    }
+    if (hasSubscription) {
+      options.push({
+        value: providerOptionValue(provider.id, null),
+        label: `${provider.name} (Subscription)${disabled ? ' (disabled)' : ''}`,
+        providerId: provider.id,
+        credentialMode: null,
+        disabled,
+      });
+      continue;
+    }
+    options.push({
+      value: providerOptionValue(provider.id, null),
+      label: `${provider.name} (no credential)`,
+      providerId: provider.id,
+      credentialMode: null,
+      disabled,
+    });
+  }
+  return options;
+}
+
+function findProviderOption(
+  options: ProviderOption[],
+  providerId: string,
+  credentialMode: RegisteredAgentCredentialMode | null,
+): ProviderOption | undefined {
+  return (
+    options.find(
+      (o) =>
+        o.providerId === providerId && o.credentialMode === credentialMode,
+    ) ?? options.find((o) => o.providerId === providerId)
+  );
+}
+
+function credentialModeBadgeLabel(
+  mode: RegisteredAgentCredentialMode | null,
+): string | null {
+  if (mode === 'api_key') return 'API key';
+  if (mode === 'subscription') return 'Subscription';
+  return null;
+}
 
 function buildDefaultRegisteredAgentToolPermissions(): Record<string, boolean> {
   // Keep in sync with the backend default in agent-accessors.ts.
@@ -287,8 +389,14 @@ export function RegisteredAgentsPanel(props: Props): JSX.Element {
 
   function startCreate() {
     setIsCreating(true);
+    const options = buildProviderOptions(providers);
     const defaultProviderId =
       readyProviders()[0]?.id || availableProviders()[0]?.id || '';
+    const defaultOption = findProviderOption(
+      options,
+      defaultProviderId,
+      null,
+    );
     const defaultModelId =
       getProviderModels(defaultProviderId)[0]?.modelId || '';
     setCreateDraft({
@@ -301,6 +409,7 @@ export function RegisteredAgentsPanel(props: Props): JSX.Element {
       systemPrompt: '',
       toolPermissions: buildDefaultRegisteredAgentToolPermissions(),
       enabled: true,
+      credentialMode: defaultOption?.credentialMode ?? null,
     });
   }
 
@@ -325,6 +434,7 @@ export function RegisteredAgentsPanel(props: Props): JSX.Element {
         description: createDraft.description || undefined,
         systemPrompt: createDraft.systemPrompt || undefined,
         toolPermissionsJson: JSON.stringify(createDraft.toolPermissions),
+        credentialMode: createDraft.credentialMode,
       };
       const newAgent = await createRegisteredAgent(input);
       const nextAgents = [...agents, newAgent];
@@ -355,6 +465,7 @@ export function RegisteredAgentsPanel(props: Props): JSX.Element {
       systemPrompt: agent.systemPrompt || '',
       toolPermissions: { ...agent.toolPermissions },
       enabled: agent.enabled,
+      credentialMode: agent.credentialMode,
     });
   }
 
@@ -381,6 +492,7 @@ export function RegisteredAgentsPanel(props: Props): JSX.Element {
         systemPrompt: editDraft.systemPrompt || null,
         toolPermissionsJson: JSON.stringify(editDraft.toolPermissions),
         enabled: editDraft.enabled,
+        credentialMode: editDraft.credentialMode,
       };
       const updated = await updateRegisteredAgent(input);
       const nextAgents = agents.map((a) =>
@@ -544,6 +656,7 @@ function AgentForm({
   const isNonClaudeProvider =
     selectedProvider?.id !== 'provider.anthropic' && heavyToolsEnabled;
   const saveDisabled = !canManage || executionPreview?.ready === false;
+  const providerOptions = buildProviderOptions(providers);
 
   return (
     <div className="agent-editor-card">
@@ -561,41 +674,26 @@ function AgentForm({
       <label className="agent-form-field">
         <span>Provider</span>
         <select
-          value={draft.providerId}
+          value={providerOptionValue(draft.providerId, draft.credentialMode)}
           onChange={(e) => {
-            const newProviderId = e.target.value;
+            const next = providerOptions.find((o) => o.value === e.target.value);
+            if (!next) return;
             const newModelId =
-              getProviderModels(newProviderId)[0]?.modelId || '';
+              getProviderModels(next.providerId)[0]?.modelId || '';
             setDraft({
               ...draft,
-              providerId: newProviderId,
+              providerId: next.providerId,
               modelId: newModelId,
+              credentialMode: next.credentialMode,
             });
           }}
           disabled={!canManage}
         >
-          {providers.map((p) => {
-            // A credential is anything the execution-resolver will
-            // accept: personal/workspace api_key OR personal/workspace
-            // OAuth subscription. ChatGPT Codex is subscription-only,
-            // so checking hasCredential alone would always mark it as
-            // missing — see execution-resolver.ts:resolveSecret.
-            const providerHasUsableCredential =
-              p.hasCredential ||
-              p.workspaceHasCredential ||
-              p.hasPersonalSubscription ||
-              p.hasWorkspaceSubscription;
-            return (
-              <option key={p.id} value={p.id}>
-                {p.name}
-                {!providerHasUsableCredential
-                  ? ' (no credential)'
-                  : !p.enabled
-                    ? ' (disabled)'
-                    : ''}
-              </option>
-            );
-          })}
+          {providerOptions.map((o) => (
+            <option key={o.value} value={o.value}>
+              {o.label}
+            </option>
+          ))}
         </select>
       </label>
 
@@ -757,6 +855,7 @@ function AgentCardView({
     .filter(([, enabled]) => enabled)
     .map(([toolName]) => TOOL_NAMES[toolName] || toolName);
 
+  const credentialModeBadge = credentialModeBadgeLabel(agent.credentialMode);
   return (
     <>
       <div className="registered-agent-card-content">
@@ -765,6 +864,11 @@ function AgentCardView({
             <h4>{agent.name}</h4>
             <div className="registered-agent-card-meta">
               <span className="registered-agent-provider">{providerName}</span>
+              {credentialModeBadge && (
+                <span className="registered-agent-role">
+                  {credentialModeBadge}
+                </span>
+              )}
               {agent.personaRole && (
                 <span className="registered-agent-role">
                   {agent.personaRole}

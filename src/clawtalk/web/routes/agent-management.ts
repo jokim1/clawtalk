@@ -6,6 +6,7 @@ import {
   listRegisteredAgents,
   toAgentSnapshot,
   updateRegisteredAgent,
+  type RegisteredAgentCredentialMode,
   type RegisteredAgentRecord,
   type RegisteredAgentSnapshot,
 } from '../../db/agent-accessors.js';
@@ -145,6 +146,26 @@ function readStringField(
   return undefined;
 }
 
+/**
+ * Parse credentialMode out of the request body. Returns the literal
+ * 'api_key' / 'subscription' values, `null` to clear the pin (i.e.
+ * fall back to the resolver's auto precedence), or undefined when the
+ * key is absent (leave the column unchanged on update). Throws a
+ * sentinel error for invalid values so the caller can map to a 400.
+ */
+class InvalidCredentialModeError extends Error {}
+function readCredentialModeField(
+  body: Record<string, unknown> | null,
+): RegisteredAgentCredentialMode | null | undefined {
+  if (!body || !('credentialMode' in body)) return undefined;
+  const value = body.credentialMode;
+  if (value === null) return null;
+  if (value === 'api_key' || value === 'subscription') return value;
+  throw new InvalidCredentialModeError(
+    "credentialMode must be 'api_key', 'subscription', or null.",
+  );
+}
+
 // ---------------------------------------------------------------------------
 // List / get
 // ---------------------------------------------------------------------------
@@ -229,6 +250,16 @@ export async function createAgentRoute(
     typeof body?.systemPrompt === 'string' ? body.systemPrompt : undefined;
   const description =
     typeof body?.description === 'string' ? body.description : undefined;
+  let credentialMode: RegisteredAgentCredentialMode | null | undefined;
+  try {
+    credentialMode = readCredentialModeField(body);
+  } catch (err) {
+    return envelopeError(
+      400,
+      'invalid_input',
+      err instanceof Error ? err.message : 'Invalid credentialMode.',
+    );
+  }
 
   return withUserContext(auth.userId, async () => {
     try {
@@ -241,6 +272,7 @@ export async function createAgentRoute(
         personaRole,
         systemPrompt,
         description,
+        credentialMode,
       });
       return envelopeOk(await toApiSnapshot(record));
     } catch (err) {
@@ -294,6 +326,16 @@ export async function updateAgentRoute(
   const description = readStringField(body, 'description');
   if (description !== undefined) updates.description = description;
   if (typeof body?.enabled === 'boolean') updates.enabled = body.enabled;
+  try {
+    const credentialMode = readCredentialModeField(body);
+    if (credentialMode !== undefined) updates.credentialMode = credentialMode;
+  } catch (err) {
+    return envelopeError(
+      400,
+      'invalid_input',
+      err instanceof Error ? err.message : 'Invalid credentialMode.',
+    );
+  }
 
   return withUserContext(auth.userId, async () => {
     if (!(await getRegisteredAgent(agentId))) {

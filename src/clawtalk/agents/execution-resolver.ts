@@ -31,7 +31,10 @@
  */
 
 import { getDbPg, type Sql } from '../../db.js';
-import type { RegisteredAgentRecord } from '../db/agent-accessors.js';
+import type {
+  RegisteredAgentCredentialMode,
+  RegisteredAgentRecord,
+} from '../db/agent-accessors.js';
 import {
   decryptProviderSecret,
   encryptProviderSecret,
@@ -105,9 +108,15 @@ export class ExecutionResolverError extends Error {
  *
  * Returns a ready-to-use ExecutionBinding or throws an
  * ExecutionResolverError with a machine-readable code.
+ *
+ * `credentialKindSnapshot` is the run-snapshot persisted on
+ * `talk_runs.credential_kind_snapshot` at enqueue time. When present
+ * it overrides the agent's live `credential_mode`, so editing the
+ * agent's pin while a run is queued can't flip auth mid-flight.
  */
 export async function resolveExecution(
   agent: RegisteredAgentRecord,
+  options?: { credentialKindSnapshot?: RegisteredAgentCredentialMode | null },
 ): Promise<ExecutionBinding> {
   const db: Sql = getDbPg();
 
@@ -130,7 +139,9 @@ export async function resolveExecution(
   }
 
   // --- Step 2: Resolve credentials ---
-  const secret = await resolveSecret(agent, db);
+  const pinnedMode =
+    options?.credentialKindSnapshot ?? agent.credential_mode ?? null;
+  const secret = await resolveSecret(agent, db, pinnedMode);
 
   // --- Step 3: Build provider config ---
   // For provider.anthropic, honour the ANTHROPIC_BASE_URL env var override
@@ -206,20 +217,27 @@ export async function isAnthropicDirectHttpReady(): Promise<boolean> {
  *
  * 1. Try llm_provider_secrets (works for all providers).
  * 2. For provider.anthropic only: fall back to ANTHROPIC_API_KEY env var.
- *    OAuth/auth tokens are NOT used — they are incompatible with the
- *    x-api-key auth scheme required by api.anthropic.com.
  * 3. If nothing found, throw a clear error.
+ *
+ * `pinnedMode` (from `talk_runs.credential_kind_snapshot` OR live
+ * `agent.credential_mode`) restricts the precedence walk to that kind.
+ * Null/undefined preserves the legacy multi-kind walk.
  */
 async function resolveSecret(
   agent: RegisteredAgentRecord,
   db: Sql,
+  pinnedMode: RegisteredAgentCredentialMode | null,
 ): Promise<LlmSecret> {
-  // Order precedence:
+  // Order precedence (when no pinned mode):
   //   1. Personal api_key
   //   2. Personal subscription (OAuth)
   //   3. Workspace api_key
   //   4. Workspace subscription (OAuth)
-  //   5. Env var (Anthropic only)
+  //   5. Env var (Anthropic only, api_key kind)
+  //
+  // When pinnedMode is set, both queries below filter by
+  // credential_kind so only that mode is considered. Env-var fallback
+  // is skipped for the 'subscription' pin (env-var is api_key only).
   //
   // Per-user RLS scopes the personal queries to auth.uid() automatically.
   const personalRows = await db<LlmProviderSecretRow[]>`
@@ -227,6 +245,8 @@ async function resolveSecret(
            expires_at::text as expires_at
     from public.llm_provider_secrets
     where provider_id = ${agent.provider_id}
+      and (${pinnedMode}::text is null
+           or credential_kind = ${pinnedMode}::text)
     order by case credential_kind
       when 'api_key' then 0
       when 'subscription' then 1
@@ -248,6 +268,8 @@ async function resolveSecret(
            expires_at::text as expires_at
     from public.workspace_provider_secrets
     where provider_id = ${agent.provider_id}
+      and (${pinnedMode}::text is null
+           or credential_kind = ${pinnedMode}::text)
     order by case credential_kind
       when 'api_key' then 0
       when 'subscription' then 1
@@ -264,15 +286,28 @@ async function resolveSecret(
     if (secret) return secret;
   }
 
-  // For provider.anthropic: fall back to the API key env var ONLY.
+  // For provider.anthropic: fall back to the API key env var. Skip when
+  // the agent is pinned to 'subscription' — env-var is api_key only.
   if (
     agent.provider_id === 'provider.anthropic' &&
+    pinnedMode !== 'subscription' &&
     TALK_EXECUTOR_ANTHROPIC_API_KEY
   ) {
     return {
       apiKey: TALK_EXECUTOR_ANTHROPIC_API_KEY,
       credentialKind: 'api_key',
     };
+  }
+
+  if (pinnedMode) {
+    const modeLabel =
+      pinnedMode === 'api_key' ? 'API key' : 'subscription (OAuth)';
+    throw new ExecutionResolverError(
+      `Agent is pinned to ${modeLabel} for ${agent.provider_id} but no ` +
+        `matching credential is configured. Add one in Settings → API ` +
+        `Keys, or edit the agent to use a different credential mode.`,
+      'PINNED_CREDENTIAL_MISSING',
+    );
   }
 
   if (agent.provider_id === 'provider.anthropic') {
@@ -287,6 +322,64 @@ async function resolveSecret(
     `No API credentials found for provider ${agent.provider_id}`,
     'PROVIDER_SECRET_MISSING',
   );
+}
+
+/**
+ * Compute what credential kind the resolver WOULD pick for the agent
+ * RIGHT NOW, without decrypting the secret. Used by the enqueue path
+ * to persist `talk_runs.credential_kind_snapshot` so in-flight runs
+ * stay stable across post-enqueue credential_mode edits.
+ *
+ * Returns null when no credential is configured — the resolver call at
+ * execution time will surface the missing-credential error.
+ */
+export async function resolveCredentialKindSnapshot(
+  agent: RegisteredAgentRecord,
+): Promise<RegisteredAgentCredentialMode | null> {
+  const db: Sql = getDbPg();
+  const pinnedMode = agent.credential_mode ?? null;
+
+  const personalRow = await db<Array<{ credential_kind: string }>>`
+    select credential_kind
+    from public.llm_provider_secrets
+    where provider_id = ${agent.provider_id}
+      and (${pinnedMode}::text is null
+           or credential_kind = ${pinnedMode}::text)
+    order by case credential_kind
+      when 'api_key' then 0
+      when 'subscription' then 1
+    end asc
+    limit 1
+  `;
+  if (personalRow[0]) {
+    return personalRow[0].credential_kind as RegisteredAgentCredentialMode;
+  }
+
+  const workspaceRow = await db<Array<{ credential_kind: string }>>`
+    select credential_kind
+    from public.workspace_provider_secrets
+    where provider_id = ${agent.provider_id}
+      and (${pinnedMode}::text is null
+           or credential_kind = ${pinnedMode}::text)
+    order by case credential_kind
+      when 'api_key' then 0
+      when 'subscription' then 1
+    end asc
+    limit 1
+  `;
+  if (workspaceRow[0]) {
+    return workspaceRow[0].credential_kind as RegisteredAgentCredentialMode;
+  }
+
+  if (
+    agent.provider_id === 'provider.anthropic' &&
+    pinnedMode !== 'subscription' &&
+    TALK_EXECUTOR_ANTHROPIC_API_KEY
+  ) {
+    return 'api_key';
+  }
+
+  return null;
 }
 
 async function tryUseSecretRow(input: {
