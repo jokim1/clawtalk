@@ -20,6 +20,7 @@
 // → retry (up to wrangler.toml's max_retries=3 then DLQ); return →
 // ack.
 
+import type { ExecutionContext } from 'hono';
 import { type RequestExecutionContext, withRequestScopedDb } from './db.js';
 import { logger } from './logger.js';
 import { getWorkerApp } from './clawtalk/web/worker-app.js';
@@ -137,7 +138,7 @@ export default {
   async fetch(
     request: Request,
     env: Env,
-    ctx: RequestExecutionContext,
+    ctx: ExecutionContext,
   ): Promise<Response> {
     const url = new URL(request.url);
 
@@ -155,7 +156,7 @@ export default {
           TALK_RUN_QUEUE: env.TALK_RUN_QUEUE,
           ATTACHMENTS: env.ATTACHMENTS,
         },
-        async () => getWorkerApp().fetch(request, env),
+        async () => getWorkerApp().fetch(request, env, ctx),
       );
     } catch (err) {
       console.error(
