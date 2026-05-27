@@ -3854,6 +3854,67 @@ describe('TalkDetailPage', () => {
       screen.queryByRole('tab', { name: /preview/i }),
     ).not.toBeInTheDocument();
   });
+
+  it('clears the doc pane when switching from a thread that has a doc to a sibling that does not', async () => {
+    const user = userEvent.setup();
+    const NO_DOC_THREAD_ID = 'thread-no-doc';
+    installTalkDetailFetch({
+      threads: [
+        buildThread({
+          id: DEFAULT_THREAD_ID,
+          title: 'Default thread',
+          isDefault: true,
+          lastMessageAt: '2026-03-06T00:00:00.000Z',
+        }),
+        buildThread({
+          id: NO_DOC_THREAD_ID,
+          title: 'Sibling thread',
+          lastMessageAt: '2026-03-06T01:00:00.000Z',
+        }),
+      ],
+      contentByThreadId: {
+        [DEFAULT_THREAD_ID]: buildContent({
+          id: 'content-md',
+          threadId: DEFAULT_THREAD_ID,
+          title: 'Default doc',
+          contentFormat: 'markdown',
+          bodyMarkdown: '# Default doc body',
+        }),
+      },
+    });
+    renderDetailPage(
+      `/app/talks/talk-1/talk?thread=${DEFAULT_THREAD_ID}&doc=1`,
+      {
+        sidebarContents: [
+          {
+            id: 'content-md',
+            talkId: 'talk-1',
+            threadId: DEFAULT_THREAD_ID,
+            title: 'Default doc',
+            updatedAt: '2026-03-06T00:00:00.000Z',
+          },
+        ],
+      },
+    );
+
+    // Doc loads on the default thread.
+    const doc = await screen.findByLabelText('Talk document');
+    expect(doc).toBeInTheDocument();
+
+    // Click the sibling thread (no doc).
+    const siblingButton = await screen.findByRole('button', {
+      name: /sibling thread/i,
+    });
+    await user.click(siblingButton);
+
+    // The doc pane should unmount because the new thread has no doc row
+    // in the sidebar.
+    await waitFor(() =>
+      expect(
+        screen.queryByLabelText('Talk document'),
+      ).not.toBeInTheDocument(),
+    );
+  });
 });
 
 function renderDetailPage(
