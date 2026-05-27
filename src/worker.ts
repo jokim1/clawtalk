@@ -86,9 +86,11 @@ interface R2Object {
   key: string;
   size: number;
   httpMetadata?: { contentType?: string };
+  httpEtag: string;
 }
 interface R2ObjectBody extends R2Object {
   arrayBuffer(): Promise<ArrayBuffer>;
+  body: ReadableStream<Uint8Array>;
 }
 
 interface UserEventHubNamespace {
