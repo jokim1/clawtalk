@@ -133,6 +133,8 @@ export function applyToolDependencies(
 // Record + snapshot types
 // ---------------------------------------------------------------------------
 
+export type RegisteredAgentCredentialMode = 'api_key' | 'subscription';
+
 export interface RegisteredAgentRecord {
   id: string;
   owner_id: string;
@@ -144,6 +146,10 @@ export interface RegisteredAgentRecord {
   system_prompt: string | null;
   description: string | null;
   enabled: boolean;
+  // NULL = auto (resolver walks personal/workspace × api_key/subscription
+  // precedence). Non-null pins the agent to a specific credential kind.
+  // See execution-resolver.ts:resolveSecret.
+  credential_mode: RegisteredAgentCredentialMode | null;
   created_at: string;
   updated_at: string;
 }
@@ -174,6 +180,7 @@ export interface RegisteredAgentSnapshot {
   systemPrompt: string | null;
   description: string | null;
   enabled: boolean;
+  credentialMode: RegisteredAgentCredentialMode | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -203,6 +210,7 @@ export function toAgentSnapshot(
     systemPrompt: record.system_prompt,
     description: record.description,
     enabled: record.enabled,
+    credentialMode: record.credential_mode,
     createdAt: record.created_at,
     updatedAt: record.updated_at,
   };
@@ -236,7 +244,7 @@ export async function getRegisteredAgent(
   const rows = await db<RegisteredAgentRecord[]>`
     select id, owner_id, name, provider_id, model_id,
            tool_permissions_json, persona_role, system_prompt,
-           description, enabled, created_at, updated_at
+           description, enabled, credential_mode, created_at, updated_at
     from public.registered_agents
     where id = ${agentId}::uuid
     limit 1
@@ -256,7 +264,7 @@ export async function listRegisteredAgents(): Promise<RegisteredAgentRecord[]> {
   return await db<RegisteredAgentRecord[]>`
     select id, owner_id, name, provider_id, model_id,
            tool_permissions_json, persona_role, system_prompt,
-           description, enabled, created_at, updated_at
+           description, enabled, credential_mode, created_at, updated_at
     from public.registered_agents
     order by created_at asc
   `;
@@ -267,7 +275,7 @@ export async function listEnabledAgents(): Promise<RegisteredAgentRecord[]> {
   return await db<RegisteredAgentRecord[]>`
     select id, owner_id, name, provider_id, model_id,
            tool_permissions_json, persona_role, system_prompt,
-           description, enabled, created_at, updated_at
+           description, enabled, credential_mode, created_at, updated_at
     from public.registered_agents
     where enabled = true
     order by created_at asc
@@ -283,6 +291,7 @@ export async function createRegisteredAgent(params: {
   personaRole?: string | null;
   systemPrompt?: string | null;
   description?: string | null;
+  credentialMode?: RegisteredAgentCredentialMode | null;
 }): Promise<RegisteredAgentRecord> {
   const toolPermissions =
     params.toolPermissions ?? buildDefaultTalkToolPermissions();
@@ -296,15 +305,16 @@ export async function createRegisteredAgent(params: {
   const rows = await db<RegisteredAgentRecord[]>`
     insert into public.registered_agents
       (owner_id, name, provider_id, model_id, tool_permissions_json,
-       persona_role, system_prompt, description, enabled)
+       persona_role, system_prompt, description, enabled, credential_mode)
     values
       (${params.ownerId}::uuid, ${params.name}, ${params.providerId},
        ${params.modelId}, ${db.json(normalized as never)},
        ${params.personaRole ?? null}, ${params.systemPrompt ?? null},
-       ${params.description ?? null}, true)
+       ${params.description ?? null}, true,
+       ${params.credentialMode ?? null})
     returning id, owner_id, name, provider_id, model_id,
               tool_permissions_json, persona_role, system_prompt,
-              description, enabled, created_at, updated_at
+              description, enabled, credential_mode, created_at, updated_at
   `;
   if (!rows[0]) {
     throw new Error('Failed to create agent');
@@ -323,6 +333,7 @@ export async function updateRegisteredAgent(
     systemPrompt: string | null;
     description: string | null;
     enabled: boolean;
+    credentialMode: RegisteredAgentCredentialMode | null;
   }>,
 ): Promise<RegisteredAgentRecord | undefined> {
   let normalizedToolPermissions: Record<string, boolean> | undefined;
@@ -361,11 +372,13 @@ export async function updateRegisteredAgent(
       description = case when ${updates.description !== undefined}::boolean
         then ${updates.description ?? null} else description end,
       enabled = coalesce(${updates.enabled ?? null}, enabled),
+      credential_mode = case when ${updates.credentialMode !== undefined}::boolean
+        then ${updates.credentialMode ?? null} else credential_mode end,
       updated_at = now()
     where id = ${agentId}::uuid
     returning id, owner_id, name, provider_id, model_id,
               tool_permissions_json, persona_role, system_prompt,
-              description, enabled, created_at, updated_at
+              description, enabled, credential_mode, created_at, updated_at
   `;
   return rows[0];
 }

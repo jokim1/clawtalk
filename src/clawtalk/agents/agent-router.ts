@@ -263,6 +263,15 @@ export async function executeWithAgent(
      * direct-edit redesign promised in its rollout plan.
      */
     forceToolUseOnFirstIteration?: boolean;
+    /**
+     * Snapshot of the credential kind the resolver should pick for
+     * THIS run (populated from `talk_runs.credential_kind_snapshot`
+     * at enqueue time — migration 0032 / PR B). Overrides the live
+     * `agent.credential_mode` so editing the agent's pin while a run
+     * is queued can't flip auth mid-flight. Null/undefined falls back
+     * to the live agent value.
+     */
+    credentialKindSnapshot?: 'api_key' | 'subscription' | null;
   },
 ): Promise<AgentExecutionResult> {
   const emit = options.emit || (() => {});
@@ -297,7 +306,9 @@ export async function executeWithAgent(
   let defaultMaxOutputTokens: number | undefined;
 
   try {
-    const binding = await resolveExecution(agent);
+    const binding = await resolveExecution(agent, {
+      credentialKindSnapshot: options.credentialKindSnapshot,
+    });
     providerConfig = binding.providerConfig;
     secret = binding.secret;
     defaultMaxOutputTokens = binding.defaultMaxOutputTokens;

@@ -464,6 +464,7 @@ function buildRegisteredAgents(): RegisteredAgent[] {
       systemPrompt: null,
       description: null,
       enabled: true,
+      credentialMode: null,
       createdAt: '2026-03-06T00:00:00.000Z',
       updatedAt: '2026-03-06T00:00:00.000Z',
       executionPreview: {

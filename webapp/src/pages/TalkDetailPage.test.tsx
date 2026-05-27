@@ -4145,6 +4145,7 @@ function buildRegisteredAgent(
     systemPrompt: input.systemPrompt ?? null,
     description: input.description ?? null,
     enabled: input.enabled ?? true,
+    credentialMode: input.credentialMode ?? null,
     createdAt: input.createdAt ?? '2026-03-06T00:00:00.000Z',
     updatedAt: input.updatedAt ?? '2026-03-06T00:00:00.000Z',
     executionPreview: input.executionPreview ?? {

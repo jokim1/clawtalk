@@ -22,6 +22,8 @@ import {
   createTalkThread,
 } from './accessors.js';
 import { getDbPg } from '../../db.js';
+import { resolveCredentialKindSnapshot } from '../agents/execution-resolver.js';
+import { getRegisteredAgent } from './agent-accessors.js';
 import { emitOutboxEvent } from '../talks/outbox-emit.js';
 
 export type TalkJobStatus = 'active' | 'paused' | 'blocked';
@@ -960,6 +962,15 @@ export async function createJobTriggerRun(input: {
   const activeToolFamiliesSnapshot =
     activeToolFamiliesRows[0]?.active_tool_families_json ?? {};
 
+  // Credential-kind snapshot (migration 0032 / PR B). See accessors.ts
+  // enqueueTalkTurnAtomic comment for rationale.
+  const agentRecord = job.targetAgentId
+    ? await getRegisteredAgent(job.targetAgentId)
+    : undefined;
+  const credentialKindSnapshot = agentRecord
+    ? await resolveCredentialKindSnapshot(agentRecord)
+    : null;
+
   const run = await createTalkRun({
     ownerId: input.ownerId,
     talkId: job.talkId,
@@ -970,6 +981,7 @@ export async function createJobTriggerRun(input: {
     jobId: job.id,
     targetAgentId: job.targetAgentId,
     activeToolFamiliesSnapshot,
+    credentialKindSnapshot,
   });
 
   await touchTalkUpdatedAtForJob(job.talkId, currentNow);

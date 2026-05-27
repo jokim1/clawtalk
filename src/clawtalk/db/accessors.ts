@@ -28,7 +28,9 @@
 import { randomUUID } from 'node:crypto';
 
 import { getCurrentUserId, getDbPg, getOutOfBandSql } from '../../db.js';
+import { resolveCredentialKindSnapshot } from '../agents/execution-resolver.js';
 import { emitOutboxEvent } from '../talks/outbox-emit.js';
+import { getRegisteredAgent } from './agent-accessors.js';
 import {
   listContentsForSidebar,
   type ContentSidebarRecord,
@@ -1416,6 +1418,10 @@ export interface TalkRunRecord {
   // Null on rows created before migration 0031 — consumers fall back to
   // a live read in that case.
   active_tool_families_snapshot: Record<string, boolean> | null;
+  // Snapshot of the credential kind the resolver picked at enqueue
+  // time. Null on rows created before migration 0032; the executor
+  // falls back to live agent.credential_mode resolution when null.
+  credential_kind_snapshot: 'api_key' | 'subscription' | null;
 }
 
 const TALK_RUN_COLUMNS = `id, talk_id, owner_id, thread_id, requested_by,
@@ -1424,7 +1430,7 @@ const TALK_RUN_COLUMNS = `id, talk_id, owner_id, thread_id, requested_by,
   executor_alias, executor_model, source_binding_id,
   source_external_message_id, source_thread_key, task_type, selected_mode,
   transport, timeout_phase, created_at, started_at, ended_at, cancel_reason,
-  metadata_json, active_tool_families_snapshot`;
+  metadata_json, active_tool_families_snapshot, credential_kind_snapshot`;
 
 export async function createTalkRun(input: {
   ownerId: string;
@@ -1455,12 +1461,19 @@ export async function createTalkRun(input: {
   // at run-creation time. Pre-toggle-feature callers leave this
   // undefined; the consumer falls back to a live read.
   activeToolFamiliesSnapshot?: Record<string, boolean> | null;
+  // Snapshot of the credential kind the caller's resolver picked at
+  // enqueue time (see resolveCredentialKindSnapshot in
+  // execution-resolver.ts). Stable across post-enqueue credential_mode
+  // edits. Pre-PR-B callers leave this undefined; the executor falls
+  // back to live agent.credential_mode resolution.
+  credentialKindSnapshot?: 'api_key' | 'subscription' | null;
 }): Promise<TalkRunRecord> {
   const db = getDbPg();
   const metadata = input.metadata ? db.json(input.metadata as never) : null;
   const snapshot = input.activeToolFamiliesSnapshot
     ? db.json(input.activeToolFamiliesSnapshot as never)
     : null;
+  const credentialKindSnapshot = input.credentialKindSnapshot ?? null;
   const rows = input.id
     ? await db<TalkRunRecord[]>`
         insert into public.talk_runs
@@ -1470,7 +1483,7 @@ export async function createTalkRun(input: {
            executor_alias, executor_model, source_binding_id,
            source_external_message_id, source_thread_key, task_type,
            selected_mode, transport, timeout_phase, metadata_json,
-           active_tool_families_snapshot)
+           active_tool_families_snapshot, credential_kind_snapshot)
         values
           (${input.id}::uuid, ${input.talkId}::uuid, ${input.ownerId}::uuid,
            ${input.threadId}::uuid, ${input.requestedBy}::uuid,
@@ -1493,7 +1506,8 @@ export async function createTalkRun(input: {
            ${input.transport ?? null},
            ${input.timeoutPhase ?? null},
            ${metadata},
-           ${snapshot})
+           ${snapshot},
+           ${credentialKindSnapshot})
         returning ${db.unsafe(TALK_RUN_COLUMNS)}
       `
     : await db<TalkRunRecord[]>`
@@ -1504,7 +1518,7 @@ export async function createTalkRun(input: {
            executor_alias, executor_model, source_binding_id,
            source_external_message_id, source_thread_key, task_type,
            selected_mode, transport, timeout_phase, metadata_json,
-           active_tool_families_snapshot)
+           active_tool_families_snapshot, credential_kind_snapshot)
         values
           (${input.talkId}::uuid, ${input.ownerId}::uuid,
            ${input.threadId}::uuid, ${input.requestedBy}::uuid,
@@ -1527,7 +1541,8 @@ export async function createTalkRun(input: {
            ${input.transport ?? null},
            ${input.timeoutPhase ?? null},
            ${metadata},
-           ${snapshot})
+           ${snapshot},
+           ${credentialKindSnapshot})
         returning ${db.unsafe(TALK_RUN_COLUMNS)}
       `;
   return rows[0];
@@ -2301,9 +2316,20 @@ export async function enqueueTalkTurnAtomic(input: {
   const activeToolFamiliesSnapshot =
     activeToolFamiliesRows[0]?.active_tool_families_json ?? {};
 
-  // Fan out one queued run per target agent.
+  // Fan out one queued run per target agent. Each run snapshots the
+  // credential kind the resolver would pick RIGHT NOW (migration 0032 /
+  // PR B). The executor reads from the snapshot, so editing the
+  // agent's `credential_mode` between enqueue and execution can't flip
+  // auth mid-run. Returns null when no credential is configured — the
+  // executor's resolver call will surface that as the missing-credential
+  // error at run start.
   const runs: TalkRunRecord[] = [];
   for (let i = 0; i < input.targetAgentIds.length; i++) {
+    const agentId = input.targetAgentIds[i];
+    const agentRecord = await getRegisteredAgent(agentId);
+    const credentialKindSnapshot = agentRecord
+      ? await resolveCredentialKindSnapshot(agentRecord)
+      : null;
     const run = await createTalkRun({
       ownerId: input.ownerId,
       id: input.runIds?.[i],
@@ -2312,11 +2338,12 @@ export async function enqueueTalkTurnAtomic(input: {
       requestedBy: input.userId,
       status: 'queued',
       triggerMessageId: message.id,
-      targetAgentId: input.targetAgentIds[i],
+      targetAgentId: agentId,
       idempotencyKey: i === 0 ? (input.idempotencyKey ?? null) : null,
       responseGroupId,
       sequenceIndex: sequenceIndexes[i],
       activeToolFamiliesSnapshot,
+      credentialKindSnapshot,
     });
     runs.push(run);
   }

@@ -2681,6 +2681,7 @@ export class CleanTalkExecutor implements TalkExecutor {
             },
             executeToolCall: wrappedToolExecutor,
             forceToolUseOnFirstIteration,
+            credentialKindSnapshot: runRecord?.credential_kind_snapshot,
           },
         );
       } finally {
