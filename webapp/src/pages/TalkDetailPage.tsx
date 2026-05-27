@@ -3601,7 +3601,16 @@ export function TalkDetailPage({
   }, [onUnauthorized, talkId]);
 
   useEffect(() => {
-    if (!talkId || !currentThreadHasContent || !activeThreadId) return;
+    if (!talkId || !activeThreadId) return;
+    // Thread without a doc — clear any stale doc from the previous thread
+    // so the doc pane doesn't carry over to threads that never had one.
+    if (!currentThreadHasContent) {
+      setTalkContent(null);
+      setTalkContentPendingEdits([]);
+      setTalkContentError(null);
+      setTalkContentLoading(false);
+      return;
+    }
     let cancelled = false;
     setTalkContentLoading(true);
     setTalkContentError(null);
