@@ -145,12 +145,29 @@ async function main(): Promise<void> {
 
   const allStats: ProviderStats[] = [];
   for (const provider of TARGETS) {
+    let registeredAgentId: string;
+    try {
+      registeredAgentId = await ensureBenchAgent(provider);
+    } catch (err) {
+      const message =
+        err instanceof Error ? `${err.name}: ${err.message}` : String(err);
+      console.error(
+        `[bench] FAIL setting up ${provider.name} agent: ${message}`,
+      );
+      const failed: RunMeasurement[] = Array.from(
+        { length: RUNS_PER_PROVIDER },
+        (_, runIndex) => failedMeasurement(provider, runIndex, message),
+      );
+      allStats.push(aggregate(provider, failed));
+      continue;
+    }
+
     const runs: RunMeasurement[] = [];
     for (let runIndex = 0; runIndex < RUNS_PER_PROVIDER; runIndex += 1) {
       console.error(
         `[bench] ${provider.name} run ${runIndex + 1}/${RUNS_PER_PROVIDER} ...`,
       );
-      const measurement = await runOne(provider, runIndex);
+      const measurement = await runOne(provider, runIndex, registeredAgentId);
       logSummary(measurement);
       runs.push(measurement);
     }
@@ -174,6 +191,7 @@ async function main(): Promise<void> {
 async function runOne(
   provider: ProviderConfig,
   runIndex: number,
+  registeredAgentId: string,
 ): Promise<RunMeasurement> {
   const measurement: RunMeasurement = {
     provider: provider.name,
@@ -199,12 +217,12 @@ async function runOne(
   try {
     const talk = await createTalk(`bench-${provider.name}-${Date.now()}`);
     measurement.talkId = talk.id;
-    const agentId = await assignAgent(talk.id, provider);
+    await assignAgent(talk.id, provider, registeredAgentId);
 
     const events = await openTalkEvents(talk.id);
     try {
       measurement.t0_postSent = Date.now();
-      const chatPromise = sendChat(talk.id, agentId);
+      const chatPromise = sendChat(talk.id, registeredAgentId);
       const eventsPromise = collectStreamingEvents(events);
 
       const chatResponse = await chatPromise;
@@ -265,22 +283,24 @@ async function createTalk(title: string): Promise<{ id: string }> {
 async function assignAgent(
   talkId: string,
   provider: ProviderConfig,
-): Promise<string> {
-  const agentId = crypto.randomUUID();
+  registeredAgentId: string,
+): Promise<void> {
   const res = await authedFetch(`/api/v1/talks/${talkId}/agents`, {
     method: 'PUT',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({
       agents: [
         {
-          id: agentId,
+          // Must match an existing registered_agents row — talk_agents.
+          // registered_agent_id is a FK. See setTalkAgents in
+          // src/clawtalk/db/talk-agents.ts.
+          id: registeredAgentId,
           role: 'assistant',
           isPrimary: true,
           sourceKind: 'provider',
           providerId: provider.providerId,
           modelId: provider.modelId,
-          nickname: `Bench ${provider.name}`,
-          nicknameMode: 'custom',
+          nicknameMode: 'auto',
           displayOrder: 0,
         },
       ],
@@ -288,7 +308,67 @@ async function assignAgent(
   });
   const json = (await res.json()) as ApiEnvelope<unknown>;
   if (!res.ok || !json.ok) throw apiError('assignAgent', res.status, json);
-  return agentId;
+}
+
+// Idempotent: looks up a registered_agent named `bench-<name>`. If it
+// exists with the right provider+model it's reused; if stale it's
+// updated; if missing it's created. Persists across baseline reruns so
+// the per-run measurement window never pays the agent-create cost.
+async function ensureBenchAgent(provider: ProviderConfig): Promise<string> {
+  const benchName = `bench-${provider.name}`;
+  const listRes = await authedFetch('/api/v1/registered-agents', {
+    method: 'GET',
+  });
+  const listJson = (await listRes.json()) as ApiEnvelope<
+    Array<{ id: string; name: string; providerId: string; modelId: string }>
+  >;
+  if (!listRes.ok || !listJson.ok) {
+    throw apiError('listRegisteredAgents', listRes.status, listJson);
+  }
+  const existing = listJson.data.find((a) => a.name === benchName);
+
+  if (existing) {
+    if (
+      existing.providerId === provider.providerId &&
+      existing.modelId === provider.modelId
+    ) {
+      return existing.id;
+    }
+    const updateRes = await authedFetch(
+      `/api/v1/registered-agents/${existing.id}`,
+      {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          name: benchName,
+          providerId: provider.providerId,
+          modelId: provider.modelId,
+        }),
+      },
+    );
+    const updateJson = (await updateRes.json()) as ApiEnvelope<{
+      id: string;
+    }>;
+    if (!updateRes.ok || !updateJson.ok) {
+      throw apiError('updateRegisteredAgent', updateRes.status, updateJson);
+    }
+    return existing.id;
+  }
+
+  const createRes = await authedFetch('/api/v1/registered-agents', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      name: benchName,
+      providerId: provider.providerId,
+      modelId: provider.modelId,
+    }),
+  });
+  const createJson = (await createRes.json()) as ApiEnvelope<{ id: string }>;
+  if (!createRes.ok || !createJson.ok) {
+    throw apiError('createRegisteredAgent', createRes.status, createJson);
+  }
+  return createJson.data.id;
 }
 
 async function sendChat(
@@ -492,6 +572,33 @@ function readErrorMessage(data: unknown): string | null {
 }
 
 // ── stats ──────────────────────────────────────────────────────────
+
+function failedMeasurement(
+  provider: ProviderConfig,
+  runIndex: number,
+  error: string,
+): RunMeasurement {
+  return {
+    provider: provider.name,
+    providerId: provider.providerId,
+    modelId: provider.modelId,
+    runIndex,
+    talkId: null,
+    runId: null,
+    t0_postSent: 0,
+    t1_postReturned: null,
+    t2_responseStarted: null,
+    t3_firstDelta: null,
+    t4_completed: null,
+    d_t1_t0: null,
+    d_t2_t0: null,
+    d_t3_t0: null,
+    d_t4_t0: null,
+    d_t4_t3: null,
+    responsePreview: '',
+    error,
+  };
+}
 
 function aggregate(
   provider: ProviderConfig,
