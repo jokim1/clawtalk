@@ -840,8 +840,6 @@ export type TalkAgent = {
   modelDisplayName: string | null;
 };
 
-export type ProviderCredentialScope = 'user' | 'workspace';
-
 export type ProviderVerificationStatus =
   | 'missing'
   | 'not_verified'
@@ -872,15 +870,8 @@ export type AgentProviderCard = {
   verificationStatus: ProviderVerificationStatus;
   lastVerifiedAt: string | null;
   lastVerificationError: string | null;
-  workspaceHasCredential: boolean;
-  workspaceCredentialHint: string | null;
-  workspaceVerificationStatus: ProviderVerificationStatus;
-  workspaceLastVerifiedAt: string | null;
-  workspaceLastVerificationError: string | null;
   hasPersonalSubscription: boolean;
   personalSubscriptionExpiresAt: string | null;
-  hasWorkspaceSubscription: boolean;
-  workspaceSubscriptionExpiresAt: string | null;
   modelSuggestions: Array<{
     modelId: string;
     displayName: string;
@@ -3431,7 +3422,6 @@ export async function saveAiProviderCredential(input: {
   organizationId?: string | null;
   baseUrl?: string | null;
   authScheme?: 'x_api_key' | 'bearer';
-  scope?: ProviderCredentialScope;
 }): Promise<AgentProviderCard> {
   const envelope = await apiMutationRequest<{ provider: AgentProviderCard }>(
     `/api/v1/agents/providers/${encodeURIComponent(input.providerId)}`,
@@ -3446,11 +3436,9 @@ export async function saveAiProviderCredential(input: {
 
 export async function verifyAiProviderCredential(
   providerId: string,
-  scope: ProviderCredentialScope = 'user',
 ): Promise<AgentProviderCard> {
-  const query = scope === 'workspace' ? '?scope=workspace' : '';
   const envelope = await apiMutationRequest<{ provider: AgentProviderCard }>(
-    `/api/v1/agents/providers/${encodeURIComponent(providerId)}/verify${query}`,
+    `/api/v1/agents/providers/${encodeURIComponent(providerId)}/verify`,
     {
       method: 'POST',
     },
@@ -3465,21 +3453,16 @@ export interface AnthropicOauthInitiateResult {
   state: string;
 }
 
-export async function initiateAnthropicSubscriptionOauth(
-  scope: ProviderCredentialScope = 'user',
-): Promise<AnthropicOauthInitiateResult> {
+export async function initiateAnthropicSubscriptionOauth(): Promise<AnthropicOauthInitiateResult> {
   return apiMutationRequest<AnthropicOauthInitiateResult>(
     '/api/v1/agents/providers/provider.anthropic/oauth/initiate',
     {
       method: 'POST',
-      includeJson: true,
-      body: JSON.stringify({ scope }),
     },
   );
 }
 
 export interface AnthropicOauthCompleteResult {
-  scope: ProviderCredentialScope;
   expiresAt: string;
 }
 
@@ -3505,15 +3488,11 @@ export interface OpenAiCodexOauthInitiateResult {
   expiresAt: string;
 }
 
-export async function initiateOpenAiCodexSubscriptionOauth(
-  scope: ProviderCredentialScope = 'user',
-): Promise<OpenAiCodexOauthInitiateResult> {
+export async function initiateOpenAiCodexSubscriptionOauth(): Promise<OpenAiCodexOauthInitiateResult> {
   return apiMutationRequest<OpenAiCodexOauthInitiateResult>(
     '/api/v1/agents/providers/provider.openai_codex/oauth/initiate',
     {
       method: 'POST',
-      includeJson: true,
-      body: JSON.stringify({ scope }),
     },
   );
 }
@@ -3522,7 +3501,6 @@ export type OpenAiCodexOauthPollResult =
   | { status: 'pending' }
   | {
       status: 'authorized';
-      scope: ProviderCredentialScope;
       expiresAt: string;
     };
 

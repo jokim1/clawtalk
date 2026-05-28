@@ -35,16 +35,16 @@ type AgentDraft = {
   systemPrompt: string;
   toolPermissions: Record<string, boolean>;
   enabled: boolean;
-  // null = auto (resolver walks personal/workspace × api_key/sub
-  // precedence). Non-null pins the agent to one mode.
+  // null = auto (resolver walks api_key → subscription precedence).
+  // Non-null pins the agent to one mode.
   credentialMode: RegisteredAgentCredentialMode | null;
 };
 
 // Build the dropdown's selectable options for a provider. Returns one
 // entry per credential mode that the provider has a credential
-// configured for (personal OR workspace counts). Providers with no
-// credential render a single "(no credential)" entry tied to null so
-// the form still has a non-empty value.
+// configured for. Providers with no credential render a single
+// "(no credential)" entry tied to null so the form still has a
+// non-empty value.
 type ProviderOption = {
   value: string;
   label: string;
@@ -65,9 +65,8 @@ function buildProviderOptions(
 ): ProviderOption[] {
   const options: ProviderOption[] = [];
   for (const provider of providers) {
-    const hasApiKey = provider.hasCredential || provider.workspaceHasCredential;
-    const hasSubscription =
-      provider.hasPersonalSubscription || provider.hasWorkspaceSubscription;
+    const hasApiKey = provider.hasCredential;
+    const hasSubscription = provider.hasPersonalSubscription;
     const disabled = !provider.enabled;
     if (hasApiKey && hasSubscription) {
       options.push({

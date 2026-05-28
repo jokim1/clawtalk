@@ -2424,15 +2424,11 @@ function getConfiguredProviders(
 ): AgentProviderCard[] {
   if (!data) return [];
   // Any credential surface the execution-resolver will accept: personal
-  // or workspace api_key, personal or workspace OAuth subscription. The
-  // ChatGPT Codex provider is subscription_only — gating on
-  // hasCredential alone would hide it after a user connected ChatGPT.
+  // api_key or personal OAuth subscription. The ChatGPT Codex provider
+  // is subscription_only — gating on hasCredential alone would hide it
+  // after a user connected ChatGPT.
   return data.additionalProviders.filter(
-    (provider) =>
-      provider.hasCredential ||
-      provider.workspaceHasCredential ||
-      provider.hasPersonalSubscription ||
-      provider.hasWorkspaceSubscription,
+    (provider) => provider.hasCredential || provider.hasPersonalSubscription,
   );
 }
 

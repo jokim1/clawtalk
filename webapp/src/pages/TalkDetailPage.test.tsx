@@ -4785,15 +4785,8 @@ function buildAiAgentsData(): AiAgentsPageData {
         verificationStatus: 'verified',
         lastVerifiedAt: '2026-03-06T00:00:00.000Z',
         lastVerificationError: null,
-        workspaceHasCredential: false,
-        workspaceCredentialHint: null,
-        workspaceVerificationStatus: 'missing',
-        workspaceLastVerifiedAt: null,
-        workspaceLastVerificationError: null,
         hasPersonalSubscription: false,
         personalSubscriptionExpiresAt: null,
-        hasWorkspaceSubscription: false,
-        workspaceSubscriptionExpiresAt: null,
         modelSuggestions: [
           {
             modelId: 'gpt-5-mini',

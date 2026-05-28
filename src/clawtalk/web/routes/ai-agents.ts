@@ -39,8 +39,6 @@ type ClaudeModelSuggestion = {
   supportsVision: boolean;
 };
 
-export type ProviderCredentialScope = 'user' | 'workspace';
-
 export type AgentProviderCard = {
   id: string;
   name: string;
@@ -55,21 +53,11 @@ export type AgentProviderCard = {
   verificationStatus: AdditionalProviderVerificationStatus;
   lastVerifiedAt: string | null;
   lastVerificationError: string | null;
-  // Workspace-shared credential (admin-managed). Visible to all
-  // members; the executor falls back to this when the caller has no
-  // personal credential of their own.
-  workspaceHasCredential: boolean;
-  workspaceCredentialHint: string | null;
-  workspaceVerificationStatus: AdditionalProviderVerificationStatus;
-  workspaceLastVerifiedAt: string | null;
-  workspaceLastVerificationError: string | null;
-  // OAuth subscription metadata. Either or both may be present
-  // alongside api-key credentials — the resolver prefers api_key but
-  // falls back to subscription when only the OAuth route is set.
+  // OAuth subscription metadata. May be present alongside an api-key
+  // credential — the resolver prefers api_key but falls back to
+  // subscription when only the OAuth route is set.
   hasPersonalSubscription: boolean;
   personalSubscriptionExpiresAt: string | null;
-  hasWorkspaceSubscription: boolean;
-  workspaceSubscriptionExpiresAt: string | null;
   modelSuggestions: Array<{
     modelId: string;
     displayName: string;
@@ -96,11 +84,6 @@ export type AiAgentsPageData = {
 interface ProviderSecretBody {
   apiKey?: unknown;
   organizationId?: unknown;
-  scope?: unknown;
-}
-
-function parseScope(value: unknown): ProviderCredentialScope {
-  return value === 'workspace' ? 'workspace' : 'user';
 }
 
 interface ProviderRow {
@@ -310,28 +293,6 @@ async function listProviderVerifications(): Promise<
   );
 }
 
-async function listWorkspaceProviderSecrets(): Promise<
-  Map<string, LlmSecret | null>
-> {
-  const db = getDbPg();
-  const rows = await db<Array<{ provider_id: string; ciphertext: string }>>`
-    select provider_id, ciphertext
-    from public.workspace_provider_secrets
-    where provider_id = any(${BUILTIN_ADDITIONAL_PROVIDER_IDS})
-      and credential_kind = 'api_key'
-  `;
-
-  const entries = await Promise.all(
-    rows.map(
-      async (row): Promise<[string, LlmSecret | null]> => [
-        row.provider_id,
-        await parseStoredSecret(row.ciphertext),
-      ],
-    ),
-  );
-  return new Map(entries);
-}
-
 async function listPersonalSubscriptionMetadata(): Promise<
   Map<string, { expiresAt: string | null }>
 > {
@@ -349,74 +310,17 @@ async function listPersonalSubscriptionMetadata(): Promise<
   );
 }
 
-async function listWorkspaceSubscriptionMetadata(): Promise<
-  Map<string, { expiresAt: string | null }>
-> {
-  const db = getDbPg();
-  const rows = await db<
-    Array<{ provider_id: string; expires_at: string | null }>
-  >`
-    select provider_id, expires_at::text as expires_at
-    from public.workspace_provider_secrets
-    where credential_kind = 'subscription'
-      and provider_id = any(${BUILTIN_ADDITIONAL_PROVIDER_IDS})
-  `;
-  return new Map(
-    rows.map((row) => [row.provider_id, { expiresAt: row.expires_at }]),
-  );
-}
-
-async function listWorkspaceProviderVerifications(): Promise<
-  Map<string, ProviderVerificationRow>
-> {
-  const db = getDbPg();
-  const rows = await db<
-    Array<{
-      provider_id: string;
-      status: AdditionalProviderVerificationStatus;
-      last_verified_at: string | null;
-      last_error: string | null;
-    }>
-  >`
-    select provider_id, status, last_verified_at, last_error
-    from public.workspace_provider_verifications
-    where provider_id = any(${BUILTIN_ADDITIONAL_PROVIDER_IDS})
-      and credential_kind = 'api_key'
-  `;
-
-  return new Map(
-    rows.map((row) => [
-      row.provider_id,
-      {
-        status: row.status,
-        last_verified_at: row.last_verified_at,
-        last_error: row.last_error,
-      },
-    ]),
-  );
-}
-
 async function buildAdditionalProviderCards(): Promise<AgentProviderCard[]> {
   const providerRows = await listAdditionalProviderRows();
   const modelsByProvider = await listAdditionalProviderModels();
   const secretsByProvider = await listProviderSecrets();
   const verificationsByProvider = await listProviderVerifications();
-  const workspaceSecretsByProvider = await listWorkspaceProviderSecrets();
-  const workspaceVerificationsByProvider =
-    await listWorkspaceProviderVerifications();
   const personalSubscriptionsByProvider =
     await listPersonalSubscriptionMetadata();
-  const workspaceSubscriptionsByProvider =
-    await listWorkspaceSubscriptionMetadata();
 
-  // Live model discovery for NVIDIA. Workspace credential wins so the team
-  // sees the shared catalog; falls back to the per-user credential if no
-  // workspace key is set. With no credential at all, the card just shows
-  // the curated fallback rows from llm_provider_models.
-  const nvidiaSecret =
-    workspaceSecretsByProvider.get(NVIDIA_PROVIDER_ID) ??
-    secretsByProvider.get(NVIDIA_PROVIDER_ID) ??
-    null;
+  // Live model discovery for NVIDIA. Falls back to the curated rows from
+  // llm_provider_models when no personal key is configured.
+  const nvidiaSecret = secretsByProvider.get(NVIDIA_PROVIDER_ID) ?? null;
   const nvidiaDiscovery: DiscoveryResult | null = nvidiaSecret?.apiKey
     ? await discoverNvidiaModels(nvidiaSecret.apiKey, {
         cache: getDefaultCache(),
@@ -439,14 +343,6 @@ async function buildAdditionalProviderCards(): Promise<AgentProviderCard[]> {
       credentialMode === 'api_key'
         ? verificationsByProvider.get(provider.id)
         : undefined;
-    const workspaceSecret =
-      credentialMode === 'api_key'
-        ? (workspaceSecretsByProvider.get(provider.id) ?? null)
-        : null;
-    const workspaceVerification =
-      credentialMode === 'api_key'
-        ? workspaceVerificationsByProvider.get(provider.id)
-        : undefined;
     const hasCredential = !!secret;
     const verificationStatus: AdditionalProviderVerificationStatus =
       !hasCredential ? 'missing' : (verification?.status ?? 'not_verified');
@@ -455,18 +351,6 @@ async function buildAdditionalProviderCards(): Promise<AgentProviderCard[]> {
     const personalSubscription = personalSubscriptionsByProvider.get(
       provider.id,
     );
-    const workspaceSubscription = workspaceSubscriptionsByProvider.get(
-      provider.id,
-    );
-
-    const workspaceHasCredential = !!workspaceSecret;
-    const workspaceVerificationStatus: AdditionalProviderVerificationStatus =
-      !workspaceHasCredential
-        ? 'missing'
-        : (workspaceVerification?.status ?? 'not_verified');
-    const workspaceCredentialHint = workspaceSecret
-      ? maskApiKey(workspaceSecret.apiKey)
-      : null;
 
     return {
       id: provider.id,
@@ -488,22 +372,8 @@ async function buildAdditionalProviderCards(): Promise<AgentProviderCard[]> {
         verificationStatus === 'invalid' || verificationStatus === 'unavailable'
           ? (verification?.last_error ?? null)
           : null,
-      workspaceHasCredential,
-      workspaceCredentialHint,
-      workspaceVerificationStatus,
-      workspaceLastVerifiedAt:
-        workspaceVerificationStatus === 'verified'
-          ? (workspaceVerification?.last_verified_at ?? null)
-          : null,
-      workspaceLastVerificationError:
-        workspaceVerificationStatus === 'invalid' ||
-        workspaceVerificationStatus === 'unavailable'
-          ? (workspaceVerification?.last_error ?? null)
-          : null,
       hasPersonalSubscription: !!personalSubscription,
       personalSubscriptionExpiresAt: personalSubscription?.expiresAt ?? null,
-      hasWorkspaceSubscription: !!workspaceSubscription,
-      workspaceSubscriptionExpiresAt: workspaceSubscription?.expiresAt ?? null,
       modelSuggestions: buildModelSuggestions(
         provider.id,
         modelsByProvider.get(provider.id) ?? [],
@@ -653,38 +523,6 @@ async function deleteProviderVerification(providerId: string): Promise<void> {
   `;
 }
 
-async function upsertWorkspaceProviderVerification(
-  providerId: string,
-  result: ProviderVerificationResult,
-): Promise<void> {
-  const db = getDbPg();
-  await db`
-    insert into public.workspace_provider_verifications (
-      provider_id, credential_kind, status, last_verified_at, last_error
-    )
-    values (
-      ${providerId}, 'api_key', ${result.status},
-      ${result.lastVerifiedAt}::timestamptz, ${result.lastError}
-    )
-    on conflict (provider_id, credential_kind) do update set
-      status = excluded.status,
-      last_verified_at = excluded.last_verified_at,
-      last_error = excluded.last_error,
-      updated_at = now()
-  `;
-}
-
-async function deleteWorkspaceProviderVerification(
-  providerId: string,
-): Promise<void> {
-  const db = getDbPg();
-  await db`
-    delete from public.workspace_provider_verifications
-    where provider_id = ${providerId}
-      and credential_kind = 'api_key'
-  `;
-}
-
 function buildProviderConfig(provider: ProviderRow): LlmProviderConfig {
   return {
     providerId: provider.id,
@@ -734,62 +572,36 @@ function mapVerificationFailure(error: unknown): ProviderVerificationResult {
 async function verifyProviderSecret(
   ownerId: string,
   providerId: string,
-  scope: ProviderCredentialScope = 'user',
 ): Promise<void> {
   const provider = await getAdditionalProvider(providerId);
   if (!provider) {
     throw new Error(`Provider '${providerId}' is not supported.`);
   }
 
-  const writeVerification = async (
-    result: ProviderVerificationResult,
-  ): Promise<void> => {
-    if (scope === 'workspace') {
-      await upsertWorkspaceProviderVerification(providerId, result);
-    } else {
-      await upsertProviderVerification(ownerId, providerId, result);
-    }
-  };
-
-  const dropVerification = async (): Promise<void> => {
-    if (scope === 'workspace') {
-      await deleteWorkspaceProviderVerification(providerId);
-    } else {
-      await deleteProviderVerification(providerId);
-    }
-  };
-
   // Subscription-only providers (Codex) skip the API-key verification
   // path entirely — the OAuth flow handles connect/refresh separately.
   if (providerId === CODEX_PROVIDER_ID) {
-    await dropVerification();
+    await deleteProviderVerification(providerId);
     return;
   }
 
   const db = getDbPg();
-  const secretRows =
-    scope === 'workspace'
-      ? await db<Array<{ ciphertext: string }>>`
-          select ciphertext from public.workspace_provider_secrets
-          where provider_id = ${providerId}
-            and credential_kind = 'api_key'
-        `
-      : await db<Array<{ ciphertext: string }>>`
-          select ciphertext from public.llm_provider_secrets
-          where provider_id = ${providerId}
-            and credential_kind = 'api_key'
-        `;
+  const secretRows = await db<Array<{ ciphertext: string }>>`
+    select ciphertext from public.llm_provider_secrets
+    where provider_id = ${providerId}
+      and credential_kind = 'api_key'
+  `;
   const secret = secretRows[0]
     ? await parseStoredSecret(secretRows[0].ciphertext)
     : null;
   if (!secret) {
-    await dropVerification();
+    await deleteProviderVerification(providerId);
     return;
   }
 
   const model = await getPrimaryProviderModel(providerId);
   if (!model) {
-    await writeVerification({
+    await upsertProviderVerification(ownerId, providerId, {
       status: 'unavailable',
       lastVerifiedAt: null,
       lastError:
@@ -814,13 +626,17 @@ async function verifyProviderSecret(
         signal: controller.signal,
       },
     );
-    await writeVerification({
+    await upsertProviderVerification(ownerId, providerId, {
       status: 'verified',
       lastVerifiedAt: new Date().toISOString(),
       lastError: null,
     });
   } catch (error) {
-    await writeVerification(mapVerificationFailure(error));
+    await upsertProviderVerification(
+      ownerId,
+      providerId,
+      mapVerificationFailure(error),
+    );
   } finally {
     clearTimeout(timer);
   }
@@ -935,21 +751,6 @@ export async function putAiProviderCredentialRoute(
   statusCode: number;
   body: ApiEnvelope<{ provider: AgentProviderCard }>;
 }> {
-  const scope = parseScope(body.scope);
-  if (scope === 'workspace' && !isAdminLike(auth.role)) {
-    return {
-      statusCode: 403,
-      body: {
-        ok: false,
-        error: {
-          code: 'forbidden',
-          message:
-            'Only workspace admins can manage workspace-shared provider credentials.',
-        },
-      },
-    };
-  }
-
   return withUserContext(auth.userId, async () => {
     if (!(await getAdditionalProvider(providerId))) {
       return {
@@ -1000,21 +801,12 @@ export async function putAiProviderCredentialRoute(
 
     const db = getDbPg();
     if (!apiKey) {
-      if (scope === 'workspace') {
-        await db`
-          delete from public.workspace_provider_secrets
-          where provider_id = ${providerId}
-            and credential_kind = 'api_key'
-        `;
-        await deleteWorkspaceProviderVerification(providerId);
-      } else {
-        await db`
-          delete from public.llm_provider_secrets
-          where provider_id = ${providerId}
-            and credential_kind = 'api_key'
-        `;
-        await deleteProviderVerification(providerId);
-      }
+      await db`
+        delete from public.llm_provider_secrets
+        where provider_id = ${providerId}
+          and credential_kind = 'api_key'
+      `;
+      await deleteProviderVerification(providerId);
       return getProviderCardOrNotFound(providerId);
     }
 
@@ -1022,34 +814,19 @@ export async function putAiProviderCredentialRoute(
       apiKey,
       ...(organizationId ? { organizationId } : {}),
     });
-    if (scope === 'workspace') {
-      await db`
-        insert into public.workspace_provider_secrets (
-          provider_id, credential_kind, ciphertext, updated_by
-        )
-        values (
-          ${providerId}, 'api_key', ${ciphertext}, ${auth.userId}::uuid
-        )
-        on conflict (provider_id, credential_kind) do update set
-          ciphertext = excluded.ciphertext,
-          updated_by = excluded.updated_by,
-          updated_at = now()
-      `;
-    } else {
-      await db`
-        insert into public.llm_provider_secrets (
-          owner_id, provider_id, credential_kind, ciphertext
-        )
-        values (
-          ${auth.userId}::uuid, ${providerId}, 'api_key', ${ciphertext}
-        )
-        on conflict (owner_id, provider_id, credential_kind) do update set
-          ciphertext = excluded.ciphertext,
-          updated_at = now()
-      `;
-    }
+    await db`
+      insert into public.llm_provider_secrets (
+        owner_id, provider_id, credential_kind, ciphertext
+      )
+      values (
+        ${auth.userId}::uuid, ${providerId}, 'api_key', ${ciphertext}
+      )
+      on conflict (owner_id, provider_id, credential_kind) do update set
+        ciphertext = excluded.ciphertext,
+        updated_at = now()
+    `;
 
-    await verifyProviderSecret(auth.userId, providerId, scope);
+    await verifyProviderSecret(auth.userId, providerId);
     if (providerId === NVIDIA_PROVIDER_ID && apiKey) {
       // Drop any cached discovery for this exact key. Handles the edge
       // case where the user re-pastes the same key after NVIDIA invalidated
@@ -1064,25 +841,10 @@ export async function putAiProviderCredentialRoute(
 export async function verifyAiProviderCredentialRoute(
   auth: AuthContext,
   providerId: string,
-  scope: ProviderCredentialScope = 'user',
 ): Promise<{
   statusCode: number;
   body: ApiEnvelope<{ provider: AgentProviderCard }>;
 }> {
-  if (scope === 'workspace' && !isAdminLike(auth.role)) {
-    return {
-      statusCode: 403,
-      body: {
-        ok: false,
-        error: {
-          code: 'forbidden',
-          message:
-            'Only workspace admins can verify workspace-shared provider credentials.',
-        },
-      },
-    };
-  }
-
   return withUserContext(auth.userId, async () => {
     if (!(await getAdditionalProvider(providerId))) {
       return {
@@ -1097,7 +859,7 @@ export async function verifyAiProviderCredentialRoute(
       };
     }
 
-    await verifyProviderSecret(auth.userId, providerId, scope);
+    await verifyProviderSecret(auth.userId, providerId);
     return getProviderCardOrNotFound(providerId);
   });
 }

@@ -498,11 +498,9 @@ function buildApp(): Hono<{ Variables: Variables }> {
     if (!rl.allowed) return rateLimitedResponse(c, rl);
     const csrfFail = checkCsrf(c, auth);
     if (csrfFail) return csrfFail;
-    const scope = c.req.query('scope') === 'workspace' ? 'workspace' : 'user';
     const result = await verifyAiProviderCredentialRoute(
       auth,
       c.req.param('providerId'),
-      scope,
     );
     return jsonResponse(result);
   });
@@ -959,8 +957,7 @@ function buildApp(): Hono<{ Variables: Variables }> {
       if (!rl.allowed) return rateLimitedResponse(c, rl);
       const csrfFail = checkCsrf(c, auth);
       if (csrfFail) return csrfFail;
-      const body = await c.req.json().catch(() => ({}));
-      const result = await initiateAnthropicOauthRoute(auth, body);
+      const result = await initiateAnthropicOauthRoute(auth);
       return jsonResponse(result);
     },
   );
@@ -987,8 +984,7 @@ function buildApp(): Hono<{ Variables: Variables }> {
       if (!rl.allowed) return rateLimitedResponse(c, rl);
       const csrfFail = checkCsrf(c, auth);
       if (csrfFail) return csrfFail;
-      const body = await c.req.json().catch(() => ({}));
-      const result = await initiateOpenAiCodexOauthRoute(auth, body);
+      const result = await initiateOpenAiCodexOauthRoute(auth);
       return jsonResponse(result);
     },
   );
