@@ -12,7 +12,18 @@ import { useState } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+
 import { TalkDetailPage } from './TalkDetailPage';
+
+function buildTestQueryClient(): QueryClient {
+  // Default gcTime so setQueryData entries survive until the
+  // useQuery hook subscribes (RQ v5 GCs unsubscribed entries when
+  // gcTime is 0, which races our bootstrap → thread-keyed handoff).
+  return new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+}
 import { openTalkStream } from '../lib/talkStream';
 import type {
   AiAgentsPageData,
@@ -2425,9 +2436,7 @@ describe('TalkDetailPage', () => {
     fireEvent.drop(workspace, { dataTransfer: createFileDataTransfer([file]) });
 
     expect(await screen.findByAltText('diagram.png')).toBeTruthy();
-    expect(
-      screen.queryByText(/does not support image attachments/),
-    ).toBeNull();
+    expect(screen.queryByText(/does not support image attachments/)).toBeNull();
   });
 
   it('still blocks image sends for Main when defaultClaudeModelId is unset', async () => {
@@ -3044,7 +3053,7 @@ describe('TalkDetailPage', () => {
   it('refetches the active thread when MESSAGE_APPENDED never lands after RUN_COMPLETED', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     try {
-      let listMessagesCallCount = 0;
+      let runCompletedFiredAt = 0;
       const userMsg = buildMessage({
         id: 'msg-1',
         role: 'user',
@@ -3061,9 +3070,13 @@ describe('TalkDetailPage', () => {
 
       installTalkDetailFetch({
         messages: [userMsg],
+        // The snapshot-first refactor (PR B) loads the message timeline
+        // through GET /snapshot, not /messages — so the only caller of
+        // /messages in this test is the resyncTalkState backstop fired
+        // by RUN_COMPLETED. Gate on that signal instead of a brittle
+        // listTalkMessages call count.
         onListMessages: () => {
-          listMessagesCallCount += 1;
-          return listMessagesCallCount === 1
+          return runCompletedFiredAt === 0
             ? [userMsg]
             : [userMsg, assistantMsg];
         },
@@ -3095,6 +3108,7 @@ describe('TalkDetailPage', () => {
           triggerMessageId: 'msg-1',
           responseMessageId: 'msg-assistant-late',
         });
+        runCompletedFiredAt += 1;
         // MESSAGE_APPENDED intentionally omitted to simulate a dropped event.
       });
 
@@ -4136,24 +4150,27 @@ function renderDetailPage(
   options?: { sidebarContents?: ContentSidebarItem[] },
 ): ReturnType<typeof render> {
   return render(
-    <MemoryRouter initialEntries={[initialEntry]}>
-      <Routes>
-        <Route
-          path="/app/talks/:talkId/*"
-          element={
-            <TalkDetailPage
-              onUnauthorized={vi.fn()}
-              renameDraft={null}
-              onRenameDraftChange={vi.fn()}
-              onRenameDraftCancel={vi.fn()}
-              onRenameDraftCommit={vi.fn().mockResolvedValue(undefined)}
-              onSidebarChanged={vi.fn().mockResolvedValue(undefined)}
-              sidebarContents={options?.sidebarContents ?? []}
-            />
-          }
-        />
-      </Routes>
-    </MemoryRouter>,
+    <QueryClientProvider client={buildTestQueryClient()}>
+      <MemoryRouter initialEntries={[initialEntry]}>
+        <Routes>
+          <Route
+            path="/app/talks/:talkId/*"
+            element={
+              <TalkDetailPage
+                userId="test-user"
+                onUnauthorized={vi.fn()}
+                renameDraft={null}
+                onRenameDraftChange={vi.fn()}
+                onRenameDraftCancel={vi.fn()}
+                onRenameDraftCommit={vi.fn().mockResolvedValue(undefined)}
+                onSidebarChanged={vi.fn().mockResolvedValue(undefined)}
+                sidebarContents={options?.sidebarContents ?? []}
+              />
+            }
+          />
+        </Routes>
+      </MemoryRouter>
+    </QueryClientProvider>,
   );
 }
 
@@ -4176,35 +4193,38 @@ function renderDetailPageWithRenameHarness(
     } | null>(null);
 
     return (
-      <MemoryRouter initialEntries={[initialEntry]}>
-        <Routes>
-          <Route
-            path="/app/talks/:talkId/*"
-            element={
-              <TalkDetailPage
-                onUnauthorized={vi.fn()}
-                renameDraft={renameDraft}
-                onRenameDraftChange={(talkId, draft) =>
-                  setRenameDraft({ talkId, draft })
-                }
-                onRenameDraftCancel={(talkId) =>
-                  setRenameDraft((current) =>
-                    current?.talkId === talkId ? null : current,
-                  )
-                }
-                onRenameDraftCommit={async (talkId, draft) => {
-                  await onRenameDraftCommit(talkId, draft);
-                  setRenameDraft((current) =>
-                    current?.talkId === talkId ? null : current,
-                  );
-                }}
-                onSidebarChanged={vi.fn().mockResolvedValue(undefined)}
-                sidebarContents={[]}
-              />
-            }
-          />
-        </Routes>
-      </MemoryRouter>
+      <QueryClientProvider client={buildTestQueryClient()}>
+        <MemoryRouter initialEntries={[initialEntry]}>
+          <Routes>
+            <Route
+              path="/app/talks/:talkId/*"
+              element={
+                <TalkDetailPage
+                  userId="test-user"
+                  onUnauthorized={vi.fn()}
+                  renameDraft={renameDraft}
+                  onRenameDraftChange={(talkId, draft) =>
+                    setRenameDraft({ talkId, draft })
+                  }
+                  onRenameDraftCancel={(talkId) =>
+                    setRenameDraft((current) =>
+                      current?.talkId === talkId ? null : current,
+                    )
+                  }
+                  onRenameDraftCommit={async (talkId, draft) => {
+                    await onRenameDraftCommit(talkId, draft);
+                    setRenameDraft((current) =>
+                      current?.talkId === talkId ? null : current,
+                    );
+                  }}
+                  onSidebarChanged={vi.fn().mockResolvedValue(undefined)}
+                  sidebarContents={[]}
+                />
+              }
+            />
+          </Routes>
+        </MemoryRouter>
+      </QueryClientProvider>
     );
   }
 
@@ -5000,6 +5020,81 @@ function installTalkDetailFetch(input?: {
       const method = init?.method || 'GET';
       const parsedUrl = new URL(url, 'http://localhost');
       const path = parsedUrl.pathname;
+
+      if (path === '/api/v1/talks/talk-1/snapshot' && method === 'GET') {
+        const requestedThreadId = parsedUrl.searchParams.get('threadId');
+        const activeThreadId =
+          (requestedThreadId &&
+            threads.find((t) => t.id === requestedThreadId)?.id) ||
+          threads.find((t) => t.isDefault)?.id ||
+          threads[0]?.id ||
+          DEFAULT_THREAD_ID;
+        const activeThreadMessages = messages.filter(
+          (m) => m.threadId === activeThreadId,
+        );
+        const activeRuns = runs.filter((r) =>
+          ['queued', 'running', 'awaiting_confirmation'].includes(r.status),
+        );
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            talk: {
+              id: talk.id,
+              ownerId: talk.ownerId,
+              folderId: talk.folderId,
+              sortOrder: talk.sortOrder,
+              title: talk.title,
+              orchestrationMode: talk.orchestrationMode,
+              status: talk.status,
+              version: talk.version,
+              createdAt: talk.createdAt,
+              updatedAt: talk.updatedAt,
+              accessRole: talk.accessRole,
+            },
+            threads: threads.map((thread) => ({
+              id: thread.id,
+              talkId: thread.talkId,
+              title: thread.title,
+              isDefault: thread.isDefault,
+              isInternal: false,
+              isPinned: thread.isPinned,
+              createdAt: thread.createdAt,
+              updatedAt: thread.updatedAt,
+              messageCount: thread.messageCount,
+              lastMessageAt: thread.lastMessageAt,
+            })),
+            activeThreadId,
+            messages: activeThreadMessages,
+            hasOlderMessages: false,
+            content: contentByThreadId[activeThreadId] ?? null,
+            pendingEdits: [],
+            runs: activeRuns.map((run) => ({
+              id: run.id,
+              threadId: run.threadId,
+              status: run.status,
+              responseGroupId: run.responseGroupId,
+              sequenceIndex: run.sequenceIndex,
+              createdAt: run.createdAt,
+              startedAt: run.startedAt,
+              endedAt: run.completedAt,
+              triggerMessageId: run.triggerMessageId,
+              targetAgentId: run.targetAgentId,
+              executorAlias: run.executorAlias,
+              executorModel: run.executorModel,
+            })),
+            agents: talkAgents.map((a) => ({
+              assignmentId: a.id,
+              agentId: a.id,
+              agentName: a.nickname,
+              nickname: a.nickname,
+              personaRole: a.role,
+              isPrimary: a.isPrimary,
+              sortOrder: a.displayOrder,
+            })),
+            snapshotVersion: 0,
+          },
+        });
+      }
 
       if (path === '/api/v1/talks/talk-1' && method === 'GET') {
         return jsonResponse(200, { ok: true, data: { talk } });

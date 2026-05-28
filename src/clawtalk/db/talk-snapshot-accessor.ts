@@ -22,13 +22,13 @@ import { getDbPg, withUserContextIsolated } from '../../db.js';
 import {
   TALK_MESSAGE_COLUMNS,
   TALK_RUN_COLUMNS,
-  getTalkById,
+  getTalkForUser,
   listTalkThreads,
   resolveThreadIdForTalk,
   type TalkMessageRecord,
-  type TalkRecord,
   type TalkRunRecord,
   type TalkThreadWithMetrics,
+  type TalkWithAccessRecord,
 } from './accessors.js';
 import { getContentByThreadId, type Content } from './content-accessors.js';
 import { getPendingEditsByContent } from './content-edits-accessors.js';
@@ -40,7 +40,7 @@ import { listTalkAgents, type TalkAgentAssignment } from './talk-agents.js';
 const TALK_SNAPSHOT_MESSAGE_LIMIT = 200;
 
 export interface TalkSnapshot {
-  talk: TalkRecord;
+  talk: TalkWithAccessRecord;
   threads: TalkThreadWithMetrics[];
   activeThreadId: string;
   messages: TalkMessageRecord[];
@@ -58,7 +58,7 @@ export async function loadTalkSnapshot(input: {
   threadId?: string | null;
 }): Promise<TalkSnapshot | null> {
   return withUserContextIsolated(input.userId, async () => {
-    const talk = await getTalkById(input.talkId);
+    const talk = await getTalkForUser(input.talkId);
     if (!talk) return null;
 
     const threads = await listTalkThreads({

@@ -161,6 +161,16 @@ import {
 import { linkifyText } from '../lib/linkifyText';
 import { displayThreadTitle } from '../lib/threadTitles';
 import { openTalkStream } from '../lib/talkStream';
+import { useQueryClient } from '@tanstack/react-query';
+import {
+  rememberActiveThreadForTalk,
+  snapshotQueryKey,
+  useTalkSnapshot,
+} from '../lib/useTalkSnapshot';
+import {
+  applyMessageAppendedDelta,
+  createWsCacheRouter,
+} from '../lib/wsCacheRouter';
 import { type RichTextEditorSaveStatus } from '../components/rich-text/RichTextEditor';
 import type {
   TalkBrowserBlockedEvent,
@@ -540,6 +550,12 @@ type DetailAction =
       threadId: string;
       messages: TalkMessage[];
       runs: TalkRun[];
+    }
+  | { type: 'MERGE_HISTORICAL_RUNS'; runs: TalkRun[] }
+  | {
+      type: 'PREPEND_OLDER_MESSAGES';
+      threadId: string;
+      messages: TalkMessage[];
     }
   | {
       type: 'MESSAGE_APPENDED';
@@ -1143,6 +1159,37 @@ function detailReducer(state: DetailState, action: DetailAction): DetailState {
         hasUnreadBelow: false,
         initialScrollPending: false,
       };
+    case 'MERGE_HISTORICAL_RUNS': {
+      if (state.kind !== 'ready') return state;
+      // Merge: active runs already in the cache keep whatever live-state
+      // they've accumulated (queued → running, error envelopes, etc.).
+      // Historical runs from the fetched list overlay the rest so the
+      // Runs tab has the full timeline without disturbing live UX.
+      const merged = mapRunsById(action.runs);
+      for (const [runId, view] of Object.entries(state.runsById)) {
+        merged[runId] = { ...merged[runId], ...view };
+      }
+      return { ...state, runsById: merged };
+    }
+    case 'PREPEND_OLDER_MESSAGES': {
+      if (state.kind !== 'ready') return state;
+      if (action.threadId !== state.selectedThreadId) return state;
+      if (action.messages.length === 0) return state;
+      const additions = action.messages.filter(
+        (message) => !state.messageIds.has(message.id),
+      );
+      if (additions.length === 0) return state;
+      const nextMessages = [...additions, ...state.messages];
+      const nextIds = new Set(state.messageIds);
+      for (const message of additions) {
+        nextIds.add(message.id);
+      }
+      return {
+        ...state,
+        messages: nextMessages,
+        messageIds: nextIds,
+      };
+    }
     case 'MESSAGE_APPENDED': {
       if (state.kind !== 'ready') return state;
       if (state.messageIds.has(action.message.id)) return state;
@@ -2899,6 +2946,7 @@ class HtmlEditorErrorBoundary extends Component<
 }
 
 export function TalkDetailPage({
+  userId,
   onUnauthorized,
   titleOverride,
   renameDraft,
@@ -2908,6 +2956,7 @@ export function TalkDetailPage({
   onSidebarChanged,
   sidebarContents,
 }: {
+  userId: string;
   onUnauthorized: () => void;
   titleOverride?: string | null;
   renameDraft: { talkId: string; draft: string } | null;
@@ -2923,6 +2972,19 @@ export function TalkDetailPage({
   const currentTab = getTabFromPath(location.pathname, talkId);
   const locationParams = new URLSearchParams(location.search);
   const requestedThreadId = locationParams.get('thread')?.trim() || null;
+  // If the URL hasn't pinned a thread yet, ride the saved last-viewed
+  // thread for this Talk so the snapshot warms straight to the UX the
+  // user expects (avoids the bootstrap → refetch-on-resolve double-hop).
+  const initialResolvedThreadId =
+    requestedThreadId ?? getLastThreadForTalk(talkId);
+  const queryClient = useQueryClient();
+  const snapshotQuery = useTalkSnapshot({
+    userId,
+    talkId,
+    threadId: initialResolvedThreadId,
+    onUnauthorized,
+  });
+  const wsCacheRouterRef = useRef(createWsCacheRouter(queryClient));
   const [state, dispatch] = useReducer(
     detailReducer,
     undefined,
@@ -3010,6 +3072,7 @@ export function TalkDetailPage({
   const docModalInputRef = useRef<HTMLInputElement | null>(null);
   const [talkContent, setTalkContent] = useState<Content | null>(null);
   const [talkContentLoading, setTalkContentLoading] = useState(false);
+  const [loadingOlderMessages, setLoadingOlderMessages] = useState(false);
   const [talkContentError, setTalkContentError] = useState<string | null>(null);
   const [talkContentPendingEdits, setTalkContentPendingEdits] = useState<
     ContentEditSummary[]
@@ -3207,6 +3270,7 @@ export function TalkDetailPage({
   const messageElementRefs = useRef<Map<string, HTMLElement>>(new Map());
   const autoStickToBottomRef = useRef(false);
   const onUnauthorizedRef = useRef(onUnauthorized);
+  const stateKindRef = useRef<DetailState['kind']>(state.kind);
 
   useEffect(() => {
     onUnauthorizedRef.current = onUnauthorized;
@@ -3216,6 +3280,7 @@ export function TalkDetailPage({
   threadStateRef.current = threadState;
   searchQueryRef.current = searchQuery;
   runContextPanelsRef.current = runContextPanels;
+  stateKindRef.current = state.kind;
 
   useEffect(() => {
     threadSnapshotVersionRef.current += 1;
@@ -3339,7 +3404,10 @@ export function TalkDetailPage({
     const interval = setInterval(() => {
       const now = Date.now();
       const stale: string[] = [];
-      for (const [runId, startedAt] of pendingEditStreamingStartedAtRef.current) {
+      for (const [
+        runId,
+        startedAt,
+      ] of pendingEditStreamingStartedAtRef.current) {
         if (now - startedAt > STREAMING_TTL_MS) stale.push(runId);
       }
       if (stale.length === 0) return;
@@ -3618,44 +3686,19 @@ export function TalkDetailPage({
     }
   }, [onUnauthorized, talkId]);
 
+  // Doc state is now hydrated by the snapshot. When the active thread
+  // doesn't have a doc, the snapshot still returns `content: null`, so
+  // a defensive clear when the sidebar's hasContent flag drops to false
+  // keeps the pane from holding onto a stale doc.
   useEffect(() => {
     if (!talkId || !activeThreadId) return;
-    // Thread without a doc — clear any stale doc from the previous thread
-    // so the doc pane doesn't carry over to threads that never had one.
     if (!currentThreadHasContent) {
       setTalkContent(null);
       setTalkContentPendingEdits([]);
       setTalkContentError(null);
       setTalkContentLoading(false);
-      return;
     }
-    let cancelled = false;
-    setTalkContentLoading(true);
-    setTalkContentError(null);
-    const fetchPromise = getThreadContent(activeThreadId);
-    fetchPromise
-      .then((payload) => {
-        if (cancelled) return;
-        setTalkContent(payload.content);
-        setTalkContentPendingEdits(payload.pendingEdits ?? []);
-      })
-      .catch((err) => {
-        if (cancelled) return;
-        if (err instanceof UnauthorizedError) {
-          onUnauthorized();
-          return;
-        }
-        setTalkContentError(
-          err instanceof Error ? err.message : 'Failed to load document.',
-        );
-      })
-      .finally(() => {
-        if (!cancelled) setTalkContentLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [activeThreadId, currentThreadHasContent, onUnauthorized, talkId]);
+  }, [activeThreadId, currentThreadHasContent, talkId]);
 
   useEffect(() => {
     if (!talkId) return;
@@ -3843,6 +3886,41 @@ export function TalkDetailPage({
       (message) => !deletedMessageIdsRef.current.has(message.id),
     );
   }, []);
+
+  const handleLoadOlderMessages = useCallback(async (): Promise<void> => {
+    const threadId = activeThreadIdRef.current;
+    if (!threadId) return;
+    if (loadingOlderMessages) return;
+    const oldest = state.kind === 'ready' ? state.messages[0] : null;
+    if (!oldest) return;
+    setLoadingOlderMessages(true);
+    try {
+      const older = await listTalkMessages(talkId, {
+        threadId,
+        before: oldest.createdAt,
+        limit: 200,
+      });
+      if (activeThreadIdRef.current !== threadId) return;
+      dispatch({
+        type: 'PREPEND_OLDER_MESSAGES',
+        threadId,
+        messages: filterDeletedMessages(older),
+      });
+    } catch (err) {
+      if (err instanceof UnauthorizedError) {
+        handleUnauthorized();
+      }
+    } finally {
+      setLoadingOlderMessages(false);
+    }
+  }, [
+    filterDeletedMessages,
+    handleUnauthorized,
+    loadingOlderMessages,
+    state.kind,
+    state.messages,
+    talkId,
+  ]);
 
   const scheduleThreadListRefresh = useCallback(() => {
     threadRefreshDirtyRef.current = true;
@@ -4038,11 +4116,10 @@ export function TalkDetailPage({
     [selectedJobId, talkId],
   );
 
+  // Reset every per-talk slice when talkId changes. The snapshot query
+  // and the runs/agents fetch below re-hydrate them; the rest stay at
+  // their defaults until the user opens the corresponding tab.
   useEffect(() => {
-    let cancelled = false;
-    // Invalidate the threadState-talkId tag synchronously so the
-    // routing-resolution effect, which fires in the same commit, can't
-    // read stale (previous-talk) threads under the new talkId.
     threadStateTalkIdRef.current = null;
     dispatch({ type: 'BOOTSTRAP_LOADING' });
     messageElementRefs.current.clear();
@@ -4093,55 +4170,176 @@ export function TalkDetailPage({
     setChannelCreateDraft(buildDefaultChannelCreateDraft());
     setChannelTargetsLoading(false);
     setChannelStatus({ status: 'idle' });
-
-    const load = async () => {
-      try {
-        const [talk, threads, runs, talkAgents] = await Promise.all([
-          getTalk(talkId),
-          listTalkThreads(talkId),
-          getTalkRuns(talkId),
-          getTalkAgents(talkId),
-        ]);
-        if (cancelled) return;
-        const sortedThreads = sortThreads(threads);
-        setAgents(talkAgents);
-        setAgentDrafts(talkAgents);
-        setTargetAgentIds(buildTargetSelection(talkAgents, []));
-        setThreadState({ threads: sortedThreads, loading: false, error: null });
-        threadStateTalkIdRef.current = talkId;
-        dispatch({ type: 'BOOTSTRAP_READY', talk, runs });
-      } catch (err) {
-        if (err instanceof UnauthorizedError) {
-          handleUnauthorized();
-          return;
-        }
-        if (err instanceof ApiError && err.status === 404) {
-          if (!cancelled) {
-            dispatch({
-              type: 'BOOTSTRAP_ERROR',
-              unavailable: true,
-              message: 'Talk not found',
-            });
-          }
-          return;
-        }
-        if (!cancelled) {
-          dispatch({
-            type: 'BOOTSTRAP_ERROR',
-            unavailable: false,
-            message: err instanceof Error ? err.message : 'Failed to load talk',
-          });
-        }
-      }
-    };
-
-    void load();
+    setTalkContent(null);
+    setTalkContentPendingEdits([]);
+    setTalkContentError(null);
+    setTalkContentLoading(false);
     return () => {
-      cancelled = true;
       if (threadRefreshTimerRef.current) {
         clearTimeout(threadRefreshTimerRef.current);
         threadRefreshTimerRef.current = null;
       }
+    };
+  }, [talkId]);
+
+  // Tracks the last (talkId, activeThreadId) we fully hydrated from the
+  // snapshot. Subsequent snapshot.data changes for the same pair
+  // (e.g. a MESSAGE_APPENDED setQueryData patch) MUST NOT re-dispatch
+  // THREAD_MESSAGES_LOADED — that would clobber `liveResponsesByRunId`
+  // and bulk-clear failed cards mid-stream.
+  const hydratedKeyRef = useRef<string | null>(null);
+
+  // Hydrate everything the snapshot owns the moment it resolves
+  // (instant under a warm IDB cache; bounded by Hyperdrive RTT cold).
+  // BOOTSTRAP_READY here only seeds active runs from the snapshot —
+  // the parallel getTalkRuns/getTalkAgents effect below merges in the
+  // rich shapes (historical runs, provider/model fields) without
+  // re-dispatching BOOTSTRAP_READY.
+  useEffect(() => {
+    if (snapshotQuery.error) {
+      const err = snapshotQuery.error;
+      if (err instanceof ApiError && err.status === 404) {
+        dispatch({
+          type: 'BOOTSTRAP_ERROR',
+          unavailable: true,
+          message: 'Talk not found',
+        });
+        return;
+      }
+      dispatch({
+        type: 'BOOTSTRAP_ERROR',
+        unavailable: false,
+        message: err instanceof Error ? err.message : 'Failed to load talk',
+      });
+      return;
+    }
+    const snapshot = snapshotQuery.data;
+    if (!snapshot) return;
+    if (snapshot.talk.id !== talkId) return;
+    const hydrationKey = `${talkId}::${snapshot.activeThreadId}`;
+    const isFirstHydration = hydratedKeyRef.current !== hydrationKey;
+    const sortedThreads = sortThreads(
+      snapshot.threads.filter((thread) => !thread.isInternal),
+    );
+    setThreadState({ threads: sortedThreads, loading: false, error: null });
+    threadStateTalkIdRef.current = talkId;
+    // Always reconcile doc state — it advances independently of the
+    // message timeline (content_updated/applied/resolved invalidates).
+    setTalkContent(snapshot.content);
+    setTalkContentPendingEdits(
+      snapshot.pendingEdits.map((edit) => ({
+        id: edit.id,
+        contentId: edit.contentId,
+        runId: edit.runId,
+        agentId: edit.agentId,
+        agentNickname: edit.agentNickname,
+        messageId: edit.messageId,
+        kind: edit.kind,
+        baseContentVersion: edit.baseContentVersion,
+        targetAnchorId: edit.targetAnchorId,
+        newMarkdown: edit.newMarkdown,
+        rationale: edit.rationale,
+        createdAt: edit.createdAt,
+      })),
+    );
+    setTalkContentError(null);
+    setTalkContentLoading(false);
+    rememberActiveThreadForTalk(talkId, snapshot.activeThreadId);
+    if (!isFirstHydration) {
+      // Same (talkId, threadId) — the cache router patched the snapshot
+      // in place (e.g. MESSAGE_APPENDED setQueryData). The reducer was
+      // already updated by the WS dispatcher; re-running the bootstrap
+      // sequence here would wipe liveResponsesByRunId.
+      return;
+    }
+    hydratedKeyRef.current = hydrationKey;
+    const reducerTalk: Talk = {
+      id: snapshot.talk.id,
+      ownerId: snapshot.talk.ownerId,
+      title: snapshot.talk.title ?? '',
+      orchestrationMode: snapshot.talk.orchestrationMode,
+      agents: [],
+      status: snapshot.talk.status,
+      folderId: snapshot.talk.folderId,
+      sortOrder: snapshot.talk.sortOrder,
+      version: snapshot.talk.version,
+      createdAt: snapshot.talk.createdAt,
+      updatedAt: snapshot.talk.updatedAt,
+      accessRole: snapshot.talk.accessRole,
+    };
+    const reducerRuns: TalkRun[] = snapshot.runs.map((row) => ({
+      id: row.id,
+      threadId: row.threadId,
+      responseGroupId: row.responseGroupId,
+      sequenceIndex: row.sequenceIndex,
+      status: row.status,
+      createdAt: row.createdAt,
+      startedAt: row.startedAt,
+      completedAt: row.endedAt,
+      triggerMessageId: row.triggerMessageId,
+      targetAgentId: row.targetAgentId,
+      targetAgentNickname: null,
+      errorCode: null,
+      errorMessage: null,
+      cancelReason: null,
+      executorAlias: row.executorAlias,
+      executorModel: row.executorModel,
+    }));
+    dispatch({ type: 'BOOTSTRAP_READY', talk: reducerTalk, runs: reducerRuns });
+    // Re-dispatch historical runs if the runs/agents fetch resolved
+    // before BOOTSTRAP_READY (which would have dropped the dispatch
+    // because state.kind was still 'loading').
+    const stashedRuns = pendingHistoricalRunsRef.current;
+    if (stashedRuns) {
+      dispatch({ type: 'MERGE_HISTORICAL_RUNS', runs: stashedRuns });
+    }
+    dispatch({
+      type: 'THREAD_MESSAGES_LOADING',
+      threadId: snapshot.activeThreadId,
+    });
+    dispatch({
+      type: 'THREAD_MESSAGES_LOADED',
+      threadId: snapshot.activeThreadId,
+      messages: filterDeletedMessages(snapshot.messages),
+    });
+  }, [filterDeletedMessages, snapshotQuery.data, snapshotQuery.error, talkId]);
+
+  // Rich runs (historical) + rich agents (provider/model/health) come
+  // from these two existing endpoints — kept out of the snapshot wire
+  // shape to keep that payload tight. Fire in parallel with the
+  // snapshot so they don't gate the first paint. The runs result is
+  // stashed in a ref so MERGE_HISTORICAL_RUNS can be re-dispatched
+  // after BOOTSTRAP_READY when the snapshot wins the race.
+  const pendingHistoricalRunsRef = useRef<TalkRun[] | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    pendingHistoricalRunsRef.current = null;
+    const load = async () => {
+      try {
+        const [runs, talkAgents] = await Promise.all([
+          getTalkRuns(talkId),
+          getTalkAgents(talkId),
+        ]);
+        if (cancelled) return;
+        setAgents(talkAgents);
+        setAgentDrafts(talkAgents);
+        setTargetAgentIds(buildTargetSelection(talkAgents, []));
+        pendingHistoricalRunsRef.current = runs;
+        // If BOOTSTRAP_READY already landed (snapshot won the race), we
+        // can merge in place; otherwise the snapshot sync effect picks
+        // these up via the ref once it dispatches BOOTSTRAP_READY.
+        if (stateKindRef.current === 'ready') {
+          dispatch({ type: 'MERGE_HISTORICAL_RUNS', runs });
+        }
+      } catch (err) {
+        if (err instanceof UnauthorizedError) {
+          handleUnauthorized();
+        }
+      }
+    };
+    void load();
+    return () => {
+      cancelled = true;
     };
   }, [handleUnauthorized, talkId]);
 
@@ -4203,65 +4401,19 @@ export function TalkDetailPage({
     setRetryRunState(null);
   }, [activeThreadId]);
 
+  // Scroll-to-bottom on thread show — the snapshot already hydrated the
+  // messages slice, so all we need to do here is fire the post-render
+  // scroll alignment.
   useEffect(() => {
     if (state.kind !== 'ready' || !activeThreadId) return;
-    const snapshotVersion = threadSnapshotVersionRef.current;
-    let cancelled = false;
-    dispatch({ type: 'THREAD_MESSAGES_LOADING', threadId: activeThreadId });
-    listTalkMessages(talkId, { threadId: activeThreadId })
-      .then((messages) => {
-        if (
-          cancelled ||
-          activeThreadIdRef.current !== activeThreadId ||
-          snapshotVersion !== threadSnapshotVersionRef.current
-        ) {
-          return;
-        }
-        dispatch({
-          type: 'THREAD_MESSAGES_LOADED',
-          threadId: activeThreadId,
-          messages: filterDeletedMessages(messages),
-        });
-        requestAnimationFrame(() => {
-          if (pendingComposerFocusRef.current) {
-            pendingComposerFocusRef.current = false;
-            textareaRef.current?.focus();
-          }
-          scrollToBottom('auto');
-        });
-      })
-      .catch((err) => {
-        if (cancelled) return;
-        if (
-          activeThreadIdRef.current !== activeThreadId ||
-          snapshotVersion !== threadSnapshotVersionRef.current
-        ) {
-          return;
-        }
-        if (err instanceof UnauthorizedError) {
-          handleUnauthorized();
-          return;
-        }
-        dispatch({
-          type: 'THREAD_MESSAGES_FAILED',
-          threadId: activeThreadId,
-          message:
-            err instanceof Error
-              ? err.message
-              : 'Failed to load thread messages.',
-        });
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [
-    activeThreadId,
-    handleUnauthorized,
-    filterDeletedMessages,
-    scrollToBottom,
-    state.kind,
-    talkId,
-  ]);
+    requestAnimationFrame(() => {
+      if (pendingComposerFocusRef.current) {
+        pendingComposerFocusRef.current = false;
+        textareaRef.current?.focus();
+      }
+      scrollToBottom('auto');
+    });
+  }, [activeThreadId, scrollToBottom, state.kind]);
 
   useEffect(() => {
     let cancelled = false;
@@ -4355,6 +4507,9 @@ export function TalkDetailPage({
             pendingMessageRefetchTimersRef.current.delete(event.runId);
           }
         }
+        // Surgical RQ cache patch — keeps the persisted IDB snapshot
+        // exact across reloads even when no React consumer is mounted.
+        applyMessageAppendedDelta({ queryClient, userId, event });
         if (event.threadId) {
           ensureKnownThread(event.threadId);
         }
@@ -4555,6 +4710,9 @@ export function TalkDetailPage({
         scheduleThreadListRefresh();
       },
       onContentUpdated: (event: TalkContentUpdatedEvent) => {
+        // Mark the snapshot stale across consumers; tab-local refetch
+        // still happens inline so the editor reconciles right away.
+        wsCacheRouterRef.current.scheduleInvalidate({ userId, talkId });
         // The DO scopes events to the current talk-room subscription, so
         // the contentId here always belongs to this Talk. Bail when the
         // user hasn't loaded the doc yet — no local version to compare.
@@ -4596,6 +4754,7 @@ export function TalkDetailPage({
         pendingEditStreamingStartedAtRef.current.delete(event.runId);
       },
       onContentEditApplied: (event: TalkContentEditAppliedEvent) => {
+        wsCacheRouterRef.current.scheduleInvalidate({ userId, talkId });
         // Always refetch — the apply just created a pending row that
         // the UI must surface. The prior `current.id !== event.contentId`
         // guard caused a missed-update bug when the WebSocket event
@@ -4624,6 +4783,7 @@ export function TalkDetailPage({
         void refetchTalkContent();
       },
       onContentEditResolved: (event: TalkContentEditResolvedEvent) => {
+        wsCacheRouterRef.current.scheduleInvalidate({ userId, talkId });
         setTalkContentPendingEdits((prev) =>
           prev.filter((edit) => !event.editIds.includes(edit.id)),
         );
@@ -4633,6 +4793,7 @@ export function TalkDetailPage({
         void refetchTalkContent();
       },
       onTalkToolsChanged: () => {
+        wsCacheRouterRef.current.scheduleInvalidate({ userId, talkId });
         // Cross-tab sync: another tab toggled a tool chip. Bumping
         // refreshKey causes ToolChipsBar to refetch and reflect the
         // post-toggle active set. The event filter at
@@ -4661,6 +4822,12 @@ export function TalkDetailPage({
             dispatch({ type: 'STREAM_CONNECTING' });
             break;
           case 'live':
+            // Coming back online (or first live tick on mount) — mark
+            // every cached snapshot stale so any other open Talk pulls
+            // the latest the next time it renders, and the active one
+            // refetches immediately. Debounced so a reconnect replay
+            // backlog collapses to one round-trip.
+            wsCacheRouterRef.current.scheduleInvalidateAllSnapshots();
             dispatch({ type: 'STREAM_LIVE' });
             break;
           case 'reconnecting':
@@ -4688,12 +4855,14 @@ export function TalkDetailPage({
     ensureKnownThread,
     handleUnauthorized,
     isNearBottom,
+    queryClient,
     refetchTalkContent,
     rememberDeletedMessageIds,
     resyncTalkState,
     scheduleThreadListRefresh,
     state.kind,
     talkId,
+    userId,
   ]);
 
   useEffect(() => {
@@ -9713,6 +9882,22 @@ export function TalkDetailPage({
                       ) : null}
 
                       <div className="timeline talk-thread-timeline">
+                        {!state.messagesLoading &&
+                        activeThread &&
+                        snapshotQuery.data?.hasOlderMessages &&
+                        !loadingOlderMessages &&
+                        state.messages.length > 0 ? (
+                          <button
+                            type="button"
+                            className="timeline-load-earlier"
+                            onClick={() => void handleLoadOlderMessages()}
+                          >
+                            Load earlier messages
+                          </button>
+                        ) : null}
+                        {loadingOlderMessages ? (
+                          <p className="page-state">Loading earlier…</p>
+                        ) : null}
                         {state.messagesLoading ? (
                           <p className="page-state">Loading thread…</p>
                         ) : !activeThread ? (

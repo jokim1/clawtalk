@@ -24,6 +24,10 @@ export type MessageAppendedEvent = {
   agentId?: string | null;
   agentNickname?: string | null;
   metadata?: Record<string, unknown> | null;
+  // Outbox row id of the framed event. Cache router uses it to drop
+  // deltas that the snapshot already incorporates (per-delta version
+  // check vs. snapshot.snapshotVersion).
+  eventId?: number;
 };
 
 export type TalkRunStartedEvent = {
@@ -409,7 +413,7 @@ export function openTalkStream(input: OpenTalkStreamInput): TalkStreamHandle {
     switch (frame.event) {
       case 'message_appended': {
         const payload = parseFrame<MessageAppendedEvent>(frame);
-        if (payload) input.onMessageAppended(payload);
+        if (payload) input.onMessageAppended({ ...payload, eventId: frame.id });
         return;
       }
       case 'talk_run_started': {

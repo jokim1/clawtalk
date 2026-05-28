@@ -16,10 +16,10 @@ import {
 } from '../../db/talk-snapshot-accessor.js';
 import type {
   TalkMessageRecord,
-  TalkRecord,
   TalkRunRecord,
   TalkRunStatus,
   TalkThreadWithMetrics,
+  TalkWithAccessRecord,
 } from '../../db/accessors.js';
 import type { Content } from '../../db/content-accessors.js';
 import type { ContentEditRow } from '../../../shared/rich-text/index.js';
@@ -37,6 +37,12 @@ export interface TalkSnapshotApiTalk {
   version: number;
   createdAt: string;
   updatedAt: string;
+  // Permission gate used by the webapp's edit/delete UI. RLS already
+  // refuses the snapshot fetch when the user isn't the owner, so this
+  // is always 'owner' today; the field is still exposed so the webapp
+  // can read a single shape across all entry points and the future
+  // sharing feature can flip it without another contract bump.
+  accessRole: 'owner' | 'admin' | 'editor' | 'viewer';
 }
 
 export interface TalkSnapshotApiThread {
@@ -103,7 +109,7 @@ export interface TalkSnapshotApiRecord {
   snapshotVersion: number;
 }
 
-function toApiTalk(row: TalkRecord): TalkSnapshotApiTalk {
+function toApiTalk(row: TalkWithAccessRecord): TalkSnapshotApiTalk {
   return {
     id: row.id,
     ownerId: row.owner_id,
@@ -115,6 +121,7 @@ function toApiTalk(row: TalkRecord): TalkSnapshotApiTalk {
     version: row.version,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+    accessRole: row.access_role,
   };
 }
 
