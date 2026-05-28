@@ -29,8 +29,10 @@ import {
   TalkSidebarTalk,
   UnauthorizedError,
 } from './lib/api';
+import { clearPersistedQueryCache } from './lib/queryClient';
 import { isSupabaseConfigured } from './lib/supabase-client';
 import { installAuthStateListener } from './lib/supabase-cookie-shim';
+import { clearActiveThreadMemory } from './lib/useTalkSnapshot';
 import { TalkDetailPage } from './pages/TalkDetailPage';
 import { TalkListPage } from './pages/TalkListPage';
 import { SettingsPage } from './pages/SettingsPage';
@@ -453,6 +455,12 @@ export function App() {
     try {
       await logoutSession();
     } finally {
+      // Drop any cached snapshot data so a different user signing in
+      // on the same device doesn't read the previous user's IDB
+      // residue. Per-user queryKey prefix protects against accidental
+      // cross-reads while persisted; this is the belt-and-braces wipe.
+      await clearPersistedQueryCache();
+      clearActiveThreadMemory();
       setAuth({ status: 'unauthenticated' });
       setSignOutBusy(false);
     }
@@ -788,6 +796,7 @@ export function App() {
               path="/app/talks/:talkId/*"
               element={
                 <TalkDetailPage
+                  userId={auth.user.id}
                   onUnauthorized={handleUnauthorized}
                   titleOverride={currentTalkTitle}
                   renameDraft={renameDraft}

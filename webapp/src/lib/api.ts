@@ -1213,6 +1213,86 @@ export async function getTalk(talkId: string): Promise<Talk> {
   return envelope.talk;
 }
 
+export type TalkSnapshotThread = {
+  id: string;
+  talkId: string;
+  title: string | null;
+  isDefault: boolean;
+  isInternal: boolean;
+  isPinned: boolean;
+  createdAt: string;
+  updatedAt: string;
+  messageCount: number;
+  lastMessageAt: string | null;
+};
+
+export type TalkSnapshotTalk = {
+  id: string;
+  ownerId: string;
+  folderId: string | null;
+  sortOrder: number;
+  title: string | null;
+  orchestrationMode: 'ordered' | 'panel';
+  status: 'active' | 'paused' | 'archived';
+  version: number;
+  createdAt: string;
+  updatedAt: string;
+  accessRole: Talk['accessRole'];
+};
+
+export type TalkSnapshotAgent = {
+  assignmentId: string;
+  agentId: string;
+  agentName: string;
+  nickname: string;
+  personaRole: string | null;
+  isPrimary: boolean;
+  sortOrder: number;
+};
+
+export type TalkSnapshotRun = {
+  id: string;
+  threadId: string;
+  status: TalkRun['status'];
+  responseGroupId: string | null;
+  sequenceIndex: number | null;
+  createdAt: string;
+  startedAt: string | null;
+  endedAt: string | null;
+  triggerMessageId: string | null;
+  targetAgentId: string | null;
+  executorAlias: string | null;
+  executorModel: string | null;
+};
+
+export type TalkSnapshot = {
+  talk: TalkSnapshotTalk;
+  threads: TalkSnapshotThread[];
+  activeThreadId: string;
+  messages: TalkMessage[];
+  hasOlderMessages: boolean;
+  content: Content | null;
+  pendingEdits: ContentEditSummary[];
+  runs: TalkSnapshotRun[];
+  agents: TalkSnapshotAgent[];
+  snapshotVersion: number;
+};
+
+export async function getTalkSnapshot(input: {
+  talkId: string;
+  threadId?: string | null;
+}): Promise<TalkSnapshot> {
+  const params = new URLSearchParams();
+  if (input.threadId) {
+    params.set('threadId', input.threadId);
+  }
+  return apiRequest<TalkSnapshot>(
+    `/api/v1/talks/${encodeURIComponent(input.talkId)}/snapshot${
+      params.size > 0 ? `?${params.toString()}` : ''
+    }`,
+  );
+}
+
 export type ContentEditSummary = {
   id: string;
   contentId: string;
@@ -1521,11 +1601,21 @@ export async function deleteTalkThread(input: {
 
 export async function listTalkMessages(
   talkId: string,
-  options?: { threadId?: string | null },
+  options?: {
+    threadId?: string | null;
+    before?: string | null;
+    limit?: number;
+  },
 ): Promise<TalkMessage[]> {
   const params = new URLSearchParams();
   if (options?.threadId) {
     params.set('threadId', options.threadId);
+  }
+  if (options?.before) {
+    params.set('before', options.before);
+  }
+  if (typeof options?.limit === 'number') {
+    params.set('limit', String(options.limit));
   }
   const envelope = await apiRequest<{
     talkId: string;

@@ -1,6 +1,7 @@
 import { cleanup, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { App } from './App';
@@ -410,6 +411,12 @@ describe('App', () => {
           error: { code: 'talk_not_found', message: 'Talk not found' },
         }),
       ],
+      '/api/v1/talks/talk-missing/snapshot': [
+        jsonResponse(404, {
+          ok: false,
+          error: { code: 'talk_not_found', message: 'Talk not found' },
+        }),
+      ],
       '/api/v1/talks/talk-missing/messages': [
         jsonResponse(200, {
           ok: true,
@@ -455,10 +462,15 @@ describe('App', () => {
 });
 
 function renderWithRouter(initialEntry: string): void {
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false, gcTime: 0 } },
+  });
   render(
-    <MemoryRouter initialEntries={[initialEntry]}>
-      <App />
-    </MemoryRouter>,
+    <QueryClientProvider client={queryClient}>
+      <MemoryRouter initialEntries={[initialEntry]}>
+        <App />
+      </MemoryRouter>
+    </QueryClientProvider>,
   );
 }
 
