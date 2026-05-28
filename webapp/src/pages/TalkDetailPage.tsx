@@ -110,6 +110,7 @@ import {
   TalkMessageSearchResult,
   TalkMessageAttachment,
   TalkRun,
+  TalkSnapshot,
   TalkRunContextSnapshot,
   TalkStateEntry,
   TalkThread,
@@ -168,8 +169,11 @@ import {
   useTalkSnapshot,
 } from '../lib/useTalkSnapshot';
 import {
+  appendTalkMessageToSnapshot,
   applyMessageAppendedDelta,
   createWsCacheRouter,
+  patchTalkInSnapshot,
+  prependOlderTalkMessagesToSnapshot,
 } from '../lib/wsCacheRouter';
 import { type RichTextEditorSaveStatus } from '../components/rich-text/RichTextEditor';
 import type {
@@ -360,14 +364,13 @@ type TalkJobDraft = {
   allowWeb: boolean;
 };
 
+// PR C (talk-load architecture refactor): server data — talk, messages,
+// threads, content — moved to React Query (snapshotQuery). This reducer
+// holds only UI state + live streaming/runs state that the WS event
+// fan-out needs to render token-by-token without re-rendering the
+// snapshot subscriber tree.
 type DetailState = {
-  kind: 'loading' | 'ready' | 'unavailable' | 'error';
-  talk: Talk | null;
-  errorMessage: string | null;
   selectedThreadId: string | null;
-  messages: TalkMessage[];
-  messageIds: Set<string>;
-  messagesLoading: boolean;
   runsById: Record<string, RunView>;
   streamState: TalkStreamState;
   sendState: {
@@ -530,40 +533,12 @@ function summarizeTalkJobScope(
 }
 
 type DetailAction =
-  | { type: 'BOOTSTRAP_LOADING' }
-  | {
-      type: 'BOOTSTRAP_READY';
-      talk: Talk;
-      runs: TalkRun[];
-    }
-  | { type: 'BOOTSTRAP_ERROR'; unavailable: boolean; message: string }
-  | { type: 'TALK_UPDATED'; talk: Talk }
-  | { type: 'THREAD_MESSAGES_LOADING'; threadId: string }
-  | {
-      type: 'THREAD_MESSAGES_LOADED';
-      threadId: string;
-      messages: TalkMessage[];
-    }
-  | { type: 'THREAD_MESSAGES_FAILED'; threadId: string; message: string }
-  | {
-      type: 'RESET_FROM_RESYNC';
-      threadId: string;
-      messages: TalkMessage[];
-      runs: TalkRun[];
-    }
+  | { type: 'TALK_RESET' }
+  | { type: 'SNAPSHOT_HYDRATED'; threadId: string; runs: TalkRun[] }
+  | { type: 'THREAD_SELECTED'; threadId: string | null }
   | { type: 'MERGE_HISTORICAL_RUNS'; runs: TalkRun[] }
   | {
-      type: 'PREPEND_OLDER_MESSAGES';
-      threadId: string;
-      messages: TalkMessage[];
-    }
-  | {
-      type: 'THREAD_MESSAGES_SYNCED';
-      threadId: string;
-      messages: TalkMessage[];
-    }
-  | {
-      type: 'MESSAGE_APPENDED';
+      type: 'MESSAGE_LANDED';
       message: TalkMessage;
       wasNearBottom: boolean;
     }
@@ -850,13 +825,7 @@ type TalkAgentSourceOption = {
 
 function createInitialDetailState(): DetailState {
   return {
-    kind: 'loading',
-    talk: null,
-    errorMessage: null,
     selectedThreadId: null,
-    messages: [],
-    messageIds: new Set<string>(),
-    messagesLoading: false,
     runsById: {},
     streamState: 'connecting',
     sendState: { status: 'idle' },
@@ -891,6 +860,49 @@ function mapRunsById(runs: TalkRun[]): Record<string, RunView> {
     acc[run.id] = toRunView(run);
     return acc;
   }, {});
+}
+
+const EMPTY_MESSAGES: TalkMessage[] = [];
+
+// Stable conversion from the snapshot's wire shape to the webapp's Talk
+// type (defaults `title` to '' and `agents` to []) so render-site reads
+// against `snapshot.talk` get the same shape the old reducer mirrored.
+function snapshotTalkToTalk(snapshotTalk: TalkSnapshot['talk']): Talk {
+  return {
+    id: snapshotTalk.id,
+    ownerId: snapshotTalk.ownerId,
+    title: snapshotTalk.title ?? '',
+    orchestrationMode: snapshotTalk.orchestrationMode,
+    agents: [],
+    status: snapshotTalk.status,
+    folderId: snapshotTalk.folderId,
+    sortOrder: snapshotTalk.sortOrder,
+    version: snapshotTalk.version,
+    createdAt: snapshotTalk.createdAt,
+    updatedAt: snapshotTalk.updatedAt,
+    accessRole: snapshotTalk.accessRole,
+  };
+}
+
+function snapshotRunsToTalkRuns(snapshotRuns: TalkSnapshot['runs']): TalkRun[] {
+  return snapshotRuns.map((row) => ({
+    id: row.id,
+    threadId: row.threadId,
+    responseGroupId: row.responseGroupId,
+    sequenceIndex: row.sequenceIndex,
+    status: row.status,
+    createdAt: row.createdAt,
+    startedAt: row.startedAt,
+    completedAt: row.endedAt,
+    triggerMessageId: row.triggerMessageId,
+    targetAgentId: row.targetAgentId,
+    targetAgentNickname: null,
+    errorCode: null,
+    errorMessage: null,
+    cancelReason: null,
+    executorAlias: row.executorAlias,
+    executorModel: row.executorModel,
+  }));
 }
 
 function deriveLiveResponsesFromRuns(
@@ -1079,155 +1091,73 @@ function withRun(
 
 function detailReducer(state: DetailState, action: DetailAction): DetailState {
   switch (action.type) {
-    case 'BOOTSTRAP_LOADING':
-      return {
-        ...createInitialDetailState(),
-        kind: 'loading',
-      };
-    case 'BOOTSTRAP_READY':
-      return {
-        kind: 'ready',
-        talk: action.talk,
-        errorMessage: null,
-        selectedThreadId: null,
-        messages: [],
-        messageIds: new Set<string>(),
-        messagesLoading: false,
-        runsById: mapRunsById(action.runs),
-        streamState: 'connecting',
-        sendState: { status: 'idle' },
-        liveResponsesByRunId: deriveLiveResponsesFromRuns(action.runs, null),
-        cancelState: { status: 'idle' },
-        hasUnreadBelow: false,
-        initialScrollPending: true,
-      };
-    case 'BOOTSTRAP_ERROR':
-      return {
-        ...createInitialDetailState(),
-        kind: action.unavailable ? 'unavailable' : 'error',
-        errorMessage: action.message,
-        streamState: 'offline',
-      };
-    case 'TALK_UPDATED':
-      if (state.kind !== 'ready') return state;
-      return {
-        ...state,
-        talk: action.talk,
-      };
-    case 'THREAD_MESSAGES_LOADING':
-      if (state.kind !== 'ready') return state;
+    case 'TALK_RESET':
+      // Cross-talk navigation: previously BOOTSTRAP_LOADING cleared the
+      // full reducer state because the snapshot hydrate replaced it.
+      // PR C kept the existing run cache so a parallel-fetch race
+      // wouldn't drop in-flight runs — but on a fresh talkId the old
+      // talk's runs/live state must not survive into the new one.
+      return createInitialDetailState();
+    case 'SNAPSHOT_HYDRATED': {
+      // First snapshot hydration for a (talkId, threadId). Seed runsById
+      // from the snapshot's active runs while preserving any live-state
+      // already accumulated from WS deltas that beat the snapshot. Mark
+      // initialScrollPending so the scroll effect parks us at the bottom
+      // once messages render.
+      const incoming = mapRunsById(action.runs);
+      const merged = { ...incoming };
+      for (const [runId, view] of Object.entries(state.runsById)) {
+        merged[runId] = { ...merged[runId], ...view };
+      }
+      const seededLive = deriveLiveResponsesFromRuns(
+        action.runs,
+        action.threadId,
+      );
+      const liveResponsesByRunId = { ...state.liveResponsesByRunId };
+      for (const [runId, view] of Object.entries(seededLive)) {
+        if (!liveResponsesByRunId[runId]) liveResponsesByRunId[runId] = view;
+      }
       return {
         ...state,
         selectedThreadId: action.threadId,
-        messages: [],
-        messageIds: new Set<string>(),
-        messagesLoading: true,
-        liveResponsesByRunId: {},
-        hasUnreadBelow: false,
-        initialScrollPending: false,
-      };
-    case 'THREAD_MESSAGES_LOADED':
-      if (state.kind !== 'ready') return state;
-      if (action.threadId !== state.selectedThreadId) return state;
-      return {
-        ...state,
-        messages: action.messages,
-        messageIds: new Set(action.messages.map((message) => message.id)),
-        messagesLoading: false,
-        liveResponsesByRunId: {},
+        runsById: pruneEventRunCache(merged),
+        liveResponsesByRunId,
         hasUnreadBelow: false,
         initialScrollPending: true,
       };
-    case 'THREAD_MESSAGES_FAILED':
-      if (state.kind !== 'ready') return state;
-      if (action.threadId !== state.selectedThreadId) return state;
+    }
+    case 'THREAD_SELECTED':
+      if (state.selectedThreadId === action.threadId) return state;
       return {
         ...state,
-        messages: [],
-        messageIds: new Set<string>(),
-        messagesLoading: false,
-        sendState: { status: 'error', error: action.message },
-      };
-    case 'RESET_FROM_RESYNC':
-      if (state.kind !== 'ready') return state;
-      if (action.threadId !== state.selectedThreadId) return state;
-      return {
-        ...state,
-        messages: action.messages,
-        messageIds: new Set(action.messages.map((message) => message.id)),
-        messagesLoading: false,
-        runsById: pruneEventRunCache(mapRunsById(action.runs)),
-        liveResponsesByRunId: deriveLiveResponsesFromRuns(
-          action.runs,
-          action.threadId,
-        ),
+        selectedThreadId: action.threadId,
+        liveResponsesByRunId: {},
         hasUnreadBelow: false,
         initialScrollPending: false,
       };
     case 'MERGE_HISTORICAL_RUNS': {
-      if (state.kind !== 'ready') return state;
-      // Merge: active runs already in the cache keep whatever live-state
-      // they've accumulated (queued → running, error envelopes, etc.).
-      // Historical runs from the fetched list overlay the rest so the
-      // Runs tab has the full timeline without disturbing live UX.
+      // Server-authoritative refresh: every run in `action.runs` carries
+      // the latest persisted shape (status, browserBlock, errorMessage,
+      // etc.). Incoming wins for matched run ids so a resync (e.g. after
+      // approving a browser confirmation) clears stale fields like
+      // browserBlock. Runs that are only in local state — typically
+      // ephemeral entries the live stream just minted — are preserved so
+      // a parallel fetch racing a fresh RUN_QUEUED doesn't drop the
+      // in-flight panel.
       const merged = mapRunsById(action.runs);
       for (const [runId, view] of Object.entries(state.runsById)) {
-        merged[runId] = { ...merged[runId], ...view };
+        if (!(runId in merged)) {
+          merged[runId] = view;
+        }
       }
       return { ...state, runsById: merged };
     }
-    case 'PREPEND_OLDER_MESSAGES': {
-      if (state.kind !== 'ready') return state;
-      if (action.threadId !== state.selectedThreadId) return state;
-      if (action.messages.length === 0) return state;
-      const additions = action.messages.filter(
-        (message) => !state.messageIds.has(message.id),
-      );
-      if (additions.length === 0) return state;
-      const nextMessages = [...additions, ...state.messages];
-      const nextIds = new Set(state.messageIds);
-      for (const message of additions) {
-        nextIds.add(message.id);
-      }
-      return {
-        ...state,
-        messages: nextMessages,
-        messageIds: nextIds,
-      };
-    }
-    case 'THREAD_MESSAGES_SYNCED': {
-      // Fires whenever a same-thread snapshot refetch lands (e.g. after
-      // reconnect-invalidate). No-ops when the snapshot content matches
-      // what the WS handler already merged into state.messages, so a
-      // delta-patch fan-out doesn't churn — but a fresh server-side set
-      // (e.g. a deleted message vanishing) still flows through.
-      if (state.kind !== 'ready') return state;
-      if (action.threadId !== state.selectedThreadId) return state;
-      const sameLength = state.messages.length === action.messages.length;
-      const sameLastId =
-        sameLength &&
-        (state.messages.length === 0 ||
-          state.messages[state.messages.length - 1].id ===
-            action.messages[action.messages.length - 1].id);
-      const sameFirstId =
-        sameLength &&
-        (state.messages.length === 0 ||
-          state.messages[0].id === action.messages[0].id);
-      if (sameLength && sameLastId && sameFirstId) return state;
-      return {
-        ...state,
-        messages: action.messages,
-        messageIds: new Set(action.messages.map((message) => message.id)),
-        messagesLoading: false,
-      };
-    }
-    case 'MESSAGE_APPENDED': {
-      if (state.kind !== 'ready') return state;
-      if (state.messageIds.has(action.message.id)) return state;
-
-      const messages = [...state.messages, action.message];
-      const messageIds = new Set(state.messageIds);
-      messageIds.add(action.message.id);
+    case 'MESSAGE_LANDED': {
+      // The snapshot cache holds the message itself (router setQueryData
+      // already appended it). This action only updates the
+      // streaming/runs slices: drop the live placeholder for the
+      // run, clear any failed live cards if this is a user turn, and
+      // bump the unread-below pill if the user wasn't near bottom.
       let liveResponsesByRunId = { ...state.liveResponsesByRunId };
       if (action.message.runId) {
         delete liveResponsesByRunId[action.message.runId];
@@ -1239,11 +1169,8 @@ function detailReducer(state: DetailState, action: DetailAction): DetailState {
           action.message.threadId,
         );
       }
-
       return {
         ...state,
-        messages,
-        messageIds,
         liveResponsesByRunId,
         hasUnreadBelow:
           state.initialScrollPending || action.wasNearBottom
@@ -1252,7 +1179,6 @@ function detailReducer(state: DetailState, action: DetailAction): DetailState {
       };
     }
     case 'RUN_STARTED': {
-      if (state.kind !== 'ready') return state;
       const runsById = withRun(state, action.runId, {
         threadId: action.threadId || undefined,
         status: 'running',
@@ -1297,7 +1223,6 @@ function detailReducer(state: DetailState, action: DetailAction): DetailState {
       return { ...state, runsById, liveResponsesByRunId };
     }
     case 'RUN_QUEUED': {
-      if (state.kind !== 'ready') return state;
       const runsById = withRun(state, action.runId, {
         threadId: action.threadId || undefined,
         status: 'queued',
@@ -1340,7 +1265,6 @@ function detailReducer(state: DetailState, action: DetailAction): DetailState {
       return { ...state, runsById, liveResponsesByRunId };
     }
     case 'RUN_RETRYING': {
-      if (state.kind !== 'ready') return state;
       const existing = state.liveResponsesByRunId[action.runId];
       // Only stamp retry visibility onto a live response we already
       // know about — no point synthesizing one if we never saw the
@@ -1357,7 +1281,6 @@ function detailReducer(state: DetailState, action: DetailAction): DetailState {
       return { ...state, liveResponsesByRunId };
     }
     case 'RUN_COMPLETED': {
-      if (state.kind !== 'ready') return state;
       const runsById = withRun(state, action.runId, {
         threadId: action.threadId || undefined,
         status: 'completed',
@@ -1391,7 +1314,6 @@ function detailReducer(state: DetailState, action: DetailAction): DetailState {
       };
     }
     case 'RUN_FAILED': {
-      if (state.kind !== 'ready') return state;
       const existing = state.liveResponsesByRunId[action.runId];
       const priorRun = state.runsById[action.runId];
       const runsById = withRun(state, action.runId, {
@@ -1445,7 +1367,7 @@ function detailReducer(state: DetailState, action: DetailAction): DetailState {
       };
     }
     case 'RUN_CANCELLED_BATCH': {
-      if (state.kind !== 'ready' || action.runIds.length === 0) return state;
+      if (action.runIds.length === 0) return state;
       // Keep cancelled panels visible with terminalStatus='cancelled' so the
       // user sees "Cancelled · Ns" with retained elapsed. Previously these
       // were deleted on cancel — which silently removed feedback.
@@ -1501,7 +1423,6 @@ function detailReducer(state: DetailState, action: DetailAction): DetailState {
       };
     }
     case 'RESPONSE_STARTED': {
-      if (state.kind !== 'ready') return state;
       // Upsert: refine the queued/running placeholder created at RUN_QUEUED
       // with provider details; do NOT clobber existing text/queuedAt.
       const existing = state.liveResponsesByRunId[action.event.runId];
@@ -1533,7 +1454,6 @@ function detailReducer(state: DetailState, action: DetailAction): DetailState {
       };
     }
     case 'RESPONSE_PROGRESS': {
-      if (state.kind !== 'ready') return state;
       const existing = state.liveResponsesByRunId[action.event.runId];
       const queuedAt = existing?.queuedAt ?? Date.now();
       return {
@@ -1564,7 +1484,6 @@ function detailReducer(state: DetailState, action: DetailAction): DetailState {
       };
     }
     case 'RESPONSE_DELTA': {
-      if (state.kind !== 'ready') return state;
       const existing = state.liveResponsesByRunId[action.event.runId];
       // If RUN_COMPLETED already deleted the in-flight liveResponse, drop
       // late deltas. Without this guard, the next delta re-creates a
@@ -1611,7 +1530,6 @@ function detailReducer(state: DetailState, action: DetailAction): DetailState {
     case 'RESPONSE_COMPLETED':
       return state;
     case 'RESPONSE_FAILED': {
-      if (state.kind !== 'ready') return state;
       const existing = state.liveResponsesByRunId[action.event.runId];
       const priorRun = state.runsById[action.event.runId];
       if (
@@ -1650,16 +1568,13 @@ function detailReducer(state: DetailState, action: DetailAction): DetailState {
       };
     }
     case 'RESPONSE_CANCELLED': {
-      if (state.kind !== 'ready') return state;
       const liveResponsesByRunId = { ...state.liveResponsesByRunId };
       delete liveResponsesByRunId[action.event.runId];
       return { ...state, liveResponsesByRunId };
     }
     case 'STREAM_CONNECTING':
-      if (state.kind !== 'ready') return state;
       return { ...state, streamState: 'connecting' };
     case 'STREAM_LIVE': {
-      if (state.kind !== 'ready') return state;
       // Revert any panels stuck in 'reconnecting' back to 'running'.
       const liveResponsesByRunId = { ...state.liveResponsesByRunId };
       let changed = false;
@@ -1678,7 +1593,6 @@ function detailReducer(state: DetailState, action: DetailAction): DetailState {
       };
     }
     case 'STREAM_RECONNECTING': {
-      if (state.kind !== 'ready') return state;
       // Flip all non-terminal panels to 'reconnecting' so the UI shows the SSE drop.
       const liveResponsesByRunId = { ...state.liveResponsesByRunId };
       let changed = false;
@@ -1700,13 +1614,10 @@ function detailReducer(state: DetailState, action: DetailAction): DetailState {
       };
     }
     case 'STREAM_OFFLINE':
-      if (state.kind !== 'ready') return state;
       return { ...state, streamState: 'offline' };
     case 'SEND_STARTED':
-      if (state.kind !== 'ready') return state;
       return { ...state, sendState: { status: 'posting' } };
     case 'SEND_FAILED':
-      if (state.kind !== 'ready') return state;
       return {
         ...state,
         sendState: {
@@ -1716,25 +1627,20 @@ function detailReducer(state: DetailState, action: DetailAction): DetailState {
         },
       };
     case 'SEND_CLEARED':
-      if (state.kind !== 'ready') return state;
       return { ...state, sendState: { status: 'idle' } };
     case 'CANCEL_STARTED':
-      if (state.kind !== 'ready') return state;
       return { ...state, cancelState: { status: 'posting' } };
     case 'CANCEL_SUCCEEDED':
-      if (state.kind !== 'ready') return state;
       return {
         ...state,
         cancelState: { status: 'success', message: action.message },
       };
     case 'CANCEL_FAILED':
-      if (state.kind !== 'ready') return state;
       return {
         ...state,
         cancelState: { status: 'error', message: action.message },
       };
     case 'CLEAR_UNREAD':
-      if (state.kind !== 'ready') return state;
       return {
         ...state,
         hasUnreadBelow: false,
@@ -3033,6 +2939,52 @@ export function TalkDetailPage({
     undefined,
     createInitialDetailState,
   );
+
+  // Derived snapshot accessors — PR C: server data lives in React
+  // Query. Render-site reads pull from these instead of the reducer.
+  //
+  // Once the page has rendered with snapshot data, we stay 'ready' even
+  // during background refetches and thread-switch rekeys (which drop
+  // snapshotQuery.data back to undefined). Flipping pageKind back to
+  // 'loading' would unmount the ready-branch tree — replacing the
+  // thread rail / composer DOM nodes — which breaks any handler that
+  // captured a DOM reference (e.g. handleDeleteThread holding a
+  // threadRail node) and causes a visible page-level loading flash.
+  const lastSnapshotRef = useRef<TalkSnapshot | null>(null);
+  // Only fall back to the last-good snapshot when it belongs to the
+  // currently-routed talk. Cross-talk navigation drops the fallback
+  // immediately so the previous talk's messages/title can't render
+  // against the new talkId — and so handlers reading pageTalk.id can't
+  // mutate the previous Talk before the new snapshot resolves.
+  if (snapshotQuery.data) {
+    lastSnapshotRef.current = snapshotQuery.data;
+  } else if (
+    lastSnapshotRef.current &&
+    lastSnapshotRef.current.talk.id !== talkId
+  ) {
+    lastSnapshotRef.current = null;
+  }
+  const talkSnapshot = snapshotQuery.data ?? lastSnapshotRef.current;
+  const snapshotError = snapshotQuery.error;
+  const snapshotIs404 =
+    snapshotError instanceof ApiError && snapshotError.status === 404;
+  const pageKind: 'loading' | 'ready' | 'unavailable' | 'error' = snapshotIs404
+    ? 'unavailable'
+    : snapshotError
+      ? 'error'
+      : !talkSnapshot
+        ? 'loading'
+        : 'ready';
+  const pageErrorMessage: string | null = snapshotIs404
+    ? 'Talk not found'
+    : snapshotError instanceof Error
+      ? snapshotError.message
+      : null;
+  const pageTalk: Talk | null = useMemo(
+    () => (talkSnapshot ? snapshotTalkToTalk(talkSnapshot.talk) : null),
+    [talkSnapshot?.talk],
+  );
+
   const [threadState, setThreadState] = useState<ThreadListState>({
     threads: [],
     loading: true,
@@ -3318,7 +3270,6 @@ export function TalkDetailPage({
   const messageElementRefs = useRef<Map<string, HTMLElement>>(new Map());
   const autoStickToBottomRef = useRef(false);
   const onUnauthorizedRef = useRef(onUnauthorized);
-  const stateKindRef = useRef<DetailState['kind']>(state.kind);
 
   useEffect(() => {
     onUnauthorizedRef.current = onUnauthorized;
@@ -3328,10 +3279,17 @@ export function TalkDetailPage({
   threadStateRef.current = threadState;
   searchQueryRef.current = searchQuery;
   runContextPanelsRef.current = runContextPanels;
-  stateKindRef.current = state.kind;
 
   useEffect(() => {
     threadSnapshotVersionRef.current += 1;
+  }, [activeThreadId]);
+
+  // PR C: keep the reducer's selectedThreadId in lockstep with the
+  // page's activeThreadId useState. Several actions (RUN_QUEUED,
+  // RUN_STARTED, RESPONSE_FAILED) guard on this to decide whether a
+  // live-response panel belongs in the currently-rendered thread.
+  useEffect(() => {
+    dispatch({ type: 'THREAD_SELECTED', threadId: activeThreadId });
   }, [activeThreadId]);
 
   const ruleSensors = useSensors(
@@ -3927,11 +3885,23 @@ export function TalkDetailPage({
     );
   }, []);
 
+  // PR C: cached message timeline derived from the snapshot. The wsCacheRouter
+  // appends new messages via setQueryData; this memo re-derives whenever the
+  // identity of `talkSnapshot.messages` changes (mutation, refetch, delete).
+  const pageMessages: TalkMessage[] = useMemo(
+    () => filterDeletedMessages(talkSnapshot?.messages ?? EMPTY_MESSAGES),
+    [filterDeletedMessages, talkSnapshot?.messages],
+  );
+  const pageMessageIds = useMemo(
+    () => new Set(pageMessages.map((m) => m.id)),
+    [pageMessages],
+  );
+
   const handleLoadOlderMessages = useCallback(async (): Promise<void> => {
     const threadId = activeThreadIdRef.current;
     if (!threadId) return;
     if (loadingOlderMessages) return;
-    const oldest = state.kind === 'ready' ? state.messages[0] : null;
+    const oldest = pageKind === 'ready' ? pageMessages[0] : null;
     if (!oldest) return;
     setLoadingOlderMessages(true);
     const pageSize = 200;
@@ -3943,15 +3913,20 @@ export function TalkDetailPage({
       });
       if (activeThreadIdRef.current !== threadId) return;
       const filtered = filterDeletedMessages(older);
-      dispatch({
-        type: 'PREPEND_OLDER_MESSAGES',
+      // Server returned fewer than we asked for → no more history. Patch
+      // the snapshot's `hasOlderMessages` in the same setQueryData so a
+      // background refetch can't mirror the stale `true` back into the
+      // page state (Codex #466 P2 + Codex #462 P3).
+      const isFinalPage = older.length < pageSize;
+      prependOlderTalkMessagesToSnapshot({
+        queryClient,
+        userId,
+        talkId,
         threadId,
         messages: filtered,
+        hasOlderMessages: isFinalPage ? false : undefined,
       });
-      // Server returned fewer than we asked for → no more history. Hide
-      // the button so the user doesn't keep firing empty `?before=`
-      // requests (Codex #462 P3).
-      if (older.length < pageSize) {
+      if (isFinalPage) {
         setOlderMessagesAvailable(false);
       }
     } catch (err) {
@@ -3965,9 +3940,11 @@ export function TalkDetailPage({
     filterDeletedMessages,
     handleUnauthorized,
     loadingOlderMessages,
-    state.kind,
-    state.messages,
+    pageKind,
+    pageMessages,
+    queryClient,
     talkId,
+    userId,
   ]);
 
   const scheduleThreadListRefresh = useCallback(() => {
@@ -3986,12 +3963,18 @@ export function TalkDetailPage({
       const threadId = activeThreadIdRef.current;
       if (!threadId) return;
       const snapshotVersion = threadSnapshotVersionRef.current;
+      // PR C: messages + active runs come from the snapshot query —
+      // invalidate it and let RQ refetch. Historical runs are still
+      // separate; re-fetch them in parallel so the Runs tab updates.
+      // The threads list stays on its component-local state.
+      void queryClient.invalidateQueries({
+        queryKey: snapshotQueryKey(userId, talkId, threadId),
+      });
       try {
-        const [threads, messages, runs] = await Promise.all([
+        const [threads, runs] = await Promise.all([
           options?.refreshThreads === false
             ? Promise.resolve(null)
             : listTalkThreads(talkId),
-          listTalkMessages(talkId, { threadId }),
           getTalkRuns(talkId),
         ]);
         if (
@@ -4007,12 +3990,7 @@ export function TalkDetailPage({
             error: null,
           });
         }
-        dispatch({
-          type: 'RESET_FROM_RESYNC',
-          threadId,
-          messages: filterDeletedMessages(messages),
-          runs,
-        });
+        dispatch({ type: 'MERGE_HISTORICAL_RUNS', runs });
         autoStickToBottomRef.current = true;
       } catch (err) {
         if (err instanceof UnauthorizedError) {
@@ -4020,7 +3998,7 @@ export function TalkDetailPage({
         }
       }
     },
-    [filterDeletedMessages, handleUnauthorized, talkId],
+    [handleUnauthorized, queryClient, talkId, userId],
   );
 
   const refreshBrowserRuns = useCallback(
@@ -4164,12 +4142,22 @@ export function TalkDetailPage({
     [selectedJobId, talkId],
   );
 
+  // Tracks the last (talkId, activeThreadId) we fully hydrated from the
+  // snapshot. PR C: same-thread refetches no longer dispatch into the
+  // reducer at all — the snapshot owns messages/talk/content — but we
+  // still gate the run-side SNAPSHOT_HYDRATED so we don't re-seed
+  // active runs (and reset initialScrollPending) on every background
+  // refetch.
+  const hydratedKeyRef = useRef<string | null>(null);
+
   // Reset every per-talk slice when talkId changes. The snapshot query
   // and the runs/agents fetch below re-hydrate them; the rest stay at
   // their defaults until the user opens the corresponding tab.
   useEffect(() => {
+    dispatch({ type: 'TALK_RESET' });
     threadStateTalkIdRef.current = null;
-    dispatch({ type: 'BOOTSTRAP_LOADING' });
+    hydratedKeyRef.current = null;
+    lastSnapshotRef.current = null;
     messageElementRefs.current.clear();
     setThreadState({ threads: [], loading: true, error: null });
     deletedMessageIdsRef.current = new Set();
@@ -4230,37 +4218,15 @@ export function TalkDetailPage({
     };
   }, [talkId]);
 
-  // Tracks the last (talkId, activeThreadId) we fully hydrated from the
-  // snapshot. Subsequent snapshot.data changes for the same pair
-  // (e.g. a MESSAGE_APPENDED setQueryData patch) MUST NOT re-dispatch
-  // THREAD_MESSAGES_LOADED — that would clobber `liveResponsesByRunId`
-  // and bulk-clear failed cards mid-stream.
-  const hydratedKeyRef = useRef<string | null>(null);
-
-  // Hydrate everything the snapshot owns the moment it resolves
-  // (instant under a warm IDB cache; bounded by Hyperdrive RTT cold).
-  // BOOTSTRAP_READY here only seeds active runs from the snapshot —
-  // the parallel getTalkRuns/getTalkAgents effect below merges in the
-  // rich shapes (historical runs, provider/model fields) without
-  // re-dispatching BOOTSTRAP_READY.
+  // Hydrate non-RQ side-effects the moment the snapshot resolves: the
+  // thread list (kept in component state because the threads tab edits
+  // it independently), the doc panel useState bridges (kept until a
+  // future PR migrates them to RQ), and the reducer's runs slice via
+  // SNAPSHOT_HYDRATED. Same-thread refetches re-run only the bridges,
+  // never the reducer dispatch, so an inbound `setQueryData` patch
+  // doesn't clobber live-streaming state.
   useEffect(() => {
-    if (snapshotQuery.error) {
-      const err = snapshotQuery.error;
-      if (err instanceof ApiError && err.status === 404) {
-        dispatch({
-          type: 'BOOTSTRAP_ERROR',
-          unavailable: true,
-          message: 'Talk not found',
-        });
-        return;
-      }
-      dispatch({
-        type: 'BOOTSTRAP_ERROR',
-        unavailable: false,
-        message: err instanceof Error ? err.message : 'Failed to load talk',
-      });
-      return;
-    }
+    if (snapshotQuery.error) return;
     const snapshot = snapshotQuery.data;
     if (!snapshot) return;
     if (snapshot.talk.id !== talkId) return;
@@ -4294,83 +4260,24 @@ export function TalkDetailPage({
     setTalkContentLoading(false);
     rememberActiveThreadForTalk(talkId, snapshot.activeThreadId);
     setOlderMessagesAvailable(snapshot.hasOlderMessages);
-    if (!isFirstHydration) {
-      // Same (talkId, threadId) revisit. Don't re-run the full bootstrap
-      // sequence — that would wipe `liveResponsesByRunId` mid-stream
-      // (PR B regression Codex caught at #462). But DO sync the message
-      // set so a same-thread refetch (reconnect-invalidate, persisted
-      // → fresh) overwrites the reducer when content actually differs.
-      // THREAD_MESSAGES_SYNCED no-ops when first+last IDs match (the
-      // common case where setQueryData and the reducer already agree).
-      dispatch({
-        type: 'THREAD_MESSAGES_SYNCED',
-        threadId: snapshot.activeThreadId,
-        messages: filterDeletedMessages(snapshot.messages),
-      });
-      return;
-    }
+    if (!isFirstHydration) return;
     hydratedKeyRef.current = hydrationKey;
-    const reducerTalk: Talk = {
-      id: snapshot.talk.id,
-      ownerId: snapshot.talk.ownerId,
-      title: snapshot.talk.title ?? '',
-      orchestrationMode: snapshot.talk.orchestrationMode,
-      agents: [],
-      status: snapshot.talk.status,
-      folderId: snapshot.talk.folderId,
-      sortOrder: snapshot.talk.sortOrder,
-      version: snapshot.talk.version,
-      createdAt: snapshot.talk.createdAt,
-      updatedAt: snapshot.talk.updatedAt,
-      accessRole: snapshot.talk.accessRole,
-    };
-    const reducerRuns: TalkRun[] = snapshot.runs.map((row) => ({
-      id: row.id,
-      threadId: row.threadId,
-      responseGroupId: row.responseGroupId,
-      sequenceIndex: row.sequenceIndex,
-      status: row.status,
-      createdAt: row.createdAt,
-      startedAt: row.startedAt,
-      completedAt: row.endedAt,
-      triggerMessageId: row.triggerMessageId,
-      targetAgentId: row.targetAgentId,
-      targetAgentNickname: null,
-      errorCode: null,
-      errorMessage: null,
-      cancelReason: null,
-      executorAlias: row.executorAlias,
-      executorModel: row.executorModel,
-    }));
-    dispatch({ type: 'BOOTSTRAP_READY', talk: reducerTalk, runs: reducerRuns });
-    // Re-dispatch historical runs if the runs/agents fetch resolved
-    // before BOOTSTRAP_READY (which would have dropped the dispatch
-    // because state.kind was still 'loading').
-    const stashedRuns = pendingHistoricalRunsRef.current;
-    if (stashedRuns) {
-      dispatch({ type: 'MERGE_HISTORICAL_RUNS', runs: stashedRuns });
-    }
     dispatch({
-      type: 'THREAD_MESSAGES_LOADING',
+      type: 'SNAPSHOT_HYDRATED',
       threadId: snapshot.activeThreadId,
+      runs: snapshotRunsToTalkRuns(snapshot.runs),
     });
-    dispatch({
-      type: 'THREAD_MESSAGES_LOADED',
-      threadId: snapshot.activeThreadId,
-      messages: filterDeletedMessages(snapshot.messages),
-    });
-  }, [filterDeletedMessages, snapshotQuery.data, snapshotQuery.error, talkId]);
+  }, [snapshotQuery.data, snapshotQuery.error, talkId]);
 
   // Rich runs (historical) + rich agents (provider/model/health) come
   // from these two existing endpoints — kept out of the snapshot wire
   // shape to keep that payload tight. Fire in parallel with the
-  // snapshot so they don't gate the first paint. The runs result is
-  // stashed in a ref so MERGE_HISTORICAL_RUNS can be re-dispatched
-  // after BOOTSTRAP_READY when the snapshot wins the race.
-  const pendingHistoricalRunsRef = useRef<TalkRun[] | null>(null);
+  // snapshot so they don't gate the first paint. PR C: both ordering
+  // cases (parallel-first or snapshot-first) merge cleanly because
+  // SNAPSHOT_HYDRATED and MERGE_HISTORICAL_RUNS are both pure overlays
+  // on `runsById` that preserve any live-state already accumulated.
   useEffect(() => {
     let cancelled = false;
-    pendingHistoricalRunsRef.current = null;
     const load = async () => {
       try {
         const [runs, talkAgents] = await Promise.all([
@@ -4381,13 +4288,10 @@ export function TalkDetailPage({
         setAgents(talkAgents);
         setAgentDrafts(talkAgents);
         setTargetAgentIds(buildTargetSelection(talkAgents, []));
-        pendingHistoricalRunsRef.current = runs;
-        // If BOOTSTRAP_READY already landed (snapshot won the race), we
-        // can merge in place; otherwise the snapshot sync effect picks
-        // these up via the ref once it dispatches BOOTSTRAP_READY.
-        if (stateKindRef.current === 'ready') {
-          dispatch({ type: 'MERGE_HISTORICAL_RUNS', runs });
-        }
+        // MERGE_HISTORICAL_RUNS is a pure overlay — order-independent
+        // vs the snapshot effect's SNAPSHOT_HYDRATED, since neither
+        // clobbers in-flight live state on existing run ids.
+        dispatch({ type: 'MERGE_HISTORICAL_RUNS', runs });
       } catch (err) {
         if (err instanceof UnauthorizedError) {
           handleUnauthorized();
@@ -4462,7 +4366,7 @@ export function TalkDetailPage({
   // messages slice, so all we need to do here is fire the post-render
   // scroll alignment.
   useEffect(() => {
-    if (state.kind !== 'ready' || !activeThreadId) return;
+    if (pageKind !== 'ready' || !activeThreadId) return;
     requestAnimationFrame(() => {
       if (pendingComposerFocusRef.current) {
         pendingComposerFocusRef.current = false;
@@ -4470,7 +4374,7 @@ export function TalkDetailPage({
       }
       scrollToBottom('auto');
     });
-  }, [activeThreadId, scrollToBottom, state.kind]);
+  }, [activeThreadId, scrollToBottom, pageKind]);
 
   useEffect(() => {
     let cancelled = false;
@@ -4547,7 +4451,7 @@ export function TalkDetailPage({
   );
 
   useEffect(() => {
-    if (state.kind !== 'ready') return;
+    if (pageKind !== 'ready') return;
     const stream = openTalkStream({
       talkId,
       onUnauthorized: handleUnauthorized,
@@ -4589,7 +4493,7 @@ export function TalkDetailPage({
           autoStickToBottomRef.current = true;
         }
         dispatch({
-          type: 'MESSAGE_APPENDED',
+          type: 'MESSAGE_LANDED',
           wasNearBottom: nearBottom,
           message: {
             id: event.messageId,
@@ -4917,19 +4821,19 @@ export function TalkDetailPage({
     rememberDeletedMessageIds,
     resyncTalkState,
     scheduleThreadListRefresh,
-    state.kind,
+    pageKind,
     talkId,
     userId,
   ]);
 
   useEffect(() => {
-    if (state.kind !== 'ready' || !state.initialScrollPending) return;
+    if (pageKind !== 'ready' || !state.initialScrollPending) return;
     scrollToBottom('auto');
     dispatch({ type: 'CLEAR_UNREAD' });
-  }, [scrollToBottom, state.initialScrollPending, state.kind]);
+  }, [scrollToBottom, state.initialScrollPending, pageKind]);
 
   useEffect(() => {
-    if (state.kind !== 'ready' || state.initialScrollPending) return;
+    if (pageKind !== 'ready' || state.initialScrollPending) return;
     if (!autoStickToBottomRef.current) return;
     autoStickToBottomRef.current = false;
     scrollToBottom('smooth');
@@ -4944,12 +4848,12 @@ export function TalkDetailPage({
   }, [
     scrollToBottom,
     state.initialScrollPending,
-    state.kind,
-    state.messages.length,
+    pageKind,
+    pageMessages.length,
     state.liveResponsesByRunId,
   ]);
 
-  const accessRole = state.kind === 'ready' ? state.talk?.accessRole : null;
+  const accessRole = pageKind === 'ready' ? pageTalk?.accessRole : null;
   const canEditAgents =
     accessRole === 'owner' || accessRole === 'admin' || accessRole === 'editor';
   const canEditJobs = canEditAgents;
@@ -5032,9 +4936,7 @@ export function TalkDetailPage({
   );
 
   const orchestrationMode: TalkOrchestrationMode =
-    state.kind === 'ready' && state.talk
-      ? state.talk.orchestrationMode
-      : 'ordered';
+    pageKind === 'ready' && pageTalk ? pageTalk.orchestrationMode : 'ordered';
   const orchestrationModeLabel = getOrchestrationModeLabel(orchestrationMode);
   const showOrchestrationSelector = agents.length >= 2;
   useEffect(() => {
@@ -5156,8 +5058,8 @@ export function TalkDetailPage({
   }, [orchestrationMode, selectedTargetAgents.length]);
   const messageLookup = useMemo(
     () =>
-      new Map(state.messages.map((message) => [message.id, message] as const)),
-    [state.messages],
+      new Map(pageMessages.map((message) => [message.id, message] as const)),
+    [pageMessages],
   );
   const sortedThreads = useMemo(
     () => sortThreads(threadState.threads),
@@ -5184,12 +5086,12 @@ export function TalkDetailPage({
         pinned?: boolean;
       },
     ) => {
-      if (state.kind !== 'ready' || !state.talk) {
+      if (pageKind !== 'ready' || !pageTalk) {
         throw new Error('Talk not ready.');
       }
       try {
         const updated = await updateTalkThread({
-          talkId: state.talk.id,
+          talkId: pageTalk.id,
           threadId,
           ...patch,
         });
@@ -5226,14 +5128,14 @@ export function TalkDetailPage({
   );
   const handleDeleteThread = useCallback(
     async (thread: TalkThread) => {
-      if (state.kind !== 'ready' || !state.talk) return;
+      if (pageKind !== 'ready' || !pageTalk) return;
       const confirmed = window.confirm(
         `Delete "${formatThreadLabel(thread)}"? This will permanently remove the thread and its messages.`,
       );
       if (!confirmed) return;
       try {
         await deleteTalkThread({
-          talkId: state.talk.id,
+          talkId: pageTalk.id,
           threadId: thread.id,
         });
         // Garbage-collect this thread's doc-pane layout state so we
@@ -5301,7 +5203,7 @@ export function TalkDetailPage({
     [state.runsById],
   );
   // Set of runIds that already have a persisted assistant message in
-  // state.messages. Used to filter out orphan "Streaming…" placeholders
+  // pageMessages. Used to filter out orphan "Streaming…" placeholders
   // for runs whose final message already landed — happens when
   // MESSAGE_APPENDED reaches the SPA but the placeholder cleanup in the
   // reducer missed (e.g., older message rows without a runId, or stream
@@ -5309,11 +5211,11 @@ export function TalkDetailPage({
   const persistedMessageRunIds = useMemo(
     () =>
       new Set(
-        state.messages
+        pageMessages
           .map((message) => message.runId)
           .filter((id): id is string => Boolean(id)),
       ),
-    [state.messages],
+    [pageMessages],
   );
   const liveResponses = useMemo(
     () =>
@@ -5493,7 +5395,7 @@ export function TalkDetailPage({
   const talkTimeline = useMemo<TalkTimelineEntry[]>(
     () =>
       [
-        ...state.messages.map((message, index) => ({
+        ...pageMessages.map((message, index) => ({
           kind: 'message' as const,
           key: message.id,
           timestamp: Date.parse(message.createdAt) || 0,
@@ -5508,7 +5410,7 @@ export function TalkDetailPage({
           // is emitted inside enqueueTalkTurnAtomic).
           const triggerMessageId = run?.triggerMessageId ?? null;
           const triggerMessage = triggerMessageId
-            ? state.messages.find((m) => m.id === triggerMessageId)
+            ? pageMessages.find((m) => m.id === triggerMessageId)
             : undefined;
           const anchorTimestamp = Date.parse(
             triggerMessage?.createdAt || run?.startedAt || run?.createdAt || '',
@@ -5520,7 +5422,7 @@ export function TalkDetailPage({
               Number.isFinite(anchorTimestamp) && anchorTimestamp > 0
                 ? anchorTimestamp
                 : response.queuedAt || response.startedAt,
-            sortOrder: state.messages.length + index,
+            sortOrder: pageMessages.length + index,
             response,
           };
         }),
@@ -5542,7 +5444,7 @@ export function TalkDetailPage({
                 Number.isFinite(updatedAt) && updatedAt > 0
                   ? updatedAt
                   : Date.parse(run.createdAt) || 0,
-              sortOrder: state.messages.length + liveResponses.length + index,
+              sortOrder: pageMessages.length + liveResponses.length + index,
               run,
             };
           }),
@@ -5554,7 +5456,7 @@ export function TalkDetailPage({
       activeThreadId,
       liveResponses,
       orderedGroupSizesById,
-      state.messages,
+      pageMessages,
       state.runsById,
     ],
   );
@@ -5590,9 +5492,9 @@ export function TalkDetailPage({
   );
   const canEditHistory = useMemo(
     () =>
-      state.kind === 'ready' &&
+      pageKind === 'ready' &&
       !activeRound &&
-      state.messages.some((message) => message.role !== 'system'),
+      pageMessages.some((message) => message.role !== 'system'),
     [activeRound, state],
   );
   const resolveMessageActorLabel = useCallback(
@@ -5745,7 +5647,7 @@ export function TalkDetailPage({
 
   const reloadTalkChannels = useCallback(
     async (options?: { quiet?: boolean }) => {
-      if (state.kind !== 'ready') return;
+      if (pageKind !== 'ready') return;
       if (!options?.quiet) {
         setChannelStatus((current) =>
           current.status === 'saving' ? current : { status: 'loading' },
@@ -5861,12 +5763,12 @@ export function TalkDetailPage({
         });
       }
     },
-    [canBrowseChannelConnections, handleUnauthorized, state.kind, talkId],
+    [canBrowseChannelConnections, handleUnauthorized, pageKind, talkId],
   );
 
   // Load Talk context once so Rules badges and context surfaces stay hydrated.
   useEffect(() => {
-    if (state.kind !== 'ready') return;
+    if (pageKind !== 'ready') return;
     if (contextLoaded) return;
 
     let cancelled = false;
@@ -5897,24 +5799,18 @@ export function TalkDetailPage({
     return () => {
       cancelled = true;
     };
-  }, [
-    contextLoaded,
-    currentTab,
-    handleUnauthorized,
-    refreshContext,
-    state.kind,
-  ]);
+  }, [contextLoaded, currentTab, handleUnauthorized, refreshContext, pageKind]);
 
   useEffect(() => {
-    if (state.kind !== 'ready' || currentTab !== 'context') {
+    if (pageKind !== 'ready' || currentTab !== 'context') {
       return;
     }
 
     void refreshTalkStateEntries({ showLoading: !talkStateLoaded });
-  }, [currentTab, refreshTalkStateEntries, state.kind, talkStateLoaded]);
+  }, [currentTab, refreshTalkStateEntries, pageKind, talkStateLoaded]);
 
   useEffect(() => {
-    if (state.kind !== 'ready' || currentTab !== 'context' || !contextLoaded) {
+    if (pageKind !== 'ready' || currentTab !== 'context' || !contextLoaded) {
       return;
     }
     if (!contextSources.some((source) => source.status === 'pending')) {
@@ -5949,7 +5845,7 @@ export function TalkDetailPage({
     currentTab,
     handleUnauthorized,
     refreshContext,
-    state.kind,
+    pageKind,
   ]);
 
   // Context handlers
@@ -7276,7 +7172,7 @@ export function TalkDetailPage({
   );
 
   const openHistoryEditor = useCallback(() => {
-    if (state.kind !== 'ready') return;
+    if (pageKind !== 'ready') return;
     if (activeRound) {
       setHistoryEditState({
         status: 'error',
@@ -7285,7 +7181,7 @@ export function TalkDetailPage({
       });
       return;
     }
-    if (!state.messages.some((message) => message.role !== 'system')) {
+    if (!pageMessages.some((message) => message.role !== 'system')) {
       setHistoryEditState({
         status: 'error',
         message: 'There are no editable messages in this Talk yet.',
@@ -7306,7 +7202,7 @@ export function TalkDetailPage({
 
   const handleDeleteHistoryMessages = useCallback(
     async (messageIds: string[]) => {
-      if (state.kind !== 'ready' || !state.talk) return;
+      if (pageKind !== 'ready' || !pageTalk) return;
       const threadId = activeThreadId;
       if (!threadId) return;
       if (messageIds.length === 0) {
@@ -7326,7 +7222,7 @@ export function TalkDetailPage({
       setHistoryEditState({ status: 'saving' });
       try {
         const result = await deleteTalkMessages({
-          talkId: state.talk.id,
+          talkId: pageTalk.id,
           messageIds,
           threadId,
         });
@@ -7430,7 +7326,7 @@ export function TalkDetailPage({
 
   const handleDraftChange = (value: string) => {
     setDraft(value);
-    if (state.kind === 'ready' && state.sendState.status === 'error') {
+    if (pageKind === 'ready' && state.sendState.status === 'error') {
       dispatch({ type: 'SEND_CLEARED' });
     }
     // `@` trigger: open the mention picker when the user types `@` at a
@@ -7483,7 +7379,7 @@ export function TalkDetailPage({
 
   useEffect(() => {
     resizeComposerTextarea();
-  }, [activeThreadId, currentTab, draft, resizeComposerTextarea, state.kind]);
+  }, [activeThreadId, currentTab, draft, resizeComposerTextarea, pageKind]);
 
   const ALLOWED_ATTACHMENT_EXTENSIONS =
     '.txt,.md,.csv,.html,.rtf,' +
@@ -7549,7 +7445,7 @@ export function TalkDetailPage({
   };
 
   const handleFilesSelected = async (files: FileList | File[]) => {
-    if (!state.talk) return;
+    if (!pageTalk) return;
     const fileArray = Array.from(files);
     const currentCount = pendingAttachments.length;
     if (currentCount + fileArray.length > MAX_ATTACHMENTS_PER_MESSAGE) {
@@ -7618,7 +7514,7 @@ export function TalkDetailPage({
       ]);
 
       try {
-        const result = await uploadTalkAttachment(state.talk!.id, file);
+        const result = await uploadTalkAttachment(pageTalk!.id, file);
         setPendingAttachments((prev) =>
           prev.map((a) =>
             a.localId === localId
@@ -7777,7 +7673,7 @@ export function TalkDetailPage({
       }
       return [...current, agentId];
     });
-    if (state.kind === 'ready' && state.sendState.status === 'error') {
+    if (pageKind === 'ready' && state.sendState.status === 'error') {
       dispatch({ type: 'SEND_CLEARED' });
     }
   };
@@ -7788,12 +7684,12 @@ export function TalkDetailPage({
       targetAgentIds: string[];
       attachmentIds?: string[];
     }) => {
-      if (state.kind !== 'ready' || !state.talk || !activeThreadId) {
+      if (pageKind !== 'ready' || !pageTalk || !activeThreadId) {
         throw new Error('Thread unavailable.');
       }
 
       const result = await sendTalkMessage({
-        talkId: state.talk.id,
+        talkId: pageTalk.id,
         content: input.content,
         targetAgentIds: input.targetAgentIds,
         attachmentIds: input.attachmentIds,
@@ -7804,8 +7700,14 @@ export function TalkDetailPage({
       // agent responses go through the usual nearBottom gate so a user
       // who scrolls away mid-stream won't get yanked back.
       autoStickToBottomRef.current = true;
+      appendTalkMessageToSnapshot({
+        queryClient,
+        userId,
+        talkId,
+        message: result.message,
+      });
       dispatch({
-        type: 'MESSAGE_APPENDED',
+        type: 'MESSAGE_LANDED',
         wasNearBottom: true,
         message: result.message,
       });
@@ -7826,11 +7728,11 @@ export function TalkDetailPage({
       }
       return result;
     },
-    [activeThreadId, state.kind, state.talk],
+    [activeThreadId, pageKind, pageTalk],
   );
 
   const submitDraft = async () => {
-    if (state.kind !== 'ready' || !state.talk || !activeThreadId) return;
+    if (pageKind !== 'ready' || !pageTalk || !activeThreadId) return;
 
     const content = draft.trim();
     if (!content) {
@@ -7926,7 +7828,7 @@ export function TalkDetailPage({
 
   const handleRetryAgentRun = useCallback(
     async (runId: string) => {
-      if (state.kind !== 'ready' || !state.talk || !activeThreadId) return;
+      if (pageKind !== 'ready' || !pageTalk || !activeThreadId) return;
       if (activeRound) {
         setRetryRunState({
           runId,
@@ -7945,7 +7847,7 @@ export function TalkDetailPage({
       }
 
       const run = state.runsById[runId];
-      const triggerMessage = state.messages.find(
+      const triggerMessage = pageMessages.find(
         (message) =>
           message.id === run?.triggerMessageId && message.role === 'user',
       );
@@ -7992,10 +7894,10 @@ export function TalkDetailPage({
       handleUnauthorized,
       hasUnsavedAgentChanges,
       queueTalkMessage,
-      state.kind,
-      state.messages,
+      pageKind,
+      pageMessages,
       state.runsById,
-      state.talk,
+      pageTalk,
     ],
   );
 
@@ -8052,10 +7954,10 @@ export function TalkDetailPage({
   };
 
   const handleCancelRuns = async () => {
-    if (state.kind !== 'ready' || !state.talk || !activeThreadId) return;
+    if (pageKind !== 'ready' || !pageTalk || !activeThreadId) return;
     dispatch({ type: 'CANCEL_STARTED' });
     try {
-      const result = await cancelTalkRuns(state.talk.id, activeThreadId);
+      const result = await cancelTalkRuns(pageTalk.id, activeThreadId);
       dispatch({
         type: 'CANCEL_SUCCEEDED',
         message: `Cancelled ${result.cancelledRuns} run${result.cancelledRuns === 1 ? '' : 's'}.`,
@@ -8108,16 +8010,27 @@ export function TalkDetailPage({
 
   const handleOrchestrationModeChange = useCallback(
     async (nextMode: TalkOrchestrationMode) => {
-      if (state.kind !== 'ready' || !state.talk) return;
-      if (state.talk.orchestrationMode === nextMode) return;
+      if (pageKind !== 'ready' || !pageTalk) return;
+      if (pageTalk.orchestrationMode === nextMode) return;
 
       setOrchestrationState({ status: 'saving' });
       try {
         const updatedTalk = await patchTalkMetadata({
-          talkId: state.talk.id,
+          talkId: pageTalk.id,
           orchestrationMode: nextMode,
         });
-        dispatch({ type: 'TALK_UPDATED', talk: updatedTalk });
+        patchTalkInSnapshot({
+          queryClient,
+          userId,
+          talkId,
+          threadId: activeThreadIdRef.current,
+          patch: {
+            orchestrationMode: updatedTalk.orchestrationMode,
+            title: updatedTalk.title,
+            version: updatedTalk.version,
+            updatedAt: updatedTalk.updatedAt,
+          },
+        });
         setOrchestrationState({ status: 'idle' });
       } catch (err) {
         if (err instanceof UnauthorizedError) {
@@ -8133,13 +8046,13 @@ export function TalkDetailPage({
         });
       }
     },
-    [handleUnauthorized, state],
+    [handleUnauthorized, pageKind, pageTalk, queryClient, talkId, userId],
   );
 
   const handleCreateThread = useCallback(async () => {
-    if (state.kind !== 'ready' || !state.talk) return;
+    if (pageKind !== 'ready' || !pageTalk) return;
     try {
-      const nextThread = await createTalkThread({ talkId: state.talk.id });
+      const nextThread = await createTalkThread({ talkId: pageTalk.id });
       setThreadState((current) => ({
         ...current,
         threads: sortThreads([nextThread, ...current.threads]),
@@ -8492,7 +8405,7 @@ export function TalkDetailPage({
   };
 
   const handleSaveAgents = async () => {
-    if (state.kind !== 'ready' || !state.talk || !canEditAgents) return;
+    if (pageKind !== 'ready' || !pageTalk || !canEditAgents) return;
     const materialized = materializePendingFooterAgent(agentDrafts);
     if (materialized.error) {
       setAgentState({ status: 'error', message: materialized.error });
@@ -8505,7 +8418,7 @@ export function TalkDetailPage({
     setAgentState({ status: 'saving' });
     try {
       const saved = await updateTalkAgents({
-        talkId: state.talk.id,
+        talkId: pageTalk.id,
         agents: materialized.nextAgents.map((agent, index) => ({
           id: agent.id,
           nickname: agent.nickname.trim(),
@@ -8638,31 +8551,31 @@ export function TalkDetailPage({
     titleInputRef.current?.select();
   }, [isRenaming]);
 
-  if (state.kind === 'loading') {
+  if (pageKind === 'loading') {
     return <p className="page-state">Loading talk…</p>;
   }
 
-  if (state.kind === 'unavailable') {
+  if (pageKind === 'unavailable') {
     return (
       <section className="page-state">
         <h2>Talk Unavailable</h2>
-        <p>{state.errorMessage || 'Talk not found.'}</p>
+        <p>{pageErrorMessage || 'Talk not found.'}</p>
         <Link to="/app/talks">Back to talks</Link>
       </section>
     );
   }
 
-  if (state.kind === 'error' || !state.talk) {
+  if (pageKind === 'error' || !pageTalk) {
     return (
       <section className="page-state">
         <h2>Talk Error</h2>
-        <p>{state.errorMessage || 'Failed to load talk.'}</p>
+        <p>{pageErrorMessage || 'Failed to load talk.'}</p>
         <Link to="/app/talks">Back to talks</Link>
       </section>
     );
   }
 
-  const talk = state.talk;
+  const talk = pageTalk;
   const displayedTitle = titleOverride || talk.title;
 
   return (
@@ -9949,11 +9862,11 @@ export function TalkDetailPage({
                       ) : null}
 
                       <div className="timeline talk-thread-timeline">
-                        {!state.messagesLoading &&
+                        {!snapshotQuery.isPending &&
                         activeThread &&
                         olderMessagesAvailable &&
                         !loadingOlderMessages &&
-                        state.messages.length > 0 ? (
+                        pageMessages.length > 0 ? (
                           <button
                             type="button"
                             className="timeline-load-earlier"
@@ -9965,7 +9878,7 @@ export function TalkDetailPage({
                         {loadingOlderMessages ? (
                           <p className="page-state">Loading earlier…</p>
                         ) : null}
-                        {state.messagesLoading ? (
+                        {snapshotQuery.isPending ? (
                           <p className="page-state">Loading thread…</p>
                         ) : !activeThread ? (
                           <p className="page-state">No thread selected.</p>
@@ -10686,7 +10599,7 @@ export function TalkDetailPage({
       </div>
       <TalkHistoryEditor
         isOpen={historyEditorOpen}
-        messages={state.messages}
+        messages={pageMessages}
         busy={historyEditState.status === 'saving'}
         errorMessage={
           historyEditorOpen && historyEditState.status === 'error'

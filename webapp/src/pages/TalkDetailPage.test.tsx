@@ -5042,9 +5042,15 @@ function installTalkDetailFetch(input?: {
           threads.find((t) => t.isDefault)?.id ||
           threads[0]?.id ||
           DEFAULT_THREAD_ID;
-        const activeThreadMessages = messages.filter(
+        const baseMessages = messages.filter(
           (m) => m.threadId === activeThreadId,
         );
+        const activeThreadMessages = input?.onListMessages
+          ? await input.onListMessages({
+              threadId: activeThreadId,
+              visibleMessages: baseMessages,
+            })
+          : baseMessages;
         const activeRuns = runs.filter((r) =>
           ['queued', 'running', 'awaiting_confirmation'].includes(r.status),
         );
