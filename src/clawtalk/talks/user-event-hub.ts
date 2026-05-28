@@ -104,6 +104,12 @@ const SOCKET_CAP_PER_OWNER = 3;
 const REPLAY_FRAME_CAP = 500;
 const REPLAY_BATCH_LIMIT = 100;
 const DRAIN_BATCH_LIMIT = 100;
+// Cap how many DRAIN_BATCH_LIMIT-sized batches one drain pass reads.
+// Bounds blockConcurrencyWhile occupancy under pathological backlog ×
+// slow-query conditions so we never trip CF's 30s reset ceiling. Excess
+// rows defer to the alarm backstop. 10 × ~500ms/batch p95 = 5s budget,
+// leaving 25s headroom.
+const MAX_DRAIN_BATCHES_PER_CALL = 10;
 const REPLAY_TIMEOUT_MS = 5_000;
 const ALARM_BACKOFF_MS = 30_000;
 const BACKPRESSURE_BYTES = 1_000_000;
@@ -372,6 +378,7 @@ export class UserEventHub {
     );
 
     await this.withDoSql(async () => {
+      let batches = 0;
       while (true) {
         const rows = await getOutboxEventsForTopics(
           topics,
@@ -407,7 +414,14 @@ export class UserEventHub {
           }
           sinceCursor = row.event_id;
         }
+        batches += 1;
         if (rows.length < DRAIN_BATCH_LIMIT) break;
+        if (batches >= MAX_DRAIN_BATCHES_PER_CALL) {
+          console.warn(
+            '[user-event-hub] drain hit MAX_DRAIN_BATCHES_PER_CALL; deferring remainder to alarm',
+          );
+          break;
+        }
       }
     });
   }
