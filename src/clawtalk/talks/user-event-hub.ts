@@ -17,13 +17,15 @@
 //
 // /notify:
 //   • blockConcurrencyWhile (F9) wraps the drain so two concurrent
-//     /notify requests serialize.
+//     /notify requests serialize. The drain runs to completion inside
+//     the lock — drainOnce is bounded by postgres.statement_timeout
+//     (5_000 ms per query), so the lock release is naturally bounded
+//     well under CF's 30s blockConcurrencyWhile reset ceiling.
 //   • R8 JWT exp check per socket → close(4401) on expiry.
 //   • R9 backpressure close on bufferedAmount > 1MB → close(1011).
 //   • Drain loop (R5) keeps reading outbox until rows < limit, in
 //     batches of 100. Per-socket cursor advances via
 //     serializeAttachment.
-//   • Promise.race rejectAfter(8_000) bounds the critical section.
 //   • R4 setAlarm(now + 30_000) on every notify so a final-frame
 //     loss has a catch-up path.
 //
@@ -101,7 +103,6 @@ const REPLAY_FRAME_CAP = 500;
 const REPLAY_BATCH_LIMIT = 100;
 const DRAIN_BATCH_LIMIT = 100;
 const REPLAY_TIMEOUT_MS = 5_000;
-const DRAIN_TIMEOUT_MS = 8_000;
 const ALARM_BACKOFF_MS = 30_000;
 const BACKPRESSURE_BYTES = 1_000_000;
 const STATEMENT_TIMEOUT_MS = 5_000;
@@ -314,12 +315,17 @@ export class UserEventHub {
 
   // ─── /notify ─────────────────────────────────────────────────────────
   private async handleNotify(_req: Request): Promise<Response> {
+    // blockConcurrencyWhile serializes /notify, /upgrade, and alarm
+    // on this DO. drainOnce runs to completion inside the lock so a
+    // subsequent /notify (or alarm) cannot start a second drainOnce
+    // while this one is still draining the outbox — that would race
+    // on per-socket attachment.cursor writes. drainOnce is bounded
+    // by postgres.statement_timeout (5s per query) and DRAIN_BATCH_
+    // LIMIT, so the lock release is naturally bounded well under CF's
+    // 30s blockConcurrencyWhile ceiling.
     await this.state.blockConcurrencyWhile(async () => {
       try {
-        await Promise.race([
-          this.drainOnce(),
-          rejectAfter(DRAIN_TIMEOUT_MS, 'drain_timeout'),
-        ]);
+        await this.drainOnce();
       } catch (err) {
         console.error('[user-event-hub] drain failed', err);
       }
@@ -411,12 +417,13 @@ export class UserEventHub {
 
   // ─── alarm() — catch-up path (R4) ────────────────────────────────────
   async alarm(): Promise<void> {
+    // Same blockConcurrencyWhile-holds-full-drainOnce contract as
+    // handleNotify above: drainOnce runs to completion inside the lock
+    // so it can't race a concurrent /notify drain on attachment.cursor
+    // writes. Bounded by postgres.statement_timeout.
     await this.state.blockConcurrencyWhile(async () => {
       try {
-        await Promise.race([
-          this.drainOnce(),
-          rejectAfter(DRAIN_TIMEOUT_MS, 'alarm_drain_timeout'),
-        ]);
+        await this.drainOnce();
       } catch (err) {
         console.error('[user-event-hub] alarm drain failed', err);
       }
