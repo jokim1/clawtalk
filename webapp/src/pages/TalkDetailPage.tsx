@@ -558,6 +558,11 @@ type DetailAction =
       messages: TalkMessage[];
     }
   | {
+      type: 'THREAD_MESSAGES_SYNCED';
+      threadId: string;
+      messages: TalkMessage[];
+    }
+  | {
       type: 'MESSAGE_APPENDED';
       message: TalkMessage;
       wasNearBottom: boolean;
@@ -1188,6 +1193,32 @@ function detailReducer(state: DetailState, action: DetailAction): DetailState {
         ...state,
         messages: nextMessages,
         messageIds: nextIds,
+      };
+    }
+    case 'THREAD_MESSAGES_SYNCED': {
+      // Fires whenever a same-thread snapshot refetch lands (e.g. after
+      // reconnect-invalidate). No-ops when the snapshot content matches
+      // what the WS handler already merged into state.messages, so a
+      // delta-patch fan-out doesn't churn — but a fresh server-side set
+      // (e.g. a deleted message vanishing) still flows through.
+      if (state.kind !== 'ready') return state;
+      if (action.threadId !== state.selectedThreadId) return state;
+      const sameLength = state.messages.length === action.messages.length;
+      const sameLastId =
+        sameLength &&
+        (state.messages.length === 0 ||
+          state.messages[state.messages.length - 1].id ===
+            action.messages[action.messages.length - 1].id);
+      const sameFirstId =
+        sameLength &&
+        (state.messages.length === 0 ||
+          state.messages[0].id === action.messages[0].id);
+      if (sameLength && sameLastId && sameFirstId) return state;
+      return {
+        ...state,
+        messages: action.messages,
+        messageIds: new Set(action.messages.map((message) => message.id)),
+        messagesLoading: false,
       };
     }
     case 'MESSAGE_APPENDED': {
@@ -3073,6 +3104,11 @@ export function TalkDetailPage({
   const [talkContent, setTalkContent] = useState<Content | null>(null);
   const [talkContentLoading, setTalkContentLoading] = useState(false);
   const [loadingOlderMessages, setLoadingOlderMessages] = useState(false);
+  // Tracks whether the server has more history past the current view.
+  // Initial value follows snapshot.hasOlderMessages; flips to false the
+  // moment a `?before=<oldest>` page comes back short, so the
+  // Load-earlier button hides once history is exhausted.
+  const [olderMessagesAvailable, setOlderMessagesAvailable] = useState(false);
   const [talkContentError, setTalkContentError] = useState<string | null>(null);
   const [talkContentPendingEdits, setTalkContentPendingEdits] = useState<
     ContentEditSummary[]
@@ -3686,19 +3722,11 @@ export function TalkDetailPage({
     }
   }, [onUnauthorized, talkId]);
 
-  // Doc state is now hydrated by the snapshot. When the active thread
-  // doesn't have a doc, the snapshot still returns `content: null`, so
-  // a defensive clear when the sidebar's hasContent flag drops to false
-  // keeps the pane from holding onto a stale doc.
-  useEffect(() => {
-    if (!talkId || !activeThreadId) return;
-    if (!currentThreadHasContent) {
-      setTalkContent(null);
-      setTalkContentPendingEdits([]);
-      setTalkContentError(null);
-      setTalkContentLoading(false);
-    }
-  }, [activeThreadId, currentThreadHasContent, talkId]);
+  // Doc state is hydrated entirely by the snapshot. The defensive clear
+  // that used to live here raced sidebarContents on initial load —
+  // App.tsx fetches the sidebar tree separately, so `currentThreadHasContent`
+  // could land `false` for a thread that genuinely has a doc, clearing
+  // `snapshot.content` before the sidebar caught up. Codex #462 P1.
 
   useEffect(() => {
     if (!talkId) return;
@@ -3894,18 +3922,26 @@ export function TalkDetailPage({
     const oldest = state.kind === 'ready' ? state.messages[0] : null;
     if (!oldest) return;
     setLoadingOlderMessages(true);
+    const pageSize = 200;
     try {
       const older = await listTalkMessages(talkId, {
         threadId,
         before: oldest.createdAt,
-        limit: 200,
+        limit: pageSize,
       });
       if (activeThreadIdRef.current !== threadId) return;
+      const filtered = filterDeletedMessages(older);
       dispatch({
         type: 'PREPEND_OLDER_MESSAGES',
         threadId,
-        messages: filterDeletedMessages(older),
+        messages: filtered,
       });
+      // Server returned fewer than we asked for → no more history. Hide
+      // the button so the user doesn't keep firing empty `?before=`
+      // requests (Codex #462 P3).
+      if (older.length < pageSize) {
+        setOlderMessagesAvailable(false);
+      }
     } catch (err) {
       if (err instanceof UnauthorizedError) {
         handleUnauthorized();
@@ -4245,11 +4281,20 @@ export function TalkDetailPage({
     setTalkContentError(null);
     setTalkContentLoading(false);
     rememberActiveThreadForTalk(talkId, snapshot.activeThreadId);
+    setOlderMessagesAvailable(snapshot.hasOlderMessages);
     if (!isFirstHydration) {
-      // Same (talkId, threadId) — the cache router patched the snapshot
-      // in place (e.g. MESSAGE_APPENDED setQueryData). The reducer was
-      // already updated by the WS dispatcher; re-running the bootstrap
-      // sequence here would wipe liveResponsesByRunId.
+      // Same (talkId, threadId) revisit. Don't re-run the full bootstrap
+      // sequence — that would wipe `liveResponsesByRunId` mid-stream
+      // (PR B regression Codex caught at #462). But DO sync the message
+      // set so a same-thread refetch (reconnect-invalidate, persisted
+      // → fresh) overwrites the reducer when content actually differs.
+      // THREAD_MESSAGES_SYNCED no-ops when first+last IDs match (the
+      // common case where setQueryData and the reducer already agree).
+      dispatch({
+        type: 'THREAD_MESSAGES_SYNCED',
+        threadId: snapshot.activeThreadId,
+        messages: filterDeletedMessages(snapshot.messages),
+      });
       return;
     }
     hydratedKeyRef.current = hydrationKey;
@@ -9884,7 +9929,7 @@ export function TalkDetailPage({
                       <div className="timeline talk-thread-timeline">
                         {!state.messagesLoading &&
                         activeThread &&
-                        snapshotQuery.data?.hasOlderMessages &&
+                        olderMessagesAvailable &&
                         !loadingOlderMessages &&
                         state.messages.length > 0 ? (
                           <button
