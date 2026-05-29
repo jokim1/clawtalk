@@ -1,6 +1,6 @@
 # T-new-C — `ensureTalkUsesUsableDefaultAgent` happy-path early-exit
 
-**Status:** Plan, **r2 draft**.
+**Status:** Plan, **r3 draft**.
 **Tracking:** [[project-llm-turn-latency]], [[T-new-A-chat-handler-parallelize]] (the §4.5 attribution that surfaced this).
 **Branch (planning):** `docs/t-new-c-ensure-default-agent` (this doc).
 **Branch (implementation, to be created):** `feature/t-new-c-ensure-default-agent`.
@@ -11,15 +11,12 @@
 ## Revision history
 
 - **r1 (2026-05-29)** — initial draft. Codex returned 2 P1 + 5 P2 (`.codex-r1-findings.txt`). Karpathy returned 1 critical + 2 warning + 1 nit. Critical overlap on the gate-equivalence claim; complementary on enabled-semantics, RLS reference, failure surface, call multiplicity, "99%" hand-wave.
-- **r2 (this revision)** — absorbs r1 findings:
-  - Widened gate to `activeCount > 0 AND primaryCount = 1 AND orphanCount = 0` (codex P1 #1, karpathy critical).
-  - Renamed terminology — snapshot answers "is the assigned-agent set healthy?", not "usable" — and dropped the "usable" overstatement (codex P1 #2).
-  - Acknowledged the new throw surface on snapshot SELECT (codex P2 #6) and decided not to swallow it.
-  - Fixed RLS reference to migration `0002`, owner-scoped (codex P2 #3).
-  - Replaced "99% of calls" hand-wave with measurement-validated framing (karpathy W1).
-  - Replaced "§4.6" stale reference with "§7" (karpathy W2).
-  - §2.2 + §7 now distinguish function-level (~625 ms per call) from route-level (1× for sendChatRoute, 2× for getTalkRoute and listTalkAgentsRoute, N× for listTalksRoute via toTalkApiRecord) (codex P2 #4).
-  - Documented but did NOT fix the redundant inner calls — that's a separate plan (§3.3 deferral).
+- **r2 (2026-05-29)** — absorbed r1: widened gate to `orphanCount = 0`; dropped "usable" terminology; fixed RLS reference; replaced "99%" with measurement-validated framing; added §2.3 route multiplicity table; deferred redundant-inner-call removal. Codex r2 returned 0 P1 + 3 P2; karpathy r2 returned 0 critical + 2 warning + 1 nit (100% overlap with codex). Raw: `.codex-r2-findings.txt`.
+- **r3 (this revision)** — absorbs r2 findings:
+  - Wrapped snapshot SELECT in try/catch matching the existing `getDefaultTalkAgentId` swallow (codex r2-P2 #2, karpathy r2 nit). No new throw surface; preserves today's behavioral contract.
+  - §7 verification commands rewritten to use the actual `latency-bench.ts` interface (`--provider=haiku`, no `--route` flag exists). Route-level claims qualified — the bench only exercises `sendChatRoute`; `getTalkRoute` / `listTalksRoute` savings inferred from function-level + multiplicity, not measured directly (codex r2-P2 #1).
+  - Baseline reference corrected from "post-T-new-A 3920 ms" to "pre-T-new-C measured at C5" — captured during implementation rather than asserted at plan time (codex r2-P2 #1).
+  - §4.1 equivalence table — added the missing N-active/1-primary/0-orphan row (codex r2-P2 #3, karpathy r2 W2). Dropped "strictly tighter" — the table proves equivalence, not strictness.
 
 ---
 
@@ -147,7 +144,14 @@ export async function ensureTalkUsesUsableDefaultAgent(
   // - activeCount > 0: at least one usable assignment
   // - primaryCount = 1: post-prune primary invariant holds
   // - orphanCount = 0: prune would have been a no-op (no null-FK rows to delete)
-  const health = await getTalkAgentsHealthSnapshot(talkId);
+  // On snapshot error, fall through to the heal path's existing swallow on
+  // getDefaultTalkAgentId — preserves the function's best-effort contract.
+  let health: { activeCount: number; primaryCount: number; orphanCount: number };
+  try {
+    health = await getTalkAgentsHealthSnapshot(talkId);
+  } catch {
+    health = { activeCount: 0, primaryCount: 0, orphanCount: 1 }; // force heal
+  }
   if (
     health.activeCount > 0 &&
     health.primaryCount === 1 &&
@@ -197,26 +201,29 @@ Per-route savings compound by §2.3 multiplicity. The bench reports both functio
 
 ### 4.1 Gate equivalence — three-field check
 
-The widened gate `activeCount > 0 AND primaryCount = 1 AND orphanCount = 0` covers the three failure modes that `pruneDeletedTalkAgentAssignments` + the function's own `rows.length === 0` check together address:
+The gate `activeCount > 0 AND primaryCount = 1 AND orphanCount = 0` matches the post-prune healthy invariant that `pruneDeletedTalkAgentAssignments` + the function's own `rows.length === 0` check together produce:
 
 | Talk state | activeCount | primaryCount | orphanCount | Gate verdict | Existing-code behavior |
 |---|---|---|---|---|---|
 | 1 active primary, no orphans | 1 | 1 | 0 | **HEALTHY** | prune no-op, function early-returns | ✅ equivalent |
+| **N** active rows, **exactly 1 primary**, no orphans (multi-agent steady state) | N | 1 | 0 | **HEALTHY** | prune no-op, function early-returns | ✅ equivalent |
 | 1 active non-primary, no orphans | 1 | 0 | 0 | HEAL | prune updates primary on surviving row | ✅ heal path runs |
 | 2 active rows, 0 primary | 2 | 0 | 0 | HEAL | prune updates first row to primary | ✅ heal path runs |
 | 2 active rows, 2 primary (invariant broken) | 2 | 2 | 0 | HEAL | prune updates first row, demotes others | ✅ heal path runs |
 | 1 active primary + 1 orphan | 1 | 1 | 1 | HEAL | prune deletes orphan, no UPDATE needed | ✅ heal path runs |
-| 1 active non-primary + 1 orphan primary (codex P1 #1 case b) | 1 | 1 | 1 | HEAL | prune deletes orphan + UPDATEs survivor primary | ✅ heal path runs |
+| 1 active non-primary + 1 orphan primary (codex r1 P1 #1 case b) | 1 | 1 | 1 | HEAL | prune deletes orphan + UPDATEs survivor primary | ✅ heal path runs |
 | 0 active, 1+ orphans | 0 | * | ≥1 | HEAL | prune deletes orphans + heal-from-default | ✅ heal path runs |
 | 0 active, 0 orphans (empty) | 0 | 0 | 0 | HEAL | prune no-op, heal-from-default | ✅ heal path runs |
 
-The gate is **strictly tighter** than the current implicit check — every state the current code modifies routes to the heal path, plus a few states that today would no-op route to the heal path too. The cost: a small number of extra heal-path runs that do nothing (the function early-returns at `rows.length === 0` check after re-reading via `getTalkAgentRows`). These are bounded by the rare-orphan rate.
+The gate is **equivalent** to the post-prune predicate: every state that the existing code modifies routes to the heal path; every state that the existing code leaves alone routes to early-exit. The cost on the heal-path side is one extra SELECT (the snapshot) that we then re-derive via `getTalkAgentRows`. Acceptable — heal is not on the steady-state user path.
 
-### 4.2 Snapshot SELECT failure surface — new throw
+### 4.2 Snapshot SELECT failure surface — preserved swallow
 
-Today's `ensureTalkUsesUsableDefaultAgent` swallows `getDefaultTalkAgentId()` errors via `try { ... } catch { return }`. That swallow covers two cases: (a) "no default agent configured" — benign on a fresh install, and (b) DB connection error — *also* swallowed today (arguably a hidden bug).
+Today's `ensureTalkUsesUsableDefaultAgent` swallows `getDefaultTalkAgentId()` errors via `try { ... } catch { return }`. The function is best-effort healing; a DB error on the read path silently no-ops rather than failing the route.
 
-The proposed snapshot SELECT does NOT wrap in try/catch. A DB error on the snapshot throws to the caller (a talks.ts route handler), which surfaces as a 500. That **IS a new failure surface vs today** (codex P2 #6). Decision: accept the more honest failure. Hiding DB errors on the read path was masking real problems. Documented in §8.
+r3 preserves that contract: the snapshot SELECT is wrapped in try/catch and falls through to the heal path on error (which itself swallows). Net behavioral change vs main: zero — the failure surface of `ensureTalkUsesUsableDefaultAgent` is exactly what it is today. The earlier r2 framing ("accept the more honest failure") was rejected — turning a perf optimization into a behavior change wasn't justified.
+
+If a future PR wants to surface DB read errors instead of swallowing them, it should land as its own behavioral-change PR with appropriate route-handler error mapping; not folded into a perf lever.
 
 ### 4.3 RLS surface
 
@@ -281,24 +288,30 @@ Existing four-caller happy-path tests must continue to pass without modification
 
 ## 7. Post-deploy verification
 
-Per [[feedback-measure-before-locking-perf-plans]]: T-new-A's §4.5 already gave the 748 ms baseline. The bench validates that savings materialize at function-level (per-call) AND at route-level (per-request, accounting for §2.3 multiplicity).
+Per [[feedback-measure-before-locking-perf-plans]]: T-new-A's §4.5 attribution already gave the 748 ms baseline for the function. The bench validates that savings materialize at function-level (per-call) and on the latency-sensitive `sendChatRoute` (1× call).
 
-**Bench commands** (SPA tabs closed per [[feedback-close-clawtalk-tabs-before-bench]]):
+**Bench command** (SPA tabs closed per [[feedback-close-clawtalk-tabs-before-bench]]):
 
-- `npx tsx scripts/latency-bench.ts --provider=haiku --route=chat` (n=10) — measures `sendChatRoute` (1× call).
-- `npx tsx scripts/latency-bench.ts --provider=haiku --route=get-talk` (n=10) — measures `getTalkRoute` (2× call).
-- A new function-level micro-bench wrapping a direct `ensureTalkUsesUsableDefaultAgent` call against a healthy talk and a heal-required talk (logged via temp instrumentation, removed after deploy).
+```
+CLAWTALK_BENCH_TOKEN=<fresh eb_at JWT> npx tsx scripts/latency-bench.ts --provider=haiku
+```
+
+This is the existing `/chat`-only harness (the script does not have a `--route` flag — confirmed against `scripts/latency-bench.ts:719-735`). It measures `sendChatRoute`'s t1-t0.
+
+**Pre-T-new-C baseline measurement (C5 step):** run the bench command above on `main` BEFORE merging T-new-C. Record the t1-t0 median as `BASELINE_MS`. Asserting "post-T-new-A 3920 ms" at plan-time was stale — T-new-A2 also shipped (−273 ms) so the real baseline is somewhere around 3520 ms but should be re-measured rather than assumed.
 
 **Success criteria**:
 
-1. Function-level micro-bench: **healthy-shape call ≥500 ms faster** than pre-T-new-C baseline.
-2. Route-level `sendChatRoute` t1-t0: **median drops by ≥500 ms** vs the post-T-new-A baseline (3920 ms → ≤3420 ms).
-3. Route-level `getTalkRoute`: **median drops by ≥1000 ms** (2× multiplicity).
-4. **Zero new error classes** in 24h prod logs after deploy. Specifically, check for new 500s on snapshot SELECT failures (§4.2 acknowledged surface).
+1. **Function-level instrumentation** — add a one-call timer around `ensureTalkUsesUsableDefaultAgent` for the duration of C5 (removed after deploy verification). Healthy-shape median ≤200 ms (vs ~750 ms pre-T-new-C). If ≥500 ms saving, structural claim holds.
+2. **`sendChatRoute` t1-t0 median** ≥500 ms drop vs `BASELINE_MS` measured at C5.
+3. **Zero new error classes** in 24h prod logs after deploy. Snapshot SELECT failures are swallowed by §4.2's try/catch, so the "no new 500s" check is a regression on the broader read path, not on snapshot specifically.
 
-If function-level shows ≥500 ms drop but route-level shows <300 ms drop, the structural hypothesis is right but multiplicity is masking the saving differently than expected. Acceptable; file `T-new-C-followup.md` for the §3.3 redundant-inner-calls deferral.
+`getTalkRoute` and `listTalksRoute` are not benched directly (the harness doesn't drive them). Their savings are inferred: per-call function-level saving × §2.3 multiplicity. Verifying them empirically would require a bench-script extension and is out of scope for this lever.
 
-If function-level shows <300 ms drop, the gate is firing less than expected (healthy-shape proportion lower than predicted). Log `getTalkAgentsHealthSnapshot` outcomes for 24h and reframe.
+**Failure-branch decisions:**
+
+- If function-level shows ≥500 ms but `sendChatRoute` shows <300 ms: the structural saving exists but is masked by other phases (likely the same `enqueueTalkTurnAtomic` ~1734 ms surfaced by T-new-A). Acceptable; file `T-new-C-followup.md` noting the gap.
+- If function-level shows <300 ms: gate is firing less than expected. Log `getTalkAgentsHealthSnapshot` outcomes for 24h and reframe — the healthy-shape proportion was wrong, not the structural lever.
 
 ---
 
@@ -306,7 +319,7 @@ If function-level shows <300 ms drop, the gate is firing less than expected (hea
 
 | Failure | Behavior | Recovery |
 |---|---|---|
-| `getTalkAgentsHealthSnapshot` SELECT throws | `ensureTalkUsesUsableDefaultAgent` throws → caller (talks.ts route) throws → 500. **New surface** vs today's swallow on the same DB-error class (§4.2). | Deliberate. Today's swallow hid real DB errors; surfacing is more honest. If observed in prod, root-cause the DB error rather than re-instate the swallow. |
+| `getTalkAgentsHealthSnapshot` SELECT throws | Swallowed by §4.2's try/catch → falls through to heal path → existing swallow on `getDefaultTalkAgentId`. Same end-state as today: function silently no-ops. | n/a — preserves existing best-effort contract. |
 | `postgres.js` coerces counts as strings | `Number(rows[0]?.active_count ?? 0)` handles correctly (§4.5). | n/a |
 | Snapshot reads stale row count under concurrent mutation | Slightly different race than today's; §4.4 argues benign. | Next request's call catches it. |
 | Snapshot SQL accidentally OR-s `is_primary` against null-FK rows | `(is_primary)::int` over a NULL `is_primary` yields NULL; `sum(NULL) = NULL`; `coalesce(..., 0) = 0` makes the gate refuse healthy → routes to heal. Harmless mis-classification. | n/a |
@@ -329,5 +342,7 @@ If function-level shows <300 ms drop, the gate is firing less than expected (hea
 |---|---|---|---|---|---|
 | Codex consult (r1) | `/codex consult` | Behavior + framework-specific (gate equivalence, postgres.js coercion, RLS, race, route multiplicity, failure surface) | 2 P1 + 5 P2 | NOT CLEAR → r2 | Counterexamples on the gate, double-call on `listTalkAgentsRoute`, RLS reference accuracy. All absorbed. `.codex-r1-findings.txt`. |
 | Karpathy audit (r1) | `/karpathy-audit` against the plan | Style + four principles (coverage + quality) | 4/4 coverage; 1 critical + 2 warning + 1 nit | NOT CLEAR → r2 | Critical (orphan-row case) overlapped with codex P1; W1 (99% hand-wave), W2 (§4.6 stale ref) absorbed. NIT (coalesce) skipped — left as-is. |
-| Codex consult (r2) | `/codex consult` | Re-verify equivalence with widened gate, multiplicity claim, failure-surface decision | pending | pending | To run on this revision. |
-| Karpathy audit (r2) | `/karpathy-audit` | Re-verify style on the rewritten r2 | pending | pending | To run alongside codex r2. |
+| Codex consult (r2) | `/codex consult` | Re-verify gate equivalence, multiplicity, failure-surface decision | 0 P1 + 3 P2 | NOT CLEAR → r3 | Invalid bench flags (script doesn't have `--route`), stale baseline (3920 ms is pre-T-new-A2), §4.1 missing N-active row + "strictly tighter" claim. All absorbed. `.codex-r2-findings.txt`. |
+| Karpathy audit (r2) | `/karpathy-audit` against the plan | Style + four principles re-check | 4/4 coverage; 0 critical + 2 warning + 1 nit | NOT CLEAR → r3 | 100 % overlap with codex r2 (W1 invalid-bench, W2 strictly-tighter, NIT failure-surface framing). Rising overlap per [[feedback-codex-catches-behavior-karpathy-catches-style]] — plan converging. |
+| Codex consult (r3) | `/codex consult` | Re-verify swallow wrap, fixed bench commands, equivalence table | pending | pending | To run on this revision. |
+| Karpathy audit (r3) | `/karpathy-audit` | Re-verify style on r3 | pending | pending | To run alongside codex r3. |
