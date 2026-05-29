@@ -1,0 +1,107 @@
+codex consult on docs/T-new-A2-B3-credential-resolve.md r2 (commit 0341fc8)
+session id: 019e74dd-1a7e-7ff2-af09-f65bd30a35da
+tokens: 530,333
+verdict: FAIL — ABSORB findings 1,2,3,4,5,6 and re-review
+
+1. [P1] `DROP FUNCTION current_user_is_workspace_admin()` is wrong. The plan
+   claims "no other readers" at docs/T-new-A2-B3-credential-resolve.md:121 and
+   includes the drop at docs/T-new-A2-B3-credential-resolve.md:203-205, but
+   later migrations still use that helper in active RLS policies:
+   supabase/migrations/0019_workspace_channels.sql:55-59,
+   supabase/migrations/0020_workspace_data_connectors.sql:40-44,
+   supabase/migrations/0023_workspace_slack_installs.sql:39-43. The migration
+   will either fail due to dependent policies or, if forced, break workspace
+   channel/data connector/Slack writes.
+
+2. [P1] Single-PR deploy ordering is not safe. .github/workflows/deploy.yml
+   applies migrations BEFORE Worker deploy at lines 73-95, then deploys the
+   Worker at lines 126-129. During that window, old code still reads/writes
+   dropped tables from execution-resolver.ts:202-208, :266-278;
+   ai-agents.ts:318-401, :674-704, :797-1078; agent-oauth.ts:89-106. The
+   plan's "writers → readers → schema" PR-internal order at
+   docs/T-new-A2-B3-credential-resolve.md:151-160 does not survive deploy
+   order. Needs staged deploy: remove code first, deploy, then destructive
+   migration in a later PR/deploy.
+
+3. [P1] Rollback framing is false. docs/T-new-A2-B3-credential-resolve.md:300-302
+   only discusses transactional migration failure, but the real bad case is
+   Worker rollback after a successful schema drop. Old Worker code is not
+   backward-compatible with "no workspace_provider_secrets table"; it will
+   hit "relation does not exist." Another reason the destructive migration
+   must be separate from code removal.
+
+4. [P1] The OAuth-state insert plan contradicts the schema.
+   provider_oauth_states.scope is `not null` in
+   supabase/migrations/0010_oauth_subscription_credentials.sql:75-80. §4.2
+   says "Inserts to provider_oauth_states drop the scope column" at
+   docs/T-new-A2-B3-credential-resolve.md:172, while §4.3 says column removal
+   is out of scope at docs/T-new-A2-B3-credential-resolve.md:186. Dropping
+   scope from inserts would break insertPkceState / insertDeviceCodeState
+   unless the migration also adds a default or drops NOT NULL; current code
+   inserts scope at src/clawtalk/web/routes/agent-oauth.ts:139-147 and
+   :162-170.
+
+5. [P1] Frontend inventory is incomplete. TalkDetailPage consumes the
+   workspace fields to decide configured providers at
+   webapp/src/pages/TalkDetailPage.tsx:2327-2341, and its test fixture
+   carries those fields at webapp/src/pages/TalkDetailPage.test.tsx:4862-4870.
+   §2.4 and B3-2-6 only list api.ts, SettingsPage, SettingsPage.test, and
+   RegisteredAgentsPanel at docs/T-new-A2-B3-credential-resolve.md:105-117
+   and :403-405. Removing the API fields without updating TalkDetail will
+   fail typecheck or leave stale gating logic.
+
+6. [P1] §4.6's data migration is underspecified and can discard secret
+   material. The plan says preserve ciphertext, encrypted_refresh_token, and
+   expires_at, then says "Skip the migration target if a personal row already
+   exists" at docs/T-new-A2-B3-credential-resolve.md:267. ON CONFLICT ... DO
+   NOTHING is behavior-compatible with personal precedence, but it does not
+   preserve the workspace row; the later drop deletes it. If row_count > 0,
+   require an explicit conflict report/export or an explicit "personal wins,
+   workspace ciphertext intentionally discarded" signoff.
+
+7. [P2] The provider_oauth_states.scope CHECK name is probably correct, but
+   the race handling is incomplete. The generated inline check name should
+   be provider_oauth_states_scope_check from migration 0010:79-80, so §4.4's
+   constraint name is fine. The race is old Worker / new schema: old
+   parseScope can still insert workspace states at agent-oauth.ts:228-243
+   and :343-360 after the migration tightens the CHECK. This is covered
+   only by staging, not by the audit.
+
+8. [P2] Test plan is internally inconsistent. §7 says Tests 4/5 seed a
+   workspace row, then says after migration the insert must fail because
+   the table does not exist at
+   docs/T-new-A2-B3-credential-resolve.md:357-360. You cannot both seed a
+   workspace-only row and run against the post-drop schema. Also, §7 says
+   all 6 tests live in execution-resolver.test.ts at
+   docs/T-new-A2-B3-credential-resolve.md:351, but Test 5 targets private
+   providerHasCredential in agent-management.ts:62-83 and Test 6 targets
+   private loadSetupChecklist in main-talk-bootstrap.ts:108-145.
+
+9. [P2] isAnthropicDirectHttpReady still does not mean "API key ready." The
+   comment says subscription credentials are not sufficient at
+   src/clawtalk/agents/execution-resolver.ts:187-188, but the query checks
+   any personal Anthropic row without credential_kind = 'api_key' at
+   :194-198. No current callers (grep), so not a deploy blocker, but the
+   plan's "personal OR env-var" claim is imprecise.
+
+10. [P2] Model discovery regression is real and should be called out as
+    intentional. buildAdditionalProviderCards currently prefers workspace
+    API keys for live discovery at src/clawtalk/web/routes/ai-agents.ts:417-430.
+    Removing workspace credentials means a workspace-only NVIDIA/Anthropic
+    key loses live model discovery and falls back to curated rows. That may
+    be acceptable, but §4.8 should verify the expected degraded state, not
+    just absence of workspace* fields.
+
+11. [P2] Plan has small inventory accuracy issues. §2.2 says "13 total" but
+    lists 14 rows at docs/T-new-A2-B3-credential-resolve.md:78-95. §2.4
+    names workspaceSubscriptionHasCredential at
+    docs/T-new-A2-B3-credential-resolve.md:110, but the actual field is
+    hasWorkspaceSubscription in webapp/src/lib/api.ts:880-883 and
+    ai-agents.ts:523-526.
+
+12. [P2] Docs inventory missed stale architectural docs. Grep finds
+    docs/11-data-model.md still saying workspace provider keys are
+    preserved/shared at docs/11-data-model.md:30-32 and listed as reused
+    infrastructure at docs/11-data-model.md:632-637. Not live code, but it
+    will mislead the next implementer unless the PR includes doc cleanup
+    or explicitly defers it.

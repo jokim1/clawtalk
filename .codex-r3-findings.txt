@@ -1,0 +1,49 @@
+codex consult on docs/T-new-A2-B3-credential-resolve.md r3 (commit b400133)
+session id: 019e74f0-9fe8-75b1-9278-9d0dcd5b593b
+tokens: 2,047,787
+verdict: FAIL — ABSORB finding 1, address P2 nits, re-review.
+Overall: r3 absorbed every r2 P1 structurally. The new P1 is a self-introduced
+contradiction in §4.4's gate; the rest are precision fixes.
+
+1. [P1] Data-migration fork cannot satisfy its own PR B gate. The copy SQL
+   inserts workspace rows into llm_provider_secrets, but never deletes the
+   source rows from workspace_provider_secrets; immediately after that, the
+   plan says re-running the audit should show `secrets.row_count = 0`
+   before PR B merges. That will remain nonzero for every copied or
+   intentionally discarded workspace row. Fix the fork to either delete
+   migrated/discarded source rows before the final audit, or change the
+   gate to audit "unhandled workspace rows" instead of raw table count.
+   Citations: docs/T-new-A2-B3-credential-resolve.md:224 (insert),
+   docs/T-new-A2-B3-credential-resolve.md:227 (re-run audit),
+   docs/T-new-A2-B3-credential-resolve.md:244 (PR B requires zero).
+
+2. [P2] The optional copy SQL does not preserve enc_key_version. Both
+   personal and workspace secret tables carry enc_key_version; the
+   migration copies ciphertext and tokens but lets the target default
+   the key version. Today that may be harmless if every row is version 1,
+   but it is not a faithful "preserve secret material" migration and will
+   break any non-v1 ciphertext. Include enc_key_version in the
+   insert/select.
+   Citations: supabase/migrations/0008_workspace_provider_secrets.sql:41,
+   supabase/migrations/0001_init_clawtalk_schema.sql:177,
+   docs/T-new-A2-B3-credential-resolve.md:227.
+
+3. [P2] PR B's Worker deploy is not literally a no-op. The plan says the
+   deploy is a no-op, but deploy.yml still builds the SPA, syncs a Worker
+   secret, and runs npx wrangler deploy; wrangler.toml includes assets,
+   queues, cron triggers, Hyperdrive, R2, KV, and a Durable Object
+   migration binding. With no code/config changes it should be
+   behaviorally identical, but it can still fail or reapply Cloudflare-
+   side declarations. Reword as "no application code changes; still a
+   real Worker/assets deploy."
+   Citations: .github/workflows/deploy.yml:50, :105, :126;
+   wrangler.toml:34, :100, :144.
+
+4. [P2] TalkDetailPage replacement names a nonexistent field. The plan
+   says to replace the configured-provider check with
+   `provider.hasCredential || provider.hasSubscription`, but
+   AgentProviderCard has `hasPersonalSubscription`, not `hasSubscription`.
+   Typecheck should catch this, but the plan should use the actual field
+   to avoid hiding subscription-only providers during implementation.
+   Citations: docs/T-new-A2-B3-credential-resolve.md:140,
+   webapp/src/lib/api.ts:880, webapp/src/pages/TalkDetailPage.tsx:2335.

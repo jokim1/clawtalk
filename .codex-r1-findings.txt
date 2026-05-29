@@ -1,0 +1,35 @@
+I’ll review the referenced code and migrations first, then I’ll give you the failure points directly. I’m constrained to read-only access here, so this will be a plan review only.
+The migrations already contradict part of the plan: `workspace_provider_secrets` is not owner-scoped after migration 0010, its primary key is `(provider_id, credential_kind)`. I’m checking the rest of the repository for other readers before forming the review.
+**Problems**
+
+1. The Step 1 SQL is wrong. `workspace_provider_secrets` has no `owner_id`; after migration 0010 its PK is `(provider_id, credential_kind)`, and RLS read policy is `using (true)`. See [0008_workspace_provider_secrets.sql](/Users/josephkim/dev/clawtalk/.claude/worktrees/t-new-a2-b3-plan/supabase/migrations/0008_workspace_provider_secrets.sql:48) and [0010_oauth_subscription_credentials.sql](/Users/josephkim/dev/clawtalk/.claude/worktrees/t-new-a2-b3-plan/supabase/migrations/0010_oauth_subscription_credentials.sql:43). The proposed gate query cannot work.
+
+2. The central premise is only partially right. `resolveCredentialKindSnapshot` is 1 RT only when a visible personal row exists and matches `credential_mode`; otherwise it is 2 RT plus possible env fallback. Production can hit 2 RT for real reasons: pinned subscription with only API key, pinned API key with only subscription, missing/incorrect `withUserContext`, provider_id mismatch, deleted personal key, OAuth-only setup, or global workspace fallback. The plan treats “Joseph probably has Anthropic api_key” as too much evidence.
+
+3. Workspace fallback is not owner-specific. “Count rows for Joseph” is conceptually wrong. A workspace row is shared with all authenticated users by design. If one exists for `provider.anthropic`, everyone can read it under RLS.
+
+4. Option A’s `UNION ALL ... ORDER BY ... LIMIT 1` should not be assumed to short-circuit. With a global sort key over the append result, Postgres realistically evaluates both branches, sorts/top-Ns the tiny result, then limits. Since each branch can only return up to two rows by `(provider_id, credential_kind)`, server CPU is trivial, but it still does both index probes. The win is one client/Hyperdrive round trip, not planner short-circuiting.
+
+5. Option A query as written loses the env fallback ordering consideration only indirectly. It returns `null` when both tables miss, then existing code can still do env fallback if retained. The plan should explicitly say the fallback remains outside the query. Otherwise someone may “simplify” it away.
+
+6. Better Option A shape exists if preserving personal-hit cheapness matters: query personal in a CTE/subquery and only consider workspace when personal is empty, e.g. `personal as materialized (...) union all workspace where not exists (select 1 from personal)`. Still needs measurement, but the current proposed SQL is the bluntest version.
+
+7. The 30 ms gate is weak. N=10 is too small for Hyperdrive/Worker noise, and a 30 ms absolute band can be both too narrow for WAN jitter and too wide when the expected server-side delta is near zero. Use at least n=30-50, report median/p75/p95, compare paired per-call deltas, and separate personal-hit vs personal-miss cohorts.
+
+8. Shadow measurement will contaminate the thing being measured. Running current plus shadow in the same request adds extra DB work and may benefit the shadow from warmed connection/cache/state. It also changes request load. Randomize order or run separate instrumented modes; include `EXPLAIN (ANALYZE, BUFFERS)` on prod-like data if possible.
+
+9. The decision tree has a degenerate bad branch: if workspace row count is 0, it jumps to Option B and never measures Option A. That means you lose the chance to validate the single-query path and you also make a behavior deletion based on current data only. Zero rows today does not prove the code path is dead.
+
+10. Option B is under-scoped and internally inconsistent. The runtime resolver still uses workspace fallback in [execution-resolver.ts](/Users/josephkim/dev/clawtalk/.claude/worktrees/t-new-a2-b3-plan/src/clawtalk/agents/execution-resolver.ts:266), and `getAnthropicApiKeyFromDb` still uses it in [execution-planner.ts](/Users/josephkim/dev/clawtalk/.claude/worktrees/t-new-a2-b3-plan/src/clawtalk/agents/execution-planner.ts:164). Dropping only the snapshot fallback can create mismatches between enqueue snapshot and runtime secret resolution.
+
+11. There are many other workspace secret code paths, not just `resolveSecret`: readiness check [execution-resolver.ts](/Users/josephkim/dev/clawtalk/.claude/worktrees/t-new-a2-b3-plan/src/clawtalk/agents/execution-resolver.ts:202), provider cards [ai-agents.ts](/Users/josephkim/dev/clawtalk/.claude/worktrees/t-new-a2-b3-plan/src/clawtalk/web/routes/ai-agents.ts:318), workspace subscription metadata [ai-agents.ts](/Users/josephkim/dev/clawtalk/.claude/worktrees/t-new-a2-b3-plan/src/clawtalk/web/routes/ai-agents.ts:357), API-key writes [ai-agents.ts](/Users/josephkim/dev/clawtalk/.claude/worktrees/t-new-a2-b3-plan/src/clawtalk/web/routes/ai-agents.ts:1053), and OAuth workspace writes [agent-oauth.ts](/Users/josephkim/dev/clawtalk/.claude/worktrees/t-new-a2-b3-plan/src/clawtalk/web/routes/agent-oauth.ts:89). Option B should either remove the feature coherently or not touch it.
+
+12. Option B’s “workspace-secret path is gone returns null” test is dangerous if runtime still accepts workspace secrets. You would be asserting intentional inconsistency.
+
+13. §7 Option A tests miss important cases: empty personal + workspace api_key, empty personal + workspace subscription, empty + empty with env fallback present, pinned api_key with only personal subscription plus workspace api_key, and personal subscription vs workspace api_key precedence.
+
+14. The tests as described do not prove RLS/multi-user isolation. Personal rows need two users with same provider/kind to ensure `auth.uid()` scopes personal selection. Workspace rows need a test proving they are globally visible if that behavior is intentionally preserved.
+
+15. The plan ignores that `resolveSecret` fetches `limit 2` and can skip an invalid/decrypt-failing first row, while snapshot only chooses credential kind without decrypting. This existing semantic mismatch matters more if you optimize snapshot alone.
+
+16. “Critical gaps: none” is false. The gate SQL is invalid, Option B is not scoped to all readers/writers, and the UNION query does not short-circuit in the way the plan is trying to reason about.
