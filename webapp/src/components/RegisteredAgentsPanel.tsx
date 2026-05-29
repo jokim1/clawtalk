@@ -66,9 +66,8 @@ function buildProviderOptions(
 ): ProviderOption[] {
   const options: ProviderOption[] = [];
   for (const provider of providers) {
-    const hasApiKey = provider.hasCredential || provider.workspaceHasCredential;
-    const hasSubscription =
-      provider.hasPersonalSubscription || provider.hasWorkspaceSubscription;
+    const hasApiKey = provider.hasCredential;
+    const hasSubscription = provider.hasPersonalSubscription;
     const disabled = !provider.enabled;
     if (hasApiKey && hasSubscription) {
       options.push({
