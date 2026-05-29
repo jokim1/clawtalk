@@ -111,14 +111,15 @@ messages (
   run_id            uuid,                                            -- composite FK below (back-edge, deferrable)
   body text, attachments_json jsonb not null default '[]',
   created_at,
-  unique (workspace_id, id),                                         -- composite-FK target (runs.trigger_message_id)
+  unique (workspace_id, id),                                         -- composite-FK target (agent_feedback_events)
+  unique (workspace_id, talk_id, id),                                -- composite-FK target including talk_id (runs.trigger_message_id)
   check (
     (author_kind = 'user'  and author_user_id is not null and agent_snapshot_id is null and run_id is null) or
     (author_kind = 'agent' and author_user_id is null     and agent_snapshot_id is not null and run_id is not null)
   ),
-  foreign key (workspace_id, talk_id)            references talks(workspace_id, id) on delete cascade,
-  foreign key (workspace_id, agent_snapshot_id)  references talk_agent_snapshots(workspace_id, id),
-  foreign key (workspace_id, run_id)             references runs(workspace_id, id) deferrable initially deferred
+  foreign key (workspace_id, talk_id)                       references talks(workspace_id, id) on delete cascade,
+  foreign key (workspace_id, talk_id, agent_snapshot_id)    references talk_agent_snapshots(workspace_id, talk_id, id),
+  foreign key (workspace_id, talk_id, run_id)               references runs(workspace_id, talk_id, id) deferrable initially deferred
 )
 
 runs (                                                            -- clean: NO thread_id (D4/D7)
@@ -138,12 +139,16 @@ runs (                                                            -- clean: NO t
   prompt_snapshot_id uuid,
   tokens_in int, tokens_out int, error_json jsonb,
   started_at, finished_at, created_at,
-  unique (workspace_id, id),                                     -- composite-FK target (messages.run_id, run_prompt_snapshots, etc.)
-  foreign key (workspace_id, talk_id)              references talks(workspace_id, id) on delete cascade,
-  foreign key (workspace_id, agent_snapshot_id)    references talk_agent_snapshots(workspace_id, id),
-  foreign key (workspace_id, trigger_message_id)   references messages(workspace_id, id) deferrable initially deferred,
-  foreign key (workspace_id, job_id)               references jobs(workspace_id, id) on delete set null (job_id),
-  foreign key (workspace_id, prompt_snapshot_id)   references run_prompt_snapshots(workspace_id, id) deferrable initially deferred
+  unique (workspace_id, id),                                     -- composite-FK target (run_prompt_snapshots, document_edits.proposed_by_run_id, etc.)
+  unique (workspace_id, talk_id, id),                            -- composite-FK target including talk_id (messages.run_id)
+  foreign key (workspace_id, talk_id)                                          references talks(workspace_id, id) on delete cascade,
+  foreign key (workspace_id, talk_id, snapshot_group_id, agent_snapshot_id)
+    references talk_agent_snapshots(workspace_id, talk_id, snapshot_group_id, id),
+  foreign key (workspace_id, talk_id, trigger_message_id)
+    references messages(workspace_id, talk_id, id) deferrable initially deferred,
+  foreign key (workspace_id, job_id)                                           references jobs(workspace_id, id) on delete set null (job_id),
+  foreign key (workspace_id, prompt_snapshot_id)
+    references run_prompt_snapshots(workspace_id, id) deferrable initially deferred
 )
 -- single-flight per job: only one nonterminal run per job at a time (P1, §8)
 create unique index runs_one_active_per_job
@@ -225,8 +230,10 @@ talk_agent_snapshots (                        -- immutable per-run roster freeze
   model_id text not null references llm_models(id),
   temperature numeric not null, persona text, focus text, method text[],
   sort_order int not null, role_template_version int, global_policy_version int, created_at,
-  unique (workspace_id, id),                    -- composite-FK target (runs, messages, run_prompt_snapshots)
-  unique (snapshot_group_id, source_agent_id),  -- one snapshot per (group, source agent)
+  unique (workspace_id, id),                                             -- composite-FK target (messages.agent_snapshot_id loose, run_prompt_snapshots)
+  unique (workspace_id, talk_id, id),                                    -- composite-FK target including talk_id (messages.agent_snapshot_id strict)
+  unique (workspace_id, talk_id, snapshot_group_id, id),                 -- composite-FK target including group (runs.agent_snapshot_id — "acting agent is inside this run's frozen roster")
+  unique (snapshot_group_id, source_agent_id),                           -- one snapshot per (group, source agent)
   foreign key (workspace_id, talk_id)         references talks(workspace_id, id) on delete cascade,
   foreign key (workspace_id, source_agent_id) references agents(workspace_id, id) on delete set null (source_agent_id)
 )
@@ -295,8 +302,9 @@ doc_blocks (
   kind text not null check (kind in ('h1','h2','p','li','meta','code')),
   text text not null default '', attrs_json jsonb not null default '{}', created_at, updated_at,
   unique (tab_id, sort_order),
-  unique (workspace_id, id),                                              -- composite-FK target (document_edits)
+  unique (workspace_id, id),                                              -- composite-FK target (loose; per-workspace)
   unique (workspace_id, document_id, id),                                 -- composite-FK target ("edit's block belongs to same document")
+  unique (workspace_id, document_id, tab_id, id),                         -- composite-FK target including tab_id (document_edits — block must belong to edit's tab)
   foreign key (workspace_id, document_id, tab_id)
     references doc_tabs(workspace_id, document_id, id) on delete cascade  -- block's tab must belong to block's document
 )
@@ -318,13 +326,14 @@ document_edits (                              -- unified pending-edit model (rep
     (op = 'replace' and block_id is not null and base_block_version is not null and new_text is not null) or
     (op = 'delete'  and block_id is not null and base_block_version is not null)
   ),
-  foreign key (workspace_id, document_id)              references documents(workspace_id, id)               on delete cascade,
-  foreign key (workspace_id, document_id, tab_id)      references doc_tabs(workspace_id, document_id, id)   on delete cascade,
-  foreign key (workspace_id, document_id, block_id)    references doc_blocks(workspace_id, document_id, id) on delete cascade,
-  foreign key (workspace_id, document_id, after_block_id)
-    references doc_blocks(workspace_id, document_id, id) on delete cascade,
-  foreign key (workspace_id, proposed_by_agent_id)     references agents(workspace_id, id) on delete set null (proposed_by_agent_id),
-  foreign key (workspace_id, proposed_by_run_id)       references runs(workspace_id, id)   on delete set null (proposed_by_run_id)
+  foreign key (workspace_id, document_id)                       references documents(workspace_id, id)             on delete cascade,
+  foreign key (workspace_id, document_id, tab_id)               references doc_tabs(workspace_id, document_id, id) on delete cascade,
+  foreign key (workspace_id, document_id, tab_id, block_id)
+    references doc_blocks(workspace_id, document_id, tab_id, id) on delete cascade,    -- block must belong to edit's tab
+  foreign key (workspace_id, document_id, tab_id, after_block_id)
+    references doc_blocks(workspace_id, document_id, tab_id, id) on delete cascade,    -- placement anchor must belong to edit's tab
+  foreign key (workspace_id, proposed_by_agent_id)              references agents(workspace_id, id) on delete set null (proposed_by_agent_id),
+  foreign key (workspace_id, proposed_by_run_id)                references runs(workspace_id, id)   on delete set null (proposed_by_run_id)
 )
 
 doc_tab_coeditors ( workspace_id uuid not null, tab_id uuid not null, agent_id uuid not null,
@@ -468,14 +477,20 @@ jobs (
   last_run_at timestamptz, last_run_status text, run_count int not null default 0,
   created_at, updated_at,
   unique (workspace_id, id),
-  check (status <> 'active' or agent_id is not null),          -- active jobs need an agent
   foreign key (workspace_id, talk_id)  references talks(workspace_id, id)  on delete cascade,
   foreign key (workspace_id, agent_id) references agents(workspace_id, id) on delete set null (agent_id)
 )
+
+-- Agent delete → atomic transition to blocked (replaces the "status <> 'active' or agent_id is not null" check
+-- constraint, which would fire and ABORT the FK SET NULL action before status could be updated).
+create trigger jobs_block_on_agent_clear
+  before update of agent_id on jobs
+  for each row when (new.agent_id is null and old.agent_id is not null)
+  execute function set_job_blocked_agent_missing();   -- sets new.status='blocked', new.block_reason='agent_missing'
 ```
 
 - **Output via the unified edit path:** `document_append` proposes a `document_edits` row (`source='job'`), review-gated by default — no second write path, no autonomous overwrite (§5, `12` §3).
-- **Agent lifecycle:** `agent_id` is nullable + `on delete set null (agent_id)`; when the agent disappears the job flips to `status='blocked'`, `block_reason='agent_missing'` (app-side after the FK fires). A check constraint prevents `status='active'` with a null `agent_id`.
+- **Agent lifecycle:** `agent_id` is nullable + `on delete set null (agent_id)`. The `BEFORE UPDATE` trigger above runs _inside_ the FK action's row update, so the `SET NULL` and the `status='blocked'` flip are atomic — no window where an active job has a null agent. (An earlier `check (status <> 'active' or agent_id is not null)` was wrong: it would abort the FK action instead of letting it complete.)
 - **"Agent must be in the Talk roster"** is a runtime invariant — a `before insert or update` trigger on `jobs` looks up `talk_agents` for the same `(workspace_id, talk_id, agent_id)`; on roster removal the app flips status to `blocked`.
 - **Single-flight per job** is enforced in §3 by `runs_one_active_per_job` (partial unique on `runs(job_id) where status in ('queued','running','awaiting')`) — schema-guaranteed, not prose-only.
 - **Scheduler robustness** (`12` §5): lease-based claim (`for update skip locked` + `claimed_at`, advance `next_due_at` in-txn), sweep stuck `running` **and** `queued` runs. Reuses the cron `scheduler.ts` + Queues mechanism; the executor data-access is reworked with the new runs table.
@@ -564,14 +579,15 @@ improvement_run_held_out_personas (
 document_versions (                           -- one per scored candidate
   id uuid pk, workspace_id uuid not null, run_id uuid not null,
   iteration int not null, candidate_id text not null,
-  parent_version_id uuid references document_versions(id),         -- null = baseline; self-FK, same workspace by construction
+  parent_version_id uuid,                                          -- null = baseline; composite FK below (same workspace)
   body_markdown text not null, mutation_strategy text,
   composite_score numeric, held_out_score numeric,                -- 0–10 scale (see scales note)
   per_persona_json jsonb,                                          -- { personaId: { likert:int[5] (1–5), verbatim, score } }
   ssr_job_id text, decision text check (decision in ('keep','discard','frontier','winner')), decision_reason text, created_at,
-  unique (workspace_id, id),                                       -- composite-FK target (improvement_runs.best_version_id)
+  unique (workspace_id, id),                                       -- composite-FK target (improvement_runs.best_version_id, self-FK)
   unique (run_id, candidate_id),                                   -- one row per (run, candidate) — SSR result reproducibility
-  foreign key (workspace_id, run_id) references improvement_runs(workspace_id, id) on delete cascade
+  foreign key (workspace_id, run_id)            references improvement_runs(workspace_id, id) on delete cascade,
+  foreign key (workspace_id, parent_version_id) references document_versions(workspace_id, id) on delete set null (parent_version_id)
 )
 ```
 
