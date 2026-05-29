@@ -190,14 +190,16 @@ function extractMentionTokens(content: string): string[] {
   return mentions;
 }
 
-export async function resolveTalkAgentMentions(
-  talkId: string,
+// Pure variant: resolve mentions against a pre-loaded talk_agents list.
+// Callers that already loaded talk_agents (e.g. enqueueTalkChat) use this
+// to skip a duplicate read. resolveTalkAgentMentions is the IO-wrapper
+// that loads the list itself for callers without one in hand.
+export function resolveTalkAgentMentionsFromList(
+  talkAgents: TalkAgentAssignment[],
   content: string,
-): Promise<TalkAgentAssignment[]> {
+): TalkAgentAssignment[] {
   const mentionTokens = extractMentionTokens(content);
   if (mentionTokens.length === 0) return [];
-
-  const talkAgents = await listTalkAgents(talkId);
   if (talkAgents.length === 0) return [];
 
   const aliasToAgentIds = new Map<string, Set<string>>();
@@ -226,6 +228,17 @@ export async function resolveTalkAgentMentions(
   }
 
   return talkAgents.filter((agent) => matchedAgentIds.has(agent.agentId));
+}
+
+export async function resolveTalkAgentMentions(
+  talkId: string,
+  content: string,
+): Promise<TalkAgentAssignment[]> {
+  // Preserve the early-exit so no-mention content doesn't read talk_agents.
+  const mentionTokens = extractMentionTokens(content);
+  if (mentionTokens.length === 0) return [];
+  const talkAgents = await listTalkAgents(talkId);
+  return resolveTalkAgentMentionsFromList(talkAgents, content);
 }
 
 // ---------------------------------------------------------------------------
