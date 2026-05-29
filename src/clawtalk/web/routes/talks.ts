@@ -45,7 +45,7 @@ import {
   getDefaultTalkAgentId,
   ensureTalkUsesUsableDefaultAgent,
   listTalkAgents,
-  resolveTalkAgentMentions,
+  resolveTalkAgentMentionsFromList,
   setTalkAgents,
   getTalkAgentRows,
   type TalkAgentInput,
@@ -60,7 +60,7 @@ import {
   planExecution,
 } from '../../agents/execution-planner.js';
 import { MAX_ATTACHMENTS_PER_MESSAGE } from '../../talks/attachment-extraction.js';
-import { canEditTalk } from '../middleware/acl.js';
+import { canEditTalk, canEditTalkFromRecord } from '../middleware/acl.js';
 import { AuthContext, ApiEnvelope } from '../types.js';
 import { getContentByTalkId } from '../../db/content-accessors.js';
 import { isContentEditIntent } from '../../talks/content-edit-intent.js';
@@ -1922,7 +1922,13 @@ export async function enqueueTalkChat(input: {
       };
     }
 
-    if (!(await canEditTalk(input.talkId))) {
+    // Reuse the already-loaded talk record instead of re-running the
+    // RLS-gated SELECT inside canEditTalk. Today canEditTalkFromRecord
+    // returns talk !== undefined — observationally identical to
+    // canEditTalk(talkId) since getTalkForUser already verified
+    // visibility. When real ACL/access_role lands, both code paths
+    // MUST update together so this stays a faithful mirror.
+    if (!canEditTalkFromRecord(talk)) {
       return {
         statusCode: 403,
         body: {
@@ -1944,8 +1950,10 @@ export async function enqueueTalkChat(input: {
       : [];
     await ensureTalkUsesUsableDefaultAgent(input.talkId, talk.owner_id);
     const talkAgents = await listTalkAgents(input.talkId);
-    const mentionedAgents = await resolveTalkAgentMentions(
-      input.talkId,
+    // Dedupe: resolveTalkAgentMentions re-reads talk_agents via
+    // listTalkAgents. Reuse the list we just loaded.
+    const mentionedAgents = resolveTalkAgentMentionsFromList(
+      talkAgents,
       content,
     );
     const selectedAgents: Array<{ id: string; nickname: string }> =

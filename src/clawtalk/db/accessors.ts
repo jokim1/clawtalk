@@ -896,6 +896,17 @@ export async function canUserEditTalk(talkId: string): Promise<boolean> {
   return talk !== undefined;
 }
 
+// Mirrors canUserEditTalk(talkId): RLS visibility is sufficient today
+// (TalkWithAccessRecord.access_role is hardcoded to 'owner' in
+// getTalkForUser). When real sharing/ACL lands, this and
+// canUserEditTalk MUST update together so the in-memory check stays
+// observationally identical to the SELECT-backed one.
+export function canUserEditTalkFromRecord(
+  talk: TalkWithAccessRecord | undefined,
+): boolean {
+  return talk !== undefined;
+}
+
 export async function getTalkIdsAccessibleByUser(): Promise<string[]> {
   const db = getDbPg();
   const rows = await db<{ id: string }[]>`
