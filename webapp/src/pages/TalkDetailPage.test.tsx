@@ -3473,6 +3473,10 @@ describe('TalkDetailPage', () => {
     );
 
     await user.type(composer, '/edit');
+    // Ensure the draft is committed before Enter: the keydown handler reads
+    // the `draft` state, so a not-yet-flushed update would skip the /edit
+    // command and the dialog would never open (flaky under CI timing).
+    await waitFor(() => expect(composer).toHaveValue('/edit'));
     await user.keyboard('{Enter}');
 
     expect(
@@ -3545,6 +3549,10 @@ describe('TalkDetailPage', () => {
     });
 
     await user.type(composer, '/edit');
+    // Ensure the draft is committed before Enter: the keydown handler reads
+    // the `draft` state, so a not-yet-flushed update would skip the /edit
+    // command and the dialog would never open (flaky under CI timing).
+    await waitFor(() => expect(composer).toHaveValue('/edit'));
     await user.keyboard('{Enter}');
     expect(
       await screen.findByRole('dialog', { name: 'Edit history' }),
@@ -3568,6 +3576,10 @@ describe('TalkDetailPage', () => {
     });
 
     await user.type(composer, '/edit');
+    // Ensure the draft is committed before Enter: the keydown handler reads
+    // the `draft` state, so a not-yet-flushed update would skip the /edit
+    // command and the dialog would never open (flaky under CI timing).
+    await waitFor(() => expect(composer).toHaveValue('/edit'));
     await user.keyboard('{Enter}');
     const dialog = await screen.findByRole('dialog', { name: 'Edit history' });
     expect(within(dialog).queryByText('Old user prompt')).toBeNull();
@@ -3609,6 +3621,10 @@ describe('TalkDetailPage', () => {
     );
 
     await user.type(composer, '/edit');
+    // Ensure the draft is committed before Enter: the keydown handler reads
+    // the `draft` state, so a not-yet-flushed update would skip the /edit
+    // command and the dialog would never open (flaky under CI timing).
+    await waitFor(() => expect(composer).toHaveValue('/edit'));
     await user.keyboard('{Enter}');
     expect(
       await screen.findByRole('dialog', { name: 'Edit history' }),
@@ -3712,6 +3728,10 @@ describe('TalkDetailPage', () => {
     );
 
     await user.type(composer, '/edit');
+    // Ensure the draft is committed before Enter: the keydown handler reads
+    // the `draft` state, so a not-yet-flushed update would skip the /edit
+    // command and the dialog would never open (flaky under CI timing).
+    await waitFor(() => expect(composer).toHaveValue('/edit'));
     await user.keyboard('{Enter}');
     expect(
       await screen.findByRole('dialog', { name: 'Edit history' }),
