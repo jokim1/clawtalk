@@ -16,6 +16,10 @@ import {
   type DiscoveryResult,
 } from '../../agents/nvidia-model-discovery.js';
 import {
+  discoverAnthropicModels,
+  invalidateAnthropicDiscovery,
+} from '../../agents/anthropic-model-discovery.js';
+import {
   decryptProviderSecret,
   encryptProviderSecret,
 } from '../../llm/provider-secret-store.js';
@@ -139,6 +143,7 @@ type ProviderVerificationResult = {
 
 const CODEX_PROVIDER_ID = 'provider.openai_codex';
 const NVIDIA_PROVIDER_ID = 'provider.nvidia';
+const ANTHROPIC_PROVIDER_ID = 'provider.anthropic';
 
 /**
  * Return the Cloudflare Workers default Cache, or undefined in environments
@@ -409,24 +414,39 @@ async function buildAdditionalProviderCards(): Promise<AgentProviderCard[]> {
   const workspaceSubscriptionsByProvider =
     await listWorkspaceSubscriptionMetadata();
 
-  // Live model discovery for NVIDIA. Workspace credential wins so the team
-  // sees the shared catalog; falls back to the per-user credential if no
-  // workspace key is set. With no credential at all, the card just shows
-  // the curated fallback rows from llm_provider_models.
-  const nvidiaSecret =
-    workspaceSecretsByProvider.get(NVIDIA_PROVIDER_ID) ??
-    secretsByProvider.get(NVIDIA_PROVIDER_ID) ??
+  // Live model discovery. Workspace credential wins so the team sees the
+  // shared catalog; falls back to the per-user credential if no workspace
+  // key is set. With no credential at all (or an auth_error), the card just
+  // shows the curated rows from llm_provider_models. NVIDIA and Anthropic
+  // run in parallel — each is an independent, cached (~1h) network call.
+  //
+  // Anthropic discovery makes a newly-released Claude model appear in the
+  // picker automatically — no migration. It needs an Anthropic API key
+  // (the subscription/OAuth token is scoped to /v1/messages); without one
+  // it degrades to the curated rows.
+  const credentialFor = (providerId: string): string | null =>
+    workspaceSecretsByProvider.get(providerId)?.apiKey ??
+    secretsByProvider.get(providerId)?.apiKey ??
     null;
-  const nvidiaDiscovery: DiscoveryResult | null = nvidiaSecret?.apiKey
-    ? await discoverNvidiaModels(nvidiaSecret.apiKey, {
-        cache: getDefaultCache(),
-      })
-    : null;
+  const nvidiaKey = credentialFor(NVIDIA_PROVIDER_ID);
+  const anthropicKey = credentialFor(ANTHROPIC_PROVIDER_ID);
+  const cache = getDefaultCache();
+  const [nvidiaDiscovery, anthropicDiscovery] = await Promise.all([
+    nvidiaKey ? discoverNvidiaModels(nvidiaKey, { cache }) : null,
+    anthropicKey ? discoverAnthropicModels(anthropicKey, { cache }) : null,
+  ]);
+
+  const discoveryFor = (providerId: string): DiscoveryResult | null => {
+    if (providerId === NVIDIA_PROVIDER_ID) return nvidiaDiscovery;
+    if (providerId === ANTHROPIC_PROVIDER_ID) return anthropicDiscovery;
+    return null;
+  };
 
   return providerRows.map((provider) => {
     const builtinProvider = BUILTIN_ADDITIONAL_PROVIDERS.find(
       (entry) => entry.id === provider.id,
     );
+    const discovery = discoveryFor(provider.id);
     const credentialMode = builtinProvider?.credentialMode ?? 'api_key';
     // Subscription-only providers (e.g. ChatGPT Codex) have no API
     // key surface — the card hides the api-key field, and credential
@@ -507,15 +527,13 @@ async function buildAdditionalProviderCards(): Promise<AgentProviderCard[]> {
       modelSuggestions: buildModelSuggestions(
         provider.id,
         modelsByProvider.get(provider.id) ?? [],
-        provider.id === NVIDIA_PROVIDER_ID ? nvidiaDiscovery : null,
+        discovery,
       ),
-      ...(provider.id === NVIDIA_PROVIDER_ID && nvidiaDiscovery
+      ...(discovery
         ? {
             liveModelDiscovery: {
-              status: nvidiaDiscovery.status,
-              ...(nvidiaDiscovery.message
-                ? { message: nvidiaDiscovery.message }
-                : {}),
+              status: discovery.status,
+              ...(discovery.message ? { message: discovery.message } : {}),
             },
           }
         : {}),
@@ -526,9 +544,9 @@ async function buildAdditionalProviderCards(): Promise<AgentProviderCard[]> {
 /**
  * Curated DB models come first (they carry display name + capability
  * metadata); live-discovered models append on top, deduped against the
- * curated set by modelId. Live models inherit the provider's modelId as
- * their displayName because NVIDIA's /v1/models endpoint doesn't return a
- * friendly label.
+ * curated set by modelId. A discovered model uses the provider-supplied
+ * displayName when present (Anthropic returns one) and falls back to the
+ * raw modelId otherwise (NVIDIA's /v1/models has no friendly label).
  *
  * Exported for unit testing.
  */
@@ -566,7 +584,7 @@ export function buildModelSuggestions(
       });
       suggestions.push({
         modelId: live.modelId,
-        displayName: live.modelId,
+        displayName: live.displayName ?? live.modelId,
         contextWindowTokens: 0,
         defaultMaxOutputTokens: 0,
         supportsTools: capabilities.supports_tools,
@@ -1060,12 +1078,17 @@ export async function putAiProviderCredentialRoute(
     }
 
     await verifyProviderSecret(auth.userId, providerId, scope);
-    if (providerId === NVIDIA_PROVIDER_ID && apiKey) {
-      // Drop any cached discovery for this exact key. Handles the edge
-      // case where the user re-pastes the same key after NVIDIA invalidated
-      // it server-side — without this, the stale "ok" cache hides the
-      // failure for up to an hour.
-      await invalidateNvidiaDiscovery(apiKey, getDefaultCache());
+    if (apiKey) {
+      // Drop any cached discovery for this exact key so a freshly saved key
+      // is reflected immediately. Handles the edge case where the user
+      // re-pastes the same key after the provider invalidated it
+      // server-side — without this, the stale "ok" cache hides the failure
+      // for up to an hour.
+      if (providerId === NVIDIA_PROVIDER_ID) {
+        await invalidateNvidiaDiscovery(apiKey, getDefaultCache());
+      } else if (providerId === ANTHROPIC_PROVIDER_ID) {
+        await invalidateAnthropicDiscovery(apiKey, getDefaultCache());
+      }
     }
     return getProviderCardOrNotFound(providerId);
   });
