@@ -2220,12 +2220,6 @@ async function maybePersistTalkThreadTitleFromMessages(
 // completeness (validates count cap + atomically links message_id).
 // ---------------------------------------------------------------------------
 
-// T-new-A2 §4.5 reverse-shadow counter. Alternates the post-loop shape
-// (serial vs Promise.all) per call so the §4.5 Option D gate has
-// measured medians for both shapes. Revert with the rest of the
-// instrumentation before A4.
-let __tNewA2PostLoopCounter = 0;
-
 export async function enqueueTalkTurnAtomic(input: {
   ownerId: string;
   talkId: string;
@@ -2414,30 +2408,27 @@ export async function enqueueTalkTurnAtomic(input: {
     runs.push(run);
   }
 
-  // T-new-A2 §4.5 post-loop reverse-shadow. Half the bench requests run
-  // the serial shape (current production path); the other half run the
-  // proposed Promise.all shape. The §4.5 Option D gate compares medians
-  // of postLoopSerial vs postLoopParallel. Operation builders defined
-  // once so both paths emit the same payloads. Revert before A4.
-  const buildMessageAppendedEmit = () =>
-    emitOutboxEvent({
-      topic: `talk:${input.talkId}`,
-      eventType: 'message_appended',
-      payload: {
-        talkId: input.talkId,
-        threadId,
-        messageId: message.id,
-        runId: null,
-        role: 'user',
-        createdBy: input.userId,
-        content: input.content,
-        createdAt: message.created_at,
-      },
-      ownerIds: [input.ownerId],
-    });
-  const buildRunQueuedEmit = (i: number) => {
+  await touchTalkUpdatedAt(input.talkId);
+  __turnLogPhase('touchTalkUpdatedAt');
+  await emitOutboxEvent({
+    topic: `talk:${input.talkId}`,
+    eventType: 'message_appended',
+    payload: {
+      talkId: input.talkId,
+      threadId,
+      messageId: message.id,
+      runId: null,
+      role: 'user',
+      createdBy: input.userId,
+      content: input.content,
+      createdAt: message.created_at,
+    },
+    ownerIds: [input.ownerId],
+  });
+  __turnLogPhase('emitMessageAppended');
+  for (let i = 0; i < runs.length; i++) {
     const run = runs[i];
-    return emitOutboxEvent({
+    await emitOutboxEvent({
       topic: `talk:${input.talkId}`,
       eventType: 'talk_run_queued',
       payload: {
@@ -2456,36 +2447,8 @@ export async function enqueueTalkTurnAtomic(input: {
       },
       ownerIds: [input.ownerId],
     });
-  };
-
-  const __postLoopStart = Date.now();
-  const usePipelineShape = __tNewA2PostLoopCounter++ % 2 === 1;
-  if (usePipelineShape) {
-    const ops: Promise<unknown>[] = [
-      touchTalkUpdatedAt(input.talkId),
-      buildMessageAppendedEmit(),
-    ];
-    for (let i = 0; i < runs.length; i++) ops.push(buildRunQueuedEmit(i));
-    await Promise.all(ops);
-    console.log('[t-new-a2-meta] turn', {
-      sub_phase: 'postLoopParallel',
-      elapsed_ms: Date.now() - __postLoopStart,
-    });
-  } else {
-    await touchTalkUpdatedAt(input.talkId);
-    __turnLogPhase('touchTalkUpdatedAt');
-    await buildMessageAppendedEmit();
-    __turnLogPhase('emitMessageAppended');
-    for (let i = 0; i < runs.length; i++) {
-      await buildRunQueuedEmit(i);
-      __turnLogPhase(`emitTalkRunQueued_${i}`);
-    }
-    console.log('[t-new-a2-meta] turn', {
-      sub_phase: 'postLoopSerial',
-      elapsed_ms: Date.now() - __postLoopStart,
-    });
+    __turnLogPhase(`emitTalkRunQueued_${i}`);
   }
-  __turnPhaseStart = Date.now();
 
   // Attachments: validate cap + atomically link by message_id. Any
   // un-linkable ID rolls back the whole turn via the throw.
