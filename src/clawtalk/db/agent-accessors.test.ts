@@ -24,6 +24,8 @@ import {
   withUserContext,
 } from '../../db.js';
 import {
+  autoUpgradeAgentModel,
+  clearAgentModelUpgradeNotice,
   createRegisteredAgent,
   deleteRegisteredAgent,
   getEffectiveToolsForAgent,
@@ -218,6 +220,64 @@ describe('agent-accessors-pg (postgres + RLS)', () => {
       expect(deleted).toBe(true);
       const after = await getRegisteredAgent(created.id);
       expect(after).toBeUndefined();
+    });
+  });
+
+  it('autoUpgradeAgentModel swaps the model, records the trail, and is guarded on the old model', async () => {
+    await withUserContext(USER_A_ID, async () => {
+      const agent = await createRegisteredAgent({
+        ownerId: USER_A_ID,
+        name: 'Lifecycle',
+        providerId: 'provider.anthropic',
+        modelId: 'claude-opus-4-7',
+      });
+
+      const upgraded = await autoUpgradeAgentModel(
+        agent.id,
+        'claude-opus-4-7',
+        'claude-opus-4-8',
+      );
+      expect(upgraded?.model_id).toBe('claude-opus-4-8');
+      expect(upgraded?.model_auto_upgraded_from).toBe('claude-opus-4-7');
+      expect(upgraded?.model_auto_upgraded_at).toBeTruthy();
+
+      // Guard: a stale fromModel (model already moved on) is a no-op.
+      const noop = await autoUpgradeAgentModel(
+        agent.id,
+        'claude-opus-4-7',
+        'claude-opus-4-8',
+      );
+      expect(noop).toBeUndefined();
+
+      // A deliberate model change clears the auto-upgrade badge.
+      const manual = await updateRegisteredAgent(agent.id, {
+        modelId: 'claude-sonnet-4-6',
+      });
+      expect(manual?.model_auto_upgraded_from).toBeNull();
+      expect(manual?.model_auto_upgraded_at).toBeNull();
+    });
+  });
+
+  it('clearAgentModelUpgradeNotice dismisses the badge without touching the model', async () => {
+    await withUserContext(USER_A_ID, async () => {
+      const agent = await createRegisteredAgent({
+        ownerId: USER_A_ID,
+        name: 'Dismiss',
+        providerId: 'provider.anthropic',
+        modelId: 'claude-opus-4-7',
+      });
+      await autoUpgradeAgentModel(
+        agent.id,
+        'claude-opus-4-7',
+        'claude-opus-4-8',
+      );
+
+      expect(await clearAgentModelUpgradeNotice(agent.id)).toBe(true);
+      const after = await getRegisteredAgent(agent.id);
+      expect(after?.model_id).toBe('claude-opus-4-8'); // model untouched
+      expect(after?.model_auto_upgraded_from).toBeNull();
+      // Nothing left to clear → no-op.
+      expect(await clearAgentModelUpgradeNotice(agent.id)).toBe(false);
     });
   });
 

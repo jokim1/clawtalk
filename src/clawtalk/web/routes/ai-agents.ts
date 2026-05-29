@@ -18,6 +18,7 @@ import {
 import {
   discoverAnthropicModels,
   invalidateAnthropicDiscovery,
+  isCurrentGenerationClaudeModel,
 } from '../../agents/anthropic-model-discovery.js';
 import {
   decryptProviderSecret,
@@ -436,9 +437,22 @@ async function buildAdditionalProviderCards(): Promise<AgentProviderCard[]> {
     anthropicKey ? discoverAnthropicModels(anthropicKey, { cache }) : null,
   ]);
 
+  // Discovery returns the RAW Claude list (authoritative — used for
+  // retirement checks elsewhere). For the picker we hide superseded legacy
+  // generations so the dropdown stays focused on the current line.
+  const anthropicPickerDiscovery: DiscoveryResult | null =
+    anthropicDiscovery && anthropicDiscovery.status === 'ok'
+      ? {
+          ...anthropicDiscovery,
+          models: anthropicDiscovery.models.filter((m) =>
+            isCurrentGenerationClaudeModel(m.modelId),
+          ),
+        }
+      : anthropicDiscovery;
+
   const discoveryFor = (providerId: string): DiscoveryResult | null => {
     if (providerId === NVIDIA_PROVIDER_ID) return nvidiaDiscovery;
-    if (providerId === ANTHROPIC_PROVIDER_ID) return anthropicDiscovery;
+    if (providerId === ANTHROPIC_PROVIDER_ID) return anthropicPickerDiscovery;
     return null;
   };
 

@@ -101,6 +101,7 @@ import {
 import {
   createAgentRoute,
   deleteAgentRoute,
+  dismissAgentModelUpgradeRoute,
   getAgentFallbackRoute,
   getAgentRoute,
   getMainAgentRoute,
@@ -1084,6 +1085,22 @@ function buildApp(): Hono<{ Variables: Variables }> {
     const result = await deleteAgentRoute(auth, c.req.param('agentId'));
     return jsonResponse(result);
   });
+
+  app.post(
+    '/api/v1/registered-agents/:agentId/dismiss-model-upgrade',
+    async (c) => {
+      const auth = c.get('auth');
+      const rl = checkRateLimit({ principalId: auth.userId, bucket: 'write' });
+      if (!rl.allowed) return rateLimitedResponse(c, rl);
+      const csrfFail = checkCsrf(c, auth);
+      if (csrfFail) return csrfFail;
+      const result = await dismissAgentModelUpgradeRoute(
+        auth,
+        c.req.param('agentId'),
+      );
+      return jsonResponse(result);
+    },
+  );
 
   app.get('/api/v1/registered-agents/:agentId/fallback', async (c) => {
     const auth = c.get('auth');
