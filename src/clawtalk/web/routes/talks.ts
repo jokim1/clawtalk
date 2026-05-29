@@ -1907,8 +1907,21 @@ export async function enqueueTalkChat(input: {
     };
   }
 
+  // T-new-A §4.5 temp instrumentation. Revert after measurement bench.
+  let tPhaseStart = Date.now();
+  const logPhase = (phase: string) => {
+    const now = Date.now();
+    console.log('[t-new-a-meta] enqueue', {
+      phase,
+      elapsed_ms: now - tPhaseStart,
+    });
+    tPhaseStart = now;
+  };
+
   return await withUserContext(input.auth.userId, async () => {
+    logPhase('withUserContext_entry');
     const talk = await getTalkForUser(input.talkId);
+    logPhase('getTalkForUser');
     if (!talk) {
       return {
         statusCode: 404,
@@ -1922,7 +1935,9 @@ export async function enqueueTalkChat(input: {
       };
     }
 
-    if (!(await canEditTalk(input.talkId))) {
+    const canEdit = await canEditTalk(input.talkId);
+    logPhase('canEditTalk');
+    if (!canEdit) {
       return {
         statusCode: 403,
         body: {
@@ -1943,11 +1958,14 @@ export async function enqueueTalkChat(input: {
         ]
       : [];
     await ensureTalkUsesUsableDefaultAgent(input.talkId, talk.owner_id);
+    logPhase('ensureTalkUsesUsableDefaultAgent');
     const talkAgents = await listTalkAgents(input.talkId);
+    logPhase('listTalkAgents');
     const mentionedAgents = await resolveTalkAgentMentions(
       input.talkId,
       content,
     );
+    logPhase('resolveTalkAgentMentions');
     const selectedAgents: Array<{ id: string; nickname: string }> =
       mentionedAgents.length > 0
         ? mentionedAgents.map((agent) => ({
@@ -1970,9 +1988,11 @@ export async function enqueueTalkChat(input: {
     // 1:1 with the Talk, so concurrent agent edits would otherwise
     // auto-accept each other's pending runs mid-stream.
     const docEditIntent = isContentEditIntent(content);
-    const hasAttachedDoc = docEditIntent
-      ? (await getContentByTalkId(input.talkId)) !== null
-      : false;
+    let hasAttachedDoc = false;
+    if (docEditIntent) {
+      hasAttachedDoc = (await getContentByTalkId(input.talkId)) !== null;
+      logPhase('getContentByTalkId');
+    }
     const forceSerialForDocEdit =
       docEditIntent && hasAttachedDoc && selectedAgents.length > 1;
     const orderedRunSet =
@@ -1995,12 +2015,15 @@ export async function enqueueTalkChat(input: {
       };
     }
 
+    logPhase('preflight_loop_entry');
+    let preflightIdx = 0;
     for (const agent of selectedAgents) {
       const browserPreflightError = await getBrowserPreflightErrorForAgent(
         agent.id,
         input.auth.userId,
         input.talkId,
       );
+      logPhase(`preflight_iter_${preflightIdx++}`);
       if (browserPreflightError) {
         return {
           statusCode: 409,
@@ -2087,18 +2110,22 @@ export async function enqueueTalkChat(input: {
       }
       throw error;
     }
+    logPhase('enqueueTalkTurnAtomic');
 
     const agentNicknameById = new Map(
       selectedAgents.map((agent) => [agent.id, agent.nickname]),
     );
 
-    return {
+    const messageApiRecord = await toTalkMessageApiRecord(persisted.message);
+    logPhase('toTalkMessageApiRecord');
+
+    const happyResponse = {
       statusCode: 202,
       body: {
-        ok: true,
+        ok: true as const,
         data: {
           talkId: input.talkId,
-          message: await toTalkMessageApiRecord(persisted.message),
+          message: messageApiRecord,
           runs: persisted.runs.map((run) => ({
             id: run.id,
             threadId: run.thread_id,
@@ -2124,6 +2151,8 @@ export async function enqueueTalkChat(input: {
         },
       },
     };
+    logPhase('withUserContext_exit');
+    return happyResponse;
   });
 }
 
