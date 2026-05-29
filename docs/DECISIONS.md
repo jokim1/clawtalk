@@ -55,9 +55,17 @@ Use clean, direct names — `workspaces`, `workspace_members`, `folders`, `talks
 
 ---
 
-## D6 — Jobs: design clean — ⏳ Open (needs a design pass)
+## D6 — Jobs: design clean — ✅ Decided
 
-**Decision.** Scheduled jobs are in scope, but the model needs a proper, first-class definition before building — including how a job's output lands (into a Talk vs appended to a Document). **Next action:** read the current `talk_jobs`/`scheduler.ts`/`job-accessors` *only to extract the requirements*, then design the clean version. No obligation to preserve the existing shape.
+**Decision.** Full design in **[12-jobs.md](./12-jobs.md)**; schema in `11` §8/§3. A **Job** = a saved scheduled run (prompt + one agent + schedule) that fires a normal `conversation` run on its Talk. Resolutions:
+
+- **Output (the open roadmap-#7 question):** `output_targets` set — default **`talk_message`** (answer appended to the Talk, tagged by `job_id`); optional **`document_append`** which proposes a **pending `document_edits`** (`source='job'`, review-gated by default) on the Talk's primary Document — the same accept path Forge uses, no autonomous overwrite, no second write path. Both can be targeted.
+- **No threads:** the per-job dedicated thread is gone; scheduled turns are tagged in the Talk's main stream.
+- **Workspace-scoped** (was per-user); RLS via membership.
+- **Schedule:** `interval` / `daily` / `weekly`, IANA-tz, DST-safe; explicit `catch_up` (`skip` default). No raw cron in v1.
+- **Robustness wins:** lease-based claim (`for update skip locked` + `claimed_at`) replacing the watermark-only guard; sweep stuck `queued` runs too; drop dead connector/channel scope fields. Reuse the cron tick + queue + executor + read-only mutation lockdown.
+
+**Follow-ups.** `source_scope_json` aligns to the new tools model once tools/connectors land; confirm `daily` schedule + `auto_accept` trust model (`12` §9).
 
 ---
 

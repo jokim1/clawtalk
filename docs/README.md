@@ -80,6 +80,7 @@ When ambiguity arises, the **prototype** is the canonical reference for UI, the 
 |---|---|---|
 | 9 | **[09-autonomous-content-improvement-prd.md](./09-autonomous-content-improvement-prd.md)** | "Forge" — autonomously iterate a document toward a scored quality bar, using the Synthetical/SSR platform as the scoring oracle. Population-based generate→score→improve loop over the existing Content feature. The *what & why*. Draft, pending review. |
 | 10 | **[10-forge-design-handoff.md](./10-forge-design-handoff.md)** | "Forge" design + interaction handoff — the *how it looks & behaves*. Maps the clickable prototype (`ClawTalk Forge.html`) and its surfaces back to the PRD, with a suggested build order. Front-end mock; all scoring data simulated. |
+| 12 | **[12-jobs.md](./12-jobs.md)** | "Jobs" — scheduled single-agent prompts that fire a run on a Talk and land output as a message and/or a pending Document edit. The D6 redesign (no threads, workspace-scoped, lease-based scheduler). |
 
 ---
 

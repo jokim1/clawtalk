@@ -121,6 +121,8 @@ runs (                                                            -- clean: NO t
   model_id text not null references llm_models(id),
   requested_by uuid not null references users(id),
   trigger_message_id uuid references messages(id),               -- the user turn that triggered this run
+  job_id uuid references jobs(id) on delete set null,            -- set when a scheduled Job fired this run (§8 / 12-jobs.md)
+  trigger text not null default 'user' check (trigger in ('user','scheduler','manual')),
   response_group_id text not null, sequence_index int not null,  -- ordered/parallel sequencing the orchestrator needs
   prompt_snapshot_id uuid references run_prompt_snapshots(id),
   tokens_in int, tokens_out int, error_json jsonb,
@@ -334,7 +336,7 @@ activity_events ( id, workspace_id, kind, talk_id, document_id, run_id, payload_
 
 inbox_items (
   id uuid pk, workspace_id uuid not null,
-  type text not null,   -- agent_replied|round_completed|agent_asks_user|run_failed|doc_edits_ready|connector_needs_auth|news_context_added|long_running_run|system_limit_reached|forge_run_needs_review
+  type text not null,   -- agent_replied|round_completed|agent_asks_user|run_failed|doc_edits_ready|connector_needs_auth|news_context_added|long_running_run|system_limit_reached|forge_run_needs_review|job_output_ready|job_blocked
   target_kind text, target_id uuid, talk_id uuid, document_id uuid, run_id uuid, tab_id uuid,
   title text, summary text, reason text,
   severity text check (severity in ('info','action','blocking')),
@@ -366,17 +368,38 @@ interaction_events ( id, workspace_id, surface, item_id, action, created_at )
 
 ---
 
-## 8. Jobs (provisional — pending [DECISIONS](./DECISIONS.md) D6)
+## 8. Jobs
+
+Scheduled single-agent prompts. Full model + behavior: **[12-jobs.md](./12-jobs.md)** (resolves [DECISIONS](./DECISIONS.md) D6). A Job fires a normal `conversation` run on its Talk (`runs.job_id` set, `runs.trigger='scheduler'`); **history is `runs` filtered by `job_id`** — no separate `job_runs` ledger.
 
 ```sql
-jobs ( id uuid pk, workspace_id uuid not null, talk_id uuid, kind text not null,
-  schedule_cron text, next_run_at timestamptz, enabled boolean not null default true,
-  output_target text check (output_target in ('talk_message','document_append')),   -- the open D6 question
-  config_json jsonb not null default '{}', last_run_at, created_at, updated_at )
-job_runs ( id, workspace_id, job_id, status, started_at, finished_at, error_json )
+jobs (
+  id uuid pk, workspace_id uuid not null references workspaces(id) on delete cascade,
+  talk_id uuid not null, created_by uuid not null references users(id),
+  title text not null, prompt text not null,
+  agent_id uuid not null,                                      -- the one agent; must be in the Talk roster
+  schedule_json jsonb not null,                                -- {kind:'interval'|'daily'|'weekly', ...}
+  timezone text not null,                                      -- IANA; wall-clock schedules are DST-safe
+  output_targets text[] not null default '{talk_message}'      -- subset of {talk_message, document_append}
+    check (output_targets <@ array['talk_message','document_append']),
+  document_append_mode text not null default 'pending'         -- when document_append is targeted
+    check (document_append_mode in ('pending','auto_accept')),
+  source_scope_json jsonb not null default '{"allow_web":false}',  -- {allow_web, tool_ids[]} — runs are read-only
+  status text not null default 'active' check (status in ('active','paused','blocked')),
+  block_reason text,                                           -- agent_missing | no_primary_document | ...
+  catch_up text not null default 'skip' check (catch_up in ('skip','run_once')),
+  next_due_at timestamptz, claimed_at timestamptz,             -- lease for FOR UPDATE SKIP LOCKED claiming
+  last_run_at timestamptz, last_run_status text, run_count int not null default 0,
+  created_at, updated_at,
+  unique (workspace_id, id),
+  foreign key (workspace_id, talk_id)  references talks(workspace_id, id)  on delete cascade,
+  foreign key (workspace_id, agent_id) references agents(workspace_id, id) on delete set null
+)
 ```
 
-- **Do not build from this yet** — D6 runs a first-principles definition (read current `talk_jobs`/`scheduler.ts`/`job-accessors` for *requirements only*). `output_target` captures the open roadmap #7 question. Pacing reuses the cron `scheduler.ts` + Queues mechanism.
+- **Output via the unified edit path:** `document_append` proposes a `document_edits` row (`source='job'`), review-gated by default — no second write path, no autonomous overwrite (§5, `12` §3).
+- **Scheduler robustness** (`12` §5): lease-based claim (`for update skip locked` + `claimed_at`, advance `next_due_at` in-txn), single-flight per job, sweep stuck `running` **and** `queued` runs. Reuses the cron `scheduler.ts` + Queues mechanism; the executor data-access is reworked with the new runs table.
+- Indexes: `jobs(status, next_due_at) where status='active'`; `runs(job_id, created_at)`.
 
 ---
 
