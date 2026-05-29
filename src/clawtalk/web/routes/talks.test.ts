@@ -31,7 +31,11 @@ import {
 import { createTalk } from '../../db/accessors.js';
 import { createRegisteredAgent } from '../../db/agent-accessors.js';
 import { setTalkAgents, listTalkAgents } from '../../agents/agent-registry.js';
-import { upsertSettingValue } from '../../db/accessors.js';
+import {
+  deleteSettingValue,
+  getSettingValue,
+  upsertSettingValue,
+} from '../../db/accessors.js';
 import { enqueueTalkChat } from './talks.js';
 import type { AuthContext } from '../types.js';
 
@@ -195,48 +199,66 @@ describe('enqueueTalkChat — DB-backed paths', () => {
     // Seed only the default-agent setting + a healable registered agent +
     // a talk with no talk_agents rows. enqueueTalkChat must heal AND
     // route to the healed agent within a single withUserContext tx.
-    const talkId = await withUserContext(OWNER_ID, async () => {
-      const defaultAgent = await createRegisteredAgent({
-        ownerId: OWNER_ID,
-        name: 'DefaultHealAgent',
-        providerId: 'provider.openai',
-        modelId: 'gpt-5-mini',
-      });
-      await upsertSettingValue({
-        key: 'system.defaultTalkAgentId',
-        value: defaultAgent.id,
-      });
-      const talk = await createTalk({
-        ownerId: OWNER_ID,
-        topicTitle: 'heal test',
-      });
-      return talk.id;
-    });
+    //
+    // system.defaultTalkAgentId is a global setting (per codex C-1 review
+    // 2026-05-28): save the prior value and restore on exit so subsequent
+    // tests / local dev don't see a stale pointer to a purged agent UUID.
+    const SETTING_KEY = 'system.defaultTalkAgentId';
+    const priorSettingValue = await getSettingValue(SETTING_KEY);
 
-    // Pre-assert: no talk_agents rows yet.
-    await withUserContext(OWNER_ID, async () => {
-      const before = await listTalkAgents(talkId);
-      expect(before).toHaveLength(0);
-    });
+    try {
+      const talkId = await withUserContext(OWNER_ID, async () => {
+        const defaultAgent = await createRegisteredAgent({
+          ownerId: OWNER_ID,
+          name: 'DefaultHealAgent',
+          providerId: 'provider.openai',
+          modelId: 'gpt-5-mini',
+        });
+        await upsertSettingValue({
+          key: SETTING_KEY,
+          value: defaultAgent.id,
+        });
+        const talk = await createTalk({
+          ownerId: OWNER_ID,
+          topicTitle: 'heal test',
+        });
+        return talk.id;
+      });
 
-    const result = await enqueueTalkChat({
-      talkId,
-      auth: makeAuth(),
-      content: 'hello after heal',
-    });
-    expect(result.statusCode).toBe(202);
-    if (!result.body.ok) {
-      throw new Error(
-        `expected 202 ok body, got error: ${JSON.stringify(result.body)}`,
-      );
+      // Pre-assert: no talk_agents rows yet.
+      await withUserContext(OWNER_ID, async () => {
+        const before = await listTalkAgents(talkId);
+        expect(before).toHaveLength(0);
+      });
+
+      const result = await enqueueTalkChat({
+        talkId,
+        auth: makeAuth(),
+        content: 'hello after heal',
+      });
+      expect(result.statusCode).toBe(202);
+      if (!result.body.ok) {
+        throw new Error(
+          `expected 202 ok body, got error: ${JSON.stringify(result.body)}`,
+        );
+      }
+      expect(result.body.data.runs).toHaveLength(1);
+
+      // Post-assert: heal wrote the default agent into talk_agents.
+      await withUserContext(OWNER_ID, async () => {
+        const after = await listTalkAgents(talkId);
+        expect(after).toHaveLength(1);
+      });
+    } finally {
+      if (priorSettingValue === undefined) {
+        await deleteSettingValue(SETTING_KEY);
+      } else {
+        await upsertSettingValue({
+          key: SETTING_KEY,
+          value: priorSettingValue,
+        });
+      }
     }
-    expect(result.body.data.runs).toHaveLength(1);
-
-    // Post-assert: heal wrote the default agent into talk_agents.
-    await withUserContext(OWNER_ID, async () => {
-      const after = await listTalkAgents(talkId);
-      expect(after).toHaveLength(1);
-    });
   });
 });
 
