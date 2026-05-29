@@ -23,6 +23,9 @@
   - **#20 (test the manual run-now route):** Added Test 7 for `createJobTriggerRunNowRoute`'s thread_busy handling.
   - Plus karpathy nits: §3.2 trimmed; §5 Risk 4 dropped (covered in §7.1); §2.3 "Joseph" → "solo-user app"; §6 PR title removed.
   - **Non-material acknowledgments:** #5 (`resolveThreadIdForTalk` is outside the lock — true but pre-lock race is benign, that function only validates visibility), #9 (claimDueTalkJobs upstream race between multiple scheduler instances — out of scope for this plan, noted in §5), #15 (other inserters confirmed: only the two entry points).
+- **r3 (2026-05-29, this version):** Second `/codex review` pass on r2 returned 2 P2 findings (no P1; gate PASS). Both absorbed:
+  - **r2-P1 (job_busy semantics changed unintentionally):** r2's "advance only on `'enqueued'`" rule inadvertently turned `job_busy` (previous job instance still running) into "retry every tick" — would catch up with an extra occurrence when the long-running instance finishes. r3 fixes: only `thread_busy` retries (preserves the new behavior I actually want); `job_busy` advances (preserves today's tick-consumes-skip semantics).
+  - **r2-P2 (Test 6 bypasses processClaimableJobs):** Test 6 called the accessors manually and bypassed the scheduler's result handler — the refactor target. r3 rewrites Test 6 to drive `processClaimableJobs` directly and assert persisted `next_due_at` for both `thread_busy` (unchanged) and `enqueued` (advanced).
 
 ---
 
@@ -198,7 +201,12 @@ Option 3 + NOWAIT wins because:
 2. **`src/clawtalk/db/accessors.ts`** — add `isLockNotAvailable(err)` helper used by both call sites. Net ~+5 lines.
 3. **`src/clawtalk/db/job-accessors.ts` — `createJobTriggerRun`**: add a `SELECT 1 FROM talk_threads … FOR UPDATE NOWAIT` at the start of the function, BEFORE the `job_id`-scoped active check; catch `lock_not_available` → return `{status: 'thread_busy', job}` (new sentinel). Also add a thread-level active check (returns same sentinel when count > 0). Net ~+20 lines.
 4. **`src/clawtalk/db/job-accessors.ts` — `claimDueTalkJobs`**: REMOVE the `update public.talk_jobs set next_due_at = ...` block. The function now returns due-but-not-yet-claimed jobs without advancing the cursor. Net ~-12 lines.
-5. **`src/clawtalk/talks/scheduler.ts` — `processClaimableJobs`**: after `createJobTriggerRun` returns, branch on `result.status`. Only on `'enqueued'` advance `next_due_at` to the next cron-computed time. On `'thread_busy'` (new) or `'job_busy'`, leave `next_due_at` unchanged so next tick retries naturally. On `'paused' | 'not_found' | 'blocked'`, advance to next tick to avoid hot-looping. Net ~+25 lines (including the helper to compute the advanced time, lifted from `claimDueTalkJobs`).
+5. **`src/clawtalk/talks/scheduler.ts` — `processClaimableJobs`**: after `createJobTriggerRun` returns, branch on `result.status`. **Only `'thread_busy'` (new) leaves `next_due_at` unchanged so the next tick retries the same occurrence.** All other terminal statuses advance `next_due_at` to the next cron-computed time:
+   - `'enqueued'` — advance (the tick produced a run; consume it)
+   - `'job_busy'` — advance (the previous instance is still running; consume this tick like today's behavior; do NOT catch up when the previous finishes)
+   - `'paused' | 'not_found' | 'blocked'` — advance (avoid hot-looping)
+   - `'thread_busy'` — leave unchanged (next tick retries; the lock will free up within seconds)
+   Net ~+25 lines (including the helper to compute the advanced time, lifted from `claimDueTalkJobs`).
 6. **`src/clawtalk/web/routes/talk-jobs.ts` — `runTalkJobNowRoute`**: branch the new `'thread_busy'` result to a 409 response with `code: 'thread_busy'`. Net ~+10 lines.
 7. **`src/clawtalk/db/accessors.test.ts`** — add Tests 1-4 (§7). Net ~+250 lines.
 8. **`src/clawtalk/db/job-accessors.test.ts`** — add Test 5 (real-race) + Test 6 (scheduler refactor) + Test 7 (manual run-now route). Net ~+150 lines.
@@ -333,7 +341,10 @@ Legend: ★★★ behavior + edge + error  |  ★★ happy path
 - **Test 3 (★★) — cross-talk isolation.** Seed 2 talks + their default threads. Concurrent /chat on each. Both succeed.
 - **Test 4 (★★★) — sequential active-round rejection.** Renamed from r1's "legit-retry" — current code has no idempotent-replay path, so "retry with same idempotencyKey" framing was wrong. New framing: first `enqueueTalkTurnAtomic` commits; runs are still queued. Second call (different idempotencyKey, simulating the user clicking send twice) throws `TalkActiveRoundError`. No second message + no extra runs. This locks the active-round rejection behaves correctly under the new helper shape (regression test for the path T-new-A2 §7 Test 3 covered for the pre-NOWAIT version).
 - **Test 5 (★★★) — DETERMINISTIC scheduler-vs-/chat race.** In `job-accessors.test.ts`. Same two-phase pattern as Test 1: hold FOR UPDATE on the thread via tx A, then call `createJobTriggerRun` in a fresh tx → NOWAIT fires → returns `{status: 'thread_busy', job}`. No new run inserted.
-- **Test 6 (★★★) — scheduler refactor: `claimDueTalkJobs` does NOT advance `next_due_at`.** Seed a job with `next_due_at = now - 1s`. Call `claimDueTalkJobs`; assert it returns the job AND that `talk_jobs.next_due_at` is unchanged (= `now - 1s`). Then call `createJobTriggerRun` (no thread contention); assert `'enqueued'`. Manually advance `next_due_at` (simulating what `processClaimableJobs` will do after this PR). Assert subsequent claim returns nothing.
+- **Test 6 (★★★) — `processClaimableJobs` advances `next_due_at` correctly per result.** Drive `processClaimableJobs` (the scheduler's actual entry point — exported for the test, or via a small `__test__` re-export) rather than the accessor manually, so the refactor's result-handler branching is exercised. Three sub-cases:
+  - **6a `'enqueued'`:** Seed a job with `next_due_at = now - 1s`, no thread contention. Run `processClaimableJobs`. Assert `talk_jobs.next_due_at` advanced to the next cron-computed time. Assert exactly one `talk_runs` row inserted.
+  - **6b `'thread_busy'`:** Seed a job with `next_due_at = now - 1s` AND hold a FOR UPDATE on the thread via tx A (same deterministic blocker pattern as Test 1). Run `processClaimableJobs`. Assert `talk_jobs.next_due_at` is UNCHANGED. Assert NO new `talk_runs` row.
+  - **6c `'job_busy'`:** Seed a job with `next_due_at = now - 1s` AND insert an existing active run for the same `job_id`. Run `processClaimableJobs`. Assert `talk_jobs.next_due_at` advanced (consumed-and-skipped, matching today's behavior — no catch-up). Assert NO new `talk_runs` row.
 - **Test 7 (★★★) — manual run-now route under thread_busy.** Use the `runTalkJobNowRoute` handler with the two-phase pattern: tx A holds FOR UPDATE; call the route; assert 409 with `error.code: 'thread_busy'`. No new run inserted.
 
 ### 7.1 Test discipline
@@ -352,7 +363,8 @@ Legend: ★★★ behavior + edge + error  |  ★★ happy path
 | `loadEnqueueTurnContext FOR UPDATE OF th NOWAIT` | Another tx holds the lock | Test 1 | `lock_not_available` → `TalkActiveRoundError` → route maps to 409 talk_round_active | "Wait for current round to finish" message |
 | `loadEnqueueTurnContext FOR UPDATE OF th NOWAIT` | Talk/thread deleted between `resolveThreadIdForTalk` and the FOR UPDATE | Existing T-new-A2 Test 2 (no-row contract) | Throws `EnqueueTurnContextNotFoundError` → 404 talk_not_found | Same as today |
 | `createJobTriggerRun thread FOR UPDATE NOWAIT + check` | Thread locked by /chat | Test 5 | Returns `{status: 'thread_busy', job}` | None (scheduler retries next tick) |
-| `processClaimableJobs` advances `next_due_at` only on `'enqueued'` | Job stuck in `thread_busy` forever (chronic contention) | Test 6 partially | Logs warn after N consecutive thread_busy on the same job; doesn't hot-loop because the lock check is cheap | None today; future: add `last_skipped_reason` column if visibility needed |
+| `processClaimableJobs` retries only `'thread_busy'`, advances on everything else | Job stuck in `thread_busy` forever (chronic contention) | Test 6b | Logs warn after N consecutive thread_busy on the same job; doesn't hot-loop because the lock check is cheap | None today; future: add `last_skipped_reason` column if visibility needed |
+| `processClaimableJobs` advances on `'job_busy'` | Previous job instance still running when next cron tick fires | Test 6c | next_due_at advances; this tick is skipped (matches today's claim-time advance behavior) | None |
 | `runTalkJobNowRoute` 409 on thread_busy | User clicks Run Now during active round | Test 7 | 409 `code: 'thread_busy'` | Toast: "A round is already in progress" |
 
 **Critical gaps:** none — all new code paths have rollback or test coverage. Pathological lock-wait timeouts impossible under NOWAIT.
@@ -386,25 +398,29 @@ Legend: ★★★ behavior + edge + error  |  ★★ happy path
 
 | Review | Trigger | Why | Runs | Status | Findings |
 |--------|---------|-----|------|--------|----------|
-| Codex Consult (plan, r1) | `/codex` consult on r1 | Independent 2nd opinion | 1 | NOT CLEAR — absorbed via r2 | 20 findings. Critical absorbs: (#1/#2/#6) function name `createJobTriggerRun` + `runTalkJobNowRoute` manual route; (#3/#7/#8) scheduler `next_due_at` refactor — moved advance into result handler so only `'enqueued'` consumes a tick; (#12/#13/#14) test redesign — deterministic blocker pattern (`db.begin(async tx => ...)`) for Tests 1, 5, 7; Test 4 renamed; (#17) NOWAIT replaces wait → no worker timeout risk; (#4) SQL clause order `LIMIT … FOR UPDATE`; (#10) postgres.js `max:1` per request scope acknowledged; (#11) Hyperdrive claim dropped; (#16) `createTalkRun` bypass acknowledged; (#18) Option 4 (state row) added briefly; (#19) softened deadlock language; (#20) Test 7 added for `runTalkJobNowRoute`. |
+| Codex Consult (plan, r1) | `/codex` consult on r1 | Independent 2nd opinion | 1 | NOT CLEAR — absorbed via r2 | 20 findings. Critical absorbs: (#1/#2/#6) function name `createJobTriggerRun` + `runTalkJobNowRoute` manual route; (#3/#7/#8) scheduler `next_due_at` refactor — moved advance into result handler; (#12/#13/#14) test redesign — deterministic blocker pattern (`db.begin(async tx => ...)`) for Tests 1, 5, 7; Test 4 renamed; (#17) NOWAIT replaces wait → no worker timeout risk; (#4) SQL clause order `LIMIT … FOR UPDATE`; (#10) postgres.js `max:1` per request scope acknowledged; (#11) Hyperdrive claim dropped; (#16) `createTalkRun` bypass acknowledged; (#18) Option 4 (state row) added briefly; (#19) softened deadlock language; (#20) Test 7 added for `runTalkJobNowRoute`. |
 | Karpathy Audit (diff, r1) | `/karpathy-audit diff` on r1 | Style lens + four principles | 1 | CLEAR (4/4 coverage) | 1 WARNING (§3.2 Option 2 rejection verbose — trimmed to 3 lines); 3 NITs absorbed (§2.3 "Joseph" → "solo-user", §5/§7.1 dedup'd, §6 PR title removed). |
-| Eng Review | `/plan-eng-review` | Architecture & tests (required) | 0 | not run | Codex consult covered architecture at higher rigor. |
+| Codex Review (plan, r2) | `/codex review` on r2 | Pre-implementation re-review | 1 | CLEAR (PASS, 0 P1 / 2 P2) | Both P2 absorbed into r3. r2-P1 advisory: `job_busy` retry was an unintentional semantic change — r3 advances on `job_busy`, only retries on `thread_busy`. r2-P2 advisory: Test 6 bypassed `processClaimableJobs` — r3 splits into 6a/6b/6c that drive the scheduler entry point and assert persisted `next_due_at` for each result branch. |
+| Eng Review | `/plan-eng-review` | Architecture & tests (required) | 0 | not run | Codex consult + codex review pair covered architecture at higher rigor. |
 | CEO Review | `/plan-ceo-review` | Scope & strategy | 0 | — | not run (correctness fix, scope self-evident) |
 | Design Review | `/plan-design-review` | UI/UX gaps | 0 | — | not run (backend-only) |
 | DX Review | `/plan-devex-review` | Developer experience gaps | 0 | — | not run |
 
 **CODEX (r1 → r2):** 20 findings. The wrong-function-name catch (#1) alone would have shipped broken code; codex caught it via direct source-file reads. The scheduler-retry premise (#3/#7) was a hidden incorrectness in r1's narrative — `claimDueTalkJobs` advances `next_due_at` BEFORE the dispatch result, so "thread_busy retries next tick" was false. r2 fixes this by moving the advance into the result handler. NOWAIT (#17) is a clean upgrade that eliminates the lock-hold/worker-CPU pathology. Test determinism (#12/#13) was a real correctness gap — `Promise.allSettled` doesn't guarantee both txs reach the critical section concurrently.
 
+**CODEX (r2 → r3):** 2 P2 findings. r2 over-corrected the scheduler refactor by leaving `next_due_at` unchanged for all non-`'enqueued'` results. r3 narrows the retry to `'thread_busy'` only — `'job_busy'` advances (preserves today's tick-consumes-skip semantics; no catch-up bug). Test 6 redesigned to drive `processClaimableJobs` directly with 3 sub-cases (6a enqueued, 6b thread_busy, 6c job_busy) so the scheduler refactor is actually exercised.
+
 **KARPATHY (r1 → r2):** 1 warning + 3 nits absorbed. Plan trimmed by ~15 lines in §3.2; §5 Risk 4 dropped (covered in §7.1).
 
-**CROSS-MODEL:** Codex caught behavioral correctness (function name, scheduler semantics, test determinism, NOWAIT). Karpathy caught artifact-level bloat and naming. Zero direct finding overlap. Validates [[feedback-codex-catches-behavior-karpathy-catches-style]] at the plan stage AGAIN (third time this session — T-new-A2 r1→r2, T-new-A2 PR-diff, T-new-AR r1→r2).
+**CROSS-MODEL:** Codex caught behavioral correctness (function name, scheduler semantics, test determinism, NOWAIT, job_busy retry trap). Karpathy caught artifact-level bloat and naming. Zero direct finding overlap. Validates [[feedback-codex-catches-behavior-karpathy-catches-style]] at the plan stage AGAIN (fourth time this session — T-new-A2 r1→r2, T-new-A2 PR-diff, T-new-AR r1→r2, T-new-AR r2→r3).
 
 **UNRESOLVED:** 0.
 
-**VERDICT (r2):** **CLEARED (PLAN, r2)** — material codex findings absorbed; karpathy nits absorbed. Critical constraints to remember during implementation:
+**VERDICT (r3):** **CLEARED (PLAN, r3)** — codex review on r2 PASS (0 P1, 2 P2 absorbed). Critical constraints to remember during implementation:
 1. Function is `createJobTriggerRun` (job-accessors.ts:881), NOT `runTalkJob`. Manual route is `runTalkJobNowRoute` (talk-jobs.ts:312).
 2. `FOR UPDATE OF th NOWAIT` with `LIMIT 1` placed BEFORE `FOR UPDATE`. Catch `lock_not_available` (SQLSTATE `55P03`) via a shared `isLockNotAvailable` helper.
-3. `claimDueTalkJobs` MUST stop advancing `next_due_at`. `processClaimableJobs` advances only on `result.status === 'enqueued'`.
+3. `claimDueTalkJobs` MUST stop advancing `next_due_at`. `processClaimableJobs` advances on ALL outcomes EXCEPT `'thread_busy'` (which retries the same occurrence on the next tick).
 4. New `'thread_busy'` sentinel must be handled in both `scheduler.ts` AND `talk-jobs.ts` (manual route).
 5. Race tests MUST use `db.begin(async tx => ...)` to deterministically hold the lock; never rely on `Promise.allSettled` luck.
 6. Existing T-new-A2 `EnqueueTurnContextNotFoundError` contract is UNCHANGED; NOWAIT is an additional throw path in the same helper.
+7. Test 6 drives `processClaimableJobs` directly with 3 sub-cases (enqueued/thread_busy/job_busy) — do NOT call `claimDueTalkJobs` and `createJobTriggerRun` separately and manually advance.
