@@ -107,9 +107,13 @@ export async function processClaimableJobs(): Promise<void> {
           // contention is expected.
           break;
         case 'blocked':
-          await withUserContext(job.ownerId, () =>
-            advanceTalkJobNextDueAt(job),
-          );
+          // Do NOT advance — createJobTriggerRun's dependency-block
+          // path already set next_due_at = NULL and status = 'blocked'.
+          // Advancing here would restore a future due time on a
+          // blocked row, making it appear scheduled. The blocked
+          // status itself excludes the job from claimDueTalkJobs'
+          // WHERE j.status = 'active' filter, so it won't re-fire
+          // until manually unblocked.
           logger.warn(
             {
               jobId: job.id,
