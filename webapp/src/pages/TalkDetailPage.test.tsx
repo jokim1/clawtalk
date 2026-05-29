@@ -182,6 +182,11 @@ describe('TalkDetailPage', () => {
   let streamInput: StreamCallbacks | null = null;
 
   beforeEach(() => {
+    // Isolation: doc-pane mode/hidden, split ratio, and last-thread are
+    // persisted to localStorage keyed by talk; without this, state leaks
+    // between tests (e.g. a prior test's source-mode doc pane hides the
+    // SafeHtml body the HTML-doc test expects).
+    window.localStorage.clear();
     document.cookie = 'cr_csrf_token=test-csrf-token';
     streamInput = null;
     Object.defineProperty(URL, 'createObjectURL', {
@@ -269,7 +274,7 @@ describe('TalkDetailPage', () => {
     expect(screen.getByText('Agent: GPT-5 Mini')).toBeTruthy();
 
     await user.click(tabs.getByRole('link', { name: 'Talk' }));
-    await screen.findByPlaceholderText('Send a message to this thread');
+    await screen.findByPlaceholderText(/^Send a message to this thread/);
 
     expect(openTalkStreamMock).toHaveBeenCalledTimes(1);
   });
@@ -465,7 +470,7 @@ describe('TalkDetailPage', () => {
 
     renderDetailPage('/app/talks/talk-1');
 
-    await screen.findByPlaceholderText('Send a message to this thread');
+    await screen.findByPlaceholderText(/^Send a message to this thread/);
     expect(screen.queryByRole('button', { name: /Response mode/i })).toBeNull();
   });
 
@@ -482,7 +487,7 @@ describe('TalkDetailPage', () => {
 
     renderDetailPage('/app/talks/talk-1');
 
-    await screen.findByPlaceholderText('Send a message to this thread');
+    await screen.findByPlaceholderText(/^Send a message to this thread/);
 
     const threadRail = await screen.findByLabelText('Talk threads');
     expect(
@@ -909,7 +914,7 @@ describe('TalkDetailPage', () => {
       }),
     });
 
-    renderDetailPage('/app/talks/talk-1/rules');
+    renderDetailPage('/app/talks/talk-1/context');
 
     await screen.findByRole('heading', { name: 'Rules' });
     expect(screen.getByLabelText('1 active rules')).toBeTruthy();
@@ -917,7 +922,10 @@ describe('TalkDetailPage', () => {
     const input = screen.getByDisplayValue('Use simple language');
     await user.clear(input);
     await user.type(input, 'Lead with concrete recommendations');
-    await user.click(screen.getByRole('button', { name: 'Save' }));
+    // The Context tab has multiple "Save" buttons (the Goal card + each rule),
+    // so scope to this rule's row to keep the query unambiguous.
+    const ruleRow = input.closest('.talk-rule-row') as HTMLElement;
+    await user.click(within(ruleRow).getByRole('button', { name: 'Save' }));
 
     expect(await screen.findByText('Rule updated.')).toBeTruthy();
     expect(
@@ -945,7 +953,7 @@ describe('TalkDetailPage', () => {
       },
     });
 
-    renderDetailPage('/app/talks/talk-1/rules');
+    renderDetailPage('/app/talks/talk-1/context');
 
     await screen.findByRole('heading', { name: 'Rules' });
     await user.click(screen.getByRole('button', { name: 'Pause' }));
@@ -975,7 +983,7 @@ describe('TalkDetailPage', () => {
       },
     });
 
-    renderDetailPage('/app/talks/talk-1/rules');
+    renderDetailPage('/app/talks/talk-1/context');
 
     await screen.findByRole('heading', { name: 'Rules' });
     await user.click(screen.getByRole('button', { name: 'Delete' }));
@@ -1040,7 +1048,7 @@ describe('TalkDetailPage', () => {
       screen.getByRole('navigation', { name: 'Talk sections' }),
     );
     await user.click(topTabs.getByRole('link', { name: 'Talk' }));
-    await screen.findByPlaceholderText('Send a message to this thread');
+    await screen.findByPlaceholderText(/^Send a message to this thread/);
 
     await user.click(topTabs.getByRole('link', { name: /^Context/ }));
     await screen.findByRole('heading', { name: 'State' });
@@ -1276,7 +1284,7 @@ describe('TalkDetailPage', () => {
 
     renderDetailPage('/app/talks/talk-1');
 
-    await screen.findByPlaceholderText('Send a message to this thread');
+    await screen.findByPlaceholderText(/^Send a message to this thread/);
     expect(
       screen.getByText(
         'Wait for the current round to finish or cancel it before sending another message.',
@@ -1298,7 +1306,7 @@ describe('TalkDetailPage', () => {
     });
 
     renderDetailPage('/app/talks/talk-1');
-    await screen.findByPlaceholderText('Send a message to this thread');
+    await screen.findByPlaceholderText(/^Send a message to this thread/);
 
     const targetGroup = screen.getByRole('group', { name: 'Selected agents' });
     const refreshedTargetGroup = screen.getByRole('group', {
@@ -1356,7 +1364,7 @@ describe('TalkDetailPage', () => {
 
     renderDetailPage('/app/talks/talk-1');
 
-    await screen.findByPlaceholderText('Send a message to this thread');
+    await screen.findByPlaceholderText(/^Send a message to this thread/);
     expect(
       screen.getByText('Agent 1 of 2 · Claude Sonnet 4.6 responding…'),
     ).toBeTruthy();
@@ -1911,7 +1919,7 @@ describe('TalkDetailPage', () => {
       'disabled',
     );
     expect(
-      screen.getByPlaceholderText('Send a message to this thread'),
+      screen.getByPlaceholderText(/^Send a message to this thread/),
     ).toHaveAttribute('disabled');
   });
 
@@ -1952,7 +1960,7 @@ describe('TalkDetailPage', () => {
     });
 
     renderDetailPage('/app/talks/talk-1');
-    await screen.findByPlaceholderText('Send a message to this thread');
+    await screen.findByPlaceholderText(/^Send a message to this thread/);
 
     const targetGroup = screen.getByRole('group', { name: 'Selected agents' });
     const claudeChip = within(targetGroup).getByRole('button', {
@@ -1972,7 +1980,7 @@ describe('TalkDetailPage', () => {
     expect(openAiChip.getAttribute('aria-pressed')).toBe('true');
 
     await user.type(
-      screen.getByPlaceholderText('Send a message to this thread'),
+      screen.getByPlaceholderText(/^Send a message to this thread/),
       'Give me the latest take.',
     );
     await user.click(screen.getByRole('button', { name: 'Send' }));
@@ -1989,7 +1997,7 @@ describe('TalkDetailPage', () => {
       ),
     ).toBeTruthy();
     expect(
-      screen.getByPlaceholderText('Send a message to this thread'),
+      screen.getByPlaceholderText(/^Send a message to this thread/),
     ).toHaveAttribute('disabled');
   });
 
@@ -2052,7 +2060,7 @@ describe('TalkDetailPage', () => {
 
     renderDetailPage('/app/talks/talk-1');
     const composer = await screen.findByPlaceholderText(
-      'Send a message to this thread',
+      /^Send a message to this thread/,
     );
     const sendButton = screen.getByRole('button', { name: 'Send' });
 
@@ -2114,7 +2122,7 @@ describe('TalkDetailPage', () => {
 
     renderDetailPage('/app/talks/talk-1');
     const composer = await screen.findByPlaceholderText(
-      'Send a message to this thread',
+      /^Send a message to this thread/,
     );
 
     await user.type(composer, 'Line 1');
@@ -2164,7 +2172,7 @@ describe('TalkDetailPage', () => {
 
       renderDetailPage('/app/talks/talk-1');
       const composer = (await screen.findByPlaceholderText(
-        'Send a message to this thread',
+        /^Send a message to this thread/,
       )) as HTMLTextAreaElement;
 
       expect(composer).toHaveAttribute('rows', '1');
@@ -2243,7 +2251,7 @@ describe('TalkDetailPage', () => {
 
     renderDetailPage('/app/talks/talk-1');
     const composer = await screen.findByPlaceholderText(
-      'Send a message to this thread',
+      /^Send a message to this thread/,
     );
     const workspace = composer.closest('.talk-workspace');
     if (!workspace) {
@@ -2304,7 +2312,7 @@ describe('TalkDetailPage', () => {
 
     renderDetailPage('/app/talks/talk-1');
     const composer = await screen.findByPlaceholderText(
-      'Send a message to this thread',
+      /^Send a message to this thread/,
     );
     const workspace = composer.closest('.talk-workspace');
     if (!workspace) {
@@ -2355,7 +2363,7 @@ describe('TalkDetailPage', () => {
 
     renderDetailPage('/app/talks/talk-1');
     const composer = await screen.findByPlaceholderText(
-      'Send a message to this thread',
+      /^Send a message to this thread/,
     );
     const workspace = composer.closest('.talk-workspace');
     if (!workspace) {
@@ -2431,7 +2439,7 @@ describe('TalkDetailPage', () => {
 
     renderDetailPage('/app/talks/talk-1');
     const composer = await screen.findByPlaceholderText(
-      'Send a message to this thread.',
+      /^Send a message to this thread/,
     );
     const workspace = composer.closest('.talk-workspace');
     if (!workspace) {
@@ -2493,7 +2501,7 @@ describe('TalkDetailPage', () => {
 
     renderDetailPage('/app/talks/talk-1');
     const composer = await screen.findByPlaceholderText(
-      'Send a message to this thread.',
+      /^Send a message to this thread/,
     );
     const workspace = composer.closest('.talk-workspace');
     if (!workspace) {
@@ -2515,7 +2523,7 @@ describe('TalkDetailPage', () => {
     installTalkDetailFetch();
 
     renderDetailPage('/app/talks/talk-1');
-    await screen.findByPlaceholderText('Send a message to this thread');
+    await screen.findByPlaceholderText(/^Send a message to this thread/);
 
     if (!streamInput) {
       throw new Error('Expected talk stream input');
@@ -3461,7 +3469,7 @@ describe('TalkDetailPage', () => {
 
     renderDetailPage('/app/talks/talk-1');
     const composer = await screen.findByPlaceholderText(
-      'Send a message to this thread',
+      /^Send a message to this thread/,
     );
 
     await user.type(composer, '/edit');
@@ -3528,7 +3536,7 @@ describe('TalkDetailPage', () => {
 
     renderDetailPage('/app/talks/talk-1');
     const composer = await screen.findByPlaceholderText(
-      'Send a message to this thread',
+      /^Send a message to this thread/,
     );
 
     expect(streamInput).toBeTruthy();
@@ -3597,7 +3605,7 @@ describe('TalkDetailPage', () => {
 
     renderDetailPage('/app/talks/talk-1');
     const composer = await screen.findByPlaceholderText(
-      'Send a message to this thread',
+      /^Send a message to this thread/,
     );
 
     await user.type(composer, '/edit');
@@ -3616,7 +3624,10 @@ describe('TalkDetailPage', () => {
     await waitFor(() =>
       expect(screen.queryByRole('dialog', { name: 'Edit history' })).toBeNull(),
     );
-    expect(screen.queryByText(repeatedPrompt)).toBeNull();
+    // The deleted-id filter is applied when the post-delete resync lands and
+    // pageMessages recomputes (a ref update alone doesn't re-render), so wait
+    // for the deleted prompts to drop out rather than asserting synchronously.
+    await waitFor(() => expect(screen.queryByText(repeatedPrompt)).toBeNull());
 
     await user.type(composer, repeatedPrompt);
     await user.keyboard('{Enter}');
@@ -3671,8 +3682,6 @@ describe('TalkDetailPage', () => {
         createdAt: '2026-03-06T00:00:01.000Z',
       }),
     ];
-    let onListMessagesCallCount = 0;
-
     installTalkDetailFetch({
       messages: [
         ...deletedMessages,
@@ -3684,18 +3693,22 @@ describe('TalkDetailPage', () => {
         }),
       ],
       runs: [],
+      // Simulate a racing execution resync: once the delete has removed the
+      // rows server-side (the mock store stops returning them), a stale resync
+      // re-adds them verbatim. Keyed on the server state rather than a call
+      // index so it's robust to how many snapshot fetches the initial load
+      // happens to make.
       onListMessages: ({ visibleMessages }) => {
-        const callIndex = onListMessagesCallCount++;
-        if (callIndex === 2) {
-          return [...deletedMessages, ...visibleMessages];
-        }
-        return visibleMessages;
+        const deletedRowsGone = !visibleMessages.some((m) => m.id === 'msg-1');
+        return deletedRowsGone
+          ? [...deletedMessages, ...visibleMessages]
+          : visibleMessages;
       },
     });
 
     renderDetailPage('/app/talks/talk-1');
     const composer = await screen.findByPlaceholderText(
-      'Send a message to this thread',
+      /^Send a message to this thread/,
     );
 
     await user.type(composer, '/edit');
@@ -3714,7 +3727,10 @@ describe('TalkDetailPage', () => {
     await waitFor(() =>
       expect(screen.queryByRole('dialog', { name: 'Edit history' })).toBeNull(),
     );
-    expect(screen.queryByText(repeatedPrompt)).toBeNull();
+    // The deleted-id filter is applied when the post-delete resync lands and
+    // pageMessages recomputes (a ref update alone doesn't re-render), so wait
+    // for the deleted prompts to drop out rather than asserting synchronously.
+    await waitFor(() => expect(screen.queryByText(repeatedPrompt)).toBeNull());
 
     await user.type(composer, repeatedPrompt);
     await user.keyboard('{Enter}');
@@ -3756,7 +3772,7 @@ describe('TalkDetailPage', () => {
       sidebarContents: [],
     });
 
-    await screen.findByPlaceholderText('Send a message to this thread');
+    await screen.findByPlaceholderText(/^Send a message to this thread/);
 
     // Open the + Doc modal via the existing add-doc button.
     const addDocButton = await screen.findByRole('button', {
@@ -3819,7 +3835,7 @@ describe('TalkDetailPage', () => {
     });
 
     renderDetailPage('/app/talks/talk-1/talk', { sidebarContents: [] });
-    await screen.findByPlaceholderText('Send a message to this thread');
+    await screen.findByPlaceholderText(/^Send a message to this thread/);
 
     // Kick off a snapshot refetch and leave it pending (in flight).
     expect(streamInput).toBeTruthy();
