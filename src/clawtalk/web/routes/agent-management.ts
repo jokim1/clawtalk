@@ -1,5 +1,7 @@
 import { getDbPg, withUserContext } from '../../../db.js';
 import {
+  autoUpgradeAgentModel,
+  clearAgentModelUpgradeNotice,
   createRegisteredAgent,
   deleteRegisteredAgent,
   getRegisteredAgent,
@@ -17,6 +19,14 @@ import {
   getMainAgentIdOrNull,
   setMainAgentId,
 } from '../../agents/agent-registry.js';
+import {
+  buildProviderModelSupport,
+  type ProviderModelSupport,
+} from '../../agents/agent-model-support.js';
+import {
+  isModelServed,
+  resolveModelLifecycle,
+} from '../../agents/model-lifecycle.js';
 import { TALK_EXECUTOR_ANTHROPIC_API_KEY } from '../../config.js';
 import { modelSupportsVision } from '../../llm/capabilities.js';
 import type { ApiEnvelope, AuthContext } from '../types.js';
@@ -44,6 +54,12 @@ type ExecutionPreview = {
 
 export type RegisteredAgentApiSnapshot = RegisteredAgentSnapshot & {
   executionPreview: ExecutionPreview;
+  // A newer, still-supported model in the same family is available. Purely
+  // informational — the user opts in via the normal model-update flow; we
+  // never auto-change a supported model. Null when nothing newer exists.
+  // (The auto-upgrade case for a RETIRED model is carried by the base
+  // snapshot's modelAutoUpgradedFrom/At fields.)
+  modelUpdateAvailable: { modelId: string; displayName: string | null } | null;
   // Vision capability is the agent's ground truth — sourced from
   // `resolveModelCapabilities(providerId, modelId)` on the backend. The
   // frontend uses this for the composer's image-attachment guard on the
@@ -126,11 +142,13 @@ async function buildExecutionPreview(
 
 async function toApiSnapshot(
   record: RegisteredAgentRecord,
+  modelUpdateAvailable: RegisteredAgentApiSnapshot['modelUpdateAvailable'] = null,
 ): Promise<RegisteredAgentApiSnapshot> {
   return {
     ...toAgentSnapshot(record),
     executionPreview: await buildExecutionPreview(record),
     supportsVision: modelSupportsVision(record.provider_id, record.model_id),
+    modelUpdateAvailable,
   };
 }
 
@@ -181,13 +199,104 @@ function readCredentialModeField(
 // List / get
 // ---------------------------------------------------------------------------
 
+/**
+ * Default Claude model to upgrade to when a retired model has no
+ * same-family successor (settings_kv, maintained by the AI Agents UI).
+ */
+async function defaultClaudeModelId(): Promise<string | null> {
+  const db = getDbPg();
+  const rows = await db<Array<{ value: string | null }>>`
+    select value from public.settings_kv
+    where key = 'executor.defaultClaudeModel'
+    limit 1
+  `;
+  return rows[0]?.value ?? null;
+}
+
+/**
+ * Apply the model-lifecycle policy to one agent:
+ *   - retired          → auto-upgrade to the newest same-family model (or
+ *                        the provider default if it's still supported),
+ *                        persisting the trail; returns the upgraded record.
+ *   - update_available → returns the record + a (non-mutating) suggestion.
+ *   - ok               → returns the record unchanged.
+ */
+async function applyModelLifecycle(
+  record: RegisteredAgentRecord,
+  support: ProviderModelSupport,
+): Promise<{
+  record: RegisteredAgentRecord;
+  updateAvailable: RegisteredAgentApiSnapshot['modelUpdateAvailable'];
+}> {
+  const lifecycle = resolveModelLifecycle(
+    record.provider_id,
+    record.model_id,
+    support.supported,
+  );
+
+  if (lifecycle.status === 'retired') {
+    let target = lifecycle.suggestedModelId;
+    if (!target) {
+      const fallback = await defaultClaudeModelId();
+      // Only fall back to a default we can confirm is actually SERVED — never
+      // swap a retired model for another unserved (curated-only) one.
+      target =
+        fallback && isModelServed(fallback, support.supported)
+          ? fallback
+          : null;
+    }
+    if (target && target !== record.model_id) {
+      const upgraded = await autoUpgradeAgentModel(
+        record.id,
+        record.model_id,
+        target,
+      );
+      if (upgraded) return { record: upgraded, updateAvailable: null };
+    }
+    // No safe target — leave as-is; the run-time net / a clear error
+    // surfaces it rather than swapping to another dead model.
+    return { record, updateAvailable: null };
+  }
+
+  if (lifecycle.status === 'update_available' && lifecycle.suggestedModelId) {
+    return {
+      record,
+      updateAvailable: {
+        modelId: lifecycle.suggestedModelId,
+        displayName:
+          support.displayNames.get(lifecycle.suggestedModelId) ?? null,
+      },
+    };
+  }
+
+  return { record, updateAvailable: null };
+}
+
 export async function listAgentsRoute(auth: AuthContext): Promise<{
   statusCode: number;
   body: ApiEnvelope<RegisteredAgentApiSnapshot[]>;
 }> {
   return withUserContext(auth.userId, async () => {
     const records = await listRegisteredAgents();
-    const snapshots = await Promise.all(records.map(toApiSnapshot));
+    // Build the authoritative supported-model picture once per distinct
+    // provider, then apply the lifecycle policy (auto-upgrade retired /
+    // flag newer) to each agent.
+    const providerIds = [...new Set(records.map((r) => r.provider_id))];
+    const supportByProvider = new Map<string, ProviderModelSupport>(
+      await Promise.all(
+        providerIds.map(
+          async (pid) => [pid, await buildProviderModelSupport(pid)] as const,
+        ),
+      ),
+    );
+    const snapshots = await Promise.all(
+      records.map(async (record) => {
+        const support = supportByProvider.get(record.provider_id)!;
+        const { record: effective, updateAvailable } =
+          await applyModelLifecycle(record, support);
+        return toApiSnapshot(effective, updateAvailable);
+      }),
+    );
     return envelopeOk(snapshots);
   });
 }
@@ -204,7 +313,36 @@ export async function getAgentRoute(
     if (!record) {
       return envelopeError(404, 'not_found', `Agent '${agentId}' not found.`);
     }
-    return envelopeOk(await toApiSnapshot(record));
+    // Same lifecycle handling as the list route, so a single-agent fetch
+    // (detail view, post-update refresh) auto-heals + flags consistently.
+    const support = await buildProviderModelSupport(record.provider_id);
+    const { record: effective, updateAvailable } = await applyModelLifecycle(
+      record,
+      support,
+    );
+    return envelopeOk(await toApiSnapshot(effective, updateAvailable));
+  });
+}
+
+/**
+ * Dismiss the "model retired — auto-upgraded" badge for an agent. Clears
+ * the persisted trail; the agent's (already-upgraded) model is untouched.
+ */
+export async function dismissAgentModelUpgradeRoute(
+  auth: AuthContext,
+  agentId: string,
+): Promise<{
+  statusCode: number;
+  body: ApiEnvelope<RegisteredAgentApiSnapshot>;
+}> {
+  return withUserContext(auth.userId, async () => {
+    const record = await getRegisteredAgent(agentId);
+    if (!record) {
+      return envelopeError(404, 'not_found', `Agent '${agentId}' not found.`);
+    }
+    await clearAgentModelUpgradeNotice(agentId);
+    const updated = await getRegisteredAgent(agentId);
+    return envelopeOk(await toApiSnapshot(updated ?? record));
   });
 }
 

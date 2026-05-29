@@ -150,6 +150,10 @@ export interface RegisteredAgentRecord {
   // precedence). Non-null pins the agent to a specific credential kind.
   // See execution-resolver.ts:resolveSecret.
   credential_mode: RegisteredAgentCredentialMode | null;
+  // Retired-model auto-upgrade trail. Non-null `from` = the agent was moved
+  // off a retired model; the UI shows a badge until acknowledged.
+  model_auto_upgraded_from: string | null;
+  model_auto_upgraded_at: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -181,6 +185,8 @@ export interface RegisteredAgentSnapshot {
   description: string | null;
   enabled: boolean;
   credentialMode: RegisteredAgentCredentialMode | null;
+  modelAutoUpgradedFrom: string | null;
+  modelAutoUpgradedAt: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -211,6 +217,8 @@ export function toAgentSnapshot(
     description: record.description,
     enabled: record.enabled,
     credentialMode: record.credential_mode,
+    modelAutoUpgradedFrom: record.model_auto_upgraded_from,
+    modelAutoUpgradedAt: record.model_auto_upgraded_at,
     createdAt: record.created_at,
     updatedAt: record.updated_at,
   };
@@ -244,7 +252,9 @@ export async function getRegisteredAgent(
   const rows = await db<RegisteredAgentRecord[]>`
     select id, owner_id, name, provider_id, model_id,
            tool_permissions_json, persona_role, system_prompt,
-           description, enabled, credential_mode, created_at, updated_at
+           description, enabled, credential_mode,
+           model_auto_upgraded_from, model_auto_upgraded_at,
+           created_at, updated_at
     from public.registered_agents
     where id = ${agentId}::uuid
     limit 1
@@ -264,7 +274,9 @@ export async function listRegisteredAgents(): Promise<RegisteredAgentRecord[]> {
   return await db<RegisteredAgentRecord[]>`
     select id, owner_id, name, provider_id, model_id,
            tool_permissions_json, persona_role, system_prompt,
-           description, enabled, credential_mode, created_at, updated_at
+           description, enabled, credential_mode,
+           model_auto_upgraded_from, model_auto_upgraded_at,
+           created_at, updated_at
     from public.registered_agents
     order by created_at asc
   `;
@@ -275,7 +287,9 @@ export async function listEnabledAgents(): Promise<RegisteredAgentRecord[]> {
   return await db<RegisteredAgentRecord[]>`
     select id, owner_id, name, provider_id, model_id,
            tool_permissions_json, persona_role, system_prompt,
-           description, enabled, credential_mode, created_at, updated_at
+           description, enabled, credential_mode,
+           model_auto_upgraded_from, model_auto_upgraded_at,
+           created_at, updated_at
     from public.registered_agents
     where enabled = true
     order by created_at asc
@@ -314,7 +328,9 @@ export async function createRegisteredAgent(params: {
        ${params.credentialMode ?? null})
     returning id, owner_id, name, provider_id, model_id,
               tool_permissions_json, persona_role, system_prompt,
-              description, enabled, credential_mode, created_at, updated_at
+              description, enabled, credential_mode,
+              model_auto_upgraded_from, model_auto_upgraded_at,
+              created_at, updated_at
   `;
   if (!rows[0]) {
     throw new Error('Failed to create agent');
@@ -374,13 +390,71 @@ export async function updateRegisteredAgent(
       enabled = coalesce(${updates.enabled ?? null}, enabled),
       credential_mode = case when ${updates.credentialMode !== undefined}::boolean
         then ${updates.credentialMode ?? null} else credential_mode end,
+      -- A deliberate model change (incl. accepting an "update available")
+      -- acknowledges any pending auto-upgrade badge, so clear it.
+      model_auto_upgraded_from = case when ${updates.modelId !== undefined}::boolean
+        then null else model_auto_upgraded_from end,
+      model_auto_upgraded_at = case when ${updates.modelId !== undefined}::boolean
+        then null else model_auto_upgraded_at end,
       updated_at = now()
     where id = ${agentId}::uuid
     returning id, owner_id, name, provider_id, model_id,
               tool_permissions_json, persona_role, system_prompt,
-              description, enabled, credential_mode, created_at, updated_at
+              description, enabled, credential_mode,
+              model_auto_upgraded_from, model_auto_upgraded_at,
+              created_at, updated_at
   `;
   return rows[0];
+}
+
+/**
+ * Auto-upgrade an agent off a retired model. Sets the new model_id and
+ * records the trail (from + timestamp) so the UI can surface a notice.
+ * Idempotent on the target: re-running with the same fromModel keeps the
+ * badge. No-op if the agent's current model already differs from
+ * `fromModel` (someone changed it first — avoids clobbering a concurrent
+ * edit). Returns the updated record, or undefined if no row matched.
+ */
+export async function autoUpgradeAgentModel(
+  agentId: string,
+  fromModel: string,
+  toModel: string,
+): Promise<RegisteredAgentRecord | undefined> {
+  if (!UUID_REGEX.test(agentId)) return undefined;
+  const db = getDbPg();
+  const rows = await db<RegisteredAgentRecord[]>`
+    update public.registered_agents set
+      model_id = ${toModel},
+      model_auto_upgraded_from = ${fromModel},
+      model_auto_upgraded_at = now(),
+      updated_at = now()
+    where id = ${agentId}::uuid and model_id = ${fromModel}
+    returning id, owner_id, name, provider_id, model_id,
+              tool_permissions_json, persona_role, system_prompt,
+              description, enabled, credential_mode,
+              model_auto_upgraded_from, model_auto_upgraded_at,
+              created_at, updated_at
+  `;
+  return rows[0];
+}
+
+/**
+ * Dismiss the auto-upgrade badge for an agent (user acknowledged it).
+ * Clears the trail without touching the model.
+ */
+export async function clearAgentModelUpgradeNotice(
+  agentId: string,
+): Promise<boolean> {
+  if (!UUID_REGEX.test(agentId)) return false;
+  const db = getDbPg();
+  const rows = await db<{ id: string }[]>`
+    update public.registered_agents set
+      model_auto_upgraded_from = null,
+      model_auto_upgraded_at = null
+    where id = ${agentId}::uuid and model_auto_upgraded_from is not null
+    returning id
+  `;
+  return rows.length > 0;
 }
 
 /**

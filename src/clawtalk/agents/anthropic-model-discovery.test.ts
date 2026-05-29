@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   discoverAnthropicModels,
   invalidateAnthropicDiscovery,
+  isCurrentGenerationClaudeModel,
 } from './anthropic-model-discovery.js';
 import type { DiscoveryCacheLike } from './model-discovery.js';
 
@@ -91,7 +92,9 @@ describe('discoverAnthropicModels', () => {
     expect(headers['anthropic-version']).toBe('2023-06-01');
   });
 
-  it('drops superseded legacy generations (claude-1/2/3, instant)', async () => {
+  it('returns the RAW authoritative list including legacy generations', async () => {
+    // Discovery must NOT filter — the retirement check needs the full
+    // served set so a still-supported legacy model reads as "supported".
     const fetcher = vi.fn(async () =>
       jsonResponse({
         data: [
@@ -100,11 +103,6 @@ describe('discoverAnthropicModels', () => {
             id: 'claude-3-7-sonnet-20250219',
             display_name: 'Claude 3.7 Sonnet',
           },
-          {
-            id: 'claude-3-5-sonnet-20241022',
-            display_name: 'Claude 3.5 Sonnet',
-          },
-          { id: 'claude-2.1', display_name: 'Claude 2.1' },
           { id: 'claude-instant-1.2', display_name: 'Claude Instant' },
         ],
       }),
@@ -112,19 +110,22 @@ describe('discoverAnthropicModels', () => {
     const result = await discoverAnthropicModels('sk-ant-test', { fetcher });
     expect(result.models.map((m) => m.modelId)).toEqual([
       'claude-opus-4-8-20260528',
+      'claude-3-7-sonnet-20250219',
+      'claude-instant-1.2',
     ]);
   });
 
-  it('keeps a hypothetical future generation (claude-5)', async () => {
+  it('drops non-claude ids defensively', async () => {
     const fetcher = vi.fn(async () =>
       jsonResponse({
-        data: [{ id: 'claude-opus-5-20270101', display_name: 'Claude Opus 5' }],
+        data: [
+          { id: 'claude-opus-4-8', display_name: 'Claude Opus 4.8' },
+          { id: 'text-embedding-3', display_name: 'Embedding' },
+        ],
       }),
     );
     const result = await discoverAnthropicModels('sk-ant-test', { fetcher });
-    expect(result.models.map((m) => m.modelId)).toEqual([
-      'claude-opus-5-20270101',
-    ]);
+    expect(result.models.map((m) => m.modelId)).toEqual(['claude-opus-4-8']);
   });
 
   it('falls back to modelId when display_name is absent', async () => {
@@ -206,6 +207,20 @@ describe('discoverAnthropicModels', () => {
     });
     expect(a.models[0].modelId).toBe('claude-opus-4-8');
     expect(b.models[0].modelId).toBe('claude-sonnet-4-6');
+  });
+});
+
+describe('isCurrentGenerationClaudeModel (picker display filter)', () => {
+  it('keeps current + future generations, drops legacy', () => {
+    expect(isCurrentGenerationClaudeModel('claude-opus-4-8')).toBe(true);
+    expect(isCurrentGenerationClaudeModel('claude-sonnet-4-6')).toBe(true);
+    expect(isCurrentGenerationClaudeModel('claude-opus-5-20270101')).toBe(true);
+    expect(isCurrentGenerationClaudeModel('claude-3-7-sonnet-20250219')).toBe(
+      false,
+    );
+    expect(isCurrentGenerationClaudeModel('claude-2.1')).toBe(false);
+    expect(isCurrentGenerationClaudeModel('claude-instant-1.2')).toBe(false);
+    expect(isCurrentGenerationClaudeModel('gpt-5')).toBe(false);
   });
 });
 

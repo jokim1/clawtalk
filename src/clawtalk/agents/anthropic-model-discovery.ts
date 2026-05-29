@@ -31,12 +31,12 @@ import {
 
 const ANTHROPIC_DISCOVERY_NAMESPACE = 'anthropic-discovery';
 
-// Anthropic's /v1/models returns only Claude models, but it includes the
-// superseded legacy generations. Drop claude-1 / claude-2 / claude-3 /
-// claude-instant so the picker stays focused on the current flagship line
-// (the curated rows already cover 4.x). Matching by known-old prefix —
-// rather than an allowlist — keeps this robust to future generations
-// (claude-5, claude-6, …): only what we know to be legacy is hidden.
+// Superseded legacy generations. `isCurrentGenerationClaudeModel` is the
+// PICKER-display filter (hide claude-1/2/3/instant noise) — NOT a support
+// filter. Discovery itself returns the RAW list so the model-lifecycle
+// retirement check sees Anthropic's authoritative set: a still-served
+// legacy model must read as "supported", never "retired". Matching by
+// known-old prefix keeps it robust to future gens (claude-5/6 pass).
 const LEGACY_ID_PREFIXES = [
   'claude-1',
   'claude-2',
@@ -44,7 +44,7 @@ const LEGACY_ID_PREFIXES = [
   'claude-instant',
 ] as const;
 
-function isCurrentGeneration(modelId: string): boolean {
+export function isCurrentGenerationClaudeModel(modelId: string): boolean {
   const lower = modelId.toLowerCase();
   if (!lower.startsWith('claude-')) return false;
   return !LEGACY_ID_PREFIXES.some((prefix) => lower.startsWith(prefix));
@@ -54,6 +54,9 @@ interface AnthropicModelsResponse {
   data?: Array<{ id?: string; display_name?: string }>;
 }
 
+// Returns the RAW authoritative Claude list (all generations). Picker-side
+// legacy filtering is applied separately by the caller via
+// isCurrentGenerationClaudeModel.
 function parseAnthropicModels(raw: unknown): DiscoveredModel[] {
   const payload = raw as AnthropicModelsResponse;
   if (!payload || !Array.isArray(payload.data)) return [];
@@ -61,7 +64,7 @@ function parseAnthropicModels(raw: unknown): DiscoveredModel[] {
   for (const entry of payload.data) {
     const id = entry?.id;
     if (typeof id !== 'string' || !id) continue;
-    if (!isCurrentGeneration(id)) continue;
+    if (!id.toLowerCase().startsWith('claude-')) continue;
     const displayName =
       typeof entry?.display_name === 'string' && entry.display_name
         ? entry.display_name
