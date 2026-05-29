@@ -3472,12 +3472,11 @@ describe('TalkDetailPage', () => {
       /^Send a message to this thread/,
     );
 
-    await user.type(composer, '/edit');
-    // Ensure the draft is committed before Enter: the keydown handler reads
-    // the `draft` state, so a not-yet-flushed update would skip the /edit
-    // command and the dialog would never open (flaky under CI timing).
-    await waitFor(() => expect(composer).toHaveValue('/edit'));
-    await user.keyboard('{Enter}');
+    // Type the command and submit in one awaited sequence. Separate
+    // type()/keyboard('{Enter}') calls race under CI timing: the keydown
+    // handler reads the `draft` state, which may not have committed yet, so
+    // the /edit command is dropped and the dialog never opens.
+    await user.type(composer, '/edit{Enter}');
 
     expect(
       await screen.findByRole('dialog', { name: 'Edit history' }),
@@ -3548,12 +3547,11 @@ describe('TalkDetailPage', () => {
       void streamInput?.onReplayGap?.();
     });
 
-    await user.type(composer, '/edit');
-    // Ensure the draft is committed before Enter: the keydown handler reads
-    // the `draft` state, so a not-yet-flushed update would skip the /edit
-    // command and the dialog would never open (flaky under CI timing).
-    await waitFor(() => expect(composer).toHaveValue('/edit'));
-    await user.keyboard('{Enter}');
+    // Type the command and submit in one awaited sequence. Separate
+    // type()/keyboard('{Enter}') calls race under CI timing: the keydown
+    // handler reads the `draft` state, which may not have committed yet, so
+    // the /edit command is dropped and the dialog never opens.
+    await user.type(composer, '/edit{Enter}');
     expect(
       await screen.findByRole('dialog', { name: 'Edit history' }),
     ).toBeTruthy();
@@ -3575,12 +3573,11 @@ describe('TalkDetailPage', () => {
       expect(screen.queryByText('Old assistant answer')).toBeNull();
     });
 
-    await user.type(composer, '/edit');
-    // Ensure the draft is committed before Enter: the keydown handler reads
-    // the `draft` state, so a not-yet-flushed update would skip the /edit
-    // command and the dialog would never open (flaky under CI timing).
-    await waitFor(() => expect(composer).toHaveValue('/edit'));
-    await user.keyboard('{Enter}');
+    // Type the command and submit in one awaited sequence. Separate
+    // type()/keyboard('{Enter}') calls race under CI timing: the keydown
+    // handler reads the `draft` state, which may not have committed yet, so
+    // the /edit command is dropped and the dialog never opens.
+    await user.type(composer, '/edit{Enter}');
     const dialog = await screen.findByRole('dialog', { name: 'Edit history' });
     expect(within(dialog).queryByText('Old user prompt')).toBeNull();
     expect(within(dialog).queryByText('Old assistant answer')).toBeNull();
@@ -3620,12 +3617,11 @@ describe('TalkDetailPage', () => {
       /^Send a message to this thread/,
     );
 
-    await user.type(composer, '/edit');
-    // Ensure the draft is committed before Enter: the keydown handler reads
-    // the `draft` state, so a not-yet-flushed update would skip the /edit
-    // command and the dialog would never open (flaky under CI timing).
-    await waitFor(() => expect(composer).toHaveValue('/edit'));
-    await user.keyboard('{Enter}');
+    // Type the command and submit in one awaited sequence. Separate
+    // type()/keyboard('{Enter}') calls race under CI timing: the keydown
+    // handler reads the `draft` state, which may not have committed yet, so
+    // the /edit command is dropped and the dialog never opens.
+    await user.type(composer, '/edit{Enter}');
     expect(
       await screen.findByRole('dialog', { name: 'Edit history' }),
     ).toBeTruthy();
@@ -3727,12 +3723,11 @@ describe('TalkDetailPage', () => {
       /^Send a message to this thread/,
     );
 
-    await user.type(composer, '/edit');
-    // Ensure the draft is committed before Enter: the keydown handler reads
-    // the `draft` state, so a not-yet-flushed update would skip the /edit
-    // command and the dialog would never open (flaky under CI timing).
-    await waitFor(() => expect(composer).toHaveValue('/edit'));
-    await user.keyboard('{Enter}');
+    // Type the command and submit in one awaited sequence. Separate
+    // type()/keyboard('{Enter}') calls race under CI timing: the keydown
+    // handler reads the `draft` state, which may not have committed yet, so
+    // the /edit command is dropped and the dialog never opens.
+    await user.type(composer, '/edit{Enter}');
     expect(
       await screen.findByRole('dialog', { name: 'Edit history' }),
     ).toBeTruthy();
