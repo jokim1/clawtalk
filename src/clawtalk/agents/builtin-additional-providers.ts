@@ -49,6 +49,14 @@ export const BUILTIN_ADDITIONAL_PROVIDERS: BuiltinAdditionalProvider[] = [
     absoluteTimeoutMs: 300_000,
     models: [
       {
+        modelId: 'claude-opus-4-8',
+        displayName: 'Claude Opus 4.8',
+        contextWindowTokens: 200_000,
+        defaultMaxOutputTokens: 8_192,
+        defaultTtftTimeoutMs: 60_000,
+        supportsVision: true,
+      },
+      {
         modelId: 'claude-opus-4-7',
         displayName: 'Claude Opus 4.7',
         contextWindowTokens: 200_000,
