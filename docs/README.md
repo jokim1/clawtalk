@@ -25,7 +25,7 @@ You're reading this because you're an AI coding agent (or engineer) about to wor
 5. **Shipped vs planned** → [roadmap.md](./roadmap.md) wins over `01` where they disagree (connectors, scheduled jobs).
 6. **Product behavior** → `01-product-spec.md`. **Anything in [archive/](./archive/) is superseded.**
 
-> ⚠️ The spec docs `01`–`08` were written for a greenfield `documents`/`agents` model. The live DB uses `contents`/`registered_agents` (see DECISIONS D2). Until D2 is finalized, read spec table names through the [GLOSSARY](./GLOSSARY.md) mapping.
+> ⚠️ The `01`/`08` model (**Workspace → Folder → Talk + Document**, multi-workspace, no Threads) is the **target we're migrating toward** (DECISIONS D2). The live schema differs — it's user-owned, has `talk_threads`, and calls the artifact `contents`. Threads removal (D4), the workspace layer (D5), and a jobs redefinition (D6) are committed but not yet planned. Read spec table names through the [GLOSSARY](./GLOSSARY.md) mapping until the renames land.
 
 ---
 

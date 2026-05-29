@@ -15,31 +15,46 @@
 
 ---
 
-## D2 — Document/agent vocabulary: orient to shipped names (P0 #3a) — 🟡 Provisional, pending naming review
+## D2 — Target model: adopt the canonical spec, migrate from the shipped schema (P0 #3a) — ✅ Decided
 
-**Decision (direction).** Treat the **live database schema as canonical** and align the docs to it, rather than migrating the DB to the greenfield `documents`/`agents` model in `01`/`08`. This matches the incremental-on-existing stance of the (archived) V2 review. The Forge PRD (`09`) already uses the shipped vocabulary and does **not** need rewriting.
+**Decision.** The **canonical target is the `01`/`08` model**, and we will **migrate the codebase toward it** (not align docs down to the current schema). The target hierarchy is:
 
-**Why this reframes the audit.** The audit (doc-only) assumed `01`/`08` were canonical and `09` was drifting. The codebase shows the opposite: the live schema is `contents` / `registered_agents` / `talk_agents`, and `01`/`08`'s `documents` model is an unbuilt target. So we align docs → shipped names, not code → docs.
+> **Workspace → Folder (optional) → Talk + Document (optional)**, multi-workspace, **no Threads.**
 
-**Open — needs Joseph's review before finalizing.** Confirm each canonical name below, and the three behavior questions, then this decision flips to ✅ and the doc edits (rename references in `01`/`08`/`02`) proceed.
+The live schema (user-owned talks, `talk_threads`, `contents`) is the **migration source**, not the destination. This reverses the earlier provisional "orient to shipped names" lean — on review, Joseph chose to move the product toward the spec model.
 
-### Naming review (confirm or override)
+**Structural deltas this commits us to** (current → target):
 
-| Concept | Live DB name (migrations ≤0033) | Spec name (01/08) | Proposed canonical | Confirm? |
-|---|---|---|---|---|
-| Editable artifact | `contents` | `documents` | **`contents`** | ☐ |
-| Pending agent edits | `content_edits` | doc blocks `pending` | **`content_edits`** | ☐ |
-| Edit proposals | `content_proposals` | (accept/reject path) | **`content_proposals`** | ☐ |
-| Reasoning agent record | `registered_agents` | `agents` | **`registered_agents`** | ☐ |
-| Per-Talk agent roster | `talk_agents` | `talk_agent_snapshots` | **`talk_agents`** | ☐ |
-| Talk grouping | `talk_folders` | `folders` | **`talk_folders`** | ☐ |
-| Document sections (tabs) | *(none — unbuilt)* | `doc_tabs` / `doc_blocks` | **add to `contents`** | ☐ |
+| Concept | Live schema today | Target | Tracked by |
+|---|---|---|---|
+| Tenancy | user-owned (`talks.owner_id`), no `workspaces` table | **multi-workspace** (`workspaces` + `workspace_members`; talks scoped by workspace) | D5 below |
+| Threads | `talk_threads` load-bearing; `contents` attach via threads | **removed**; Document attaches to Talk directly | D4 below |
+| Grouping | `talk_folders` | `folders` under a workspace | D5 |
+| Scheduled jobs | `talk_jobs` + scheduler built | review + redefine cleanly | D6 below |
 
-### Behavior questions raised by the schema
+**Naming (contents→documents, registered_agents→agents, talk_folders→folders).** Adopt the spec names as the **target** vocabulary; the [GLOSSARY](./GLOSSARY.md) holds the mapping during the transition. Exact table renames are a migration-design detail to settle when each refactor is planned — not a blocker now.
 
-- **Threads.** `talk_threads` still exists; `01` §1.4 says remove threads. Confirm: drop `talk_threads` (align to spec) or keep it?  ☐
-- **Scheduled jobs.** `talk_jobs` exists and `roadmap.md` #7 is actively building it; `01` §8 lists scheduled jobs as out-of-scope-v1. Confirm: scheduled jobs are **in** scope (align `01` to reality)?  ☐
-- **Workspaces.** `workspaces`/`folders` per `01` are not in migrations ≤0033 — verify whether a `workspaces` table exists in earlier migrations or whether the workspace layer is still unbuilt.  ☐
+**Follow-ups.** This is a multi-step migration; sequence it (likely: workspaces layer → threads removal → naming) and write a migration plan before touching schema. `09` Forge stays buildable on whichever artifact table exists at the time.
+
+---
+
+## D4 — Remove the Threads concept (refactor) — ✅ Decided, ⏳ not yet planned
+
+**Decision.** Remove Threads. New attachment model: **Talk + optional Document**, no intervening thread. Per `01` §1.4.
+
+**Reality check (why this is a refactor, not a cleanup).** `talk_threads` has ~46 references in `src/`, and the **Content feature attaches `contents` via `talk_threads`** (RLS on contents joins through the thread). Removing threads means reworking the contents↔talk attachment + its RLS. Needs its own plan; don't start ad hoc.
+
+---
+
+## D5 — Shift personal → multi-workspace — ✅ Decided, ⏳ not yet planned
+
+**Decision.** Build the **Workspace** tenant layer from `01` §1.1 / `08` §3.1: `workspaces` + `workspace_members` (owner/admin/member), with talks/folders/documents/agents scoped by `workspace_id`. Today there is no `workspaces` table; talks are user-owned. Migration: introduce workspaces, backfill a default workspace per user, rescope existing rows.
+
+---
+
+## D6 — Jobs: review & redefine — ⏳ Open (needs a definition pass)
+
+**Decision.** Scheduled jobs stay (the `talk_jobs` table + scheduler + `job-accessors` are built and `roadmap.md` #7 is active), **but** the model isn't well understood and needs a review + clean definition before further work — including the open roadmap #7 question of whether jobs post into a Talk thread or append to a Document via the content path. **Next action:** a jobs review (how `talk_jobs`/`scheduler.ts`/`job-accessors` work today → a proposed clean spec). Until then, treat `01` §8's "out of scope" as stale.
 
 ---
 
