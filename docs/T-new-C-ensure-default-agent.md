@@ -1,10 +1,10 @@
 # T-new-C — `ensureTalkUsesUsableDefaultAgent` happy-path early-exit
 
-**Status:** Plan, **r4 draft**.
+**Status:** Plan, **r5 draft**.
 **Tracking:** [[project-llm-turn-latency]], [[T-new-A-chat-handler-parallelize]] (the §4.5 attribution that surfaced this).
 **Branch (planning):** `docs/t-new-c-ensure-default-agent` (this doc).
 **Branch (implementation, to be created):** `feature/t-new-c-ensure-default-agent`.
-**Estimated effort:** ~2 h human / ~1.5 h CC.
+**Estimated effort:** ~4 h human / ~3 h CC (revised at r4 after absorbing the route-test gap; see §6).
 
 ---
 
@@ -13,10 +13,11 @@
 - **r1 (2026-05-29)** — initial draft. Codex returned 2 P1 + 5 P2 (`.codex-r1-findings.txt`). Karpathy returned 1 critical + 2 warning + 1 nit. Critical overlap on the gate-equivalence claim; complementary on enabled-semantics, RLS reference, failure surface, call multiplicity, "99%" hand-wave.
 - **r2 (2026-05-29)** — absorbed r1: widened gate to `orphanCount = 0`; dropped "usable" terminology; fixed RLS reference; replaced "99%" with measurement-validated framing; added §2.3 route multiplicity table; deferred redundant-inner-call removal. Codex r2 returned 0 P1 + 3 P2; karpathy r2 returned 0 critical + 2 warning + 1 nit (100% overlap with codex). Raw: `.codex-r2-findings.txt`.
 - **r3 (2026-05-29)** — absorbed r2: wrapped snapshot in try/catch; rewrote §7 to use real bench interface; baseline measured at C5; §4.1 added N-active row; dropped "strictly tighter" claim. Codex consult r3 + karpathy r3 both PASS clean. `/codex review` (the formal PR-stage review against the diff): GATE PASS with 0 P1 + 3 P2 advisories.
-- **r4 (this revision)** — absorbs `/codex review` r3 P2s:
-  - Test 2 rewritten — drop the `vi.spyOn` strategy (ESM lexical bindings yield false negatives); assert gating via DB-state post-conditions + a query counter that wraps `getDbPg()` in C-impl (P2 #1).
-  - Test 3 rewritten — acknowledge that `talks.test.ts` has NO existing route tests for `getTalkRoute` / `listTalkAgentsRoute` / `listTalksRoute`; the implementation must add explicit happy-path tests for the four call sites covered by §2.3. §6 task estimate bumped to ~4 h (P2 #2).
-  - §8 row #1 tightened — the try/catch covers only the snapshot SELECT itself; subsequent heal-path throws still propagate as today. Removed the "blanket safety" implication (P2 #3).
+- **r4 (2026-05-29)** — absorbed `/codex review` r3 P2s: Test 2 query-counter strategy; Test 3 4 new route tests; §6 estimate bumped to ~4h; §8 row #1 tightened.
+- **r5 (this revision)** — absorbs `/codex review` r4 P2s (all polish, no behavior):
+  - Top-level **Estimated effort** updated to ~4 h / ~3 h (r4 P2 #1 — summary was stale).
+  - §3.1 code comment renamed `// activeCount > 0: at least one usable assignment` → `// activeCount > 0: at least one assigned row (non-null FK)` (r4 P2 #2 — preserves r3's narrowed "assigned-agent shape" framing).
+  - §6 C3 verify-row updated to match Test 1's actual case count (r4 P2 #3 — Test 1 lists explicit cases, C3 matches).
 
 ---
 
@@ -141,7 +142,8 @@ export async function ensureTalkUsesUsableDefaultAgent(
 ): Promise<void> {
   // Cheap shape check: 1 RT instead of 6 in steady state.
   // Conditions match the post-prune invariant in talk-agents.ts:303-332:
-  // - activeCount > 0: at least one usable assignment
+  // - activeCount > 0: at least one assigned row (non-null FK; does NOT verify
+  //   the referenced registered_agent is enabled — that's out of scope here)
   // - primaryCount = 1: post-prune primary invariant holds
   // - orphanCount = 0: prune would have been a no-op (no null-FK rows to delete)
   // On snapshot error, fall through to the heal path's existing swallow on
@@ -257,7 +259,17 @@ Three test files touched:
 
 ### Test 1 — `src/clawtalk/db/talk-agents.test.ts` (new)
 
-`getTalkAgentsHealthSnapshot` returns correct counts across fixtures. Six cases mapping to §4.1's table rows. Use `seedAuthUser` + `withUserContext` pattern from `accessors.test.ts:84-96, 119-141`.
+`getTalkAgentsHealthSnapshot` returns correct counts across these fixtures (one case per healthy/heal-routing decision the gate must make, drawn from §4.1's 9-row table — heal-routing cases collapse to one representative apiece since the snapshot return shape, not the gate verdict, is what's under test here):
+
+1. **empty `talk_agents`** → `{ activeCount: 0, primaryCount: 0, orphanCount: 0 }`
+2. **1 active primary row** → `{ activeCount: 1, primaryCount: 1, orphanCount: 0 }` (healthy)
+3. **1 active non-primary row** → `{ activeCount: 1, primaryCount: 0, orphanCount: 0 }` (heal-routing)
+4. **2 active rows, exactly 1 primary** → `{ activeCount: 2, primaryCount: 1, orphanCount: 0 }` (multi-agent healthy)
+5. **2 active rows, 2 primary (invariant broken)** → `{ activeCount: 2, primaryCount: 2, orphanCount: 0 }` (heal-routing)
+6. **1 active primary + 1 null-FK orphan** → `{ activeCount: 1, primaryCount: 1, orphanCount: 1 }` (heal-routing — orphan blocks healthy)
+7. **1 null-FK orphan only** → `{ activeCount: 0, primaryCount: 0, orphanCount: 1 }`
+
+Use the `seedAuthUser` + `withUserContext` pattern from `accessors.test.ts:84-96, 119-141`. 7 cases total.
 
 ### Test 2 — `src/clawtalk/agents/agent-registry.test.ts` (extend)
 
@@ -288,7 +300,7 @@ Three test files touched:
 |---|---|---|
 | **C1** Add `getTalkAgentsHealthSnapshot` accessor | `src/clawtalk/db/talk-agents.ts` (~30 LoC) | Test 1 passes |
 | **C2** Rewrite `ensureTalkUsesUsableDefaultAgent` with snapshot gate + try/catch | `src/clawtalk/agents/agent-registry.ts:255` (gate added; existing logic preserved behind gate) | Test 2 passes |
-| **C3** Backend tests | `src/clawtalk/db/talk-agents.test.ts` (new — Test 1) + `src/clawtalk/agents/agent-registry.test.ts` (extend — Test 2, includes the query-counter helper) | `npm run test` passes (existing + 5 Test 1 cases + 5 Test 2 cases) |
+| **C3** Backend tests | `src/clawtalk/db/talk-agents.test.ts` (new — Test 1) + `src/clawtalk/agents/agent-registry.test.ts` (extend — Test 2, includes the query-counter helper) | `npm run test` passes (existing + 7 Test 1 cases + 5 Test 2 cases) |
 | **C4** Route tests (NEW per P2 #2 absorption) | `src/clawtalk/web/routes/talks.test.ts` (extend — Test 3's 4 cases: sendChatRoute / getTalkRoute / listTalkAgentsRoute / listTalksRoute happy paths) | `npm run test` passes; route gate-hit counts match §2.3 multiplicity |
 | **C5** Push PR. Run `/codex review` + `/karpathy-audit diff` on diff. Absorb findings. | n/a | both PASS clean |
 | **C6** Deploy. Function-level bench + sendChatRoute bench per §7. | n/a | targets met |
@@ -356,4 +368,5 @@ This is the existing `/chat`-only harness (the script does not have a `--route` 
 | Codex consult (r3) | `/codex consult` | Re-verify swallow wrap, fixed bench commands, equivalence table | 0 P1 + 0 P2 | **PASS clean** | "r3 PASS clean." Verified: try/catch fallback routes correctly to heal; §4.1 complete; §7 runnable. |
 | Karpathy audit (r3) | `/karpathy-audit` | Re-verify style on r3 | 4/4 coverage; 0 critical + 0 warning + 1 nit | **PASS clean** | Single optional nit on §7 instrumentation specificity. Coverage and structural quality clean. |
 | Codex review (r3 diff) | `/codex review` against the branch diff | Formal PR-stage review with `high` reasoning + Codex's review-mode tuning | 0 P1 + 3 P2 | **GATE PASS** | All 3 P2 advisory: (a) Test 2 ESM spy strategy false-negative risk; (b) Test 3 assumed talks.test.ts coverage that doesn't exist; (c) §8 row #1 overstated safety. Absorbed in r4. |
-| Codex review (r4 diff) | `/codex review` against the branch diff | Re-verify the absorption | pending | pending | To run on this revision. |
+| Codex review (r4 diff) | `/codex review` against the branch diff | Re-verify the absorption | 0 P1 + 3 P2 | **GATE PASS** | All 3 P2 polish-only: (a) header estimate stale; (b) §3.1 comment terminology regression; (c) Test 1 case-count mismatch with §6 C3. Absorbed in r5. |
+| Codex review (r5 diff) | `/codex review` against the branch diff | Re-verify r5 absorption + check for new issues | pending | pending | To run on this revision. |
