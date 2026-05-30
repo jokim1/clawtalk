@@ -1,4 +1,4 @@
-> **Status:** canonical (Forge design/interaction). Front-end mock; all scoring data simulated. Scope model (whole doc / tab / section) must reconcile with the PRD + tabs (DOC-AUDIT #3c).
+> **Status:** canonical (Forge design/interaction). Front-end mock; all scoring data simulated. Scope toggle maps cleanly to §11 §9 `improvement_runs(document_id, tab_id, target_block_id)` — see §8 below.
 > Precedence + orientation: [README.md](./README.md) · decisions: [DECISIONS.md](./DECISIONS.md) · terms: [GLOSSARY.md](./GLOSSARY.md).
 
 # Forge — design handoff
@@ -59,7 +59,7 @@ base Salon app (`../ClawTalk Salon.html`) is untouched when the flag is absent.
 
 | PRD | Where it shows up |
 |---|---|
-| §11 Entry ("Improve" on doc pane + selection) | In-doc launcher (doc pane + doc editor); scope toggle = whole doc / tab / title / section |
+| §11 Entry ("Improve" on doc pane + selection) | In-doc launcher (doc pane + doc editor); scope toggle = whole doc / tab / title / section (see §8 below for the schema mapping) |
 | §11 Config modal | Compact launcher + full `ForgeConfig` ("New run" / "Open in Forge") |
 | §6 Objective (`persona_ids`, `reference_set_ids`, `survey_question`, `scoring_config`, fitness) | Audience + personas, reference set, survey question, target score; Advanced = mutation strategies, beam N / top-k, held-out toggle |
 | §5.4 Stop conditions | Run shows target / max-rounds / plateau / budget; run statuses include `plateaued`, `cancelled` |
@@ -82,10 +82,23 @@ backend, no real scoring. Specifically:
 - Doc-pane width persists to `localStorage` (`ct-doc-width`); demo route is
   seeded in `localStorage` (`clawtalk.salon.v2`).
 
+## Scope toggle ↔ schema mapping
+
+The "Improve" launcher's scope toggle (whole doc / tab / title / section) maps directly onto §11 §9 `improvement_runs(document_id, tab_id, target_block_id)`:
+
+| Scope toggle | `improvement_runs` columns | Notes |
+|---|---|---|
+| Whole doc | `document_id` only (`tab_id = null`, `target_block_id = null`) | The full document across all tabs |
+| Tab | `document_id` + `tab_id` (`target_block_id = null`) | One tab in the document |
+| Title | `document_id` + `tab_id` + `target_block_id` where the block's `kind = 'h1'` | "Title" is the h1 block at the top of a tab |
+| Section | `document_id` + `tab_id` + `target_block_id` where the block's `kind = 'h2'` | "Section" is an h2 heading and the run scopes to that block (see §11 §5 `doc_blocks.kind` enum: `'h1'`/`'h2'`/`'p'`/`'li'`/`'meta'`/`'code'`). |
+
+"Title" and "section" are **not new scope unit names** in the schema — they're surface labels for the existing `doc_blocks.kind` values `'h1'` / `'h2'`. Implementing the toggle is a `kind`-filtered block picker, not a new table.
+
 ## Suggested build order (from the PRD)
 
-1. SSR connector — OAuth + org binding, `create_candidate_assets` / `run_scoring_batch` / `get_scoring_batch` with polling (PRD §7).
-2. `content_improvement_runs` + `content_versions` tables (PRD §8) backing the Runs list + Run detail.
-3. Thin slice: in-doc launcher → one scored round → leaderboard → promote via the existing Content accept path (PRD §12 P0).
+1. SSR connector — OAuth + org binding (token in `connector_secrets`, §11 §6), `create_candidate_assets` / `run_scoring_batch` / `get_scoring_batch` with polling (PRD §7).
+2. `improvement_runs` + `document_versions` tables (§11 §9 — that's the canonical schema source) backing the Runs list + Run detail.
+3. Thin slice: in-doc launcher → one scored round → leaderboard → promote by inserting a `document_edits` row with `source='forge'` (§11 §5) for human accept (PRD §12 P0).
 4. The loop (beam search, critic-driven mutation, stop conditions) + event-hub streaming into the Run detail "running" state (PRD §12 P1).
 5. Held-out validation re-scoring feeding the trust panel (PRD §10).

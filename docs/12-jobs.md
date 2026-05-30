@@ -49,7 +49,7 @@ When the scheduler inserts a run, it sets every required column per the §3 sche
 - `job_id = <the firing job's id>`.
 - `trigger = 'scheduler'` (or `'manual'` for run-now).
 - `scheduled_for = <the slot timestamp the scheduler is firing>` (NULL for manual run-now — see §5).
-- `response_group_id = <fresh>`, `sequence_index = 0`.
+- `response_group_id = <fresh>`, `sequence_index = 0`. The `response_group_id` value is `gen_random_uuid()::text` — the column is `text` (per §11 §3 length CHECK ≤ 64) so the orchestrator can mix in fragment tokens later, but for scheduler/manual runs it's a fresh uuid stringified.
 - `prompt_snapshot_id = <the new run_prompt_snapshots row's id>`.
 
 The `runs` CHECK enforces this contract: `(trigger='user') OR (trigger in ('scheduler','manual') AND job_id is not null AND trigger_message_id is null AND prompt_snapshot_id is not null)`.
@@ -62,7 +62,7 @@ The `run_prompt_snapshots` insert is required-column-mapped per `11` §4: `works
 
 The shipped feature "always posts a thread message." With threads gone and Documents first-class, a job's output is controlled by two booleans on `jobs`:
 
-- **`emit_talk_message bool not null default true`** — the agent's answer is appended to the **Talk** as a normal `author_kind='agent'` message, tagged with the firing run's `job_id` so the UI can group/collapse scheduled activity. (This replaces the shipped feature's per-job dedicated thread with a tag, not a separate stream.)
+- **`emit_talk_message bool not null default true`** — the agent's answer is appended to the **Talk** as a normal `author_kind='agent'` message. The `messages` row carries `run_id` pointing at the firing run, and the firing run carries `job_id` — so the UI groups/collapses scheduled activity by joining `messages.run_id → runs.job_id`. No new `messages.job_id` column is added. (This replaces the shipped feature's per-job dedicated thread with a tag-by-join, not a separate stream.)
 - **`emit_document_append bool not null default false`** — the answer is appended to the Talk's **primary Document** as a **pending `document_edits` row** (`source = 'job'`) through the unified accept path Forge uses. There is **no `auto_accept` mode** — every doc append is review-gated (consistent with §3's "no autonomous overwrite" rule and Forge's human-in-the-loop principle).
 
 A schema CHECK requires `(emit_talk_message OR emit_document_append)` — a job must produce at least one output.
@@ -155,7 +155,7 @@ Driven by the existing every-minute cron tick (`scheduler.ts` mechanism is kept;
 
 3. **Pre-generate UUIDs.** `run_id`, `snapshot_id` (for `run_prompt_snapshots`), `snapshot_group_id`, and one `agent_snapshot_id` per agent currently in the Talk's roster.
 4. **Freeze roster.** Read current `talk_agents` for the Talk. For each agent, INSERT a `talk_agent_snapshots` row with the shared `snapshot_group_id`, a unique pre-generated `id`, `source_agent_id = <the live agent's id>`, and the snapshot fields per `11` §4 (role_key, model_id, temperature, persona, focus, name, handle, initials, accent — copied from the live agent). Required before the `runs` INSERT because the `runs(workspace_id, talk_id, snapshot_group_id, agent_snapshot_id)` composite FK is non-deferrable.
-5. `SET CONSTRAINTS ALL DEFERRED` — the `runs.prompt_snapshot_id` back-edge FK is deferrable; deferring it lets the scheduler insert `runs` first with the future snapshot id.
+5. *(No explicit `SET CONSTRAINTS ALL DEFERRED` needed — `runs.prompt_snapshot_id` is declared `DEFERRABLE INITIALLY DEFERRED` in §11 §3, so the back-edge already defers per-statement. The earlier draft of this step was a no-op and has been dropped.)*
 6. **INSERT `runs`** with the full §2 mapping: `id = run_id`, `prompt_snapshot_id = snapshot_id`, `snapshot_group_id`, `agent_snapshot_id = <targeted snapshot's id>`, `trigger='scheduler'`, `scheduled_for = slot`, `requested_by = jobs.created_by`, `round = max(round)+1 over (talk_id) or 1`, `trigger_message_id = NULL`, `job_id = job.id`, `model_id = <from snapshot>`, `response_group_id = <fresh>`, `sequence_index = 0`, `status = 'queued'`.
 7. **INSERT `run_prompt_snapshots`** with the required column mapping from §2 (workspace_id, run_id, talk_id, agent_snapshot_id, model_id, provider from `llm_models`, prompt_text_redacted = `jobs.prompt`). Optional provenance fields left NULL.
 8. **UPDATE `jobs`** set `next_due_at = <advance(slot)>`, `claimed_at = NULL`. Do NOT touch `last_run_status` here — bookkeeping is terminal-only (see §6).
@@ -230,6 +230,8 @@ A schema CHECK enforces the invariant: `(archived_at is not null) OR (status='ac
 When a user edits a `blocked` job (assigns a new agent, attaches a primary doc, enables the missing tool), the API handler re-runs the dependency check from §5 step 2 at save time. If all deps pass, the handler flips `status='active'`, recomputes `next_due_at = next slot from now`, and clears `block_reason`. If any check still fails, the edit succeeds but `block_reason` is updated to the new failure (so the user sees what's still missing).
 
 Periodic scheduler-side recheck (auto-unblock when a dep heals via a different code path, e.g. an agent re-added to the Talk roster) is deferred to §9 — for v1, the user re-opening the job is the trigger.
+
+**Note on the asymmetric blocking model.** When an agent is REMOVED from `talk_agents` mid-life, the job is NOT auto-flipped to `blocked` by a trigger on `talk_agents` delete. Instead, the scheduler's fire-time dep check (§5 step 2) catches the missing roster row on the next tick and flips the job atomically in the same txn. Result: between the `talk_agents` delete and the next tick (≤ 1 minute), the job's `status` stays `'active'` but it's effectively dormant — `next_due_at` may already be in the future. The §11 `jobs_require_agent_in_roster` trigger only fires on `INSERT` or `UPDATE OF agent_id` to the `jobs` row itself, NOT on `talk_agents` mutations. This is intentional: the runtime cost of cross-table cascading dep checks dwarfs the cost of a once-per-minute scheduler eval.
 
 ### Manual run-now
 

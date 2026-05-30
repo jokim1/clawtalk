@@ -1,4 +1,4 @@
-> **Status:** canonical (Home). TODO: surface Forge runs on Home (no rec/inbox path today — DOC-AUDIT #4).
+> **Status:** canonical (Home). Forge runs surface on Home via inbox type `forge_run_needs_review` (§6.6) and recommendation kind `forge-suggestion` (§7.6, §7.7).
 > Precedence + orientation: [README.md](./README.md) · decisions: [DECISIONS.md](./DECISIONS.md) · terms: [GLOSSARY.md](./GLOSSARY.md).
 
 # ClawTalk Homepage System Design
@@ -474,7 +474,9 @@ type InboxItemType =
   | 'news_context_added'
   | 'long_running_run'
   | 'system_limit_reached'
-  | 'job_needs_review'; // reserved for future scheduled jobs
+  | 'forge_run_needs_review'
+  | 'job_output_ready'
+  | 'job_blocked';
 
 type InboxTarget =
   | { kind: 'talk'; talkId: string; messageId?: string; runId?: string }
@@ -514,6 +516,7 @@ type InboxItem = {
   secondaryActions: InboxAction[];
   sourceEventIds: string[];
   groupKey: string;
+  refId?: string; // natural-dedup key for at-least-once emits; see §6.10 Ref-id dedup
   score: number;
   algorithmVersion: string;
   createdAt: string;
@@ -798,16 +801,87 @@ Resolution:
 - user configures provider access
 - user dismisses the setup item after choosing not to run agents
 
-#### `job_needs_review`
+#### `forge_run_needs_review`
 
-Reserved for future scheduled jobs. Do not implement the job engine in v1 unless
-that scope changes.
+Use when a Forge improvement run finishes with a clear winner the user has not yet reviewed.
 
-Example future item:
+Trigger:
+
+- a Forge run transitions to `completed`
+- the run produces a non-null `best_version_id`
+- the user has not yet opened the Forge gallery for that run
+
+Visible example:
+
+- Title: `Forge run finished — review winner`
+- Summary: `Two variants ran; the winning version is ready to review and apply.`
+- Reason: `Forge picked a winner you haven't seen yet.`
+- Primary action: `Review winner` → opens Forge gallery scoped to that run
+
+Severity: `action`.
+
+Target: `{ kind: 'document', documentId, runId: improvementRunId, bestVersionId }`.
+
+Resolution:
+
+- user opens the Forge gallery for the run
+- user dismisses
+- the winning version is applied or rejected
+
+#### `job_output_ready`
+
+Use when a §08 scheduled job's run finishes and emits a Document append (see `12-jobs.md` §3).
+
+Trigger:
+
+- a job run with `emit_document_append=true` reaches `succeeded`
+- the executor INSERTs the resulting `document_edits` row (pending)
+
+Visible example:
 
 - Title: `Daily Cal Football scan is ready`
-- Summary: `5 new source matches were found.`
-- Primary action: `Review results`
+- Summary: `5 new source matches were appended as a pending edit.`
+- Primary action: `Review edit` → opens the primary document with the pending block highlighted
+
+Severity: `action`.
+
+Target: `{ kind: 'job', jobId, talkId }`; the `target_json` also carries `runId` + `editId` so the UI can deep-link.
+
+`ref_id`: queue-emitted with `ref_id = run.id` so the `(workspace_id, type, ref_id)` partial unique de-dups at-least-once replays (`12-jobs.md` §6).
+
+Resolution:
+
+- user accepts/rejects the pending edit (resolves like `doc_edits_ready`)
+- user dismisses
+- the job is paused or deleted
+
+#### `job_blocked`
+
+Use when the scheduler marks a job `status='blocked'` (see `12-jobs.md` §5 Path A step 2 fire-time dependency check).
+
+Trigger:
+
+- scheduler txn sets `jobs.status='blocked'` with a `block_reason` (`tool_not_enabled`, `no_primary_document`, `agent_missing`, etc.)
+- the inbox row is INSERTed in the same transaction
+
+Visible example:
+
+- Title: `Daily Cal Football scan is blocked`
+- Summary: `Tool gdrive-read is no longer enabled in this Talk.`
+- Reason: `block_reason=tool_not_enabled`
+- Primary action: `Fix in Talk settings` → opens the Talk's tool toggles
+
+Severity: `blocking`.
+
+Target: `{ kind: 'job', jobId, talkId }`; `target_json.blockReason` carries the reason.
+
+`ref_id`: scheduler-emitted in the same txn with `ref_id = NULL`; each distinct block episode produces a new row (no dedup against earlier blocks). The partial unique on `ref_id` excludes NULL so this is by design.
+
+Resolution:
+
+- the block_reason is cleared (tool re-enabled, primary document created, etc.) and the next scheduler tick fires the job
+- user pauses or deletes the job
+- user dismisses
 
 ### 6.7 Items That Do Not Belong In Inbox
 
@@ -945,6 +1019,26 @@ doc_edits_ready:d_pricing
 run_failed:t_pricing:run_123
 connector_needs_auth:t_research:gdrive
 ```
+
+Ref-id dedup:
+
+- `ref_id` is the natural-dedup key for at-least-once emits, distinct from
+  `group_key` (which is a UI grouping hint). A partial unique index
+  `(workspace_id, type, ref_id) where ref_id is not null` enforces it at the
+  database layer (`11-data-model.md` §7).
+- `job_output_ready` is queue-emitted (queue consumer can replay on retry).
+  The executor sets `ref_id = run.id`. The partial unique de-dups replays so a
+  retried delivery does not create a second row.
+- `job_blocked` is scheduler-emitted in the same transaction that flips
+  `jobs.status='blocked'`. The transaction guarantees at-most-once for that
+  block episode, so `ref_id = NULL`; each distinct block episode produces a
+  new row. The partial unique excludes NULL by design.
+- Other producers may set their own `ref_id` (e.g. `forge_run_needs_review`
+  may use `improvement_run_id`) when they need replay-safe dedup. The
+  constraint is per-type, so reusing the same `ref_id` across different
+  `type` values is allowed.
+- `group_key` still drives UI collapsing within a type (see grouping rules
+  above); `ref_id` only governs database-level dedup of duplicate emits.
 
 ### 6.11 Lifecycle
 
@@ -1252,6 +1346,7 @@ V1 kinds:
 - `news-context`: add a high-impact News item to a Talk.
 - `agent-change`: add, remove, swap, or tune an agent/team for better future
   rounds.
+- `forge-suggestion`: review the winner of a finished Forge improvement run.
 - `job`: add a recurring job for a Talk pattern the user appears to want.
 - `prompt-suggestion`: suggest a high-leverage next question for the room.
 - `recap`: generate a recap for a stale but still valuable Talk.
@@ -1335,6 +1430,20 @@ Each generator must emit:
   mismatch, persona/method issue, or repeated ad hoc roster pattern
 - action: `suggest_agent_change`, `save_team`, or `open_agent_profile`
 - should be shown sparingly because it changes the user's workspace setup
+
+`forge-suggestion`:
+
+- trigger: a Forge improvement run reaches `completed` with a clear winner
+  (`best_version_id` set) and the user has not yet opened the gallery for that
+  run; mirror the Inbox `forge_run_needs_review` trigger in §6.6 — see `09` for
+  the upstream Forge state machine and winner-selection rules
+- action: `open_forge_gallery` scoped to the improvement run
+- bridges the Inbox `forge_run_needs_review` item into a Hero/recommendation
+  slot when the document is high-importance and the winner has not been reviewed
+  within ~30 minutes; should not appear if the user is actively viewing that
+  Forge run
+- confidence rises with Forge's own winner confidence; suppress when the run
+  has no winner or the user has already dismissed the related Inbox item
 
 `job`:
 
@@ -2419,6 +2528,14 @@ const RECOMMENDATION_KIND_DEFAULTS = {
     confidence: 0.70,
     effortPenalty: 10,
     priority: 'improve',
+  },
+  'forge-suggestion': {
+    actionValue: 0.80,
+    urgency: 0.55,
+    actionability: 0.90,
+    confidence: 0.85,
+    effortPenalty: 3,
+    priority: 'decide',
   },
   job: {
     actionValue: 0.65,
@@ -4369,32 +4486,43 @@ Not allowed:
 
 ### 10.2 `home_inbox_items`
 
+Columns (mirrors `11-data-model.md` §7):
+
 - `id`
 - `workspace_id`
-- `talk_id`
-- `document_id`
-- `run_id`
-- `news_item_id`
-- `connector_id`
-- `job_id`
-- `type`
-- `target_kind`
-- `target_json`
-- `severity`
-- `status`
+- `type` — check: `agent_replied | round_completed | agent_asks_user | run_failed | doc_edits_ready | connector_needs_auth | news_context_added | long_running_run | system_limit_reached | forge_run_needs_review | job_output_ready | job_blocked`
+- `target_kind` — check: `talk | document | connector | news | job | system`
+- `target_json` — shape per `InboxTarget` (§6.5); resolved FK columns below mirror it for index access
+- `talk_id` — FK (`workspace_id, talk_id`) → `talks(workspace_id, id)` on delete cascade
+- `document_id` — FK (`workspace_id, document_id`) → `documents(workspace_id, id)` on delete cascade
+- `run_id` — FK (`workspace_id, run_id`) → `runs(workspace_id, id)` on delete cascade
+- `tab_id` — FK (`workspace_id, document_id, tab_id`) → `doc_tabs(workspace_id, document_id, id)` on delete cascade
+- `news_item_id` — FK → `home_news_items(id)` on delete cascade
+- `connector_id` — FK (`workspace_id, connector_id`) → `connectors(workspace_id, id)` on delete cascade
+- `job_id` — FK (`workspace_id, job_id`) → `jobs(workspace_id, id)` on delete restrict
+- `ref_id` — natural-dedup key for at-least-once emits (§6.10); partial unique `(workspace_id, type, ref_id) where ref_id is not null`
+- `severity` — check: `info | action | blocking`
+- `status` — check: `unread | read | resolved | dismissed | snoozed | expired`
 - `title`
 - `summary`
 - `reason`
-- `primary_action_json`
+- `primary_action_json` — one `InboxAction` (§6.5)
 - `secondary_actions_json`
 - `source_event_ids_json`
 - `group_key`
 - `score`
 - `algorithm_version`
-- `created_at`
-- `updated_at`
 - `snoozed_until`
 - `resolved_at`
+- `due_at`
+- `expires_at`
+- `created_at`
+- `updated_at`
+
+Indexes:
+
+- `home_inbox_items_dedup` unique partial: `(workspace_id, type, ref_id) where ref_id is not null`
+- `(workspace_id, status, created_at desc)`
 
 ### 10.3 `home_recommendation_candidates`
 
@@ -4411,20 +4539,26 @@ Not allowed:
 
 ### 10.4 `home_recommendations`
 
+Columns (mirrors `11-data-model.md` §7):
+
 - `id`
-- `candidate_id`
+- `candidate_id` — FK → `home_recommendation_candidates(id)` on delete set null
 - `workspace_id`
-- `kind`
+- `kind` — check: `setup | failed-run | unresolved | synthesis | pending-edit | doc | cross-link | tool | news-context | agent-change | recap | archive-cleanup | forge-suggestion | job | prompt-suggestion`
 - `title`
 - `why`
-- `priority`
+- `priority` — check: `decide | improve | tidy`
 - `score`
 - `rank`
-- `surface`
-- `status`
+- `surface` — check: `recommendations | news | inbox | search`; default `recommendations`
+- `status` — check: `active | dismissed | completed | expired | snoozed`; default `active`
 - `algorithm_version`
 - `created_at`
 - `expires_at`
+
+Indexes:
+
+- `(workspace_id, status, surface, rank)`
 
 ### 10.5 `home_recommendation_events`
 
@@ -4438,22 +4572,28 @@ Not allowed:
 
 ### 10.6 `home_news_topics`
 
+Columns (mirrors `11-data-model.md` §7):
+
 - `id`
 - `workspace_id`
-- `talk_id`
-- `summary`
-- `mode`
-- `decision_type`
+- `talk_id` — FK (`workspace_id, talk_id`) → `talks(workspace_id, id)` on delete cascade
+- `summary` — safe 1-2-sentence abstract; never raw message/doc text (§8.4)
+- `mode` — check: `work_context | topic_feed | balanced`
+- `decision_type` — check: `pricing | launch | research | hiring | product | technical | market | other`
 - `keywords_json`
 - `entities_json`
-- `source_domains_json`
+- `source_domains_json` — read by §8.10.1 lexical relevance
 - `negative_terms_json`
-- `freshness_horizon_days`
-- `sensitivity`
+- `freshness_horizon_days` — default 14; read by §8.10.1 freshness
+- `sensitivity` — check: `normal | private | do_not_search`; default `normal`
 - `confidence`
 - `updated_at`
 
 ### 10.7 `home_news_items`
+
+Shared global pool — no `workspace_id` (§8.4 privacy contract).
+
+Columns (mirrors `11-data-model.md` §7):
 
 - `id`
 - `canonical_url`
@@ -4463,53 +4603,75 @@ Not allowed:
 - `published_at`
 - `excerpt`
 - `raw_provider_json`
-- `content_hash`
+- `content_hash` — unique; dedups the global pool
 - `created_at`
+
+Indexes:
+
+- unique `(content_hash)`
+- `(published_at desc)`
 
 ### 10.8 `home_news_matches`
 
+Columns (mirrors `11-data-model.md` §7):
+
 - `id`
 - `workspace_id`
-- `news_item_id`
-- `talk_id`
-- `matched_on_json`
-- `impact`
+- `news_item_id` — FK → `home_news_items(id)` on delete cascade
+- `topic_id` — FK (`workspace_id, topic_id`) → `home_news_topics(workspace_id, id)` on delete cascade
+- `talk_id` — FK (`workspace_id, talk_id`) → `talks(workspace_id, id)` on delete cascade
+- `matched_on_json` — which keywords/entities/domains the match fired on
+- `impact` — check: `changes_assumption | adds_evidence | updates_competitor | introduces_risk | provides_tactic | topic_update | community_signal | background_only`
 - `why_it_matters`
 - `score`
 - `confidence`
-- `status`
+- `status` — check: `active | snoozed | added_to_context | not_relevant | expired`; default `active`
 - `algorithm_version`
 - `created_at`
 
+Indexes:
+
+- unique `(workspace_id, news_item_id, topic_id)` — one match row per (item, topic) per workspace
+- `(workspace_id, status, score desc)`
+
 ### 10.9 `home_interaction_events`
 
-- `id`
+Columns (mirrors `11-data-model.md` §7):
+
+- `id` (`bigserial`)
 - `workspace_id`
-- `surface`
-- `item_id`
-- `event_type`
-- `rank`
+- `surface` — check: `recommendations | news | inbox | search`
+- `item_id` — recommendation, inbox item, or news match id; `surface` determines which table
+- `event_type` — open enum; see §9.6
+- `rank` — rank position at time of event (optimizer audit input)
 - `algorithm_version`
 - `metadata_json`
 - `created_at`
 
+Indexes:
+
+- `(workspace_id, surface, created_at desc)`
+
 ### 10.10 `home_ranking_profiles`
 
-- `workspace_id`
-- `version`
+Columns (mirrors `11-data-model.md` §7). Primary key is `workspace_id` — one
+profile row per workspace.
+
+- `workspace_id` — PK; FK → `workspaces(id)` on delete cascade
+- `version` — default 1
 - `recommendation_kind_weights_json`
 - `recommendation_action_weights_json`
 - `news_source_weights_json`
 - `news_topic_weights_json`
 - `inbox_type_weights_json`
-- `cleanup_aggressiveness`
-- `novelty_preference`
-- `source_diversity_preference`
-- `news_exploration_rate`
-- `news_initial_page_size`
-- `news_next_page_size`
-- `news_target_pool_size`
-- `news_max_session_cards`
+- `cleanup_aggressiveness` — default 0.5
+- `novelty_preference` — default 0.5
+- `source_diversity_preference` — default 0.5
+- `news_exploration_rate` — default 0.1
+- `news_initial_page_size` — default 8
+- `news_next_page_size` — default 6
+- `news_target_pool_size` — default 24
+- `news_max_session_cards` — default 40
 - `news_mode_by_talk_id_json`
 - `updated_at`
 
@@ -4529,26 +4691,39 @@ Not allowed:
 
 ### 10.12 `home_algorithm_versions`
 
+Columns (mirrors `11-data-model.md` §7):
+
 - `id`
-- `surface`
-- `status`
+- `surface` — check: `recommendations | news | inbox | search`
+- `status` — check: `draft | staging | active | paused | retired`; default `draft`
 - `description`
 - `config_json`
 - `config_hash`
-- `created_by`
+- `created_by` — FK → `users(id)` on delete set null
 - `created_at`
 - `activated_at`
 - `retired_at`
 
+Indexes:
+
+- unique `(surface, config_hash)`
+
 ### 10.13 `home_algorithm_assignments`
+
+Columns (mirrors `11-data-model.md` §7):
 
 - `id`
 - `workspace_id`
-- `surface`
-- `algorithm_version_id`
-- `assignment_reason`
+- `surface` — check: `recommendations | news | inbox | search`
+- `algorithm_version_id` — FK → `home_algorithm_versions(id)` on delete cascade
+- `assignment_reason` — check: `rollout | staging | control | experiment | forced`
 - `started_at`
 - `ended_at`
+
+Indexes:
+
+- unique `(workspace_id, surface, ended_at)` — at most one open assignment per (workspace, surface)
+- `(algorithm_version_id)`
 
 Use assignments to roll out a new recommendation or News strategy to one
 workspace, a percentage of workspaces, or a staging environment.
