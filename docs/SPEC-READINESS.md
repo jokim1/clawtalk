@@ -1,7 +1,7 @@
 > **Status:** active · **Generated:** 2026-05-29 · **Last updated:** 2026-05-30 (design-debt resolution pass)
 > Every spec-readiness gap found in the 2026-05-29 audit (8 parallel cross-doc audits + DOC-AUDIT.md closure check). Stable IDs so we can walk through them one-by-one.
 >
-> **Verdict (post-design-debt-pass 2026-05-30): READY — VERIFIED + DESIGN-DEBT RESOLVED.** All P0 + all P1 + the 10 design-debt items I'd flagged as "deferred to impl time" all resolved. Spec corpus is implementation-ready. Migration is `0038_clawtalk_greenfield.sql` (PR #499 already used 0037).
+> **Verdict (post-design-debt-pass 2026-05-30): READY — VERIFIED + DESIGN-DEBT RESOLVED.** All P0 + all P1 + the 10 design-debt items I'd flagged as "deferred to impl time" all resolved. Spec corpus is implementation-ready. Migration is `0039_clawtalk_greenfield.sql` (PRs #499 + #501 used 0037 + 0038).
 >
 > **Verification pass (2026-05-30):** 8 parallel verification agents re-read each doc and confirmed the gap closures landed in the body (not just marked closed). Drifts caught + fixed inline:
 > 1. §12 `inbox_items` → `home_inbox_items` (3 spots).

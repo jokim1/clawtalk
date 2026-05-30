@@ -1,4 +1,4 @@
--- 0038_clawtalk_greenfield.sql
+-- 0039_clawtalk_greenfield.sql
 --
 -- ClawTalk greenfield rebuild migration.
 -- Per docs/05-build-plan.md Phase 1 + docs/11-data-model.md as the canonical schema source of truth.
@@ -29,6 +29,7 @@ drop table if exists
   public.talk_resource_bindings,
   public.talk_message_attachments,
   public.talk_outputs,
+  public.talk_context_source_pages,
   public.talk_context_sources,
   public.talk_context_source_ref_counter,
   public.talk_context_summary,
@@ -714,6 +715,7 @@ create table public.context_sources (
   extracted_text text,
   summary text,
   meta_json jsonb not null default '{}',
+  expected_page_count int,                     -- PDF page-rasterization: # page images expected; completeness = count(context_source_pages) = this. null for non-PDFs.
   include_in_prompt boolean not null default true,
   sort_order int,
   added_by_user_id uuid references public.users(id) on delete set null,
@@ -726,7 +728,22 @@ create table public.context_sources (
   ),
   foreign key (workspace_id, talk_id) references public.talks(workspace_id, id) on delete cascade,
   foreign key (workspace_id, source_document_id) references public.documents(workspace_id, id) on delete cascade,
-  foreign key (workspace_id, source_talk_id) references public.talks(workspace_id, id) on delete cascade
+  foreign key (workspace_id, source_talk_id) references public.talks(workspace_id, id) on delete cascade,
+  unique (workspace_id, id)
+);
+
+-- PDF page-rasterization: one row per page JPEG for vision-but-not-PDF models
+-- (gpt-5-mini, gemini-2.5-flash, kimi-k2.6). Attached alongside extracted_text
+-- (raster is pixels-only; the text keeps exact quotes). Per `11` §6 design note.
+create table public.context_source_pages (
+  workspace_id uuid not null,
+  source_id uuid not null,
+  page_index int not null check (page_index >= 0),
+  byte_size int not null check (byte_size >= 0),
+  payload_ref text not null,                   -- R2 key: attachments/{talk_id}/{source_id}/page-{page_index}.jpg
+  created_at timestamptz not null default now(),
+  primary key (source_id, page_index),
+  foreign key (workspace_id, source_id) references public.context_sources(workspace_id, id) on delete cascade
 );
 
 create table public.talk_tools (
@@ -1355,7 +1372,7 @@ declare
   tbl text;
   member_write_tables text[] := array[
     'folders','talks','talk_agents','talk_tools','talk_reads','messages','runs',
-    'talk_agent_snapshots','run_prompt_snapshots','context_sources','agents','agent_feedback_events',
+    'talk_agent_snapshots','run_prompt_snapshots','context_sources','context_source_pages','agents','agent_feedback_events',
     'team_compositions','team_composition_agents','documents','doc_tabs','doc_blocks',
     'document_edits','doc_tab_coeditors','jobs','improvement_runs','document_versions',
     'improvement_run_held_out_personas','forge_audiences','forge_audience_personas',
@@ -1415,7 +1432,7 @@ create policy agent_role_templates_read on public.agent_role_templates
 commit;
 
 -- =============================================================================
--- END 0038_clawtalk_greenfield.sql
+-- END 0039_clawtalk_greenfield.sql
 -- Per docs/05-build-plan.md Phase 1 Step 2: agent_role_templates seed runs in a follow-up
 -- migration or in the POST /workspaces handler at workspace-creation time.
 -- =============================================================================

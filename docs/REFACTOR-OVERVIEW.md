@@ -22,7 +22,7 @@ This is not "evolve the schema." This is "the schema we have constrains every fe
 | ✅ Merged | Spec corpus close pass (all P0 + P1 gaps closed across 14 docs) | PR [#497](https://github.com/jokim1/clawtalk/pull/497) → main `05e3a15` |
 | ✅ Merged | Talk-scoped tools refactor (removed per-agent `tool_permissions_json`) | PR [#499](https://github.com/jokim1/clawtalk/pull/499) → main `82641ed`, used migration **0037** |
 | 🟢 Open PR | 10 deferred design-debt items resolved | PR [#500](https://github.com/jokim1/clawtalk/pull/500) |
-| 🟢 Open PR | The greenfield migration — `0038_clawtalk_greenfield.sql` (1421 lines, locally validated) | PR [#502](https://github.com/jokim1/clawtalk/pull/502) |
+| 🟢 Open PR | The greenfield migration — `0039_clawtalk_greenfield.sql` (1421 lines, locally validated) | PR [#502](https://github.com/jokim1/clawtalk/pull/502) |
 | ⏭️ Next | `agent_role_templates` seed migration (Phase 1 Step 2) | TBD |
 | ⏭️ Next | Cutover plan doc (one-page) | TBD |
 | ⏭️ Next | src/ rewrite per §05 Phases 2–12 (executor, scheduler, queue consumer, accessors, routes) | Phased |
@@ -59,7 +59,7 @@ The shipped schema is the **proven prototype**, not the target. Specifically:
 - **Auth.** Google OAuth + email magic-link (planned) + device-code (CLI). HttpOnly cookies (`eb_at` / `eb_rt` / `eb_csrf`) + double-submit CSRF. See [SECURITY.md](./SECURITY.md).
 
 ### Changes
-- **Schema.** 37 legacy tables dropped in one CASCADE; 50 new tables created from the spec. The greenfield migration is [`supabase/migrations/0038_clawtalk_greenfield.sql`](../supabase/migrations/0038_clawtalk_greenfield.sql).
+- **Schema.** 37 legacy tables dropped in one CASCADE; 50 new tables created from the spec. The greenfield migration is [`supabase/migrations/0039_clawtalk_greenfield.sql`](../supabase/migrations/0039_clawtalk_greenfield.sql).
 - **Tenancy.** `workspaces` + `workspace_members` from day one; every workspace-owned table carries `workspace_id`; composite FKs prevent cross-workspace references.
 - **Runs model.** New `runs` table with `snapshot_group_id` (per-run frozen roster), `agent_snapshot_id` (the acting agent), `trigger` (`user` / `scheduler` / `manual`), `scheduled_for` (slot identity for jobs), `prompt_snapshot_id` (immutable prompt at fire time).
 - **Documents model.** First-class `documents` + `doc_tabs` + `doc_blocks` + `document_edits`. Replaces the `contents` / `content_edits` / `content_proposals` stack. Pending edits go through one unified accept path with CAS via `base_block_version` / `base_list_version`.
@@ -243,7 +243,7 @@ Detail in [05-build-plan.md](./05-build-plan.md). Summary table:
 | Phase | What | Status |
 |---|---|---|
 | **0** | Project setup — commit to Workers/Hono/DO/Hyperdrive/Queues stack | ✅ existing infra |
-| **1** | Single greenfield migration (`0038_clawtalk_greenfield.sql`) + `agent_role_templates` seed + first-signin workspace bootstrap | 🟢 migration in PR [#502](https://github.com/jokim1/clawtalk/pull/502); seed pending |
+| **1** | Single greenfield migration (`0039_clawtalk_greenfield.sql`) + `agent_role_templates` seed + first-signin workspace bootstrap | 🟢 migration in PR [#502](https://github.com/jokim1/clawtalk/pull/502); seed pending |
 | **2** | Workspace switcher + auth | ⏭️ |
 | **3** | Folders + Talks CRUD + roster | ⏭️ |
 | **4** | Chat → executor → queue consumer → outbox → DO streaming end-to-end | ⏭️ huge |
@@ -278,8 +278,8 @@ Each phase has explicit entry/exit criteria in §05.
 - 10 deferred design-debt items resolved (forge_audiences `is_default`, fitness shape, score scale, co-editor level, SSR freshness, etc.).
 
 ### Open
-- `agent_role_templates` seed migration (Phase 1 Step 2) — mechanical INSERT statements with prompts copied verbatim from [`03-agents.md`](./03-agents.md). Not yet written; will land as `0039_*.sql` or extend `0038`.
-- Cutover sequencing plan — 0038 destructively drops 37 tables; the moment it merges, `src/` references break. Could use a 1-page coordination plan.
+- `agent_role_templates` seed migration (Phase 1 Step 2) — mechanical INSERT statements with prompts copied verbatim from [`03-agents.md`](./03-agents.md). Not yet written; will land as `0040_*.sql` or extend `0039`.
+- Cutover sequencing plan — 0039 destructively drops 37 tables; the moment it merges, `src/` references break. Could use a 1-page coordination plan.
 - Forge `forge_rewriter` + `forge_critic` system prompts — §06 §3.6 has placeholder "TODO: Joseph to write at impl time."
 - Phase 13 eval scenario content + grader prompts — [eval-suite.md](./eval-suite.md) locks the harness contract but defers scenario content.
 - Per-page visual design for new surfaces — [02-visual-system.md](./02-visual-system.md) covers tokens but doesn't have component-level designs for Jobs UI, Forge gallery / run-detail / Audiences, home Forge surfacing, DocTabStrip.
@@ -325,7 +325,7 @@ If you're about to write code, here's where to start by task type:
 
 | Task | Start here |
 |---|---|
-| Writing the `agent_role_templates` seed migration | [03-agents.md](./03-agents.md) §2 (the 5 templates) + [11 §4](./11-data-model.md) (column shape) + the existing 0038 migration as the file format reference |
+| Writing the `agent_role_templates` seed migration | [03-agents.md](./03-agents.md) §2 (the 5 templates) + [11 §4](./11-data-model.md) (column shape) + the existing 0039 migration as the file format reference |
 | Rewriting `src/clawtalk/talks/scheduler.ts` for v8 jobs | [12 §5](./12-jobs.md) (Path A single-txn claim + Path B sweep) + [11 §8](./11-data-model.md) (jobs table) |
 | Rewriting `src/clawtalk/talks/queue-consumer.ts` | [12 §5](./12-jobs.md) (atomic claim) + [11 §3](./11-data-model.md) (runs CHECK invariant + partial uniques) |
 | Rewriting the executor | [06 §7](./06-agent-system-design.md) (prompt assembly) + [11 §3](./11-data-model.md) (runs/messages/snapshots) + [12 §3](./12-jobs.md) (job output emit) |
@@ -341,7 +341,7 @@ If you're about to write code, here's where to start by task type:
 
 ---
 
-## 14. Cutover risk: the moment 0038 lands
+## 14. Cutover risk: the moment 0039 lands
 
 The greenfield migration is **destructive**. The moment it lands on `main`:
 
@@ -355,7 +355,7 @@ This is why [SPEC-READINESS.md](./SPEC-READINESS.md) flags **cutover sequencing 
 - **Big-bang cutover.** One coordinated PR that lands the migration + every src/ + webapp/ rewrite + the seed in a single squash-merge. Maximum carnage, single transition window, simplest mental model. Joseph has zero downstream users; downtime is "ClawTalk doesn't work for an hour."
 - **Feature-flag cutover.** Branch the code paths behind `CT_GREENFIELD` (or similar). Old paths read the legacy tables, new paths read the greenfield tables. Migrate per Phase. Higher complexity (dual-path code; runtime forks; double the test surface) for the benefit of "the prod webapp keeps working for the human while I'm migrating."
 
-Both are valid. The right choice depends on whether Joseph wants to keep dogfooding the shipped app during the rewrite. **Resolve this before 0038 merges.**
+Both are valid. The right choice depends on whether Joseph wants to keep dogfooding the shipped app during the rewrite. **Resolve this before 0039 merges.**
 
 ---
 
