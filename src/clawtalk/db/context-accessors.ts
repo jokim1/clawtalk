@@ -105,6 +105,13 @@ export interface TalkContextSourceRecord {
   created_at: string;
   updated_at: string;
   created_by: string | null;
+  // Rasterized-page metadata. expected_page_count is a column on
+  // talk_context_sources; page_image_count is a joined count of page rows
+  // populated only by the read accessors (list + getById). Both optional
+  // so the mutation RETURNING clauses (which can't join) still type-check;
+  // those paths re-read via getTalkContextSourceById to fill them.
+  expected_page_count?: number | null;
+  page_image_count?: number;
 }
 
 export interface TalkStateEntryRecord {
@@ -160,6 +167,13 @@ export interface ContextSourceSnapshot {
   createdAt: string;
   updatedAt: string;
   createdBy: string | null;
+  // Rasterized-page state, surfaced so the webapp can show a render-pages
+  // affordance for PDFs that lack a complete page set without recomputing
+  // the rule client-side. pageSetComplete = expected_page_count is set,
+  // positive, and equal to the number of uploaded page rows.
+  expectedPageCount: number | null;
+  pageImageCount: number;
+  pageSetComplete: boolean;
 }
 
 export interface ContextSourceWithContent extends ContextSourceSnapshot {
@@ -206,6 +220,12 @@ function toRuleSnapshot(row: TalkContextRuleRecord): ContextRuleSnapshot {
 }
 
 function toSourceSnapshot(row: TalkContextSourceRecord): ContextSourceSnapshot {
+  const expectedPageCount = row.expected_page_count ?? null;
+  const pageImageCount = row.page_image_count ?? 0;
+  const pageSetComplete =
+    expectedPageCount !== null &&
+    expectedPageCount > 0 &&
+    pageImageCount === expectedPageCount;
   return {
     id: row.id,
     sourceRef: row.source_ref,
@@ -228,6 +248,9 @@ function toSourceSnapshot(row: TalkContextSourceRecord): ContextSourceSnapshot {
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     createdBy: row.created_by,
+    expectedPageCount,
+    pageImageCount,
+    pageSetComplete,
   };
 }
 
@@ -675,14 +698,21 @@ export async function listTalkContextSources(
 ): Promise<ContextSourceSnapshot[]> {
   const db = getDbPg();
   const rows = await db<TalkContextSourceRecord[]>`
-    select id, talk_id, owner_id, source_ref, source_type, title, title_slug, note,
-           sort_order, status, source_url, file_name, file_size, mime_type,
-           storage_key, extracted_text, extracted_at, last_fetched_at,
-           extraction_error, fetch_strategy, is_truncated, created_at,
-           updated_at, created_by
-    from public.talk_context_sources
-    where talk_id = ${talkId}::uuid
-    order by sort_order asc, created_at asc
+    select s.id, s.talk_id, s.owner_id, s.source_ref, s.source_type, s.title,
+           s.title_slug, s.note, s.sort_order, s.status, s.source_url,
+           s.file_name, s.file_size, s.mime_type, s.storage_key,
+           s.extracted_text, s.extracted_at, s.last_fetched_at,
+           s.extraction_error, s.fetch_strategy, s.is_truncated, s.created_at,
+           s.updated_at, s.created_by, s.expected_page_count,
+           coalesce(p.page_count, 0) as page_image_count
+    from public.talk_context_sources s
+    left join (
+      select source_id, count(*)::int as page_count
+      from public.talk_context_source_pages
+      group by source_id
+    ) p on p.source_id = s.id
+    where s.talk_id = ${talkId}::uuid
+    order by s.sort_order asc, s.created_at asc
   `;
   return rows.map(toSourceSnapshot);
 }
@@ -705,13 +735,20 @@ export async function getTalkContextSourceById(
 ): Promise<ContextSourceSnapshot | undefined> {
   const db = getDbPg();
   const rows = await db<TalkContextSourceRecord[]>`
-    select id, talk_id, owner_id, source_ref, source_type, title, title_slug, note,
-           sort_order, status, source_url, file_name, file_size, mime_type,
-           storage_key, extracted_text, extracted_at, last_fetched_at,
-           extraction_error, fetch_strategy, is_truncated, created_at,
-           updated_at, created_by
-    from public.talk_context_sources
-    where id = ${sourceId}::uuid and talk_id = ${talkId}::uuid
+    select s.id, s.talk_id, s.owner_id, s.source_ref, s.source_type, s.title,
+           s.title_slug, s.note, s.sort_order, s.status, s.source_url,
+           s.file_name, s.file_size, s.mime_type, s.storage_key,
+           s.extracted_text, s.extracted_at, s.last_fetched_at,
+           s.extraction_error, s.fetch_strategy, s.is_truncated, s.created_at,
+           s.updated_at, s.created_by, s.expected_page_count,
+           coalesce(p.page_count, 0) as page_image_count
+    from public.talk_context_sources s
+    left join (
+      select source_id, count(*)::int as page_count
+      from public.talk_context_source_pages
+      group by source_id
+    ) p on p.source_id = s.id
+    where s.id = ${sourceId}::uuid and s.talk_id = ${talkId}::uuid
     limit 1
   `;
   return rows[0] ? toSourceSnapshot(rows[0]) : undefined;
@@ -866,7 +903,11 @@ export async function patchTalkContextSource(input: {
                 extraction_error, fetch_strategy, is_truncated, created_at,
                 updated_at, created_by
     `;
-    return rows[0] ? toSourceSnapshot(rows[0]) : undefined;
+    // Re-read with the page-image join so the returned snapshot keeps the
+    // PDF's page-set state (a title/note edit must not clobber it to 0).
+    return rows[0]
+      ? getTalkContextSourceById(input.sourceId, input.talkId)
+      : undefined;
   }
 
   const rows = await db<TalkContextSourceRecord[]>`
@@ -883,7 +924,9 @@ export async function patchTalkContextSource(input: {
               extraction_error, fetch_strategy, is_truncated, created_at,
               updated_at, created_by
   `;
-  return rows[0] ? toSourceSnapshot(rows[0]) : undefined;
+  return rows[0]
+    ? getTalkContextSourceById(input.sourceId, input.talkId)
+    : undefined;
 }
 
 export async function updateSourceExtraction(input: {
@@ -949,7 +992,7 @@ export async function markTalkContextSourcePending(
               extraction_error, fetch_strategy, is_truncated, created_at,
               updated_at, created_by
   `;
-  return rows[0] ? toSourceSnapshot(rows[0]) : undefined;
+  return rows[0] ? getTalkContextSourceById(sourceId, talkId) : undefined;
 }
 
 export async function getContextSourceWithContent(

@@ -4417,6 +4417,8 @@ function buildTalkAgent(
     providerId: input.providerId ?? null,
     modelId: input.modelId ?? null,
     modelDisplayName: input.modelDisplayName ?? null,
+    supportsVision: input.supportsVision ?? false,
+    supportsPdfDocuments: input.supportsPdfDocuments ?? false,
   };
 }
 
@@ -4802,6 +4804,9 @@ function buildContextSource(input: Partial<ContextSource> = {}): ContextSource {
     sortOrder: input.sortOrder ?? 0,
     createdAt: input.createdAt ?? '2026-03-06T00:00:00.000Z',
     updatedAt: input.updatedAt ?? '2026-03-06T00:00:00.000Z',
+    expectedPageCount: input.expectedPageCount ?? null,
+    pageImageCount: input.pageImageCount ?? 0,
+    pageSetComplete: input.pageSetComplete ?? false,
   };
 }
 

@@ -8483,6 +8483,11 @@ export function TalkDetailPage({
           providerId: regAgent.providerId,
           modelId: regAgent.modelId,
           modelDisplayName: null,
+          // Capabilities are resolved server-side; an unsaved draft defaults
+          // to false. Drafts don't drive the render-pages affordance — that
+          // reads the persisted `agents` list, not `agentDrafts`.
+          supportsVision: false,
+          supportsPdfDocuments: false,
         },
       ],
       nextDraft: {
@@ -8534,6 +8539,8 @@ export function TalkDetailPage({
           isPrimary: agent.isPrimary,
           displayOrder: index,
           health: agent.health,
+          supportsVision: agent.supportsVision,
+          supportsPdfDocuments: agent.supportsPdfDocuments,
         })),
       });
       setAgents(saved);
@@ -9403,6 +9410,9 @@ export function TalkDetailPage({
                     sources={contextSources}
                     setSources={setContextSources}
                     canEdit={canEditAgents}
+                    hasVisionNonDocAgent={agents.some(
+                      (a) => a.supportsVision && !a.supportsPdfDocuments,
+                    )}
                     onUnauthorized={handleUnauthorized}
                   />
 
