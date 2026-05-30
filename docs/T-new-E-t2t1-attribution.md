@@ -1,6 +1,6 @@
 # T-new-E — t2-t1 attribution (measurement-only plan)
 
-**Status:** Plan, **r2 draft**.
+**Status:** Plan, **r3 draft**.
 **Tracking:** [[project-llm-turn-latency]].
 **Branch (planning):** `docs/t-new-e-t2t1-attribution` (this doc).
 **Branch (implementation, to be created):** `feature/t-new-e-instrumentation`.
@@ -74,10 +74,12 @@ Static-analysis suspects (priors): **E16 `loadTalkContext`** (biggest DB surface
 
 ## 3. Instrumentation strategy
 
-Add temp `[t-new-e-meta]` probes at each E-phase boundary in **four files** (codex P1-B caught r1's mistake of only probing the emit call site, which is fire-and-forget):
+Add temp `[t-new-e-meta]` probes at each E-phase boundary in **six files** (codex r2 P1-A: r1 P2-E isn't actually absorbed unless we touch `db.ts` — the statement counter has nowhere else to live):
 
 1. **dispatch-in-process.ts + queue-consumer.ts + new-executor.ts** — E0-E19 phase boundaries with `Date.now()` deltas tagged with `runId` + phase ID.
-2. **outbox-emit.ts:79** (`emitOutboxEventOutsideTx`) and **streaming-notify.ts** — instrument the actual INSERT + notify push, keyed by `runId` extracted from the payload (or by `eventId` once available). Captures E20's real timing rather than the misleading 0 ms at the fire-and-forget call site.
+2. **outbox-emit.ts:79** (`emitOutboxEventOutsideTx`) — log INSERT enqueue time + completion time + returned `eventId`, keyed by `runId` from the payload.
+3. **streaming-notify.ts:52** — log the 50ms coalescer's enqueue → flush-start → flush-end, keyed by `eventId`. Without this, E20 still undercounts the notify delay (codex r2 P2-C).
+4. **db.ts** — Proxy-wrap `getDbPg`, `getOutOfBandSql`, and the `withUserContext` setup hook (`db.savepoint` site, or the `set local role`/`set_config` setup just before user code runs). Also instrument the `db.ts:580` DO `.fetch` callsite and the `db.ts:377` scope-exit flush path so E20 captures the actual DO RPC time, not just the enqueue (codex r2 P2-C).
 
 ```ts
 // Standard phase probe:
@@ -93,7 +95,17 @@ console.log('[t-new-e-meta]', { phase: 'Ex:label', runId, ms: Date.now() - tEx, 
 
 Increment a per-request counter on each tagged-template call. Logged alongside `ms` per phase so we can distinguish "this phase is slow because many DB reads" from "this phase is slow because one slow read" from "this phase is slow because Hyperdrive cold-connected".
 
-**Pre-deploy verification (karpathy W2):** before pushing the instrumentation commit, `grep -n 'ctx.waitUntil.*dispatchRunInProcess' src/clawtalk/web/worker-app.ts` to confirm the T7 inline path is still wired for single-run /chat. If a recent PR rerouted single-run /chat to the queue path, the bench measures the queue and the attribution is meaningless. Skip the deploy if the grep returns 0 hits.
+**Pre-deploy verification (karpathy W2 + codex r2 P2-B fix):** before pushing the instrumentation commit, verify the T7 inline path is still wired for single-run /chat. The route schedules across multiple lines, so a single-line grep returns 0 hits. Use either of:
+
+```
+rg -U 'waitUntil\(\s*\n\s*dispatchRunInProcess' src/clawtalk/web/worker-app.ts
+```
+or the two-step form:
+```
+grep -A2 'ctx.waitUntil' src/clawtalk/web/worker-app.ts | grep dispatchRunInProcess
+```
+
+If neither returns hits, a recent PR rerouted single-run /chat to the queue path; the bench would measure the queue and the attribution would be meaningless. Skip the deploy until rewired.
 
 **waitUntil hazard tracking (codex P2-D):** CF Workers' `ctx.waitUntil` has a 30 sec cap shared across all `waitUntil` calls for a request; slow/canceled tails can disappear from the sample. Track in each bench run:
 - Were `[t-new-e-meta]` entries observed at every E-phase, or did the trail stop mid-chain?
@@ -106,9 +118,9 @@ Any run that fails any of the above is excluded from the attribution medians and
 **Deploy shape (codex P2-H + karpathy W3):**
 - **Single-purpose instrumentation commit** on `feature/t-new-e-instrumentation` off main. Tag its SHA in the plan when committed.
 - Push, wait for deploy.
-- Run **two cohorts** (codex P2-G):
-  - **Cold cohort:** n=5 with a `sleep 60` between runs so the Worker isolate has time to evict.
-  - **Warm cohort:** n=10 back-to-back, no sleep.
+- Run **two cohorts** (codex P2-G), each on a **fresh talk per run** to keep `loadTalkContext` cost stable (codex r2 P2-D — reusing one talk for 15 runs grows history, attachments, and E16 cost, so warm cohort would measure "later/larger conversation" not "warm isolate/DB"):
+  - **Cold cohort:** n=5, with a fresh talk seeded before each run AND a `sleep 90` between runs so the Worker isolate has time to evict (~60s isn't always enough on CF; 90s is safer).
+  - **Warm cohort:** n=10, fresh talk per run, back-to-back.
 - Read `[t-new-e-meta]` entries from `wrangler tail` filtered on `[t-new-e-meta]`. Collect per-phase ms + stmts into the §4 attribution table.
 - **Revert commit** on the same branch (pure code revert, no doc changes — single-purpose). Tag the revert SHA.
 - Verify `git diff origin/main -- src/` is empty.
@@ -123,7 +135,7 @@ Any run that fails any of the above is excluded from the attribution medians and
 
 After the bench runs (cold + warm cohorts), the two tables below fill in. Once filled, the PR ships with the instrumentation commit + the revert commit + this filled table as the docs change.
 
-**Cold cohort (n=5, 60 sec gap between runs):**
+**Cold cohort (n=5, 90 sec gap, fresh talk per run). p90 column is `max-ish` at n=5 — useful for ranking but not for tight discrimination (codex r2 P2-E).**
 
 ```
 | Phase | p50 ms | p90 ms | stmts | Notes |
@@ -152,7 +164,9 @@ After the bench runs (cold + warm cohorts), the two tables below fill in. Once f
 
 **Warm cohort (n=10, back-to-back):** same shape. Differences from cold attribute to Hyperdrive cold-connect (E1) and isolate startup.
 
-**Reconciliation rule:** Worker subtotal + E21 residual should equal bench t2-t1 ± 5 %. A residual outside the ~500 ms upper bound (T-new-B's drain p95) signals either a missed phase or a measurement bug — re-instrument.
+**Reconciliation rule (per-cohort, karpathy r2 W4):** Worker subtotal + E21 residual should equal bench t2-t1 ± 5 % **within each cohort separately**. Cold-cohort reconciliation is expected to be looser than warm because n=5 widens the range; if cold reconciliation exceeds ± 10 %, flag (could indicate a Worker isolate startup phase not in the inventory). Warm reconciliation must hit ± 5 %.
+
+If E21 residual lands outside the ~500 ms upper bound (T-new-B's drain p95) for warm, a phase is missing or a probe is buggy — re-instrument.
 
 After the tables are filled, the **dominant phase becomes the next T-new-E1 plan target**. If no single phase dominates and the cost is distributed (e.g., E10 + E14 + E16 each at ~1 sec), T-new-E1 may be a multi-phase plan.
 
@@ -180,14 +194,14 @@ After the tables are filled, the **dominant phase becomes the next T-new-E1 plan
 | Task | Files | Verify |
 |---|---|---|
 | **E-D0** Pre-deploy grep verifies T7 inline path is still wired (karpathy W2) | `grep ctx.waitUntil.*dispatchRunInProcess src/clawtalk/web/worker-app.ts` | non-zero hits |
-| **E-D1** Add `[t-new-e-meta]` probes to dispatch-in-process.ts + queue-consumer.ts + new-executor.ts + outbox-emit.ts + streaming-notify.ts (5 files) + Proxy-wrap for `getDbPg`/`getOutOfBandSql`/withUserContext setup | 5 src files | typecheck passes |
+| **E-D1** Add `[t-new-e-meta]` probes to dispatch-in-process.ts + queue-consumer.ts + new-executor.ts + outbox-emit.ts + streaming-notify.ts + **db.ts** (6 files, codex r2 P1-A — db.ts hosts the Proxy-wrap for `getDbPg`/`getOutOfBandSql` AND the DO `.fetch` callsite at db.ts:580 AND the scope-exit flush at db.ts:377) | 6 src files | typecheck passes |
 | **E-D2** Single-purpose commit on `feature/t-new-e-instrumentation`; record commit SHA in this plan | n/a | one commit, src-only |
 | **E-D3** Push; deploy succeeds; confirm logs visible via `wrangler tail` | n/a | `[t-new-e-meta]` entries appearing for normal traffic |
 | **E-D4** Run cold cohort (n=5, 60s gap); then warm cohort (n=10, back-to-back); all SPA tabs closed | n/a | 15 runs captured, no `falling back to TALK_RUN_QUEUE.send` lines |
 | **E-D5** Tail logs into JSON; compute p50 + p90 per phase per cohort; fill §4 tables; commit | docs/T-new-E-t2t1-attribution.md | both tables reconcile to bench t2-t1 ±5 %, with E21 residual ≤ 500 ms |
 | **E-D6** Revert the instrumentation commit (single-purpose revert); verify `git diff origin/main -- src/` empty | n/a | empty diff |
 | **E-D7** Deploy the reverted build | n/a | prod has no instrumentation |
-| **E-D8** Open T-new-E plan PR: three commits (instrumentation + revert + docs) | n/a | review-ready |
+| **E-D8** Open T-new-E plan PR. Branch already has the plan-doc commits (r1, r2, r3, plus `.codex-r*-findings.txt` artifacts); the PR adds three NEW src-touching commits on top: instrumentation, revert, then the filled-table doc commit (karpathy r2 W5 clarification) | n/a | review-ready; `git diff origin/main -- src/` empty |
 | **E-D9** Identify dominant phase from §4; open T-new-E1 plan for the lever | n/a | follow-up plan exists |
 
 No production code lands. The PR's main-vs-PR diff is **identical to pre-merge main on src/** (instrumentation + revert cancel out). Doc artifact (filled attribution tables) is the only durable change.
@@ -207,20 +221,28 @@ No production code lands. The PR's main-vs-PR diff is **identical to pre-merge m
 ## Revision history
 
 - **r1 (initial draft)** — Documents the t2-t1 = 6571 ms p50 finding from the 2026-05-30 bench. Lists E0-E20 phase candidates from static analysis. Submitted for double review.
-- **r2 (this revision)** — absorbs codex consult r1 (3 P1 + 5 P2) + karpathy r1 (3 warnings):
+- **r2** — absorbs codex consult r1 (3 P1 + 5 P2) + karpathy r1 (3 warnings):
   - **§2 inventory:** E18 split (codex P1-A — direct-path pre-LLM prep was conflated with LLM connect; now E18 = prep, E19 = executeWithAgent/LLM, E20 = outbox INSERT, E21 = DO+WS residual). E4 corrected to 3 stmts not 1 (codex P2-F: withUserContext setup is BEGIN + set role + set_config). E20 flagged as fire-and-forget so emit-call-site timing is meaningless (codex P1-B).
   - **§3 instrumentation:** expanded to 5 files (added outbox-emit.ts + streaming-notify.ts per codex P1-B). Wire-statement counter scope extended to `getOutOfBandSql` + withUserContext-setup hook (codex P2-E). Pre-deploy grep verifies inline path is still wired (karpathy W2). waitUntil hazard tracking added (codex P2-D). Cold + warm cohort split (codex P2-G). Clean PR shape with single-purpose instrumentation commit + revert (codex P2-H, karpathy W3). CF tail bandwidth budget computed (karpathy W1).
   - **§4 attribution:** two tables (cold + warm), E21 residual derived not measured (codex P1-C — can't reconcile to client t2 with Worker logs alone). Reconciliation rule with ±5 % tightened.
   - **§5 risks:** expanded to cover waitUntil cap, clock skew, n=10 thinness.
   - **§6 tasks:** D0 grep step added; D1 file count grew to 5; D6 verifies empty src/ diff; D7 deploys reverted build before D8 PR open.
+- **r3 (this revision)** — absorbs codex consult r2 (1 P1 + 4 P2) + karpathy r2 (3 warnings):
+  - **§3 file count grew to 6** (codex r2 P1-A) — db.ts MUST be touched because the Proxy-wrap for `getDbPg`/`getOutOfBandSql` AND the DO `.fetch` callsite at db.ts:580 AND the scope-exit flush at db.ts:377 all live there. Claiming r1 P2-E was absorbed without touching db.ts was the actual contradiction in r2.
+  - **§3 grep gate fixed** (codex r2 P2-B) — `ctx.waitUntil` and `dispatchRunInProcess` are on separate lines in worker-app.ts:2382; single-line grep returns 0. Use `rg -U` or two-step `grep -A2`.
+  - **§3 E20 expanded** (codex r2 P2-C) — instrument the 50 ms coalescer enqueue→flush in streaming-notify.ts:52 AND the DO fetch in db.ts:580 AND the scope-exit flush in db.ts:377. Without these, E20 still undercounts.
+  - **§3 cohort design** (codex r2 P2-D) — fresh talk per run for both cohorts. Reusing one talk for 15 runs grows `loadTalkContext` (E16) cost over time, so the warm cohort would measure "larger conversation" not "warm isolate". Cold gap also bumped 60s → 90s to better evict.
+  - **§4 cold-cohort table** (codex r2 P2-E) — labeled p90 as "max-ish (n=5)" so it's not compared apples-to-apples with warm p90.
+  - **§4 reconciliation rule** (karpathy r2 W4) — per-cohort: ± 5 % warm, ± 10 % cold.
+  - **§6 D8 PR commits clarified** (karpathy r2 W5) — branch already has r1/r2/r3 doc commits + findings artifacts; D8's three NEW commits are instrumentation + revert + filled-table.
 
 ## GSTACK REVIEW REPORT
 
 | Review | Trigger | Why | Runs | Status | Findings |
 |--------|---------|-----|------|--------|----------|
-| Codex Consult | `/codex consult` | Plan-stage behavior + framework catches | 1 | **CLEAR (r1 absorbed)** | r1: 3 P1 + 5 P2 absorbed in r2 |
-| Karpathy Audit | `/karpathy-audit` (file mode, by hand) | Plan-stage style + four principles | 1 | **CLEAR (r1 absorbed)** | r1: 3 warnings absorbed in r2 (W3 overlapped with codex P2-H; W1+W2 unique) |
+| Codex Consult | `/codex consult` | Plan-stage behavior + framework catches | 2 | **r2: NOT CLEAR → r3** | r1: 3 P1 + 5 P2 absorbed in r2. r2: 1 P1 + 4 P2 absorbed in r3 (db.ts scope, broken grep, E20 undercount, cohort fixture state, cold-p90 framing) |
+| Karpathy Audit | `/karpathy-audit` (file mode, by hand) | Plan-stage style + four principles | 2 | **r2: NOT CLEAR → r3** | r1: 3 warnings absorbed in r2. r2: 3 warnings absorbed in r3 (per-cohort reconciliation, PR commit clarification, 60s cold gap → 90s) |
 
-- **CROSS-MODEL:** Codex caught all the framework-specific traps (fire-and-forget emit, withUserContext setup, clock skew, waitUntil cap). Karpathy caught the process gaps (pre-deploy verification, log rate-limit budget, PR shape clarity). Near-zero overlap, both load-bearing — same pattern observed in [[feedback-codex-catches-behavior-karpathy-catches-style]].
-- **UNRESOLVED:** 0. r2 needs r2 verification pass (codex + karpathy on r2) before the measurement is run.
-- **VERDICT:** r2 draft. Significant reshape from r1; recommend r2 verification before deploying the instrumentation commit.
+- **CROSS-MODEL:** Codex still catching the framework-specific traps (this round: db.ts scope contradiction, multi-line grep, coalescer/DO instrumentation gaps). Karpathy caught the process/precision items (per-cohort reconciliation, commit count clarity). Consistent split per [[feedback-codex-catches-behavior-karpathy-catches-style]].
+- **UNRESOLVED:** 0. r3 needs r3 verification pass before the measurement is run.
+- **VERDICT:** r3 draft. Tightened on every codex r2 finding. Recommend r3 verification pass; if clean, proceed to instrumentation deploy.
