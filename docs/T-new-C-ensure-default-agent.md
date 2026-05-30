@@ -1,6 +1,6 @@
 # T-new-C — `ensureTalkUsesUsableDefaultAgent` happy-path early-exit
 
-**Status:** Plan, **r3 draft**.
+**Status:** Plan, **r4 draft**.
 **Tracking:** [[project-llm-turn-latency]], [[T-new-A-chat-handler-parallelize]] (the §4.5 attribution that surfaced this).
 **Branch (planning):** `docs/t-new-c-ensure-default-agent` (this doc).
 **Branch (implementation, to be created):** `feature/t-new-c-ensure-default-agent`.
@@ -12,11 +12,11 @@
 
 - **r1 (2026-05-29)** — initial draft. Codex returned 2 P1 + 5 P2 (`.codex-r1-findings.txt`). Karpathy returned 1 critical + 2 warning + 1 nit. Critical overlap on the gate-equivalence claim; complementary on enabled-semantics, RLS reference, failure surface, call multiplicity, "99%" hand-wave.
 - **r2 (2026-05-29)** — absorbed r1: widened gate to `orphanCount = 0`; dropped "usable" terminology; fixed RLS reference; replaced "99%" with measurement-validated framing; added §2.3 route multiplicity table; deferred redundant-inner-call removal. Codex r2 returned 0 P1 + 3 P2; karpathy r2 returned 0 critical + 2 warning + 1 nit (100% overlap with codex). Raw: `.codex-r2-findings.txt`.
-- **r3 (this revision)** — absorbs r2 findings:
-  - Wrapped snapshot SELECT in try/catch matching the existing `getDefaultTalkAgentId` swallow (codex r2-P2 #2, karpathy r2 nit). No new throw surface; preserves today's behavioral contract.
-  - §7 verification commands rewritten to use the actual `latency-bench.ts` interface (`--provider=haiku`, no `--route` flag exists). Route-level claims qualified — the bench only exercises `sendChatRoute`; `getTalkRoute` / `listTalksRoute` savings inferred from function-level + multiplicity, not measured directly (codex r2-P2 #1).
-  - Baseline reference corrected from "post-T-new-A 3920 ms" to "pre-T-new-C measured at C5" — captured during implementation rather than asserted at plan time (codex r2-P2 #1).
-  - §4.1 equivalence table — added the missing N-active/1-primary/0-orphan row (codex r2-P2 #3, karpathy r2 W2). Dropped "strictly tighter" — the table proves equivalence, not strictness.
+- **r3 (2026-05-29)** — absorbed r2: wrapped snapshot in try/catch; rewrote §7 to use real bench interface; baseline measured at C5; §4.1 added N-active row; dropped "strictly tighter" claim. Codex consult r3 + karpathy r3 both PASS clean. `/codex review` (the formal PR-stage review against the diff): GATE PASS with 0 P1 + 3 P2 advisories.
+- **r4 (this revision)** — absorbs `/codex review` r3 P2s:
+  - Test 2 rewritten — drop the `vi.spyOn` strategy (ESM lexical bindings yield false negatives); assert gating via DB-state post-conditions + a query counter that wraps `getDbPg()` in C-impl (P2 #1).
+  - Test 3 rewritten — acknowledge that `talks.test.ts` has NO existing route tests for `getTalkRoute` / `listTalkAgentsRoute` / `listTalksRoute`; the implementation must add explicit happy-path tests for the four call sites covered by §2.3. §6 task estimate bumped to ~4 h (P2 #2).
+  - §8 row #1 tightened — the try/catch covers only the snapshot SELECT itself; subsequent heal-path throws still propagate as today. Removed the "blanket safety" implication (P2 #3).
 
 ---
 
@@ -261,28 +261,37 @@ Three test files touched:
 
 ### Test 2 — `src/clawtalk/agents/agent-registry.test.ts` (extend)
 
-`ensureTalkUsesUsableDefaultAgent` gating behavior:
+`ensureTalkUsesUsableDefaultAgent` gating behavior. **Important:** `ensureTalkUsesUsableDefaultAgent` calls `getDefaultTalkAgentId` / `getRegisteredAgent` / `getTalkAgentRows` via lexical bindings within the same module. `vi.spyOn` on imported bindings won't observe those calls — the bindings were captured at module-load time before any spy could attach. Assert gating via **DB-state post-conditions** + a **query counter** that wraps the test's `getDbPg()` (a per-test counter installed in the `beforeEach`).
 
-- **Healthy-shape gate hit:** seed talk with 1 active primary row + 0 orphans → call → assert `setTalkAgents`, `getDefaultTalkAgentId`, `getRegisteredAgent`, `getTalkAgentRows` were NOT called (via spies / call-count assertions).
-- **Orphan-present heal:** seed talk with 1 active primary + 1 orphan → call → assert `pruneDeletedTalkAgentAssignments` ran (post-condition: orphan row gone).
-- **Empty-agents heal:** seed talk with 0 rows → call → assert default agent was set.
-- **Broken-primary heal:** seed talk with 2 active rows + 0 primary → call → assert prune fixed primary.
+- **Healthy-shape gate hit:** seed talk with 1 active primary row + 0 orphans → call → assert (a) query counter shows exactly 1 SELECT against `talk_agents` during the call (the snapshot), zero against `settings_kv`, zero INSERTs/UPDATEs/DELETEs on `talk_agents`; (b) talk's `talk_agents` rows unchanged (post-condition).
+- **Orphan-present heal:** seed talk with 1 active primary + 1 orphan → call → assert (a) snapshot SELECT fires, then heal path runs (prune deletes orphan); (b) orphan row gone from `talk_agents`.
+- **Empty-agents heal:** seed talk with 0 rows → call → assert default agent was set (post-condition: 1 active primary row exists after the call).
+- **Broken-primary heal:** seed talk with 2 active rows + 0 primary → call → assert prune fixed primary (post-condition: exactly 1 row has `is_primary = true`).
+- **Snapshot SELECT throws → swallow → heal fallback:** mock `getTalkAgentsHealthSnapshot` to throw → call → assert no exception propagates AND heal path was attempted (talk state matches what heal would produce).
 
-### Test 3 — `src/clawtalk/web/routes/talks.test.ts` (regression)
+### Test 3 — `src/clawtalk/web/routes/talks.test.ts` (NEW route tests)
 
-Existing four-caller happy-path tests must continue to pass without modification. Specifically `sendChatRoute` (the latency-sensitive path) confirms the gate doesn't break end-to-end `/chat`. The `listTalkAgentsRoute` test covers the double-call route shape.
+`talks.test.ts` today only tests `enqueueTalkChat` — there is NO existing happy-path coverage for the four call sites in §2.3. C-impl must ADD these tests so the §7 success criteria are validated at the route boundary, not just the function boundary.
+
+- **sendChatRoute happy path:** POST `/talks/:id/chat` with a healthy talk → asserts response shape, no 500, healthy gate hit (DB-state unchanged).
+- **getTalkRoute happy path:** GET `/talks/:id` with a healthy talk → asserts response includes talk record + agent shape; `ensureTalkUsesUsableDefaultAgent` is called twice (direct + via `toTalkApiRecord`), both gate hits.
+- **listTalkAgentsRoute happy path:** GET `/talks/:id/agents` with a healthy talk → asserts agent list shape; same double-call pattern.
+- **listTalksRoute happy path with N talks:** GET `/talks` with N=3 healthy talks → asserts list shape; `ensureTalkUsesUsableDefaultAgent` is called N times (via `toTalkApiRecord` per talk).
 
 ---
 
 ## 6. Implementation tasks
 
+**Total estimated effort: ~4 h human / ~3 h CC** (up from r3's ~2 h after absorbing P2 #2's route-test gap — those 4 new route tests in `talks.test.ts` are a real C-impl cost, not regression coverage).
+
 | Task | Files | Verify |
 |---|---|---|
 | **C1** Add `getTalkAgentsHealthSnapshot` accessor | `src/clawtalk/db/talk-agents.ts` (~30 LoC) | Test 1 passes |
-| **C2** Rewrite `ensureTalkUsesUsableDefaultAgent` | `src/clawtalk/agents/agent-registry.ts:255` (gate added; existing logic preserved behind gate) | Test 2 passes |
-| **C3** Tests | `src/clawtalk/db/talk-agents.test.ts` (new) + `src/clawtalk/agents/agent-registry.test.ts` (extend) | `npm run test` 1037+5 passes |
-| **C4** Push PR. Run `/codex review` + `/karpathy-audit diff` on diff. Absorb findings. | n/a | both PASS clean |
-| **C5** Deploy. Function-level bench + route-level bench (§7). | n/a | targets met |
+| **C2** Rewrite `ensureTalkUsesUsableDefaultAgent` with snapshot gate + try/catch | `src/clawtalk/agents/agent-registry.ts:255` (gate added; existing logic preserved behind gate) | Test 2 passes |
+| **C3** Backend tests | `src/clawtalk/db/talk-agents.test.ts` (new — Test 1) + `src/clawtalk/agents/agent-registry.test.ts` (extend — Test 2, includes the query-counter helper) | `npm run test` passes (existing + 5 Test 1 cases + 5 Test 2 cases) |
+| **C4** Route tests (NEW per P2 #2 absorption) | `src/clawtalk/web/routes/talks.test.ts` (extend — Test 3's 4 cases: sendChatRoute / getTalkRoute / listTalkAgentsRoute / listTalksRoute happy paths) | `npm run test` passes; route gate-hit counts match §2.3 multiplicity |
+| **C5** Push PR. Run `/codex review` + `/karpathy-audit diff` on diff. Absorb findings. | n/a | both PASS clean |
+| **C6** Deploy. Function-level bench + sendChatRoute bench per §7. | n/a | targets met |
 
 ---
 
@@ -319,7 +328,7 @@ This is the existing `/chat`-only harness (the script does not have a `--route` 
 
 | Failure | Behavior | Recovery |
 |---|---|---|
-| `getTalkAgentsHealthSnapshot` SELECT throws | Swallowed by §4.2's try/catch → falls through to heal path → existing swallow on `getDefaultTalkAgentId`. Same end-state as today: function silently no-ops. | n/a — preserves existing best-effort contract. |
+| `getTalkAgentsHealthSnapshot` SELECT throws | Caught by §4.2's try/catch around the snapshot call only. Falls through to the existing heal path, which has its own `try { getDefaultTalkAgentId } catch { return }` swallow. **However:** the try/catch covers ONLY the snapshot SELECT itself. If snapshot succeeds and the heal path runs, later throws from `getRegisteredAgent`, `getTalkAgentRows`, or `setTalkAgents` still propagate to the caller exactly as they do on `main` today — no new 500 surface, but also no new safety vs today. | n/a — matches today's failure surface for the heal path. |
 | `postgres.js` coerces counts as strings | `Number(rows[0]?.active_count ?? 0)` handles correctly (§4.5). | n/a |
 | Snapshot reads stale row count under concurrent mutation | Slightly different race than today's; §4.4 argues benign. | Next request's call catches it. |
 | Snapshot SQL accidentally OR-s `is_primary` against null-FK rows | `(is_primary)::int` over a NULL `is_primary` yields NULL; `sum(NULL) = NULL`; `coalesce(..., 0) = 0` makes the gate refuse healthy → routes to heal. Harmless mis-classification. | n/a |
@@ -346,3 +355,5 @@ This is the existing `/chat`-only harness (the script does not have a `--route` 
 | Karpathy audit (r2) | `/karpathy-audit` against the plan | Style + four principles re-check | 4/4 coverage; 0 critical + 2 warning + 1 nit | NOT CLEAR → r3 | 100 % overlap with codex r2 (W1 invalid-bench, W2 strictly-tighter, NIT failure-surface framing). Rising overlap per [[feedback-codex-catches-behavior-karpathy-catches-style]] — plan converging. |
 | Codex consult (r3) | `/codex consult` | Re-verify swallow wrap, fixed bench commands, equivalence table | 0 P1 + 0 P2 | **PASS clean** | "r3 PASS clean." Verified: try/catch fallback routes correctly to heal; §4.1 complete; §7 runnable. |
 | Karpathy audit (r3) | `/karpathy-audit` | Re-verify style on r3 | 4/4 coverage; 0 critical + 0 warning + 1 nit | **PASS clean** | Single optional nit on §7 instrumentation specificity. Coverage and structural quality clean. |
+| Codex review (r3 diff) | `/codex review` against the branch diff | Formal PR-stage review with `high` reasoning + Codex's review-mode tuning | 0 P1 + 3 P2 | **GATE PASS** | All 3 P2 advisory: (a) Test 2 ESM spy strategy false-negative risk; (b) Test 3 assumed talks.test.ts coverage that doesn't exist; (c) §8 row #1 overstated safety. Absorbed in r4. |
+| Codex review (r4 diff) | `/codex review` against the branch diff | Re-verify the absorption | pending | pending | To run on this revision. |
