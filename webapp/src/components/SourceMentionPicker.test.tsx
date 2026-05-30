@@ -10,7 +10,9 @@ import type { ContextSource } from '../lib/api';
 
 afterEach(() => cleanup());
 
-function makeSource(input: Partial<ContextSource> & { id: string }): ContextSource {
+function makeSource(
+  input: Partial<ContextSource> & { id: string },
+): ContextSource {
   return {
     id: input.id,
     sourceRef: input.sourceRef ?? 'S1',
@@ -31,6 +33,9 @@ function makeSource(input: Partial<ContextSource> & { id: string }): ContextSour
     sortOrder: input.sortOrder ?? 0,
     createdAt: '2026-05-26T00:00:00Z',
     updatedAt: '2026-05-26T00:00:00Z',
+    expectedPageCount: input.expectedPageCount ?? null,
+    pageImageCount: input.pageImageCount ?? 0,
+    pageSetComplete: input.pageSetComplete ?? false,
   };
 }
 

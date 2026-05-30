@@ -28,11 +28,14 @@ import {
   getTalkGoal,
   getTalkStateEntry,
   getTalkStateEntryCount,
+  insertSourcePageImage,
   listTalkContextRules,
   listTalkContextSources,
   listTalkStateEntries,
   MAX_STATE_ENTRIES_PER_TALK,
   patchTalkContextRule,
+  patchTalkContextSource,
+  setSourceExpectedPageCount,
   setTalkGoal,
   upsertTalkStateEntry,
 } from './context-accessors.js';
@@ -331,6 +334,65 @@ describe('context-accessors-pg (postgres + RLS)', () => {
 
       expect(await deleteTalkContextSource(s1.id, TALK_A_ID)).toBe(true);
       expect(await getTalkContextSourceCount(TALK_A_ID)).toBe(1);
+    });
+  });
+
+  it('sources: surfaces page-image count + pageSetComplete, and a patch does not clobber it', async () => {
+    await withUserContext(USER_A_ID, async () => {
+      const pdf = await createTalkContextSource({
+        ownerId: USER_A_ID,
+        talkId: TALK_A_ID,
+        sourceType: 'file',
+        title: 'Deck',
+        fileName: 'deck.pdf',
+        mimeType: 'application/pdf',
+        storageKey: `attachments/${TALK_A_ID}/deck.pdf`,
+        extractedText: 'slide text',
+        createdBy: USER_A_ID,
+      });
+
+      // No pages rasterized yet.
+      let byId = await getTalkContextSourceById(pdf.id, TALK_A_ID);
+      expect(byId?.pageImageCount).toBe(0);
+      expect(byId?.expectedPageCount).toBeNull();
+      expect(byId?.pageSetComplete).toBe(false);
+
+      // Rasterize 2 of 2 pages.
+      await setSourceExpectedPageCount(pdf.id, TALK_A_ID, 2);
+      await insertSourcePageImage({
+        ownerId: USER_A_ID,
+        sourceId: pdf.id,
+        pageIndex: 0,
+        byteSize: 100,
+      });
+      await insertSourcePageImage({
+        ownerId: USER_A_ID,
+        sourceId: pdf.id,
+        pageIndex: 1,
+        byteSize: 200,
+      });
+
+      byId = await getTalkContextSourceById(pdf.id, TALK_A_ID);
+      expect(byId?.pageImageCount).toBe(2);
+      expect(byId?.expectedPageCount).toBe(2);
+      expect(byId?.pageSetComplete).toBe(true);
+
+      const listed = (await listTalkContextSources(TALK_A_ID)).find(
+        (s) => s.id === pdf.id,
+      );
+      expect(listed?.pageSetComplete).toBe(true);
+      expect(listed?.pageImageCount).toBe(2);
+
+      // Clobber guard: editing the title must NOT reset the page state to 0
+      // (the mutation accessor re-reads with the join).
+      const patched = await patchTalkContextSource({
+        sourceId: pdf.id,
+        talkId: TALK_A_ID,
+        title: 'Renamed Deck',
+      });
+      expect(patched?.title).toBe('Renamed Deck');
+      expect(patched?.pageImageCount).toBe(2);
+      expect(patched?.pageSetComplete).toBe(true);
     });
   });
 

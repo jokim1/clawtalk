@@ -359,6 +359,12 @@ export type ContextSource = {
   sortOrder: number;
   createdAt: string;
   updatedAt: string;
+  // Rasterized-page state (PDF page-image feature). pageSetComplete is the
+  // backend's resolved boolean — the webapp shows a "render pages"
+  // affordance for PDFs where it is false. Surfaced, not recomputed.
+  expectedPageCount: number | null;
+  pageImageCount: number;
+  pageSetComplete: boolean;
 };
 
 export type TalkContext = {
@@ -838,6 +844,11 @@ export type TalkAgent = {
   providerId: string | null;
   modelId: string | null;
   modelDisplayName: string | null;
+  // Resolved model capabilities (backend-surfaced). Used to decide whether
+  // the Talk has a vision-but-not-PDF agent that benefits from rasterized
+  // PDF pages.
+  supportsVision: boolean;
+  supportsPdfDocuments: boolean;
 };
 
 export type ProviderCredentialScope = 'user' | 'workspace';

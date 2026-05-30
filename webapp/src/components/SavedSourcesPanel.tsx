@@ -43,6 +43,10 @@ type SavedSourcesPanelProps = {
   sources: ContextSource[];
   setSources: Dispatch<SetStateAction<ContextSource[]>>;
   canEdit: boolean;
+  // True when the Talk has at least one agent that supports image vision
+  // but NOT native PDF documents — the audience for rasterized PDF pages.
+  // Gates the "render pages" affordance on PDFs lacking a complete set.
+  hasVisionNonDocAgent: boolean;
   onUnauthorized: () => void;
 };
 
@@ -62,6 +66,7 @@ export function SavedSourcesPanel({
   sources,
   setSources,
   canEdit,
+  hasVisionNonDocAgent,
   onUnauthorized,
 }: SavedSourcesPanelProps): JSX.Element {
   const [status, setStatus] = useState<StatusState>({ status: 'idle' });
@@ -415,6 +420,7 @@ export function SavedSourcesPanel({
               key={source.id}
               source={source}
               canEdit={canEdit}
+              hasVisionNonDocAgent={hasVisionNonDocAgent}
               renderState={renderStates[source.id]}
               onPatchTitle={handlePatchTitle}
               onPatchNote={handlePatchNote}
@@ -500,6 +506,7 @@ export function SavedSourcesPanel({
 type SavedSourceRowProps = {
   source: ContextSource;
   canEdit: boolean;
+  hasVisionNonDocAgent: boolean;
   renderState: RenderState | undefined;
   onPatchTitle: (sourceId: string, nextTitle: string) => Promise<void>;
   onPatchNote: (sourceId: string, nextNote: string) => Promise<void>;
@@ -511,6 +518,7 @@ type SavedSourceRowProps = {
 function SavedSourceRow({
   source,
   canEdit,
+  hasVisionNonDocAgent,
   renderState,
   onPatchTitle,
   onPatchNote,
@@ -518,6 +526,17 @@ function SavedSourceRow({
   onRetryRender,
   onDelete,
 }: SavedSourceRowProps): JSX.Element {
+  const isPdf = source.mimeType === 'application/pdf';
+  // Offer to rasterize a PDF that lacks a complete page set when the Talk
+  // has a vision-but-not-PDF agent — but only when it isn't already being
+  // rendered this session (renderState owns that UI). pageSetComplete is
+  // the backend's resolved boolean (not recomputed here).
+  const showRenderAffordance =
+    canEdit &&
+    isPdf &&
+    hasVisionNonDocAgent &&
+    !source.pageSetComplete &&
+    !renderState;
   const fileSizeLabel = formatFileSize(source.fileSize);
   const extractedLabel =
     source.extractedTextLength != null
@@ -683,6 +702,40 @@ function SavedSourceRow({
               Retry
             </button>
           ) : null}
+        </p>
+      ) : null}
+      {showRenderAffordance ? (
+        <p
+          style={{
+            margin: '0.3rem 0 0 0.25rem',
+            fontSize: '0.7rem',
+            opacity: 0.7,
+          }}
+        >
+          Not yet rendered for image-only vision agents.
+          <button
+            type="button"
+            className="secondary-btn"
+            style={{
+              marginLeft: '0.4rem',
+              padding: '0.1rem 0.4rem',
+              fontSize: '0.7rem',
+            }}
+            onClick={() => onRetryRender(source.id)}
+          >
+            Render pages
+          </button>
+        </p>
+      ) : isPdf && source.pageSetComplete && !renderState ? (
+        <p
+          style={{
+            margin: '0.3rem 0 0 0.25rem',
+            fontSize: '0.7rem',
+            opacity: 0.5,
+          }}
+        >
+          {source.pageImageCount} page{source.pageImageCount === 1 ? '' : 's'}{' '}
+          rendered for image-only vision agents.
         </p>
       ) : null}
     </li>

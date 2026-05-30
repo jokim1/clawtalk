@@ -23,7 +23,9 @@ import { patchTalkContextSource } from '../lib/api';
 
 const patchMock = patchTalkContextSource as unknown as ReturnType<typeof vi.fn>;
 
-function makeSource(input: Partial<ContextSource> & { id: string }): ContextSource {
+function makeSource(
+  input: Partial<ContextSource> & { id: string },
+): ContextSource {
   return {
     id: input.id,
     sourceRef: input.sourceRef ?? 'S1',
@@ -44,6 +46,9 @@ function makeSource(input: Partial<ContextSource> & { id: string }): ContextSour
     sortOrder: input.sortOrder ?? 0,
     createdAt: '2026-05-26T00:00:00Z',
     updatedAt: '2026-05-26T00:00:00Z',
+    expectedPageCount: input.expectedPageCount ?? null,
+    pageImageCount: input.pageImageCount ?? 0,
+    pageSetComplete: input.pageSetComplete ?? false,
   };
 }
 
@@ -67,6 +72,7 @@ describe('SavedSourcesPanel', () => {
         sources={[source]}
         setSources={() => undefined}
         canEdit
+        hasVisionNonDocAgent={false}
         onUnauthorized={() => undefined}
       />,
     );
@@ -85,13 +91,12 @@ describe('SavedSourcesPanel', () => {
         sources={[source]}
         setSources={() => undefined}
         canEdit
+        hasVisionNonDocAgent={false}
         onUnauthorized={() => undefined}
       />,
     );
     expect(
-      screen.getByText(
-        'Add a one-line routing hint (when to use this source)',
-      ),
+      screen.getByText('Add a one-line routing hint (when to use this source)'),
     ).toBeInTheDocument();
   });
 
@@ -101,7 +106,11 @@ describe('SavedSourcesPanel', () => {
       sourceRef: 'S1',
       title: 'Old title',
     });
-    const updated = makeSource({ id: 's1', sourceRef: 'S1', title: 'New title' });
+    const updated = makeSource({
+      id: 's1',
+      sourceRef: 'S1',
+      title: 'New title',
+    });
     patchMock.mockResolvedValueOnce(updated);
 
     const setSources = vi.fn();
@@ -111,12 +120,15 @@ describe('SavedSourcesPanel', () => {
         sources={[source]}
         setSources={setSources}
         canEdit
+        hasVisionNonDocAgent={false}
         onUnauthorized={() => undefined}
       />,
     );
 
     fireEvent.click(screen.getByText('Old title'));
-    const input = screen.getByLabelText('Edit source title') as HTMLInputElement;
+    const input = screen.getByLabelText(
+      'Edit source title',
+    ) as HTMLInputElement;
     fireEvent.change(input, { target: { value: 'New title' } });
     fireEvent.keyDown(input, { key: 'Enter' });
 
@@ -151,6 +163,7 @@ describe('SavedSourcesPanel', () => {
         sources={[source]}
         setSources={() => undefined}
         canEdit
+        hasVisionNonDocAgent={false}
         onUnauthorized={() => undefined}
       />,
     );
@@ -181,12 +194,15 @@ describe('SavedSourcesPanel', () => {
         sources={[source]}
         setSources={() => undefined}
         canEdit
+        hasVisionNonDocAgent={false}
         onUnauthorized={() => undefined}
       />,
     );
 
     fireEvent.click(screen.getByText('Keep me'));
-    const input = screen.getByLabelText('Edit source title') as HTMLInputElement;
+    const input = screen.getByLabelText(
+      'Edit source title',
+    ) as HTMLInputElement;
     fireEvent.change(input, { target: { value: 'Whatever' } });
     await act(async () => {
       fireEvent.keyDown(input, { key: 'Escape' });
@@ -201,11 +217,89 @@ describe('SavedSourcesPanel', () => {
         sources={[]}
         setSources={() => undefined}
         canEdit
+        hasVisionNonDocAgent={false}
         onUnauthorized={() => undefined}
       />,
     );
     // The panel header explains @-ref usage to users.
     expect(screen.getByText(/@S1/)).toBeInTheDocument();
     expect(screen.getByText(/@title-slug/)).toBeInTheDocument();
+  });
+});
+
+describe('SavedSourcesPanel — render-pages affordance (T10)', () => {
+  function renderPanel(
+    source: ContextSource,
+    opts: { hasVisionNonDocAgent: boolean; canEdit?: boolean },
+  ): void {
+    render(
+      <SavedSourcesPanel
+        talkId="t1"
+        sources={[source]}
+        setSources={() => undefined}
+        canEdit={opts.canEdit ?? true}
+        hasVisionNonDocAgent={opts.hasVisionNonDocAgent}
+        onUnauthorized={() => undefined}
+      />,
+    );
+  }
+
+  it('offers "Render pages" for a PDF lacking a complete page set when a vision-non-doc agent is present', () => {
+    renderPanel(
+      makeSource({
+        id: 'p1',
+        title: 'Deck',
+        mimeType: 'application/pdf',
+        pageSetComplete: false,
+      }),
+      { hasVisionNonDocAgent: true },
+    );
+    expect(
+      screen.getByRole('button', { name: 'Render pages' }),
+    ).toBeInTheDocument();
+  });
+
+  it('hides the affordance (and confirms readiness) once the page set is complete', () => {
+    renderPanel(
+      makeSource({
+        id: 'p1',
+        mimeType: 'application/pdf',
+        pageSetComplete: true,
+        pageImageCount: 5,
+      }),
+      { hasVisionNonDocAgent: true },
+    );
+    expect(
+      screen.queryByRole('button', { name: 'Render pages' }),
+    ).not.toBeInTheDocument();
+    expect(screen.getByText(/5 pages rendered/)).toBeInTheDocument();
+  });
+
+  it('hides the affordance when the Talk has no vision-but-not-PDF agent', () => {
+    renderPanel(
+      makeSource({
+        id: 'p1',
+        mimeType: 'application/pdf',
+        pageSetComplete: false,
+      }),
+      { hasVisionNonDocAgent: false },
+    );
+    expect(
+      screen.queryByRole('button', { name: 'Render pages' }),
+    ).not.toBeInTheDocument();
+  });
+
+  it('never offers rendering for a non-PDF source', () => {
+    renderPanel(
+      makeSource({
+        id: 't1',
+        mimeType: 'text/plain',
+        pageSetComplete: false,
+      }),
+      { hasVisionNonDocAgent: true },
+    );
+    expect(
+      screen.queryByRole('button', { name: 'Render pages' }),
+    ).not.toBeInTheDocument();
   });
 });

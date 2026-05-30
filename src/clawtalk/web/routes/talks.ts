@@ -37,6 +37,10 @@ import {
 } from '../../db/accessors.js';
 import { listMessageAttachments } from '../../db/context-accessors.js';
 import type { TalkPersonaRole } from '../../llm/types.js';
+import {
+  modelSupportsPdfDocuments,
+  modelSupportsVision,
+} from '../../llm/capabilities.js';
 import type { TalkRunContextSnapshot } from '../../talks/context-loader.js';
 type BrowserBlockMetadata = Record<string, unknown>;
 type BrowserResumeMetadata = Record<string, unknown>;
@@ -164,6 +168,11 @@ export interface TalkAgentApiRecord {
   providerId: string | null;
   modelId: string | null;
   modelDisplayName: string | null;
+  // Resolved model capabilities, surfaced so the webapp can decide (without
+  // recomputing) whether a Talk has a vision-but-not-PDF agent — the gate
+  // for the "render pages" affordance on PDF sources.
+  supportsVision: boolean;
+  supportsPdfDocuments: boolean;
 }
 
 export interface TalkRunApiRecord {
@@ -359,6 +368,29 @@ function parseTalkRunError(
   return { errorCode: raw, errorMessage: raw };
 }
 
+/**
+ * Resolve a Talk agent's vision / native-PDF capabilities for the API
+ * snapshot. The Claude default agent is vision + PDF capable but carries a
+ * placeholder provider/model ('default') that doesn't resolve through the
+ * capability table, so short-circuit it.
+ */
+function resolveTalkAgentCaps(
+  sourceKind: 'claude_default' | 'provider',
+  providerId: string | null,
+  modelId: string | null,
+): { supportsVision: boolean; supportsPdfDocuments: boolean } {
+  if (sourceKind === 'claude_default') {
+    return { supportsVision: true, supportsPdfDocuments: true };
+  }
+  return {
+    supportsVision: modelSupportsVision(providerId ?? '', modelId ?? ''),
+    supportsPdfDocuments: modelSupportsPdfDocuments(
+      providerId ?? '',
+      modelId ?? '',
+    ),
+  };
+}
+
 function toTalkAgentApiRecord(
   agent: {
     id: string;
@@ -394,6 +426,7 @@ function toTalkAgentApiRecord(
     providerId: agent.providerId,
     modelId: agent.modelId,
     modelDisplayName: agent.modelDisplayName,
+    ...resolveTalkAgentCaps(agent.sourceKind, agent.providerId, agent.modelId),
   };
 }
 
@@ -658,6 +691,7 @@ async function listEffectiveTalkAgents(
     providerId: row.providerId,
     modelId: row.modelId,
     modelDisplayName: null, // resolved client-side from provider model list
+    ...resolveTalkAgentCaps(row.sourceKind, row.providerId, row.modelId),
   }));
 }
 
