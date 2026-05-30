@@ -1,9 +1,9 @@
-> **Status:** canonical (API). Transport is **WebSocket only** (ignore the SSE hedge). Missing: Forge endpoints (DOC-AUDIT #13) and move-block-between-tabs (DOC-AUDIT #14).
+> **Status:** canonical (API).
 > Precedence + orientation: [README.md](./README.md) · decisions: [DECISIONS.md](./DECISIONS.md) · terms: [GLOSSARY.md](./GLOSSARY.md).
 
 # ClawTalk · API Contracts
 
-Framework-agnostic backend contracts derived from the prototype's behavior. Reference implementation should be REST + WebSocket (or Server-Sent Events). All endpoints are workspace-scoped unless noted. The canonical object hierarchy and document relationship are defined in `08-information-architecture.md`.
+Framework-agnostic backend contracts derived from the prototype's behavior. Transport is **REST + WebSocket** — there is no SSE fallback. All endpoints are workspace-scoped unless noted. The canonical object hierarchy and document relationship are defined in `08-information-architecture.md`.
 
 ---
 
@@ -54,8 +54,13 @@ Framework-agnostic backend contracts derived from the prototype's behavior. Refe
 | `POST /workspaces` | Create new workspace |
 | `GET /workspaces/:id` | Full workspace info |
 | `PATCH /workspaces/:id` | Update name/settings |
+| `DELETE /workspaces/:id` | Hard-delete workspace (owner-only; rejects with 409 `WORKSPACE_HAS_JOBS_WITH_HISTORY` if any job has `run_count > 0` per §11 §8). |
+| `POST /workspaces/switch` | `{ workspaceId }` → set the calling session's active workspace. Rejects with 403 if the user is not a member. |
 | `POST /workspaces/:id/invite` | Invite member by email |
 | `GET /workspaces/:id/members` | List members |
+| `PATCH /workspaces/:id/members/:userId` | `{ role: 'owner' \| 'admin' \| 'member' }` — role update (admin-only; cannot demote the last owner). |
+| `DELETE /workspaces/:id/members/:userId` | Remove member (admin-only; cannot remove the owner). |
+| `POST /workspaces/:id/transfer-ownership` | `{ newOwnerUserId }` — single atomic txn that flips the prior owner to `admin` and promotes the target to `owner`. Owner-only. |
 
 **On workspace creation:** seed the 5 default agents and 3 default team compositions (see `03-agents.md`).
 
@@ -67,7 +72,8 @@ Framework-agnostic backend contracts derived from the prototype's behavior. Refe
 |---|---|
 | `GET /folders` | All folders in workspace |
 | `POST /folders` | `{ title }` → new folder |
-| `PATCH /folders/:id` | Rename / reorder |
+| `PATCH /folders/:id` | Rename single folder (or change `sortOrder`) |
+| `PATCH /folders/order` | `{ folders: [{ id, sortOrder }] }` — batch reorder in a single txn |
 | `DELETE /folders/:id?with_talks=true|false` | Delete; optional cascade |
 
 ---
@@ -121,7 +127,15 @@ Full talk with messages.
 
 ### `PATCH /talks/:id`
 
-Partial update — `title`, `folderId`, `mode`, `rounds`, `tools`, `team`.
+Partial update — `title`, `folderId`, `mode`, `rounds`, `tools`, `team`, `sortOrder`. `team` is full-replace shorthand; prefer the dedicated roster endpoints below for surgical changes (they preserve `talk_agents.sort_order` per agent).
+
+### Talk roster endpoints (per §11 §3 `talk_agents`)
+
+| Endpoint | Purpose |
+|---|---|
+| `POST /talks/:id/agents` | `{ agentId }` → append agent to roster (next `sort_order`). 409 `ROSTER_DUPLICATE` if already present, 409 `ROSTER_FULL` at 5 agents. |
+| `DELETE /talks/:id/agents/:agentId` | Remove agent from roster. Existing scheduled jobs targeting this agent will flip to `status='blocked'` at next fire (per §12 §5 dep check). |
+| `PATCH /talks/:id/agents/order` | `{ agents: [{ agentId, sortOrder }] }` — batch reorder in a single txn. Rejects unknown agentIds. |
 
 ### `POST /talks/:id/archive`
 
@@ -257,11 +271,52 @@ and evals.
 | `DELETE /documents/:id` | Hard delete (no archive for docs in v1) |
 | `POST /documents/:id/tabs` | `{ title }` → new document tab |
 | `PATCH /documents/:id/tabs/:tabId` | Rename / reorder tab |
-| `DELETE /documents/:id/tabs/:tabId` | Delete tab if document has 2+ tabs |
+| `DELETE /documents/:id/tabs/:tabId?cascadePending=false` | Delete tab (see cascade rules below) |
+| `PATCH /documents/:id/blocks/:blockId/move` | Move block across tabs / reorder within a tab |
 | `POST /documents/:id/blocks/:blockId/accept` | Accept a pending edit |
 | `POST /documents/:id/blocks/:blockId/reject` | Reject a pending edit |
 | `POST /documents/:id/accept-all` | Bulk accept |
 | `POST /documents/:id/reject-all` | Bulk reject |
+
+### `DELETE /documents/:id/tabs/:tabId`
+
+Requires document to have 2+ tabs. Default (`?cascadePending=false`, or omitted):
+
+- Returns **409 `TAB_HAS_PENDING_EDITS`** if any `document_edits.tab_id = :tabId` row has `status='pending'`. Response body lists the offending edit IDs so the UI can prompt the user.
+
+With `?cascadePending=true`:
+
+- Drops the tab and lets the `document_edits.tab_id` `ON DELETE CASCADE` (§11 §5) silently delete every pending edit on that tab. **The UI MUST show a confirmation dialog before sending `cascadePending=true`** (see `08-information-architecture.md` §6.3).
+
+Returns 204 on success.
+
+### `PATCH /documents/:id/blocks/:blockId/move`
+
+Move a block to another tab or reorder it within its current tab.
+
+```ts
+// Request
+{
+  targetTabId: string,          // tab the block should live under (may equal current tab)
+  afterBlockId?: string | null, // null → place at start of target tab
+  baseListVersionSource: number,// source tab's list_version the client last saw
+  baseListVersionTarget: number // target tab's list_version the client last saw
+}
+
+// Response (200)
+{
+  block: DocBlock,              // with updated tabId / sort_order
+  sourceTab: { id, listVersion: number },
+  targetTab: { id, listVersion: number }
+}
+```
+
+Updates `doc_blocks.tab_id` and `sort_order`, then bumps **both** the source tab's and target tab's `list_version` (per §11 §5 CAS rules). Same-tab reorder bumps `list_version` once.
+
+Errors:
+- **409 `LIST_VERSION_CONFLICT`** — either base version is stale; client refetches and retries.
+- **404 `BLOCK_NOT_FOUND`** — block was deleted or moved by another writer.
+- **400 `TAB_MISMATCH`** — `afterBlockId` doesn't belong to `targetTabId`.
 
 ```ts
 type DocTab = {
@@ -339,6 +394,79 @@ Server pushes events; client may send a few control messages.
   talkId,
   patch: Partial<Talk>    // running flag, unread count, etc.
 }
+
+// Inbox arrival (new home_inbox_items row for this workspace, §11 §7)
+{
+  type: 'inbox.new',
+  item: InboxItem        // shape per §13 GET /home/inbox items[]
+}
+
+// Inbox row mutated (status flip, snooze, resolve, dedupe collapse)
+{
+  type: 'inbox.updated',
+  itemId: string,
+  patch: Partial<InboxItem>
+}
+
+// Home recommendations list changed for this workspace
+// Fires after refresh, generator-driven invalidation, or any rerank.
+{
+  type: 'home.recommendations_changed',
+  algorithmVersion: string,
+  // Optional hint set when only a few rows changed; absent → full refetch.
+  changedIds?: string[]
+}
+
+// --- Forge (§09 §9 / §11 §9) — all carry runId + workspace context ---
+
+// One candidate landed and was scored against the audience.
+{
+  type: 'improvement_round_scored',
+  runId, documentId, iteration: number,
+  versionId, candidateId: string,
+  compositeScore: number, heldOutScore: number,
+  decision: 'keep' | 'discard' | 'frontier'
+}
+
+// A version was promoted to the frontier or named the running winner.
+{
+  type: 'improvement_version_kept',
+  runId, versionId,
+  iteration: number,
+  reason: string,            // e.g. 'beat baseline', 'new frontier'
+  bestVersionId: string      // current best for the run
+}
+
+// Run reached a terminal status.
+{
+  type: 'improvement_run_finished',
+  runId,
+  status: 'completed' | 'plateaued' | 'budget_exhausted' | 'cancelled' | 'failed',
+  stopReason?: string,
+  bestVersionId: string | null,
+  baselineScore: number | null,
+  bestScore: number | null
+}
+
+// --- Jobs (§12 §6) — these ALSO land as inbox.new on the originating workspace ---
+
+// Successful run completion for a scheduled or manual job fire.
+{
+  type: 'job_output_ready',
+  jobId, runId, talkId,
+  emittedMessageId?: string, // present if emit_talk_message=true
+  emittedEditId?: string,    // present if emit_document_append=true
+  inboxItemId: string        // the home_inbox_items row, ref_id = runId
+}
+
+// Dependency check failed; job flipped to status='blocked'.
+{
+  type: 'job_blocked',
+  jobId, talkId,
+  blockReason: 'agent_missing' | 'model_disabled' | 'no_primary_document'
+             | 'tool_not_enabled' | 'connector_not_authorized',
+  inboxItemId: string        // ref_id = null per §11 §7 dedup rule
+}
 ```
 
 ### Client → server
@@ -378,24 +506,35 @@ Catalog of available tools with current connection status.
 
 ## §11 · Connectors
 
-### `GET /workspace/connectors`
+Connectors are **workspace-global** (one OAuth per service per workspace; row in `connectors`). Per-Talk scope lives in `connector_bindings` (workspace_id, connector_id, talk_id) — a separate, per-Talk binding so the same Slack/GDrive/etc. connection can be scoped differently per Talk (target channel, allowed scopes, enabled flag). See §11 §6 of `11-data-model.md`.
+
+### Workspace-global authorize
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /workspace/connectors` | List workspace connectors + their bindings |
+| `POST /workspace/connectors/:service/oauth-start` | Start OAuth, returns `{ redirectUrl, state }` |
+| `GET /workspace/connectors/:service/oauth-callback?code=&state=` | OAuth callback. Persists token in `connector_secrets`, sets `connectors.authorized=true`. Returns 302 to the SPA. |
+| `POST /workspace/connectors/:service/revoke` | Revoke token. Sets `connectors.authorized=false`, clears `secret_ref`. Bindings remain (re-authorize to re-enable). |
 
 ```ts
+// GET /workspace/connectors response
 [{
-  id, service: 'slack' | 'gdrive' | 'gmail' | 'linear' | 'github' | 'notion' | 'telegram',
+  id, service: 'slack' | 'gdrive' | 'gmail' | 'linear' | 'github' | 'notion',
   authorized: boolean,
-  authorizedAt: string,
-  bindings: [{ talkId, target, scope: string[], enabled: boolean }]
+  authorizedAt: string | null,
+  bindings: [{ id, talkId, target: string | null, scope: string[], enabled: boolean }]
 }]
 ```
 
-### `POST /workspace/connectors/:service/oauth-start`
+### Per-Talk binding
 
-Returns OAuth redirect URL.
-
-### `POST /talks/:id/connectors/:service/bind`
-
-Bind a service to this Talk with a target (e.g. `#pricing` for Slack).
+| Endpoint | Purpose |
+|---|---|
+| `GET /talks/:id/connectors` | Bindings for this Talk only |
+| `POST /talks/:id/connectors/:service/bind` | `{ target?, scope?: string[] }` → create or upsert a `connector_bindings` row for this Talk. Requires workspace connector to be authorized; 409 `CONNECTOR_NOT_AUTHORIZED` otherwise. |
+| `PATCH /talks/:id/connectors/:bindingId` | Update `target` / `scope` / `enabled`. |
+| `DELETE /talks/:id/connectors/:bindingId` | Remove the binding (does not revoke the workspace connector). |
 
 ---
 
@@ -509,7 +648,7 @@ blockers, and waiting states; they are not Talk rows.
 {
   items: [{
     id: string,
-    type: 'agent_replied' | 'round_completed' | 'agent_asks_user' | 'run_failed' | 'doc_edits_ready' | 'connector_needs_auth' | 'news_context_added' | 'long_running_run' | 'system_limit_reached' | 'job_needs_review',
+    type: 'agent_replied' | 'round_completed' | 'agent_asks_user' | 'run_failed' | 'doc_edits_ready' | 'connector_needs_auth' | 'news_context_added' | 'long_running_run' | 'system_limit_reached' | 'forge_run_needs_review' | 'job_output_ready' | 'job_blocked',
     title: string,
     summary: string,
     reason: string,
@@ -599,3 +738,176 @@ Log everything that mutates state. Minimum events:
 - `member.invited`, `member.removed`, `role.changed`
 
 Include `actorId`, `workspaceId`, `entityId`, `payload`, `timestamp`. Stream to your analytics + audit log.
+
+---
+
+## §17 · Forge — improvement runs
+
+Forge is the autonomous content-improvement loop (§09 / §11 §9). Runs reuse the standard run path (`run_kind='content_improvement'`), reuse `event_outbox` for streaming, and promote winners through the unified `document_edits` accept path with `source='forge'` — no second write path.
+
+### Improvement runs
+
+| Endpoint | Purpose |
+|---|---|
+| `POST /improvement-runs` | Create a new improvement run |
+| `GET /improvement-runs?documentId=&tabId=&status=&limit=&cursor=` | List (paginated) |
+| `GET /improvement-runs/:id` | Detail |
+| `GET /improvement-runs/:id/versions?limit=&cursor=` | Gallery — scored `document_versions` for the run |
+| `POST /improvement-runs/:id/cancel` | Cancel an in-flight run |
+| `GET /document-versions/:id` | Single version detail |
+| `POST /document-versions/:id/promote` | Promote winner via the standard accept path |
+
+#### `POST /improvement-runs`
+
+```ts
+// Request — scope: documentId required; whole-doc = tabId+targetBlockId both null; tab = tabId only; block = both.
+{
+  documentId: string,
+  tabId?: string,
+  targetBlockId?: string,
+  audienceId?: string,                 // null → ad-hoc objective
+  objectiveJson: {                     // resolved per §11 §9
+    personaIds: string[],
+    referenceSetId?: string,
+    questionId?: string,
+    scoringConfig: object,
+    fitness: string                    // e.g. 'mean_composite'
+  },
+  searchConfigJson: {
+    beamN: number, beamK: number,
+    mutations: string[],
+    plateauEpsilon: number
+  },
+  targetScore?: number,
+  maxIterations?: number,
+  budgetUsd?: number
+}
+
+// Response (201)
+{ run: ImprovementRun }                // the new improvement_runs row
+```
+
+Subscribe to the WebSocket stream (§9) for `improvement_round_scored` / `improvement_version_kept` / `improvement_run_finished`.
+
+#### `GET /improvement-runs/:id`
+
+```ts
+{
+  run: ImprovementRun,                 // includes objectiveJson, searchConfigJson, status, stopReason
+  baseline: { versionId, score: number } | null,
+  best: { versionId, score: number } | null,
+  documentVersionsCount: number
+}
+```
+
+#### `POST /document-versions/:id/promote`
+
+Land the chosen version's body as a pending `document_edits` row through the unified accept path.
+
+```ts
+// Request — overrides apply only when the version was scored at a coarser scope than the desired landing site.
+{
+  tabId?: string,
+  targetBlockId?: string
+}
+
+// Response (201)
+{ editId: string }                     // the new pending document_edits row (status='pending', source='forge')
+```
+
+Errors:
+- **409 `RUN_NOT_TERMINAL`** — the parent improvement_run hasn't reached a terminal status yet.
+- **404 `DOCUMENT_VERSION_NOT_FOUND`**.
+
+#### `POST /improvement-runs/:id/cancel`
+
+Cancels an in-flight run. Returns 200 with the updated row, or 409 `RUN_ALREADY_TERMINAL` if the run is already in a terminal status.
+
+### Audiences (workspace-scoped, first-class — §11 §9)
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /forge/audiences` | List `forge_audiences` rows for the workspace |
+| `POST /forge/audiences` | `{ name, note?, referenceSetId?, questionId?, personaIds: string[] }` → create |
+| `PATCH /forge/audiences/:id` | Update any of the above fields |
+| `DELETE /forge/audiences/:id` | Delete (cascades `forge_audience_personas`; `improvement_runs.audience_id` SET NULL) |
+
+### Synced SSR assets (read-only cache; refresh via SSR sync job)
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /forge/personas` | `forge_personas` rows for the workspace |
+| `GET /forge/reference-sets` | `forge_reference_sets` rows for the workspace |
+| `GET /forge/questions` | `forge_questions` rows for the workspace |
+
+### SSR OAuth (per workspace; admin-only — §11 §9 / D7)
+
+| Endpoint | Purpose |
+|---|---|
+| `POST /forge/ssr/oauth-start` | Begin OAuth, returns `{ redirectUrl, state }` |
+| `POST /forge/ssr/oauth-callback` | `{ code, state }` → persist token in `connector_secrets`, write `ssr_connections` row |
+| `POST /forge/ssr/revoke` | Revoke the token; sets `ssr_connections.secret_ref = null` |
+
+---
+
+## §18 · Jobs — scheduled single-agent prompts
+
+A **Job** is a saved, scheduled run (§12). It fires a normal `conversation` run on its Talk with `runs.job_id` set and `runs.trigger='scheduler'` (or `'manual'` for run-now). History is `runs` filtered by `job_id`; there is no separate `job_runs` table.
+
+### Jobs
+
+| Endpoint | Purpose |
+|---|---|
+| `POST /talks/:talkId/jobs` | Create job on a Talk |
+| `GET /talks/:talkId/jobs?status=&archived=false` | List jobs on a Talk |
+| `GET /jobs/:id` | Detail (includes `nextDueAt`, `lastRunStatus`, `runCount`, `blockReason`) |
+| `PATCH /jobs/:id` | Edit. Re-runs the §12 §5 step 2 dep check on save (the §12 §6 unblock path) |
+| `POST /jobs/:id/pause` | Set `status='paused'`, `next_due_at=null` |
+| `POST /jobs/:id/resume` | Set `status='active'`, recompute `next_due_at` from now. 409 `JOB_BLOCKED` if `status='blocked'` (resolve the dep first) |
+| `POST /jobs/:id/archive` | Soft archive: `archived_at=now()`, `next_due_at=null`. Run history stays queryable |
+| `POST /talks/:talkId/jobs/:jobId/run-now` | Manual fire (§12 §6) |
+| `GET /jobs/:id/runs?limit=&cursor=` | Run history — `runs` filtered by `job_id`, newest first |
+
+#### `POST /talks/:talkId/jobs`
+
+```ts
+// Request
+{
+  title: string,
+  prompt: string,
+  agentId: string,                     // must be on talk_agents for this Talk (enforced by §11 §8 trigger)
+  scheduleJson:                        // §12 §4
+    | { kind: 'interval', everyHours: number }
+    | { kind: 'daily',  hour: number, minute: number }
+    | { kind: 'weekly', weekdays: number[], hour: number, minute: number },
+  timezone: string,                    // IANA; required even for interval (DST-safe wall-clock)
+  emitTalkMessage: boolean,            // defaults true
+  emitDocumentAppend: boolean,         // defaults false
+  // Must satisfy emitTalkMessage || emitDocumentAppend (§11 §8 CHECK).
+  sourceScopeJson: {
+    allowWeb: boolean,
+    toolIds: string[]                  // validated at fire time against talk_tools (§12 §5)
+  },
+  catchUp: 'skip' | 'run_once'         // §12 §4
+}
+
+// Response (201)
+{ job: Job }                           // status='active', next_due_at set to first slot
+```
+
+#### `POST /talks/:talkId/jobs/:jobId/run-now`
+
+Creates a `trigger='manual'` run per §12 §6. Allowed when `status in ('active','paused')`.
+
+```ts
+// Response (202)
+{ run: Run }                           // status='queued'
+
+// Errors
+// 409 RUN_BUSY — runs_one_active_per_job rejected (a non-terminal run already exists for this job).
+// 400 JOB_BLOCKED — status='blocked'; user must edit the job first to clear block_reason.
+```
+
+#### `PATCH /jobs/:id`
+
+Accepts any subset of: `title`, `prompt`, `agentId`, `scheduleJson`, `timezone`, `emitTalkMessage`, `emitDocumentAppend`, `sourceScopeJson`, `catchUp`. On save, the handler re-runs the §12 §5 step 2 dependency check; if the job was `blocked` and all deps now pass, the handler flips `status='active'` and recomputes `next_due_at` from now. If deps still fail, the edit lands but `block_reason` is updated to reflect the remaining failure.

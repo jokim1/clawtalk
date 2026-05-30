@@ -173,6 +173,21 @@ A Talk:
 The Talk owns conversation state. It does not own documents as child rows.
 Documents are workspace artifacts linked into Talks.
 
+Ownership obligations:
+
+- Every Talk has a creator (`talks.created_by`, §5.3), enforced by `NOT NULL +
+  ON DELETE RESTRICT` on `users` (§11 §3). A user cannot be hard-deleted while
+  they own Talks; the product's "leave workspace" + "transfer ownership" flows
+  reassign or anonymize ownership first.
+- Every Talk has a `sort_order` (§5.3) for drag-ordering within its folder or
+  Unfiled bucket — see §7.1 for reorder semantics.
+- `talks.last_activity_at` is maintained by the app at the end of every message
+  INSERT or run terminal transition (the executor + `/chat` handler call
+  `UPDATE talks SET last_activity_at = now() WHERE id = ?` in the same
+  transaction). NOT a trigger — the trigger overhead would fire on every
+  snapshot/edit row too. The column is `NOT NULL DEFAULT now()` at create time
+  (§11 §3) so the first read is correct even before the first message.
+
 ### 3.5 Document
 
 Document is a first-class workspace artifact.
@@ -276,6 +291,85 @@ Implementation note: the primary document may be returned in Context responses
 for display, but the primary link itself is stored on `documents.primary_talk_id`,
 not as the source of truth in `context_sources`.
 
+### 3.10 Message
+
+Message is one unit in a Talk's transcript.
+
+A Message:
+
+- belongs to exactly one Talk and one Workspace
+- has an `author_kind` of `user` or `agent` (`messages.author_kind`, §11 §3)
+- has a `round int` — the round number it belongs to inside the Talk; rounds
+  are derived, not a separate table (§11 §3 design notes)
+- when `author_kind = 'user'`: carries `author_user_id` (the sending user) and
+  has no agent attribution or run back-edge
+- when `author_kind = 'agent'`: carries `agent_snapshot_id` (the immutable
+  per-run roster snapshot of the speaking agent, §11 §4) and `run_id` (a
+  back-edge to the run that produced it)
+- has an immutable `body` plus optional `attachments_json`
+
+Composite FKs (§11 §3) tie every message to its parent Talk on
+`(workspace_id, talk_id)` and to its run on `(workspace_id, talk_id, run_id)`,
+so a row cannot reference a Talk or run in a different workspace or Talk. Agent
+attribution points at `talk_agent_snapshots`, not the live `agents` row, so
+later edits to the agent don't rewrite history (§11 §4 design notes).
+
+### 3.11 Run
+
+Run is one agent's response to a turn — the unit the orchestrator dispatches
+and the queue/Durable Object stream against.
+
+A Run:
+
+- belongs to exactly one Talk and one Workspace
+- has a `round int` matching the round the run participates in
+- has `run_kind` ∈ `{conversation, content_improvement}` (§11 §3 / §11 §9)
+- carries `snapshot_group_id` (the frozen roster group taken for this run)
+  and `agent_snapshot_id` (the one acting agent — must be a snapshot inside
+  that group; the composite FK in §11 §3 enforces this)
+- has `status` ∈ `{queued, running, awaiting, completed, failed, cancelled}`
+  (§11 §3); the Talk-level "running" flag is derived from any run being in
+  `queued | running | awaiting`
+- has `trigger` ∈ `{user, scheduler, manual}` (§11 §3) — `user` runs carry
+  `trigger_message_id` (the user message that fired them); `scheduler` and
+  `manual` runs carry `job_id` and a `prompt_snapshot_id` instead (no
+  `messages` row exists for the trigger; see [12-jobs.md](./12-jobs.md))
+- ordered/parallel sequencing rides `response_group_id` + `sequence_index`
+  (§11 §3)
+
+Composite FKs (§11 §3) keep every run inside its Talk and workspace. A
+partial unique index on `runs(job_id)` for nonterminal statuses enforces
+single-flight per job (§11 §3 + §11 §8). The full design notes (job-trigger
+invariants, slot identity for scheduler runs, stuck sweep) live in §11 §3.
+
+### 3.12 Forge artifacts (post-MVP)
+
+Forge (autonomous content improvement; `01-product-spec.md` §5c) introduces a
+small ownership cluster that follows the same §3.1 workspace-owned rule:
+
+- `improvement_runs` — one row per Forge run; ties to one `documents` row +
+  optional `tab_id` + optional `target_block_id` for scope; carries
+  `run_kind='content_improvement'`.
+- `document_versions` — one row per scored candidate; child of
+  `improvement_runs`; carries per-persona Likert + held-out scoring.
+- `forge_audiences` — saved Audiences composed in-app; reusable across runs.
+- `forge_personas` / `forge_reference_sets` / `forge_questions` — cached
+  read-only assets synced from SSR/Synthetical; one row per workspace per
+  upstream `ssr_id`.
+- `forge_audience_personas` / `improvement_run_held_out_personas` — join tables.
+- `ssr_connections` — workspace's SSR/Synthetical OAuth/secret wiring; one
+  row per workspace (token in `connector_secrets`, not
+  `workspace_provider_secrets`).
+
+Forge runs use the same `runs` machinery (§3.11) — the `run_kind` discriminator
+distinguishes `conversation` runs (chat) from `content_improvement` runs
+(Forge). The winner of a Forge run lands as a pending `document_edits` row
+with `source='forge'` against the targeted `tab_id` / `target_block_id`; the
+user accepts/rejects through the normal pending-edit pane (§6.3).
+
+Cross-refs: §11 §9 (schema), `09-improver-spec.md` (PRD),
+`10-improver-design.md` (design handoff), §04 §17 (API).
+
 ## 4. Canonical Cardinalities
 
 ```text
@@ -304,7 +398,7 @@ through `context_sources`.
 
 ### 5.1 Tables
 
-Minimum IA tables:
+Hierarchy-core IA tables (§5.2–§5.9 give the column shapes):
 
 ```text
 workspaces
@@ -317,6 +411,73 @@ context_sources
 messages
 runs
 ```
+
+`messages` and `runs` are listed here because §11 §3 carries heavy invariants
+(round attribution, run-status derivation, snapshot freezes) that the IA layer
+depends on. Column definitions for both follow at §5.8 (`messages`) and §5.9
+(`runs`). For the full schema (composite FKs, CHECKs, indexes) see §11 §3.
+
+**Other workspace-owned tables.** §08 is authoritative for hierarchy + ownership
+rules, but §11 has the full ~40-table footprint. The rest of the workspace tables
+are categorized below with a 1-line purpose + cross-ref to §11 — a reader
+scanning §08 sees the full footprint, not just the hierarchy core. §08 does not
+replicate §11's column-level DDL.
+
+Agents stack (§11 §4):
+
+- `agents` — workspace agent roster (5 default + custom).
+- `agent_role_templates` — hidden role templates (`strategist`, `critic`, …, `forge_rewriter`, `forge_critic`); seeds `agents` defaults.
+- `team_compositions` — saved rosters reusable across Talks (§01 §1.7).
+- `team_composition_agents` — join.
+- `talk_agents` — live per-Talk roster (the editable group).
+- `talk_agent_snapshots` — immutable per-run frozen roster; messages and runs attribute through this.
+- `run_prompt_snapshots` — immutable system-prompt copy attached to each run.
+- `agent_feedback_events` — per-message upvote/downvote/correction trail.
+
+Tools + connectors (§11 §6):
+
+- `talk_tools` — per-Talk tool toggles (`talk_id`, `tool_id`, `enabled`); validated against the §01 §5.1 tool catalog.
+- `connectors` — workspace-global OAuth wiring (one row per `service` per workspace; §01 §1.8).
+- `connector_bindings` — per-Talk selection of workspace-authorized connectors with target/scope/enabled.
+- `connector_secrets` — encrypted OAuth token store (JIT-decrypt at use).
+
+Home stack (§11 §7, §07 PRD):
+
+- `home_inbox_items` — arrivals/blockers/waits queue (typed; dedup via `ref_id`).
+- `home_recommendations` — surfaced ranked recommendations.
+- `home_recommendation_candidates` — pre-ranking candidate pool with provenance.
+- `home_recommendation_events` — impression/click/dismiss trail.
+- `home_news_topics` — privacy-safe topic profiles per Talk (News monitor tool).
+- `home_news_items` — shared global news pool (no `workspace_id`).
+- `home_news_matches` — per-workspace topic↔item matches with `why_it_matters`.
+- `home_ranking_profiles` — structured ranking weights + exploration rate per workspace.
+- `home_algorithm_versions`, `home_algorithm_assignments` — ranking algorithm rollout state.
+- `home_interaction_events` — surface-level click/event log (drives optimizer).
+- `home_optimization_proposals` — admin-approved ranking-update proposals.
+- `home_activation_state` — first-run / FTUE flags per workspace.
+- `activity_events` — append-only workspace activity log.
+
+Jobs (§11 §8, §12 PRD):
+
+- `jobs` — scheduled single-agent prompts that fire normal runs (§01 §5b).
+
+Forge (§11 §9, §09 PRD, §3.12 below for IA):
+
+- `ssr_connections` — per-workspace SSR/Synthetical token wiring.
+- `forge_audiences` — saved Audiences composed in-app.
+- `forge_audience_personas` — Audience↔persona join.
+- `forge_personas`, `forge_reference_sets`, `forge_questions` — cached read-only assets synced from SSR.
+- `improvement_runs` — Forge run state (`run_kind='content_improvement'`).
+- `improvement_run_held_out_personas` — held-out personas per run for reproducibility.
+- `document_versions` — one row per scored candidate rewrite.
+
+Audit + analytics (§11 §10):
+
+- `audit_events` — append-only sensitive-action audit trail (auth/membership/connectors/secrets).
+
+These tables follow the same §3.1 ownership rule: every workspace-owned row
+carries `workspace_id` and is gated by RLS through `is_workspace_member` (or
+`is_workspace_admin` for the 6 admin-write exceptions in §11 §12.2).
 
 ### 5.2 `folders`
 
@@ -344,6 +505,8 @@ Required IA columns:
 id
 workspace_id
 folder_id nullable
+sort_order int not null
+created_by uuid not null
 title
 archived_at nullable
 last_activity_at
@@ -357,6 +520,10 @@ Constraints:
 - `folder_id` references `folders.id`
 - folder workspace must match Talk workspace
 - `folder_id is null` means Unfiled
+- `created_by` references `users.id` with `ON DELETE RESTRICT` — see §3.4 ownership rules
+- `sort_order` is the drag-orderable position within the Talk's
+  `(workspace_id, folder_id)` bucket (where `folder_id is null` is the Unfiled
+  bucket). See §7.1 for the reorder rules.
 
 Do not store `doc_id` on `talks` as the source of truth. Return
 `primaryDocumentId` from API responses by looking up
@@ -425,11 +592,10 @@ workspace_id
 document_id
 tab_id
 sort_order
+version
 kind
 text
 attrs_json
-pending
-pending_by_agent_id nullable
 created_at
 updated_at
 ```
@@ -480,6 +646,83 @@ Constraints:
 Do not create a normal `context_sources` row as the source of truth for the
 primary document. The primary document can be projected into the Context API as a
 synthetic pinned item.
+
+### 5.8 `messages`
+
+Required IA columns:
+
+```text
+id
+workspace_id
+talk_id
+round int not null
+author_kind text not null            -- 'user' | 'agent'
+author_user_id uuid nullable         -- set when author_kind = 'user'
+agent_snapshot_id uuid nullable      -- set when author_kind = 'agent'
+run_id uuid nullable                 -- set when author_kind = 'agent' (back-edge)
+body text
+attachments_json jsonb
+created_at
+```
+
+Constraints (see §11 §3 for the full CHECK):
+
+- composite FK to `talks(workspace_id, id)` (one talk per workspace)
+- composite FK to `runs(workspace_id, talk_id, id)` is deferrable to allow the
+  message + run insert within one transaction
+- author shape: `user` messages have `author_user_id` set and `agent_snapshot_id
+  / run_id` null; `agent` messages have `agent_snapshot_id + run_id` set and
+  `author_user_id` null
+- `agent_snapshot_id` references `talk_agent_snapshots(workspace_id, talk_id,
+  id)` for tenant + Talk integrity (immutable attribution, §11 §4)
+
+### 5.9 `runs`
+
+Required IA columns:
+
+```text
+id
+workspace_id
+talk_id
+round int not null
+run_kind text not null               -- 'conversation' | 'content_improvement'
+snapshot_group_id uuid not null      -- frozen roster group for the run
+agent_snapshot_id uuid not null      -- the acting agent (inside snapshot_group_id)
+status text not null                 -- 'queued' | 'running' | 'awaiting' | 'completed' | 'failed' | 'cancelled'
+trigger text not null                -- 'user' | 'scheduler' | 'manual'
+trigger_message_id uuid nullable     -- set when trigger='user'
+job_id uuid nullable                 -- set when trigger in ('scheduler','manual'), §11 §8
+prompt_snapshot_id uuid nullable     -- set for scheduler/manual runs (immutable prompt copy)
+scheduled_for timestamptz nullable   -- slot identity for trigger='scheduler'
+response_group_id text not null
+sequence_index int not null
+model_id text not null
+requested_by uuid not null
+tokens_in int, tokens_out int
+error_json jsonb
+started_at, finished_at, created_at
+```
+
+Constraints (see §11 §3 for the full set):
+
+- composite FK to `talks(workspace_id, id)` and to
+  `talk_agent_snapshots(workspace_id, talk_id, snapshot_group_id, id)` —
+  the acting agent must be a snapshot inside this run's frozen roster group
+- composite FK to `messages(workspace_id, talk_id, id)` for
+  `trigger_message_id` (deferrable, cross-Talk references blocked)
+- composite FK to `jobs(workspace_id, id)` for `job_id`, `ON DELETE RESTRICT`
+  so job history (`runs` filtered by `job_id`) survives job archive
+- single-flight per job: partial unique index on `runs(job_id)` where
+  `status in ('queued','running','awaiting')` (§11 §3 + §11 §8)
+- slot dedup for scheduler runs: partial unique index on
+  `runs(job_id, scheduled_for)` where both are set (§11 §3 + [12-jobs.md](./12-jobs.md))
+- job-trigger invariant: `scheduler` and `manual` runs never carry
+  `trigger_message_id`; both require `prompt_snapshot_id`; `scheduler`
+  additionally requires `scheduled_for` (slot identity)
+
+Rounds derive from `runs` + `messages` sharing `(talk_id, round)`; there is no
+`rounds` table (§11 §3 design notes). The Talk-level "running" flag is derived
+from any run being in `queued | running | awaiting` (§3.11).
 
 ## 6. API Contract Rules
 
@@ -542,8 +785,37 @@ The product should expose these document-tab actions:
 - Delete tab when more than one tab exists.
 - Move block to another tab.
 
-Deleting the last remaining tab must fail. Deleting a tab with pending edits must
-either fail or require explicit confirmation that pending edits will be rejected.
+Deleting the last remaining tab must fail (the `doc_tabs` `before delete`
+trigger in §11 §5 enforces this with `errcode = 'CT001'`).
+
+Deleting a tab with pending edits: the DELETE endpoint **rejects the request
+with HTTP 409** if any `document_edits` row in `status='pending'` references
+the tab, **unless** the caller passes `?cascadePending=true`. When the override
+is set, the cascade falls through `document_edits.tab_id ON DELETE CASCADE`
+(§11 §5) — pending edits are dropped silently with the tab. The 409 path
+surfaces the list of dependent edits so the UI can offer an "accept/reject all
+first" affordance. See §04 (G-04.P0.6) for the endpoint contract.
+
+**Move block** payload (resolves G-01.P1.22):
+
+```ts
+POST /documents/:documentId/blocks/:blockId/move
+{
+  targetTabId: string;        // tab to move the block into (must belong to the same document)
+  afterBlockId?: string;      // place after this block in the target tab; null/undefined = append at end
+}
+```
+
+Atomicity:
+
+- both the source tab and the target tab bump their `list_version` on success
+  (§11 §5 `doc_tabs.list_version` CAS) so concurrent insert/reorder edits in
+  either tab become `superseded` rather than overwriting
+- the move is rejected if `targetTabId` does not belong to the block's document
+  (the composite FK in §11 §5 keeps blocks tied to a single document)
+- pending `document_edits` referencing the moved block remain attached via
+  composite FK; the tab change re-points them to `targetTabId` in the same
+  transaction
 
 ### 6.4 Context create
 
@@ -596,6 +868,22 @@ Rules:
 - Folder counts count active Talks only.
 - Dragging a Talk into a Folder sets `talks.folder_id`.
 - Dragging a Talk to Unfiled clears `talks.folder_id`.
+
+Talk reordering within a bucket:
+
+- Each Talk carries `sort_order` (§5.3) unique within its
+  `(workspace_id, folder_id)` bucket. The Unfiled bucket is
+  `folder_id is null`.
+- Drag a Talk row within its bucket to renumber `sort_order`. The reorder API
+  updates the dragged row's `sort_order` and shifts the affected siblings; the
+  sidebar reads `(folder_id, sort_order)` to render.
+- **Insert path for a new Talk:** the API sets
+  `sort_order = max(sort_order in target bucket) + 1`. The new Talk lands at
+  the bottom of its folder (or Unfiled).
+- Moving a Talk to a different folder (or Unfiled) sets a fresh
+  `sort_order = max(sort_order in target bucket) + 1` in the new bucket.
+- Folder reordering uses `folders.sort_order` (§2.2 / §11 §2); it does not
+  cascade through Talks.
 
 ### 7.2 Talk header
 

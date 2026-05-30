@@ -2,7 +2,7 @@
 
 This `/docs` folder specifies **ClawTalk** — a multi-agent reasoning product where users invite different LLMs into a "Talk" (a context-bound room) and watch them debate, push back, and synthesize toward a recommendation.
 
-You're reading this because you're an AI coding agent (or engineer) about to work on the product. ClawTalk is **not** greenfield — there is a live codebase on Cloudflare Workers + Supabase Postgres. Read the orientation docs below first, then the spec docs in order.
+You're reading this because you're an AI coding agent (or engineer) about to work on the product. The **design** is a clean greenfield rebuild (DECISIONS D0); the **infrastructure** is the existing Cloudflare Workers + Supabase Postgres stack. Read the orientation docs below first, then the spec docs in order.
 
 ---
 
@@ -91,8 +91,8 @@ The prototype is React + Tailwind + Babel-in-the-browser. Production runs on the
 - **Runtime:** Cloudflare Workers + Hono + Durable Objects + Hyperdrive. Run queues are **Cloudflare Queues**; websocket pub/sub is the `UserEventHub` Durable Object. **No Redis, no BullMQ/Sidekiq.**
 - **Database:** Supabase Postgres (postgres.js + RLS via `withUserContext`).
 - **Frontend:** Vite + React + Tailwind under `webapp/`. Stick with the tokens in `02-visual-system.md`.
-- **LLM providers:** Anthropic Claude, OpenAI GPT, Google Gemini — via the provider abstraction in `04` §14. Model catalog needs a single source of truth (DOC-AUDIT #10).
-- **Real-time:** WebSocket only (drop the SSE hedge in `04` §0).
+- **LLM providers:** Anthropic Claude, OpenAI GPT, Google Gemini — via the provider abstraction in `04` §14. Model catalog single source of truth: `§11` `llm_models` is a view over `llm_provider_models` (cross-ref `§11` §4).
+- **Real-time:** WebSocket only.
 - **Auth:** OAuth (Google, GitHub) + magic-link email; HttpOnly cookies + double-submit CSRF. Workspace-scoped sessions.
 
-> Earlier drafts (and the archived rebuild plan) recommended Next.js + Node + Redis. That was **rejected** — see DECISIONS D1. `05-build-plan.md` Phase 0 still references Redis/BullMQ and needs fixing.
+> Earlier drafts (and the archived rebuild plan) recommended Next.js + Node + Redis. That was **rejected** — see DECISIONS D1.

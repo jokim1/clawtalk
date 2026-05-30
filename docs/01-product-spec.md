@@ -54,16 +54,16 @@ A user can belong to 1+ workspaces. Workspace is the root of permissions, billin
 type Workspace = {
   id: string;
   name: string;             // 'Oxbow & Co.'
-  initials: string;         // 'OC'
+  slug: string;             // 'oxbow-co' — URL-stable handle (see §11 §1)
+  initials: string;         // 'OC' — UI projection (first letters of name + members.initials); not a stored column
   ownerId: string;
-  region: string;           // 'us-east'
   plan: 'team' | 'enterprise';
   createdAt: Date;
 }
 type WorkspaceMember = {
   workspaceId: string;
   userId: string;
-  role: 'owner' | 'admin' | 'member';
+  role: 'owner' | 'admin' | 'member' | 'guest';   // §11 §1 includes 'guest' for the account-switcher Guest workspace
 }
 ```
 
@@ -89,29 +89,37 @@ type Folder = {
 
 - **Drop the Threads concept entirely.** Rounds handle iteration inside a single Talk.
 - Add `folderId: string | null`.
+- Add `sortOrder: number` — drag-orderable position within its `(folderId | Unfiled)` bucket (§11 §3). New Talks get `sortOrder = max(sort_order in bucket) + 1`; reorder via the sidebar drag handler.
+- Add `createdById: UserId` — the user who created the Talk. NOT NULL, `ON DELETE RESTRICT` on `users` (§11 §3): a user can't be hard-deleted while they own Talks (leave/transfer flow handles this).
 - Add `archivedAt: Date | null` (replaces delete).
 - Add `team: AgentId[]` and `teamId: string | null` (snapshot + optional reference to a saved Team composition).
 - Add `tools: Record<ToolId, boolean>` (per-Talk overrides; inherits workspace defaults).
-- Keep `mode: 'Ordered' | 'Parallel'`, `rounds: number`, `running: boolean`, `unread: number`.
+- Keep `mode: 'ordered' | 'parallel'` (lowercase to match §11 §3 `talk_mode`), `roundsLimit: 1 | 2 | 3 | 5` (§11 §3 `rounds_limit` CHECK).
+- **No `running` or `unread` column.** Both are derived projections returned by the API, not Talk columns (§11 §3). `running` ≡ `runs.status in ('queued','running','awaiting')` for any run in the Talk; `unread` is per-caller, derived from `talk_reads(talk_id, user_id, last_read_at)` vs newer messages.
 
 ```ts
 type Talk = {
   id: string;
   workspaceId: string;
   folderId: string | null;       // null → Unfiled
+  sortOrder: number;             // §11 §3 talks.sort_order — position within folder/Unfiled bucket
   title: string;
-  mode: 'Ordered' | 'Parallel';
-  rounds: number;
+  mode: 'ordered' | 'parallel';  // matches §11 §3 talk_mode
+  roundsLimit: 1 | 2 | 3 | 5;    // §11 §3 talks.rounds_limit
   team: AgentId[];
   teamId?: string;
   tools: Record<ToolId, boolean>;
-  running: boolean;
-  unread: number;
+  createdById: UserId;           // §11 §3 talks.created_by — NOT NULL, ON DELETE RESTRICT
   archivedAt: Date | null;
   createdAt: Date;
   lastActivityAt: Date;
 }
 ```
+
+**Projected (not stored on Talk):**
+
+- `running: boolean` — derived from `runs.status in ('queued','running','awaiting')` (§11 §3 design notes). Surface via `GET /talks/:id` and `GET /talks` projection.
+- `unread: number` — derived per-user from `talk_reads.last_read_at` vs message `created_at` (§11 §3 design notes). Surface via `GET /talks` projection for the caller.
 
 ### 1.4 Threads (REMOVE)
 
@@ -138,7 +146,6 @@ type Doc = {
   title: string;
   format: 'markdown' | 'html';
   tabs: DocTab[];
-  coEditorIds: AgentId[];
   lastEditAt: Date;
 }
 type DocTab = {
@@ -147,8 +154,11 @@ type DocTab = {
   title: string;
   order: number;
   blocks: Block[];
+  coEditorIds: AgentId[];     // §11 §5 doc_tab_coeditors — co-editors are per-tab
 }
 ```
+
+Co-editors are per-tab — a Draft tab can have different editors than a Comp tab. The Doc itself has no co-editors. Storage: `doc_tab_coeditors(workspace_id, tab_id, agent_id)` (§11 §5).
 
 ### 1.6 Agents (CHANGED — substantial)
 
@@ -209,15 +219,28 @@ Seed with 3 defaults on workspace creation: Pricing crew, Research crew, Hiring 
 
 ### 1.8 Tools, Connectors, Context (3 distinct concepts — see §3)
 
+**Connectors are workspace-global** (§11 §6 + roadmap #5). The `Connector` row holds the OAuth wiring for a service at the workspace level (one row per service per workspace). Per-Talk exposure is a separate `ConnectorBinding` row that selects WHICH workspace-authorized connectors are available in a given Talk. Authorization happens once on the workspace-level Connectors page; per-Talk binding happens from the Talk header.
+
 ```ts
 type ToolToggle = Record<ToolId, boolean>;  // Talk-scoped + workspace default
-type Connector = {                          // workspace-scoped OAuth wiring
+
+type Connector = {                          // workspace-scoped OAuth wiring (§11 §6)
   id: string;
-  service: 'slack' | 'gdrive' | 'gmail' | 'linear' | 'github' | 'notion' | 'telegram';
-  target?: string;                          // '#pricing', '/pricing-v2/', etc.
-  scope: string[];                          // ['read','write']
-  bindings: { talkId: string; enabled: boolean }[];  // per-Talk bindings
+  workspaceId: string;
+  service: 'slack' | 'gdrive' | 'gmail' | 'linear' | 'github' | 'notion';   // §11 §6 CHECK (6 services; no telegram)
+  authorized: boolean;                      // workspace-level OAuth status
+  authorizedAt?: Date;
+  config: Record<string, unknown>;          // service-specific config (default target, etc.)
 }
+
+type ConnectorBinding = {                   // per-Talk selection of workspace-authorized connectors (§11 §6 connector_bindings)
+  connectorId: string;
+  talkId: string;
+  target?: string;                          // '#pricing', '/pricing-v2/', etc. — Talk-scoped override
+  scope?: string[];                         // ['read','write']
+  enabled: boolean;
+}
+
 type ContextSource = {                      // Talk-scoped
   id: string;
   talkId: string;
@@ -283,7 +306,7 @@ Top to bottom:
 | Concept | Answers | Surface |
 |---|---|---|
 | **Tools** | What can agents *do*? | Per-Talk popover from header + workspace catalog in Settings → Tools |
-| **Connectors** | Which external services is this Talk *wired into*? | Per-Talk popover + workspace OAuth bindings in Settings → Connectors |
+| **Connectors** | Which workspace-authorized services is this Talk *wired into*? | Per-Talk popover binds workspace connectors to this Talk; workspace-level OAuth lives on the Connectors page (§11 §6) |
 | **Context** | What does the room *know right now*? | Per-Talk popover with sources (primary document, supporting documents, URLs, files, past Talks, house rules) |
 
 All three are first-class header buttons in the Talk header — see §4.4.
@@ -342,7 +365,7 @@ Two-pane: 56px icon rail + 260px secondary list.
 2. **Agents · N**
 3. **Tools · N** (popover with toggle switches per tool, grouped by Web / Google / Comms / Work)
 4. **Context · N** (NEW popover — sources of truth for the Talk: primary document, supporting documents, URLs, files, past Talks, house rules)
-5. **Connectors · N** (NEW popover — OAuth service bindings: Slack channel, Drive folder, Gmail label, Linear project, GitHub repo)
+5. **Connectors · N** (NEW popover — shows chips for workspace-authorized connectors that have an active `ConnectorBinding` for this Talk: Slack channel, Drive folder, Gmail label, Linear project, GitHub repo. The popover lets the user toggle existing bindings on/off and pick a per-Talk target/scope. "Manage connectors" opens the workspace-level Connectors page (Settings → Connectors) where new OAuth wiring is authorized. Connectors are authorized once per workspace; per-Talk binding selects which to expose — see §11 §6.)
 6. **Document** (toggle the doc pane)
 7. **⋯ More menu** — Run history · Move to folder ▸ · Rename · Duplicate · Export ▸ · Archive
 
@@ -362,6 +385,8 @@ Asana-style two-column popover anchored to the rail's profile avatar.
 - **Left column:** workspace list with avatar + name + unread dot. Current is checked. Scroll.
 - **Right column:** active workspace context — user identity card, "Set out of office", links to Admin console (if owner), New workspace, Invite to workspace, Settings, Profile, Add another account, Sign out at bottom.
 
+OOO state, custom handle, and avatar photo are deferred to a follow-up `user_profiles` extension table; the v1 schema (§11 §1) stores only `email`, `name`, `avatar_color`, and `initials`.
+
 ### 4.7 Documents (NEW page)
 
 Dense sortable table at 1320px max width.
@@ -378,6 +403,8 @@ Dense sortable table at 1320px max width.
 - Pending-edits badge in the title cell when any blocks are awaiting review.
 
 **Full-bleed doc editor:** unlinked or primary-linked indicator in the top bar, document tabs when more than one exists, co-editor avatars in meta strip, pending-edits banner with Accept all / Reject all.
+
+**Forge tab (post-MVP, behind feature flag).** Each document also surfaces a Forge tab for autonomous content improvement — pick a scope (whole doc / tab / target block), an objective (Audience + reference set + question, or ad-hoc), kick off an improvement run, review the gallery of scored candidates, promote a winner to a pending edit. See §5c for the full surface description.
 
 ### 4.8 Agents (NEW page)
 
@@ -451,8 +478,48 @@ Every new workspace seeds with:
 
 - **5 default agents** (Strategist, Critic, Researcher, Editor, Quant) — full prompts and methodologies in `03-agents.md`; display seed data in `shared/data.jsx`
 - **3 default team compositions** (Pricing crew, Research crew, Hiring crew)
-- **9 default tools** with sensible enable-by-default flags (Web search ON, Drive read ON, News monitor ON; others OFF)
+- **The v1 tool catalog** (see §5.1) seeded with sensible enable-by-default flags (`web-search` ON, `gdrive-read` ON, `news-monitor` ON; others OFF)
 - **Empty folder list** — user creates folders or leaves Talks in Unfiled
+
+### 5.1 Tool catalog (v1)
+
+The canonical `tool_id` vocabulary that backs `talk_tools.tool_id` (§11 §6) and the `source_scope_json.tool_ids` validation in jobs (§12 §3). The `tool_id → required connector service` map is a static code catalog, not a table (§11 §6 design notes). Capability tiers follow engineering-notes §1 (`read` = inert observation; `write` = side-effecting external mutation).
+
+| `tool_id`        | Display name      | Connector dep (`connectors.service`) | Capability |
+|------------------|-------------------|--------------------------------------|------------|
+| `web-search`     | Web search        | `null`                               | read       |
+| `web-fetch`      | Web fetch         | `null`                               | read       |
+| `news-monitor`   | News monitor      | `null`                               | read       |
+| `gdrive-read`    | Drive read        | `gdrive`                             | read       |
+| `gdrive-write`   | Drive write       | `gdrive`                             | write      |
+| `gmail-read`     | Gmail read        | `gmail`                              | read       |
+| `gmail-send`     | Gmail send        | `gmail`                              | write      |
+| `messaging`      | Slack post        | `slack`                              | write      |
+| `linear`         | Linear create issue | `linear`                           | write      |
+| `github-read`    | GitHub search     | `github`                             | read       |
+| `notion-read`    | Notion read       | `notion`                             | read       |
+
+A tool whose connector dependency is `null` runs without OAuth wiring. A tool with a connector dependency requires the workspace's `connectors` row for that service to be `authorized = true` AND the Talk's `talk_tools` row for that `tool_id` to be `enabled = true` (§11 §6 tool↔connector dependency). Cross-ref §11 §6 + §12 §3.
+
+---
+
+## §5b · Scheduled Jobs (in scope per DECISIONS D6)
+
+A **Job** is a scheduled single-agent prompt that fires a normal run on a Talk. The user creates one from the Talk header ("Schedule a job"): pick one agent from the Talk's roster, write the prompt, set an interval/daily/weekly schedule, choose whether the run posts a message in the Talk and/or proposes a `document_edits` insert against the Talk's primary document. The scheduler claims due jobs every minute, fires a normal `conversation` run with `runs.job_id` set + `runs.trigger='scheduler'`, and Inbox surfaces `job_output_ready` / `job_blocked` items.
+
+Full data model + scheduler semantics + UI flows live in **[12-jobs.md](./12-jobs.md)** (the canonical Jobs spec). Schema details in §11 §3 (`runs.job_id`) and §11 §8 (`jobs` table).
+
+---
+
+## §5c · Forge — autonomous content improvement (post-MVP)
+
+**Forge** is a population-based generate-score-improve loop over a single Document. The user picks a Document (or a Tab / target block within it), an objective (Audience + reference set + question, or an ad-hoc objective), and a scope. The system kicks off an `improvement_runs` row (`run_kind='content_improvement'`) and iterates: generate candidate rewrites, score each against the SSR/Synthetical oracle (per-persona Likert + held-out evaluation), keep frontier winners, evolve from them. The run terminates on target-score / max-iterations / budget / plateau. The winner version lands as a pending `document_edits` row with `source='forge'` against the targeted tab/block — the user accepts/rejects through the normal pending-edit pane.
+
+Internal mechanics: rewriter + critic roles are `is_system` agents (DECISIONS D3); each scoring round calls SSR/Synthetical with a stable `idempotency_key`; held-out personas persist for reproducibility.
+
+Full PRD: **[09-improver-spec.md](./09-improver-spec.md)**. Design handoff: [10-improver-design.md](./10-improver-design.md). Schema: §11 §9 (`ssr_connections`, `forge_audiences`, `forge_personas`, `forge_reference_sets`, `forge_questions`, `forge_audience_personas`, `improvement_runs`, `improvement_run_held_out_personas`, `document_versions`). API surface: §04 §17.
+
+Forge is **post-MVP** — it ships behind a feature flag and is not part of the v1 launch checklist. UI placement: as a Forge tab on the Document page (§4.7) for picking targets + reviewing past runs + gallery of winners, with an "Improve this with Forge" action surfaced from the document pane.
 
 ---
 
@@ -494,5 +561,4 @@ Stages 1–6 are infrastructure / IA cleanup with low UI risk. 7–10 are net-ne
 - Branches / sub-conversations inside a Talk
 - Multiple primary documents per Talk
 - Community marketplace
-- Async / scheduled agent jobs
 - Real-time multiplayer co-editing of docs (single-user editor in v1)

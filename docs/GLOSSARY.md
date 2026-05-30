@@ -8,15 +8,15 @@
 | Term | Means | Notes |
 |---|---|---|
 | **Workspace** | Top-level tenant; permissions/billing/data root. | |
-| **Folder** | Optional flat grouping of Talks. Live table: `talk_folders`. | Spec (`01`/`08`) calls it `folders`; DB says `talk_folders` — see D2. |
+| **Folder** | Optional flat grouping of Talks. | Live: `talk_folders` (pre-migration) → `folders` (post-§11). |
 | **Talk** | A context-bound multi-agent conversation. | |
 | **Round** | One turn of debate; Editor closes with synthesis. | |
-| **Agent** | A fixed-role LLM reasoning role. Live table: `registered_agents` (+ per-Talk `talk_agents`). | Spec calls these `agents` / `talk_agent_snapshots` — see D2. |
-| **Content / Document** | The editable long-form artifact attached to a Talk. Live table: `contents` (Content feature, PR #385). | Spec (`01`/`08`) calls it `Document` / `documents`. **Same thing.** Canonical name TBD in D2. |
-| **Document tab** | A Google-Docs-style section inside one Content/Document. | **Specified (08) and prototyped, but not yet in the DB** — no `doc_tabs`/`doc_blocks`. Unbuilt. |
-| **Pending edit** | An agent-proposed change awaiting accept/reject. Live: `content_edits` / `content_proposals`. | |
+| **Agent** | A fixed-role LLM reasoning role. | Live: `registered_agents` (pre-migration) → `agents` + `talk_agent_snapshots` (post-§11). |
+| **Content / Document** | The editable long-form artifact attached to a Talk. | Pre-migration: `contents` (PR #423 hybrid MD+HTML). Post-§11: `documents` + `doc_tabs` + `doc_blocks` + `document_edits`. Canonical name (post-migration): **Document**. |
+| **Document tab** | A Google-Docs-style section inside one Content/Document. | Live table: `doc_tabs` (§11 §5). |
+| **Pending edit** | An agent-proposed change awaiting accept/reject. | Pre-migration: `content_edits` (PR #423). Post-§11: `document_edits` (with `source ∈ ('agent','forge','job')`). |
 | **Tools** | What agents can *do* (web search, Drive read, …). Per-Talk + workspace catalog. | |
-| **Connectors** | External service bindings (Slack, Drive, Linear, …). | `roadmap.md` #5 moved these **workspace-global**; `01` still shows per-Talk — reconcile (DOC-AUDIT #5). |
+| **Connectors** | External service bindings (Slack, Drive, Linear, …). Workspace-global. | |
 | **Context** | What the room *knows from* (primary doc, supporting docs, URLs, files, past Talks, rules, news). | |
 | **Unfiled** | Virtual view: Talks with `folder_id is null`. **Not** Inbox. | |
 | **Inbox** | Home queue of arrivals/blockers/waits. A Talk can be an Inbox item's *target*, never an item itself. | |

@@ -1,4 +1,4 @@
-> **Status:** canonical (agent architecture). Forge's rewriter/critic are **built-in system agents** in `registered_agents` (DECISIONS D3). TODO: define `ModelId` enum + temperature storage (DOC-AUDIT #9–#10).
+> **Status:** canonical (agent architecture). Forge's rewriter/critic are **built-in system agents** in `agents` with `is_system = true` (DECISIONS D3 · §11 §4). Schema column shapes for `agents`, `agent_role_templates`, `talk_agent_snapshots`, and `run_prompt_snapshots` follow §11 §4 exactly — this doc references them by name, not by re-listing.
 > Precedence + orientation: [README.md](./README.md) · decisions: [DECISIONS.md](./DECISIONS.md) · terms: [GLOSSARY.md](./GLOSSARY.md).
 
 # ClawTalk Agent System Design
@@ -316,7 +316,7 @@ The role template is the main behavioral asset. It owns:
 - reset values
 - role-specific eval checks
 
-V1 should ship exactly five default role templates:
+V1 should ship exactly five default user-facing role templates:
 
 - Strategist
 - Critic
@@ -324,15 +324,19 @@ V1 should ship exactly five default role templates:
 - Editor
 - Quant
 
-The full default prompts and methodology text should be ported verbatim from
-`03-agents.md` into the seed/runtime package. Do not paraphrase them in code.
+Plus two **system** role templates for Forge (§3.6 / D3):
+
+- `forge_rewriter`
+- `forge_critic`
+
+The five user-facing role templates live in `agent_role_templates` (§11 §4) with their `system_prompt` / `method_default` text seeded verbatim from `03-agents.md` (do not paraphrase in code). The two Forge system role templates are seeded from [`09-talk-doc-improvement.md`](./09-talk-doc-improvement.md) §9.
 
 ### 3.3 Workspace Agent
 
 Visible and editable by the user. Created from a role template when a workspace
 is created.
 
-The workspace agent is intentionally small:
+The workspace agent is intentionally small. The TS read shape mirrors §11 §4 `agents`:
 
 ```ts
 type WorkspaceAgent = {
@@ -346,8 +350,14 @@ type WorkspaceAgent = {
   accent: string;
   accentDark?: string;
 
-  model: ModelId;
-  defaultModel: ModelId;
+  // FK to `llm_models.id` (§11 §4 — a view over `llm_provider_models`).
+  model_id: string;
+  default_model_id: string;
+
+  // Editable; seeded from `agent_role_templates.default_temperature`.
+  // Snapshotted per run on `talk_agent_snapshots.temperature`.
+  // Never exposed via PATCH — the API derives it server-side from the agent record (§11 PATCH contract).
+  temperature: number;
 
   persona: string;
   focus: string;
@@ -357,9 +367,11 @@ type WorkspaceAgent = {
 
   isDefault: boolean;
   isCustom: boolean; // false in v1 unless explicitly enabled later
+  isSystem: boolean; // always false for user-facing reads (system agents are filtered server-side)
   enabled: boolean;
 
-  createdFromTemplateVersion: string;
+  // `int` per §11 §4 (`agent_role_templates.version` is int).
+  createdFromTemplateVersion: number;
   updatedAt: string;
 };
 ```
@@ -368,77 +380,165 @@ These fields are enough for v1:
 
 - `name`: what the user sees.
 - `roleKey`: fixed job family; readonly for default agents.
-- `model`: provider/model choice for this agent.
+- `model_id`: provider/model choice for this agent. FK to `llm_models.id`.
+- `temperature`: editable; defaulted from the role template; snapshotted per run.
 - `persona`: tone and voice.
 - `focus`: domain or subject emphasis.
 - `method`: concrete moves the agent makes.
 - `capabilities`: which product abilities this agent may use when the Talk
   enables them.
 - `enabled`: whether the workspace can use this agent.
+- `isSystem`: always `false` on user-facing reads. System rows (Forge rewriter/critic — see §3.6) are filtered out by the read accessor unless the caller is the runtime or an admin debug surface.
 
 Do not add v1 fields for separate epistemics, context policy, discussion
 policy, output contract, examples, or eval metrics.
 
-### 3.4 Talk Agent Snapshot
+### 3.4 Live Roster vs. Per-Run Snapshot
 
-When a Talk starts, snapshot the agents used by that Talk. This preserves what
-the Talk meant even if the workspace agent is edited later.
+Two tables back agents inside a Talk, and they answer different questions.
+
+**Live roster — `talk_agents` (§11 §3).** The current, editable list of agents in the room. Composer add/remove writes here; @mention dispatch reads from here.
+
+```ts
+type TalkAgentRoster = {
+  workspaceId: string;
+  talkId: string;
+  agentId: string;
+  sortOrder: number;
+  addedAt: string;
+  // `is_system = true` rows (Forge rewriter/critic — §3.6) are filtered at the
+  // accessor by default; user-facing reads see `isSystem: false` only.
+  isSystem: boolean;
+};
+```
+
+Rules:
+
+- The roster is mutable until the user removes/adds agents.
+- Adding an agent inserts a `talk_agents` row.
+- Removing an agent deletes the `talk_agents` row but does **not** retroactively edit history — past runs keep their own frozen snapshots (below).
+- System agents (`is_system = true`) cannot be added or removed from the roster (§3.6).
+
+**Per-run frozen snapshot — `talk_agent_snapshots` (§11 §4).** When a run is created, the entire live roster at that instant is frozen as a group of immutable snapshot rows sharing one `snapshot_group_id`. The acting agent for that run is identified by `runs.agent_snapshot_id`, which must be one row inside that group. The TS shape mirrors §11 §4:
 
 ```ts
 type TalkAgentSnapshot = {
   id: string;
+  workspaceId: string;
   talkId: string;
-  sourceAgentId: string;
-  sortOrder: number;
+  snapshotGroupId: string;        // identifies the roster freeze; not unique per row
+  sourceAgentId: string | null;   // nullable: the live agent may be deleted later
 
   roleKey: AgentRoleKey;
   name: string;
   handle: string;
   initials: string;
   accent: string;
-  model: ModelId;
+  accentDark?: string;
+
+  // FK to `llm_models.id`.
+  modelId: string;
+
+  // Frozen at run time from the agent record.
+  temperature: number;
+
   persona: string;
   focus: string;
   method: string[];
-  capabilities: AgentCapability[];
 
-  roleTemplateVersion: string;
-  globalPolicyVersion: string;
+  sortOrder: number;
+  roleTemplateVersion: number;
+  globalPolicyVersion: number;
   createdAt: string;
 };
 ```
 
-Snapshots are also required when a saved team composition is used. The Talk
-should preserve the team that was actually invited.
+Run-creation flow:
+
+1. A new `snapshot_group_id` (uuid) is generated when the run is inserted.
+2. Every row currently in `talk_agents` for the Talk is copied into `talk_agent_snapshots` with that `snapshot_group_id`. Each snapshot row freezes name / handle / model_id / temperature / persona / focus / method / role_template_version / global_policy_version from the live agent record at that moment.
+3. The acting agent's snapshot id becomes `runs.agent_snapshot_id`; the group id becomes `runs.snapshot_group_id`. Together they name "this run's full room + the acting agent inside that room."
+
+Historical roster reconstruction for any past run:
+
+```sql
+select * from talk_agent_snapshots
+where snapshot_group_id = (select snapshot_group_id from runs where id = :run_id);
+```
+
+This means editing or removing a workspace agent never rewrites historical attribution: `messages.agent_snapshot_id` (per §11 §3) and `runs.agent_snapshot_id` both point at the frozen snapshot row, not at the live `agents` record. See §11 §3 "Roster vs. snapshot" and "Roster freeze groups" design notes for the underlying schema rationale.
+
+Snapshots are required for any run that uses a saved team composition as well — the Talk preserves the team that was actually invited at that run.
 
 ### 3.5 Run Prompt Snapshot
 
-Every provider call should persist the assembled prompt metadata needed for
-debugging.
+Every provider call should persist the assembled prompt metadata needed for debugging. Shape mirrors §11 §4 `run_prompt_snapshots`:
 
 ```ts
 type RunPromptSnapshot = {
+  id: string;
+  workspaceId: string;
   runId: string;
   talkId: string;
   agentSnapshotId: string;
-  model: ModelId;
-  provider: ProviderId;
 
-  globalPolicyVersion: string;
-  roleTemplateVersion: string;
-  promptAssemblyVersion: string;
+  // FK to `llm_models.id`.
+  modelId: string;
+  provider: string;             // copied from llm_models.provider at snapshot time
+
+  globalPolicyVersion: number;
+  roleTemplateVersion: number;
+  promptAssemblyVersion: number;
 
   contextManifest: ContextManifestItem[];
   toolManifest: ToolManifestItem[];
   promptHash: string;
-  promptTextRedacted?: string; // dev/admin only
+  promptTextRedacted?: string;  // dev/admin only
 
   createdAt: string;
 };
 ```
 
 Store enough to reproduce behavior without showing hidden prompt internals in
-normal UI.
+normal UI. `runs.run_kind` (§11 §3) discriminates the prompt source: `'conversation'` for normal @chat runs, `'content_improvement'` for Forge runs invoking the system agents (§3.6).
+
+### 3.6 System Agents (Forge)
+
+Forge's rewriter and critic are **system agents** — real rows in `agents` (§11 §4) flagged `is_system = true` (DECISIONS D3). They sit alongside the five user-facing default agents but are hidden from every user surface and locked down editorially.
+
+**Two new role keys.** Add to the `agent_role_templates.role_key` CHECK enum (§11 §4), with seed rows:
+
+- `forge_rewriter` — Forge's candidate-generating agent. Default handle `@forge-rewriter`. Distinct accent (suggest a "system tint" outside the default agent palette so debug views show it as non-user).
+- `forge_critic` — Forge's candidate-scoring agent. Default handle `@forge-critic`. Distinct accent.
+
+Seed values both rows must carry:
+
+- `role_key`, `default_name`, `default_handle`, `default_initials`, `default_accent`, `default_accent_dark`
+- `default_model_id` (FK to `llm_models.id`) — Joseph chooses at impl time.
+- `default_temperature` — Joseph chooses at impl time.
+- `job`, `system_prompt` — **placeholder at this layer.** The canonical content lives in [`09`](./09-talk-doc-improvement.md) §9; the role template seed copies that text verbatim. TODO: Joseph to write the actual prompts at impl time.
+- `method_default text[]` — short procedural steps mirroring §09's rewriter/critic loop.
+- `version int` — `1` on initial seed.
+
+**Workspace-seeded `agents` rows.** On workspace creation (§12 seeding), insert two `agents` rows — one for `forge_rewriter`, one for `forge_critic` — both with `is_system = true`, `is_default = true`, `is_custom = false`, `enabled = true`. Their `model_id` / `temperature` / `persona` / `focus` / `method` are seeded from the role templates above.
+
+**Invocation contract.**
+
+- §09's Forge loop creates `runs` rows with `run_kind = 'content_improvement'` (§11 §3 line 131). Normal @chat runs use `run_kind = 'conversation'`.
+- At run creation, the acting system agent (rewriter or critic) is snapshotted into `talk_agent_snapshots` inside the run's `snapshot_group_id` group, exactly the same as any user-facing agent. `runs.agent_snapshot_id` points at the system-agent snapshot.
+- The runtime selects system agents by `role_key in ('forge_rewriter', 'forge_critic')` + `is_system = true`, not by name or handle.
+- Forge's promotion path lands through the unified `document_edits` table with `source = 'forge'` (§11 §5).
+
+**Editorial lock + visibility rules.**
+
+- `talk_agents` (live roster): system rows are never inserted by the composer; users cannot add or remove them.
+- `GET /agents`: rows with `is_system = true` are filtered server-side by the accessor; see §11 read paths below.
+- `GET /agents/:id`: returns 404 for a system row unless the caller has the runtime / admin debug capability and passes `?includeSystem=true`.
+- `PATCH /agents/:id` on a system row returns `403 Forbidden`. Forbidden fields on system rows: `name`, `model_id`, `temperature`, `persona`, `focus`, `method`, `enabled`. The only mutation path is a versioned `agent_role_templates` row → re-seed (the §14 prompt-improvement loop).
+- `DELETE /agents/:id` on a system row returns `403 Forbidden`. System agents cannot be soft- or hard-deleted by user-facing surfaces.
+- Talk UI never lists rewriter/critic as targets for @mention.
+
+Cross-references: see §11 §4 (`agents.is_system` column + design note), §11 §12.3 (system-agent visibility on `agents` — filtered at the query layer, not RLS), and [`09-talk-doc-improvement.md`](./09-talk-doc-improvement.md) §9 (canonical rewriter/critic prompt content).
 
 ## 4. User-Facing Agent Editor
 
@@ -487,9 +587,12 @@ Expose these fields:
 | Method | "What moves does it make every turn?" | High | Reset to role default |
 | Enabled | "Can this workspace use it?" | Product control | Re-enable |
 
+Temperature (`agents.temperature`, §11 §4) is stored editably and seeded from the role template's `default_temperature`. It is **not** an editable field in the v1 user-facing UI; the API edge does not accept it on PATCH. The value is set server-side from the agent record at run time and snapshotted onto `talk_agent_snapshots.temperature`.
+
 Do not expose these in v1:
 
 - raw hidden system prompt editing
+- temperature (stored editably in DB; not surfaced in v1 UI)
 - evidence policy
 - context policy
 - tool triggers
@@ -570,7 +673,7 @@ work products and decision moves.
 
 ### 4.7 Model
 
-Model is a quality, latency, and cost decision.
+Model is a quality, latency, and cost decision. The agent's `model_id` (§11 §4) FKs into `llm_models.id` — the view over `llm_provider_models`.
 
 The model picker should show:
 
@@ -582,7 +685,7 @@ The model picker should show:
 - whether the model supports tools/grounding in the current integration
 
 Do not make users pick temperature, top-p, penalties, or provider-specific
-parameters in v1.
+parameters in v1. Temperature is stored editably in `agents.temperature` (§11 §4) but is not surfaced in the v1 UI; it is seeded from the role template, snapshotted per run, and never exposed via PATCH at the API edge (§3.3, §4.3, §11 PATCH).
 
 ## 5. Role Templates
 
@@ -769,6 +872,8 @@ The New Talk UI should show:
 - rough latency/cost impact
 - whether Ordered or Parallel is recommended
 
+**Default-tool materialization (contract with §11 §6).** `TeamComposition.defaultTools` (mirrored in storage as `team_compositions.default_tools_json`, §10.3) is a *seed*, not a live link. When a user creates a Talk by selecting a `team_composition`, the create-Talk API reads `team_compositions.default_tools_json` and, in the same transaction as the `talks` insert, inserts one `talk_tools` row per entry with `enabled = true` (keyed by `(workspace_id, talk_id, tool_id)` per §11 §6). The composition row is read once at create time; subsequent edits to `team_compositions.default_tools_json` do **not** propagate to existing Talks — those rows are snapshots in that sense. After creation, the user may freely edit `talk_tools` independently (toggle on/off, add new tools, remove seeded ones); the team defaults are the seed only. Cross-ref §11 §6 for the `talk_tools` storage shape.
+
 ## 7. Prompt Assembly
 
 Prompts should be assembled from typed sections. Avoid a single opaque prompt
@@ -778,7 +883,7 @@ Assembly order:
 
 1. Global runtime policy.
 2. Talk objective and latest user request.
-3. Room roster: other agents, handles, and jobs.
+3. Room roster: other agents, handles, and jobs. The composer's @mention dispatch and the room roster section both read from the **live `talk_agents` table** (§11 §3 / §3.4) — not from snapshots. Snapshots are per-run frozen rows that exist only after a run is created; they are irrelevant to live composition. At run insert time, the room as named here is then frozen into `talk_agent_snapshots` (sharing one `snapshot_group_id`) for that run only.
 4. Role template instruction.
 5. Workspace agent overrides: persona, focus, method, model.
 6. Talk mode and current discussion phase.
@@ -811,7 +916,7 @@ Phase: response
 </talk>
 
 <room>
-@strategy: frames the strongest defensible position.
+@strat: frames the strongest defensible position.
 @critic: finds the weakest load-bearing premise.
 @quant: checks the math.
 @editor: synthesizes the round.
@@ -868,8 +973,16 @@ Example:
 - Quant may have `calculate`.
 - Editor may have `propose_document_edits`.
 
-Even if the agent has a capability, the run cannot use it unless the Talk has
-enabled the corresponding tool and the workspace has valid authorization.
+Even if the agent has a capability, the run cannot use it unless the Talk has enabled the corresponding tool **and** the workspace has valid authorization. Per-Talk enablement is read from `talk_tools(workspace_id, talk_id, tool_id, enabled)` (§11 §6) at run start; the tool-manifest section of prompt assembly (§7 step 8) and the runtime capability gate both query this table. A tool that depends on a connector (e.g. `gdrive-read` → `gdrive`) additionally requires the workspace's `connectors` row to be `authorized = true` (§11 §6 tool↔connector dependency).
+
+#### 8.1.1 Dispatch-Time Authorization Check (Chat Runs)
+
+At run dispatch time — the `POST /api/v1/chat` handler before enqueue, and again as the executor pre-step inside the queue consumer (defense-in-depth across the boundary) — the runtime validates **every** tool in the run's resolved toolset:
+
+1. **Per-Talk enablement.** A `talk_tools(workspace_id, talk_id, tool_id, enabled = true)` row exists (§11 §6).
+2. **Connector authorization.** If the static `tool_id → required_service` map (§11 §6 design notes) marks the tool as connector-dependent, the matching `connectors(workspace_id, service, authorized = true)` row exists.
+
+If either check fails, the executor emits an `agent_replied` message with body `'Tool {tool_id} is not available — connector authorization required'` (the UI renders the connector-action button from this body shape) and terminates the run with `status = 'failed'` and `error_json = {'code': 'tool_not_authorized', 'tool_id': '<id>', 'required_service': '<service or null>'}`. The check uses the same code path as the fire-time check in §12 §5 step 2 (jobs surface) — only the failure surface differs (run-fail with an agent message here vs. job-block + inbox event there).
 
 ### 8.2 Context Manifest
 
@@ -938,55 +1051,54 @@ Recommended v1 tables.
 
 ### 10.1 `agents`
 
-Workspace-specific editable agent records.
+Workspace-specific editable agent records. Column shapes mirror §11 §4 `agents` exactly:
 
-- `id`
-- `workspace_id`
-- `role_key`
-- `name`
-- `handle`
-- `initials`
-- `accent`
-- `accent_dark`
-- `model`
-- `default_model`
-- `persona`
-- `focus`
-- `method_json`
-- `capabilities_json`
-- `is_default`
-- `is_custom`
-- `enabled`
-- `disabled_at`
-- `created_from_template_version`
-- `created_at`
-- `updated_at`
+- `id uuid pk`
+- `workspace_id uuid not null` references `workspaces(id) on delete cascade`
+- `role_key text not null` references `agent_role_templates(role_key)`
+- `name text not null`
+- `handle text not null`
+- `initials text not null`
+- `accent text not null`
+- `accent_dark text`
+- `model_id text not null` references `llm_models(id)`
+- `default_model_id text not null` references `llm_models(id)`
+- `temperature numeric not null` — editable; seeded from `agent_role_templates.default_temperature`; snapshotted per run on `talk_agent_snapshots.temperature`. Not exposed via PATCH at the API edge — the API derives it server-side from the agent record.
+- `persona text`
+- `focus text`
+- `method text[] not null default '{}'`
+- `capabilities text[] not null default '{}'`
+- `is_default boolean not null default false`
+- `is_custom boolean not null default false`
+- `is_system boolean not null default false` — Forge rewriter/critic (D3, §3.6); hidden from user-facing reads at the query layer; `PATCH`/`DELETE` returns 403 on these rows.
+- `enabled boolean not null default true`
+- `created_from_template_version int`
+- `created_at`, `updated_at`
+- `unique (workspace_id, id)` — composite-FK target for `talk_agents` / snapshots / coeditors.
+
+Read-path filter (§11 §12.3): `GET /agents` and the roster accessor add `WHERE is_system = false` by default; admin / runtime callers pass `?includeSystem=true` to see them.
 
 Do not store user-editable raw system prompts here in v1.
 
 ### 10.2 `agent_role_templates`
 
-Optional table. A code fixture is acceptable for v1. Use a table only if
-workspace admins need to edit templates later.
+**Required DB table** (DECISIONS D7). Seeded from `03-agents.md` prompts; backs the §14 prompt-improvement loop via versioned rows. Column shapes mirror §11 §4 exactly:
 
-- `role_key`
-- `template_version`
-- `display_name`
-- `job`
-- `default_model`
-- `allowed_models_json`
-- `default_persona`
-- `default_focus`
-- `default_method_json`
-- `default_capabilities_json`
-- `system_instruction`
-- `output_instruction`
-- `accent`
-- `accent_dark`
-- `eval_checks_json`
-- `created_at`
+- `role_key text pk` — CHECK in (`'strategist'`, `'critic'`, `'researcher'`, `'editor'`, `'quant'`, `'forge_rewriter'`, `'forge_critic'`). The last two are Forge system-agent roles (§3.6 / D3).
+- `default_name text`
+- `default_handle text`
+- `default_initials text`
+- `default_accent text`
+- `default_accent_dark text`
+- `default_model_id text references llm_models(id)`
+- `default_temperature numeric not null`
+- `job text not null`
+- `system_prompt text not null`
+- `method_default text[] not null`
+- `version int not null`
+- `updated_at`
 
-The canonical default content comes from `03-agents.md` and `shared/data.jsx`.
+The canonical default content for the five user-facing roles comes from `03-agents.md` and `shared/data.jsx`. The two Forge system-agent roles seed their `system_prompt` / `method_default` from [`09-talk-doc-improvement.md`](./09-talk-doc-improvement.md) §9 (the canonical rewriter / critic prompt content).
 
 ### 10.3 `team_compositions`
 
@@ -1012,38 +1124,43 @@ The canonical default content comes from `03-agents.md` and `shared/data.jsx`.
 
 ### 10.5 `talk_agent_snapshots`
 
-- `id`
-- `talk_id`
-- `source_agent_id`
-- `sort_order`
-- `role_key`
-- `name`
-- `handle`
-- `initials`
-- `accent`
-- `model`
-- `persona`
-- `focus`
-- `method_json`
-- `capabilities_json`
-- `role_template_version`
-- `global_policy_version`
+Immutable per-run roster freeze (§3.4). Column shapes mirror §11 §4 exactly:
+
+- `id uuid pk`
+- `workspace_id uuid not null`
+- `talk_id uuid not null`
+- `snapshot_group_id uuid not null` — roster-freeze group; the run's full room is `SELECT * FROM talk_agent_snapshots WHERE snapshot_group_id = :group_id` (see §3.4 + §11 §3).
+- `source_agent_id uuid` — the live agent this snapshot was taken from; nullable because the agent may be deleted later (SET NULL).
+- `role_key text not null`
+- `name text`, `handle text`, `initials text`, `accent text`, `accent_dark text`
+- `model_id text not null` references `llm_models(id)`
+- `temperature numeric not null` — frozen at run time from `agents.temperature`.
+- `persona text`, `focus text`, `method text[]`
+- `sort_order int not null`
+- `role_template_version int`, `global_policy_version int`
 - `created_at`
+- Uniqueness targets: `unique (workspace_id, id)`, `unique (workspace_id, talk_id, id)`, `unique (workspace_id, talk_id, snapshot_group_id, id)`, `unique (snapshot_group_id, source_agent_id)`.
+
+`runs.snapshot_group_id` + `runs.agent_snapshot_id` together name "this run's full room + the acting agent inside that room." Editing or deleting a workspace agent never rewrites past attribution because `messages.agent_snapshot_id` points here, not at `agents`.
 
 ### 10.6 `run_prompt_snapshots`
 
-- `run_id`
-- `talk_id`
-- `agent_snapshot_id`
-- `provider`
-- `model`
-- `global_policy_version`
-- `role_template_version`
-- `prompt_assembly_version`
-- `context_manifest_json`
-- `tool_manifest_json`
-- `prompt_hash`
-- `prompt_text_redacted`
+Exact prompt provenance per run. Column shapes mirror §11 §4 exactly:
+
+- `id uuid pk`
+- `workspace_id uuid not null`
+- `run_id uuid not null` — composite FK `(workspace_id, run_id)` → `runs(workspace_id, id) on delete cascade`; one prompt snapshot per run.
+- `talk_id uuid not null` — composite FK `(workspace_id, talk_id)` → `talks(workspace_id, id) on delete cascade`.
+- `agent_snapshot_id uuid not null` — composite FK `(workspace_id, agent_snapshot_id)` → `talk_agent_snapshots(workspace_id, id)`.
+- `model_id text not null` references `llm_models(id)`
+- `provider text not null`
+- `global_policy_version int`
+- `role_template_version int`
+- `prompt_assembly_version int`
+- `context_manifest_json jsonb`
+- `tool_manifest_json jsonb`
+- `prompt_hash text`
+- `prompt_text_redacted text`
 - `created_at`
 
 ### 10.7 `agent_feedback_events`
@@ -1080,10 +1197,14 @@ These endpoints supplement `04-api-contracts.md`.
 
 Returns workspace agents and team compositions.
 
+Filters out `agents.is_system = true` rows by default (§11 §12.3 — applied at the query layer, not in RLS). Admin / runtime callers may pass `?includeSystem=true` to see Forge rewriter/critic rows; standard member callers get `400 Bad Request` if they pass it.
+
+Each agent in the response carries the read shape from §3.3 — including `model_id` (FK to `llm_models.id`), `temperature` (stored editably; not surfaced in v1 UI), and `isSystem: false`.
+
 ### `GET /agents/:id`
 
 Returns one agent profile, including editable fields, reset values, recent
-activity, and model choices.
+activity, and model choices. Returns `404 Not Found` if the row has `is_system = true` unless the caller is admin / runtime and passes `?includeSystem=true`.
 
 ### `PATCH /agents/:id`
 
@@ -1092,7 +1213,7 @@ Allowed v1 fields:
 ```ts
 type PatchAgentRequest = {
   name?: string;
-  model?: ModelId;
+  model_id?: string;            // FK to `llm_models.id` (§11 §4)
   persona?: string;
   focus?: string;
   method?: string[];
@@ -1100,55 +1221,72 @@ type PatchAgentRequest = {
 };
 ```
 
+`temperature` is **not** accepted on the PATCH body. It is stored editably on `agents.temperature` but the API edge derives it server-side from the agent record (seeded from `agent_role_templates.default_temperature`); v1 has no UI surface for editing it.
+
+`PATCH /agents/:id` on a row where `is_system = true` returns `403 Forbidden` regardless of body (§3.6). Forbidden mutation fields on system rows: `name`, `model_id`, `temperature`, `persona`, `focus`, `method`, `enabled`. The only system-agent mutation path is a versioned `agent_role_templates` row + reseed.
+
 Reject raw system prompt edits in v1.
 
 ### `POST /agents/:id/reset`
 
 ```ts
 type ResetAgentRequest = {
-  fields: Array<'name' | 'model' | 'persona' | 'focus' | 'method' | 'all'>;
+  fields: Array<'name' | 'model_id' | 'persona' | 'focus' | 'method' | 'all'>;
 };
 ```
 
+Reset values come from the row's `agent_role_templates` entry (including `default_model_id` and `default_temperature`). Reset on `is_system = true` rows returns `403 Forbidden` (§3.6).
+
 ### `GET /models`
 
-Returns model profiles that the agent model picker can show.
+Returns model profiles that the agent model picker can show. The underlying source is `llm_models` (§11 §4 — a view over `llm_provider_models`); the `id` is `llm_models.id` and the `provider` is `llm_models.provider` (open string identifying the live provider registered in `llm_providers`).
 
 ```ts
 type ModelProfile = {
-  id: string;
-  provider: 'anthropic' | 'openai' | 'google';
+  id: string;                   // FK target — `llm_models.id`
+  provider: string;             // open enum from `llm_providers` (e.g. 'anthropic', 'openai', 'google', 'nvidia', …)
   label: string;
   strengths: string[];
   tradeoffs: string[];
   bestForRoles: AgentRoleKey[];
-  latencyClass: 'fast' | 'balanced' | 'slow';
-  costClass: 'low' | 'medium' | 'high';
-  supportsTools: boolean;
-  supportsGrounding: boolean;
+
+  // The four below are projected from `llm_models.capabilities_json` (§11 §4).
+  // Keys: 'tools', 'grounding', 'latencyClass', 'costClass'.
+  // Shape: { tools: boolean; grounding: boolean; latencyClass: 'fast'|'balanced'|'slow'; costClass: 'low'|'medium'|'high' }
+  supportsTools: boolean;       // capabilities_json.tools
+  supportsGrounding: boolean;   // capabilities_json.grounding
+  latencyClass: 'fast' | 'balanced' | 'slow';   // capabilities_json.latencyClass
+  costClass: 'low' | 'medium' | 'high';         // capabilities_json.costClass
+
   contextWindow?: number;
 };
 ```
 
+Note: `provider` is an open string because `llm_providers` is extensible (live model discovery adds providers without migrations). The four capability fields are read-time projections of `capabilities_json` — if a key is missing, the API resolves a documented default per provider.
+
 ## 12. Seeding Rules
 
-On workspace creation:
+**Owner: API.** Workspace seeding runs server-side inside the `POST /workspaces` handler (the API edge — not the client, not a background worker). The handler inserts all seed rows in **one transaction** alongside the `workspaces` row insert; partial seeds are never visible. Source-of-truth tables live in §11 §4 (`agent_role_templates` as the runtime catalog) — the handler reads those plus the prompt/method text from `03-agents.md` and the display fields from `shared/data.jsx`.
 
-1. Insert the five default agents.
-2. Insert the three default team compositions.
-3. Use display fields, accents, teams, and defaults from `shared/data.jsx`.
-4. Use full role prompts and methodology from `03-agents.md`.
-5. Keep default models verbatim unless a later approved spec changes them.
-6. Mark all default agents as `is_default = true` and `is_custom = false`.
-7. Store `created_from_template_version`.
+On workspace creation, in one txn the API inserts:
+
+1. **Five default `agents` rows** — Strategist, Critic, Researcher, Quant, Editor. Seeded from `agent_role_templates` (§11 §4) for `model_id`, `temperature`, `role_template_version`; prompts and methodology from `03-agents.md`; display fields (accents, initials, icons, sort_order) from `shared/data.jsx`. Mark each `is_default = true`, `is_custom = false`, `is_system = false`. Store `created_from_template_version`.
+2. **Two system Forge agents** — `forge_rewriter` and `forge_critic`, both with `is_system = true` (RLS-hidden from `GET /agents` per §11 §12; see §11.3.6 / §11 API contract).
+3. **Three default `team_compositions` rows** — Pricing crew, Research crew, Hiring crew (§6). `default_tools_json` materializes per-Talk via the §6 contract.
+
+The seed is **idempotent**. Re-running the seed (e.g., if a user deletes a default agent and wants it back, or an admin tool re-seeds a workspace) restores from the templates without duplicating rows: keyed by `(workspace_id, role_key, is_default = true)` for the 5 default agents, `(workspace_id, role_key, is_system = true)` for the 2 Forge agents, and `(workspace_id, name, is_default = true)` for the 3 team compositions.
+
+Cross-ref: §11 §4 for the `agent_role_templates` runtime source; §11 §12 for the RLS gate hiding system agents from `GET /agents`; §3.6 for system-agent mutation rules.
 
 Seed tests should prove:
 
-- every new workspace has five enabled default agents
+- every new workspace has five enabled default agents and two system Forge agents
 - every new workspace has three default teams
 - seeded fields match `shared/data.jsx`
 - prompt/method text matches `03-agents.md`
 - reset restores the template defaults
+- re-running the seed is a no-op (no duplicate rows)
+- `GET /agents` (member caller) returns 5 rows; with `?includeSystem=true` (admin) returns 7
 
 ## 13. Evals And Quality Control
 
@@ -1390,19 +1528,33 @@ experiments across prompt versions if there are enough runs to measure signal.
 
 ### 14.6 Tables
 
-Add these when the improvement loop is implemented:
+This subsection targets four kinds of versioned prompts: `global_policy`, `role_template`, `prompt_assembly`, `eval_prompt`. §11 v1 only models one of them.
 
-- `agent_audit_results`
+**Current §11 v1 coverage:**
+
+- ✅ `role_template` — **available now** via `agent_role_templates.version` (§11 §4). Each role-template edit bumps the version; runs snapshot the version into `talk_agent_snapshots.role_template_version` and `run_prompt_snapshots.role_template_version` (§10.5, §10.6).
+- 🚧 `global_policy` — **deferred.** Not in §11 v1.
+- 🚧 `prompt_assembly` — **deferred.** Not in §11 v1.
+- 🚧 `eval_prompt` — **deferred.** Not in §11 v1.
+
+The three deferred kinds defer to a follow-up extension migration (shipped when the prompt-improvement loop lands) that adds a unified `prompt_versions(kind, ref_id, content, version, created_at)` table keyed by `kind` — covering the three deferred kinds in one table. (Role templates stay in `agent_role_templates`; not migrated.)
+
+`agent_audit_results` and `prompt_improvement_proposals` are also **not in §11 v1** — tracked as future tables, added with the same follow-up extension. The shapes below describe the eventual schema, not current storage. Cross-ref §11 §4.
+
+When the improvement loop is implemented, add:
+
+- `agent_audit_results` (🚧 future) —
   - `id`, `workspace_id`, `talk_id`, `run_id`, `agent_id`,
     `evaluator_version`, `scores_json`, `flags_json`, `explanation`,
     timestamps.
-- `prompt_improvement_proposals`
+- `prompt_improvement_proposals` (🚧 future) —
   - `id`, `status`, `target_json`, `problem_statement`, `evidence_json`,
     `proposed_diff`, `expected_effect`, `risk`, `created_by`, `reviewed_by`,
     `reviewed_at`, timestamps.
-- `prompt_versions`
-  - `id`, `kind`, `target_key`, `version`, `content_hash`, `content_redacted`,
+- `prompt_versions` (🚧 future, three kinds only) —
+  - `id`, `kind` (`'global_policy' | 'prompt_assembly' | 'eval_prompt'`), `target_key`, `version`, `content_hash`, `content_redacted`,
     `change_reason`, `proposal_id`, `rollout_status`, timestamps.
+  - Does not cover `role_template` — that kind lives in `agent_role_templates` (§11 §4).
 
 ### 14.7 Guardrails For The Improvement Loop
 
