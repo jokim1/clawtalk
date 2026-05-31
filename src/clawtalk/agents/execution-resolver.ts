@@ -68,6 +68,8 @@ interface LlmProviderModelRow {
 }
 
 interface LlmProviderSecretRow {
+  owner_id: string | null;
+  workspace_id: string | null;
   ciphertext: string;
   credential_kind: 'api_key' | 'subscription';
   encrypted_refresh_token: string | null;
@@ -87,6 +89,20 @@ export interface ExecutionBinding {
   secret: LlmSecret;
   /** Default output budget configured for this provider/model pair. */
   defaultMaxOutputTokens?: number;
+}
+
+export interface ExecutionCredentialScope {
+  /**
+   * Explicit owner for personal provider secrets. Required by service-role
+   * queue execution because RLS is bypassed there; omitted legacy callers keep
+   * relying on authenticated RLS.
+   */
+  principalUserId?: string | null;
+  /**
+   * Explicit workspace for workspace-shared provider secrets. Required by
+   * service-role queue execution so it never reads another workspace's key.
+   */
+  workspaceId?: string | null;
 }
 
 export class ExecutionResolverError extends Error {
@@ -116,7 +132,10 @@ export class ExecutionResolverError extends Error {
  */
 export async function resolveExecution(
   agent: RegisteredAgentRecord,
-  options?: { credentialKindSnapshot?: RegisteredAgentCredentialMode | null },
+  options?: {
+    credentialKindSnapshot?: RegisteredAgentCredentialMode | null;
+    credentialScope?: ExecutionCredentialScope | null;
+  },
 ): Promise<ExecutionBinding> {
   const db: Sql = getDbPg();
 
@@ -141,7 +160,12 @@ export async function resolveExecution(
   // --- Step 2: Resolve credentials ---
   const pinnedMode =
     options?.credentialKindSnapshot ?? agent.credential_mode ?? null;
-  const secret = await resolveSecret(agent, db, pinnedMode);
+  const secret = await resolveSecret(
+    agent,
+    db,
+    pinnedMode,
+    options?.credentialScope ?? null,
+  );
 
   // --- Step 3: Build provider config ---
   // For provider.anthropic, honour the ANTHROPIC_BASE_URL env var override
@@ -227,6 +251,7 @@ async function resolveSecret(
   agent: RegisteredAgentRecord,
   db: Sql,
   pinnedMode: RegisteredAgentCredentialMode | null,
+  credentialScope: ExecutionCredentialScope | null,
 ): Promise<LlmSecret> {
   // Order precedence (when no pinned mode):
   //   1. Personal api_key
@@ -241,10 +266,13 @@ async function resolveSecret(
   //
   // Per-user RLS scopes the personal queries to auth.uid() automatically.
   const personalRows = await db<LlmProviderSecretRow[]>`
-    select ciphertext, credential_kind, encrypted_refresh_token,
+    select owner_id::text, null::text as workspace_id,
+           ciphertext, credential_kind, encrypted_refresh_token,
            expires_at::text as expires_at
     from public.llm_provider_secrets
     where provider_id = ${agent.provider_id}
+      and (${credentialScope?.principalUserId ?? null}::uuid is null
+           or owner_id = ${credentialScope?.principalUserId ?? null}::uuid)
       and (${pinnedMode}::text is null
            or credential_kind = ${pinnedMode}::text)
     order by case credential_kind
@@ -264,10 +292,13 @@ async function resolveSecret(
   }
 
   const workspaceRows = await db<LlmProviderSecretRow[]>`
-    select ciphertext, credential_kind, encrypted_refresh_token,
+    select null::text as owner_id, workspace_id::text,
+           ciphertext, credential_kind, encrypted_refresh_token,
            expires_at::text as expires_at
     from public.workspace_provider_secrets
     where provider_id = ${agent.provider_id}
+      and (${credentialScope?.workspaceId ?? null}::uuid is null
+           or workspace_id = ${credentialScope?.workspaceId ?? null}::uuid)
       and (${pinnedMode}::text is null
            or credential_kind = ${pinnedMode}::text)
     order by case credential_kind
@@ -422,6 +453,8 @@ async function resolveSubscriptionSecret(input: {
     const refreshedAccess = await refreshAndPersist({
       providerId,
       origin,
+      ownerId: row.owner_id,
+      workspaceId: row.workspace_id,
       encryptedRefreshToken: row.encrypted_refresh_token,
     });
     return { apiKey: refreshedAccess, credentialKind: 'subscription' };
@@ -441,6 +474,8 @@ async function resolveSubscriptionSecret(input: {
 async function refreshAndPersist(input: {
   providerId: string;
   origin: CredentialOrigin;
+  ownerId?: string | null;
+  workspaceId?: string | null;
   encryptedRefreshToken: string;
 }): Promise<string> {
   const refreshTokenPayload = await decryptProviderSecret(
@@ -468,6 +503,8 @@ async function refreshAndPersist(input: {
           updated_at = now()
       where provider_id = ${input.providerId}
         and credential_kind = 'subscription'
+        and (${input.workspaceId ?? null}::uuid is null
+             or workspace_id = ${input.workspaceId ?? null}::uuid)
     `;
   } else {
     await db`
@@ -478,6 +515,8 @@ async function refreshAndPersist(input: {
           updated_at = now()
       where provider_id = ${input.providerId}
         and credential_kind = 'subscription'
+        and (${input.ownerId ?? null}::uuid is null
+             or owner_id = ${input.ownerId ?? null}::uuid)
     `;
   }
   return refreshed.accessToken;

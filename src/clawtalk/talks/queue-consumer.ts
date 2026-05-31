@@ -30,7 +30,7 @@ import {
 } from './greenfield-run-accessors.js';
 import { logger } from '../../logger.js';
 
-import { CleanTalkExecutor } from './new-executor.js';
+import { GreenfieldTalkExecutor } from './greenfield-executor.js';
 import { dispatchRun } from './queue-producer.js';
 import {
   TalkExecutorError,
@@ -52,7 +52,7 @@ export interface ProcessTalkRunMessageInput {
   // event so the UI can swap "Queued" for "Retrying N/maxRetries".
   attempts?: number;
   maxRetries?: number;
-  // Test seam — defaults to a fresh CleanTalkExecutor per invocation.
+  // Test seam — defaults to a fresh GreenfieldTalkExecutor per invocation.
   executor?: TalkExecutor;
   // Test seam — cancellation poll interval; production default is 500ms.
   cancelPollIntervalMs?: number;
@@ -144,7 +144,7 @@ export async function processTalkRunMessage(
   }
 
   const run = claim.run;
-  const executor = input.executor ?? new CleanTalkExecutor();
+  const executor = input.executor ?? new GreenfieldTalkExecutor();
   const cancelPollMs = input.cancelPollIntervalMs ?? DEFAULT_CANCEL_POLL_MS;
   const dispatch = input.dispatch ?? dispatchRun;
 
