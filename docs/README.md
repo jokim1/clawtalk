@@ -14,7 +14,9 @@ You're reading this because you're an AI coding agent (or engineer) about to wor
 | **[DECISIONS.md](./DECISIONS.md)** | Resolved cross-cutting decisions (stack, naming, Forge agents). **When a spec doc conflicts with a decision here, this wins.** |
 | **[GLOSSARY.md](./GLOSSARY.md)** | Canonical terms + the shipped-DB-name ↔ spec-name mapping. Read it to avoid the vocabulary forks. |
 | **[SPEC-READINESS.md](./SPEC-READINESS.md)** | Gap-closure punch list with stable IDs (G-XX.PY.Z). Verdict + history. |
-| **[DOC-AUDIT.md](./DOC-AUDIT.md)** | The original audit behind the cleanup: open inconsistencies + gaps, prioritized. (Closed items tracked in SPEC-READINESS.) |
+| **[IMPLEMENTATION-READINESS.md](./IMPLEMENTATION-READINESS.md)** | Current audit of docs vs. source, verification results, and the cutover recommendation. Read this before starting code. |
+| **[DOC-AUDIT.md](./DOC-AUDIT.md)** | Historical 2026-05-28 audit behind the cleanup. Superseded for live readiness by IMPLEMENTATION-READINESS. |
+| **[roadmap.md](./roadmap.md)** | Live shipped/in-flight tracker for the refactor. |
 | **[engineering-notes.md](./engineering-notes.md)** | Durable engineering knowledge (architectural commitments, latency hotspots, eval gate). |
 | **[archive/](./archive/)** | Retired "ClawRocket"-era docs. **Not current** — do not implement from them. |
 
@@ -24,10 +26,10 @@ You're reading this because you're an AI coding agent (or engineer) about to wor
 2. **Hierarchy / data model** → [08-information-architecture.md](./08-information-architecture.md).
 3. **UI / interaction** → the prototype (`ClawTalk Salon.html` + `prototype/*.jsx`).
 4. **Stack / runtime** → `CLAUDE.md` + repo reality (Cloudflare Workers) — **not** the historical "Tech stack" note below.
-5. **What currently exists** → [roadmap.md](./roadmap.md) describes the current/shipped code, which is **disposable** in the greenfield build (DECISIONS D0) — use it for context, not as a constraint on the target design.
+5. **What currently exists** → [IMPLEMENTATION-READINESS.md](./IMPLEMENTATION-READINESS.md) + [roadmap.md](./roadmap.md) describe the current/shipped code, which is **disposable** in the greenfield build (DECISIONS D0) — use it for context, not as a constraint on the target design.
 6. **Product behavior** → `01-product-spec.md`. **Anything in [archive/](./archive/) is superseded.**
 
-> ⚠️ **Greenfield build (DECISIONS D0).** The `01`/`08` model — **Workspace → Folder → Talk + Document**, multi-workspace, no Threads — is the design we're building, on a clean new schema with clean names (`workspaces`, `folders`, `talks`, `documents`, `agents`). The current code uses different names/shapes (`contents`, `talk_threads`, user-owned, `registered_agents`); it's **disposable** and referenced only to extract requirements. The [GLOSSARY](./GLOSSARY.md) maps the old terms purely as a reading aid for the code being replaced.
+> ⚠️ **Greenfield build (DECISIONS D0).** The `01`/`08` model — **Workspace → Folder → Talk + Document**, multi-workspace, no Threads — is the design we're building, on a clean new schema with clean names (`workspaces`, `folders`, `talks`, `documents`, `agents`). The Supabase implementation starts from a fresh baseline (`supabase/migrations/0001_clawtalk_greenfield.sql`) after old data/migration history are reset or archived; we are not layering compatibility migrations over disposable data. The current code uses different names/shapes (`contents`, `talk_threads`, user-owned, `registered_agents`); it's **disposable** and referenced only to extract requirements. The [GLOSSARY](./GLOSSARY.md) maps the old terms purely as a reading aid for the code being replaced.
 
 ---
 
@@ -76,11 +78,11 @@ When ambiguity arises, the **prototype** is the canonical reference for UI, the 
 
 ---
 
-## Feature PRDs (forward-looking, not part of the greenfield build order)
+## Feature PRDs
 
 | # | Doc | What it gives you |
 |---|---|---|
-| 9 | **[09-autonomous-content-improvement-prd.md](./09-autonomous-content-improvement-prd.md)** | "Forge" — autonomously iterate a document toward a scored quality bar, using the Synthetical/SSR platform as the scoring oracle. Population-based generate→score→improve loop over the existing Content feature. The *what & why*. Draft, pending review. |
+| 9 | **[09-autonomous-content-improvement-prd.md](./09-autonomous-content-improvement-prd.md)** | "Forge" — autonomously iterate a Document toward a scored quality bar, using the Synthetical/SSR platform as the scoring oracle. Population-based generate→score→improve loop over the greenfield Document model. The *what & why*. Post-MVP behind a feature flag. |
 | 10 | **[10-forge-design-handoff.md](./10-forge-design-handoff.md)** | "Forge" design + interaction handoff — the *how it looks & behaves*. Maps the clickable prototype (`ClawTalk Forge.html`) and its surfaces back to the PRD, with a suggested build order. Front-end mock; all scoring data simulated. |
 | 12 | **[12-jobs.md](./12-jobs.md)** | "Jobs" — scheduled single-agent prompts that fire a run on a Talk and land output as a message and/or a pending Document edit. The D6 redesign (no threads, workspace-scoped, lease-based scheduler). |
 

@@ -4,7 +4,7 @@
 
 # ClawRocket Debug Checklist
 
-Use [OPERATIONS_UBUNTU.md](OPERATIONS_UBUNTU.md) for routine service management. This file is for targeted debugging.
+The original runbook referenced `OPERATIONS_UBUNTU.md`, which is retired and not present in the ClawTalk greenfield docs. This file is kept only as historical debugging context.
 
 ## 1. Process Ownership And Single-Instance State
 

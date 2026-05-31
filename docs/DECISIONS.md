@@ -7,7 +7,7 @@
 
 **Decision.** ClawTalk is being **rebuilt greenfield**: new UI, new features, new architecture, **new schema**. We design the cleanest, most elegant model and build it directly. Existing tables, data, and code are **disposable** — there are no external users beyond Joseph, and this matches `CLAUDE.md`'s engineering defaults (no backward-compat scaffolding, no old+new code paths, treat stored data as disposable).
 
-**This means:** no migration plans, no backfill/rescope steps, no preserving `contents`/`talk_threads`/`registered_agents`/`talk_folders` names or shapes. The current code is referenced only to understand requirements, then replaced. Every decision below is a clean-slate design choice, not a delta from today.
+**This means:** no migration plans, no backfill/rescope steps, no preserving `contents`/`talk_threads`/`registered_agents`/`talk_folders` names or shapes. Supabase starts from a fresh active baseline (`supabase/migrations/0001_clawtalk_greenfield.sql`) after the old data and active migration stream are reset/removed or archived. The current code is referenced only to understand requirements, then replaced. Every decision below is a clean-slate design choice, not a delta from today.
 
 ---
 

@@ -55,7 +55,7 @@ It is **greenfield** (D0): names and shapes are designed for the new model, not 
 
 **Reuse vs. rewrite (global), corrected by D7.** _Keep_ the Cloudflare platform (Workers / Queues / Durable Objects / Hyperdrive), the `event_outbox` → `UserEventHub` DO stream, and the LLM provider/model/secret tables (`llm_providers`, `llm_provider_models`, `llm_provider_secrets`, `workspace_provider_secrets` — these are **shared LLM keys**, not OAuth). _Rework_ the run model + executor (the legacy `talk_runs` is thread/channel-entangled). _Do not reuse_ `idempotency_cache` for Forge retries (it's an HTTP-response cache keyed `idempotency_key,user_id,method,path`) and _do not_ route connector/SSR OAuth secrets through `workspace_provider_secrets` (LLM-key store) — both get their own stores below.
 
-**Migration approach (per D0).** The implementing migration script **drops every superseded table from §11 in dependency order, then creates the target schema below.** Local data IS lost — per `CLAUDE.md`, ClawTalk's local users and stored data are disposable by default; the only live user is Joseph and the only live data is dogfood. There is **no shadow-table, dual-write, or backfill phase.** The reused infrastructure (Cloudflare platform, `event_outbox`, LLM provider tables) is left untouched by the drop step. After the migration: Joseph re-OAuths Google/Anthropic providers (the keys in `workspace_provider_secrets` are preserved) and his first signin creates a fresh `workspace` + `owner` `workspace_members` row.
+**Migration approach (per D0).** Implementation uses a **fresh Supabase baseline from an empty/reset database**, not a stack of compatibility migrations. The active migration path starts at `supabase/migrations/0001_clawtalk_greenfield.sql`; old data and old migration history are disposable. There is **no shadow-table, dual-write, backfill, or legacy `DROP`/`ALTER` sequence in the active baseline.** Reused infrastructure tables such as `event_outbox` and the LLM provider tables are recreated directly in their final shapes. After reset: Joseph re-OAuths Google/Anthropic providers and first signin creates a fresh `workspace` + `owner` `workspace_members` row.
 
 ---
 
@@ -235,11 +235,22 @@ Design notes:
 -- which is just `llm_provider_models.model_id` (globally unique in practice — each
 -- provider's model_ids are namespaced 'claude-opus-4-6' / 'gpt-5-pro' / 'gemini-2.5-pro').
 --
--- The migration extends `llm_provider_models` with `capabilities_json` (additive
--- ALTER TABLE; existing rows default to '{}'), then drops + recreates the view.
+-- The fresh baseline defines `llm_provider_models` with `capabilities_json`
+-- directly, then creates the view.
 
-alter table public.llm_provider_models
-  add column if not exists capabilities_json jsonb not null default '{}';
+create table public.llm_provider_models (
+  provider_id text not null references public.llm_providers(id) on delete cascade,
+  model_id text not null,
+  display_name text not null,
+  context_window_tokens integer not null,
+  default_max_output_tokens integer not null,
+  default_ttft_timeout_ms integer,
+  enabled boolean not null default true,
+  capabilities_json jsonb not null default '{}',
+  updated_at timestamptz not null default now(),
+  updated_by uuid references public.users(id) on delete set null,
+  primary key (provider_id, model_id)
+);
 
 create view public.llm_models as
   select
@@ -1068,11 +1079,11 @@ Append-only; every state mutation (`04` §16). Distinct from `activity_events` (
 - `workspace_provider_secrets` is **LLM keys** — _not_ connector/SSR OAuth. Those use the new `connector_secrets` (§6, §9).
 - The legacy `talk_runs` + its executor data-access are **reworked** (thread/channel-entangled); only the orchestration _logic_ is salvaged.
 
-Everything else from the current schema is superseded. The explicit drop list (every legacy table the greenfield migration removes) follows.
+Everything else from the current schema is superseded. The legacy drop list below is retained as an audit/reference aid for anyone manually clearing an existing database; it is **not** part of the active fresh baseline.
 
-### 11.1 Drop list (greenfield migration step 1)
+### 11.1 Legacy drop-list reference (not active baseline DDL)
 
-Run in a single transaction at the top of the migration. CASCADE handles intra-list FKs; the kept tables (above) have no FK dependency on any dropped table, so they're unaffected.
+Prefer resetting/recreating the Supabase database and applying `0001_clawtalk_greenfield.sql` from zero. If someone manually clears an existing database instead, this is the superseded-table list to remove. CASCADE handles intra-list FKs; the kept runtime tables (above) have no FK dependency on any dropped table, so they're unaffected.
 
 ```sql
 -- Kept tables not listed here. Reference: §11 kept list.
@@ -1117,11 +1128,11 @@ drop table if exists
 cascade;
 ```
 
-The list reflects the migration snapshot at `0036_agent_model_auto_upgrade.sql`; any tables added between migration write-time and apply-time get added to this list.
+The list reflects the historical migration snapshot at `0036_agent_model_auto_upgrade.sql`; it is not a substitute for a fresh baseline.
 
-**Kept tables** (do NOT drop): `users`, `event_outbox`, `idempotency_cache`, `settings_kv`, `provider_oauth_states`, `llm_providers`, `llm_provider_models`, `llm_provider_secrets`, `llm_provider_verifications`, `llm_ttft_stats`, `workspace_provider_secrets`, `workspace_provider_verifications`.
+**Runtime tables recreated in the baseline** (do NOT drop if manually clearing an existing DB): `users`, `event_outbox`, `idempotency_cache`, `settings_kv`, `provider_oauth_states`, `llm_providers`, `llm_provider_models`, `llm_provider_secrets`, `llm_provider_verifications`, `llm_ttft_stats`, `workspace_provider_secrets`, `workspace_provider_verifications`.
 
-`users` is kept structurally but is `ALTER TABLE`'d in step 2 of the migration to add the columns §1 requires (`avatar_color`, `initials`) and drop any columns the new model doesn't use; existing rows are preserved.
+In the active baseline, `users` is defined directly with the §1 target columns (`avatar_color`, `initials`, etc.). Do not preserve existing rows or carry an `ALTER TABLE users` compatibility step unless you are doing a one-off manual cleanup outside the baseline plan.
 
 ---
 

@@ -367,8 +367,8 @@ distinguishes `conversation` runs (chat) from `content_improvement` runs
 with `source='forge'` against the targeted `tab_id` / `target_block_id`; the
 user accepts/rejects through the normal pending-edit pane (§6.3).
 
-Cross-refs: §11 §9 (schema), `09-improver-spec.md` (PRD),
-`10-improver-design.md` (design handoff), §04 §17 (API).
+Cross-refs: §11 §9 (schema), `09-autonomous-content-improvement-prd.md` (PRD),
+`10-forge-design-handoff.md` (design handoff), §04 §17 (API).
 
 ## 4. Canonical Cardinalities
 

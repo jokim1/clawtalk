@@ -6,11 +6,11 @@ Accepted source changes generally fall into these buckets:
 
 - bug fixes
 - security fixes
-- ClawRocket web/talk/runtime improvements
+- ClawTalk web/talk/runtime improvements
 - upstream-safe maintenance and simplification
 - documentation that reflects the current implementation
 
-When changing NanoClaw-core files, follow [docs/UPSTREAM-PATCH-SURFACE.md](docs/UPSTREAM-PATCH-SURFACE.md).
+When touching historical NanoClaw-derived code, keep changes isolated and document why the legacy path still matters. New product work should follow the greenfield docs in [docs/README.md](docs/README.md) and [docs/IMPLEMENTATION-READINESS.md](docs/IMPLEMENTATION-READINESS.md).
 
 ## Skills
 

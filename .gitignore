@@ -51,9 +51,9 @@ CLAUDE.local.md
 # 2026-05-26 (PR #420).
 CLAUDE.md
 
-# Local roadmap / planning notes (personal workspace; tracked
-# project planning lives elsewhere).
-docs/roadmap.md
+# Local roadmap / planning notes. The tracked refactor roadmap lives at
+# docs/roadmap.md; use this suffix for private scratch notes.
+docs/roadmap.local.md
 
 # Skills system (local per-installation state)
 .nanoclaw/

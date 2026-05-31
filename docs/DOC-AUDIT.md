@@ -1,3 +1,7 @@
+> **Status:** historical audit · **Superseded for live readiness by:** [IMPLEMENTATION-READINESS.md](./IMPLEMENTATION-READINESS.md)
+>
+> This file is preserved because it explains why the docs were restructured. The unchecked boxes below are not the live implementation punch list; many were closed in [SPEC-READINESS.md](./SPEC-READINESS.md), and the current code/docs audit lives in [IMPLEMENTATION-READINESS.md](./IMPLEMENTATION-READINESS.md).
+
 # ClawTalk Docs Audit & Restructure Plan
 
 **Date:** 2026-05-28 · **Scope:** every file in `/docs` (canonical `01–10` + README, the legacy `CLAWTALK_V2_*` / `ARCHITECTURE-REVIEW`, and the ClawRocket-era auxiliary docs).

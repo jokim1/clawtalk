@@ -9,7 +9,7 @@
 
 ## 1. What this refactor is, in one paragraph
 
-ClawTalk is being **rebuilt greenfield on the existing infrastructure**. The design — workspace tenancy, the canonical Workspace → Folder → Talk + Document model, jobs as first-class scheduled runs, Forge as autonomous content improvement, no Threads — is a clean-slate redesign. The runtime — Cloudflare Workers + Hono + Durable Objects + Hyperdrive + Cloudflare Queues + Supabase Postgres with RLS — is the existing infra. The shipped schema and code (`talk_runs`/`talk_threads`/`registered_agents`/`contents` and the per-user RLS model) is **disposable**: it served as the prototype that proved the requirements, and is being replaced by a single greenfield migration that drops 37 legacy tables and creates ~50 new ones from a clean spec.
+ClawTalk is being **rebuilt greenfield on the existing infrastructure**. The design — workspace tenancy, the canonical Workspace → Folder → Talk + Document model, jobs as first-class scheduled runs, Forge as autonomous content improvement, no Threads — is a clean-slate redesign. The runtime — Cloudflare Workers + Hono + Durable Objects + Hyperdrive + Cloudflare Queues + Supabase Postgres with RLS — is the existing infra. The shipped schema and code (`talk_runs`/`talk_threads`/`registered_agents`/`contents` and the per-user RLS model) is **disposable**: it served as the prototype that proved the requirements, and is being replaced by a fresh Supabase baseline that creates the target schema from an empty database.
 
 This is not "evolve the schema." This is "the schema we have constrains every feature; rebuild it once, then build on top."
 
@@ -25,18 +25,19 @@ This is not "evolve the schema." This is "the schema we have constrains every fe
 | ✅ Merged | PDF page rasterization Lane A (backend contract) | PR [#501](https://github.com/jokim1/clawtalk/pull/501) used migration **0038** |
 | ✅ Merged | §11 spec addition: `context_source_pages` + `context_sources.expected_page_count` | PR [#503](https://github.com/jokim1/clawtalk/pull/503) |
 | ✅ Merged | PDF rasterization Lane B + Lane C T9 (consume page images + client render/upload) | PRs [#504](https://github.com/jokim1/clawtalk/pull/504) + [#505](https://github.com/jokim1/clawtalk/pull/505) |
-| 🅿️ Parked | The greenfield migration — written, locally validated, held at [`docs/canonical-greenfield-migration.sql`](./canonical-greenfield-migration.sql) | PR #502 closed; lands as `0040+` in `supabase/migrations/` when src/ rewrite ready |
-| 🟢 Open PR | PDF rasterization Lane C T10 (render-pages affordance + capability surfacing) | PR [#506](https://github.com/jokim1/clawtalk/pull/506) |
-| ⏭️ Next | `agent_role_templates` seed migration (Phase 1 Step 2) | TBD |
-| ⏭️ Next | Cutover plan doc (one-page) | TBD |
+| ✅ Merged | PDF rasterization Lane C T10 (render-pages affordance + capability surfacing) | PR [#506](https://github.com/jokim1/clawtalk/pull/506) → main `696302d` |
+| ✅ Merged | Greenfield schema parked as docs-side canonical reference | PR #507 → main `b520932`; SQL held at [`docs/canonical-greenfield-migration.sql`](./canonical-greenfield-migration.sql) |
+| 🅿️ Parked | The active Supabase baseline | Lands as `supabase/migrations/0001_clawtalk_greenfield.sql` on the implementation cutover branch after the old active migration stream is removed or archived |
+| ⏭️ Next | `agent_role_templates` seed (Phase 1 Step 2) | First implementation PR |
+| ⏭️ Next | Cutover foundation: fresh baseline + seed + first-signin workspace bootstrap + §11 verification tests | First implementation PR |
 | ⏭️ Next | src/ rewrite per §05 Phases 2–12 (executor, scheduler, queue consumer, accessors, routes) | Phased |
 | ⏭️ Next | webapp/ rewrite per §05 Phases (every page touches new tables) | Phased |
 | ⏭️ Next | §14 verification test suite (24 invariants) | Phased |
 | ⏭️ Next | Phase 13 eval gate (harness contract done; scenarios + grader prompts TBD) | Phased |
 
-**Why the migration is parked, not landed.** The migration SQL is structurally complete and locally validated against `supabase db reset`. But shipping it on `main` without the matching src/ rewrite breaks every accessor + route + test — 38/38 accessor tests + 21/30 google-drive tests fail because they target the dropped legacy tables (CI run on PR #502 confirmed this exactly as §14 predicted). Per Joseph's docs-only posture: the SQL lives at [`docs/canonical-greenfield-migration.sql`](./canonical-greenfield-migration.sql) as the canonical reference; the executable copy lands in `supabase/migrations/` only when the src/ rewrite catches up. See §14 (Cutover risk) for strategy options.
+**Why the schema is parked, not active.** The schema reference is structurally complete and locally validated, but it was authored as a destructive drop/create script for the old migration stream. Shipping it on `main` without the matching src/ rewrite breaks every accessor + route + test — 38/38 accessor tests + 21/30 google-drive tests fail because they target the dropped legacy tables (CI run on PR #502 confirmed this exactly as §14 predicted). Per Joseph's docs-only posture: the SQL lives at [`docs/canonical-greenfield-migration.sql`](./canonical-greenfield-migration.sql) as the canonical reference. The implementation branch should convert it into a pure baseline at `supabase/migrations/0001_clawtalk_greenfield.sql`, reset/recreate Supabase, and remove or archive the old active migration stream instead of layering a `0040+` migration on top.
 
-For the full gap-by-gap close history, see [SPEC-READINESS.md](./SPEC-READINESS.md). For the canonical decisions, see [DECISIONS.md](./DECISIONS.md). For the phased build sequence, see [05-build-plan.md](./05-build-plan.md).
+For the current implementation audit, see [IMPLEMENTATION-READINESS.md](./IMPLEMENTATION-READINESS.md). For the full gap-by-gap close history, see [SPEC-READINESS.md](./SPEC-READINESS.md). For the canonical decisions, see [DECISIONS.md](./DECISIONS.md). For the phased build sequence, see [05-build-plan.md](./05-build-plan.md).
 
 ---
 
@@ -59,13 +60,13 @@ The shipped schema is the **proven prototype**, not the target. Specifically:
 
 ### Stays
 - **Cloudflare platform.** Workers, Hono router, Durable Objects (UserEventHub), Hyperdrive (Postgres connection pool), Cloudflare Queues (TALK_RUN_QUEUE), Wrangler dev/deploy, R2 (attachments). [DECISIONS D1.](./DECISIONS.md)
-- **Supabase Postgres.** Same project, same instance, same auth bridge (`auth.users` → `public.users` trigger).
+- **Supabase Postgres.** Same database product/runtime and auth bridge pattern (`auth.users` → `public.users` trigger). The implementation can reset/recreate the project/database because old data is disposable.
 - **LLM provider layer.** `llm_providers`, `llm_provider_models`, `llm_provider_secrets`, `workspace_provider_secrets` (these are LLM keys, NOT OAuth tokens), plus the live model discovery path (#484) that auto-inserts new Anthropic / NVIDIA models.
 - **Event outbox / WebSocket Hibernation streaming.** `event_outbox` → `UserEventHub` DO. All streaming rides this.
 - **Auth.** Google OAuth + email magic-link (planned) + device-code (CLI). HttpOnly cookies (`eb_at` / `eb_rt` / `eb_csrf`) + double-submit CSRF. See [SECURITY.md](./SECURITY.md).
 
 ### Changes
-- **Schema.** 37 legacy tables dropped in one CASCADE; 50 new tables created from the spec. The greenfield migration is [`supabase/migrations/0038_clawtalk_greenfield.sql`](../supabase/migrations/0038_clawtalk_greenfield.sql).
+- **Schema.** Fresh Supabase baseline from an empty DB. The active migration path starts at `supabase/migrations/0001_clawtalk_greenfield.sql`; old `0001`-`0038` migrations are removed or archived from the active path. The canonical SQL reference is parked at [`docs/canonical-greenfield-migration.sql`](./canonical-greenfield-migration.sql), but the active baseline should create final tables directly rather than run a legacy `DROP`/`ALTER` cleanup sequence.
 - **Tenancy.** `workspaces` + `workspace_members` from day one; every workspace-owned table carries `workspace_id`; composite FKs prevent cross-workspace references.
 - **Runs model.** New `runs` table with `snapshot_group_id` (per-run frozen roster), `agent_snapshot_id` (the acting agent), `trigger` (`user` / `scheduler` / `manual`), `scheduled_for` (slot identity for jobs), `prompt_snapshot_id` (immutable prompt at fire time).
 - **Documents model.** First-class `documents` + `doc_tabs` + `doc_blocks` + `document_edits`. Replaces the `contents` / `content_edits` / `content_proposals` stack. Pending edits go through one unified accept path with CAS via `base_block_version` / `base_list_version`.
@@ -201,7 +202,7 @@ The shipped schema is the **proven prototype**, not the target. Specifically:
 
 | ID | Decision |
 |---|---|
-| **D0** | Greenfield rebuild, not migration. Drop the legacy schema; treat local data as disposable. |
+| **D0** | Greenfield rebuild, not migration. Start from a fresh Supabase baseline; treat old schema/data as disposable. |
 | **D1** | Cloudflare Workers + Hono + DO + Hyperdrive + Queues + Supabase Postgres. No Redis. No BullMQ. No Next.js. |
 | **D2** | Clean data model on Workspace → Folder → Talk + Document hierarchy. No Threads. Multi-workspace from day one. |
 | **D3** | Forge rewriter / critic are built-in system agents (`is_system=true` rows in `agents`, hidden from `GET /agents` and roster). |
@@ -249,7 +250,7 @@ Detail in [05-build-plan.md](./05-build-plan.md). Summary table:
 | Phase | What | Status |
 |---|---|---|
 | **0** | Project setup — commit to Workers/Hono/DO/Hyperdrive/Queues stack | ✅ existing infra |
-| **1** | Single greenfield migration (`0038_clawtalk_greenfield.sql`) + `agent_role_templates` seed + first-signin workspace bootstrap | 🟢 migration in PR [#502](https://github.com/jokim1/clawtalk/pull/502); seed pending |
+| **1** | Fresh Supabase baseline (`supabase/migrations/0001_clawtalk_greenfield.sql`) + `agent_role_templates` seed + first-signin workspace bootstrap | 🅿️ schema reference parked; baseline/seed/bootstrap pending |
 | **2** | Workspace switcher + auth | ⏭️ |
 | **3** | Folders + Talks CRUD + roster | ⏭️ |
 | **4** | Chat → executor → queue consumer → outbox → DO streaming end-to-end | ⏭️ huge |
@@ -284,15 +285,15 @@ Each phase has explicit entry/exit criteria in §05.
 - 10 deferred design-debt items resolved (forge_audiences `is_default`, fitness shape, score scale, co-editor level, SSR freshness, etc.).
 
 ### Open
-- `agent_role_templates` seed migration (Phase 1 Step 2) — mechanical INSERT statements with prompts copied verbatim from [`03-agents.md`](./03-agents.md). Not yet written; will land as `0039_*.sql` or extend `0038`.
-- Cutover sequencing plan — 0038 destructively drops 37 tables; the moment it merges, `src/` references break. Could use a 1-page coordination plan.
+- `agent_role_templates` seed (Phase 1 Step 2) — mechanical INSERT statements with prompts copied verbatim from [`03-agents.md`](./03-agents.md) for the five user-facing roles, plus placeholder Forge system-role prompts until Joseph writes the final rewriter/critic text. Not yet written; lands with the first implementation cutover baseline or workspace-bootstrap seed path.
+- Cutover foundation PR — replace the active migration stream with `supabase/migrations/0001_clawtalk_greenfield.sql`, add the seed/bootstrap path, and add §11 verification tests. [IMPLEMENTATION-READINESS.md](./IMPLEMENTATION-READINESS.md) recommends a big-bang cutover branch over a dual-path feature flag.
 - Forge `forge_rewriter` + `forge_critic` system prompts — §06 §3.6 has placeholder "TODO: Joseph to write at impl time."
 - Phase 13 eval scenario content + grader prompts — [eval-suite.md](./eval-suite.md) locks the harness contract but defers scenario content.
 - Per-page visual design for new surfaces — [02-visual-system.md](./02-visual-system.md) covers tokens but doesn't have component-level designs for Jobs UI, Forge gallery / run-detail / Audiences, home Forge surfacing, DocTabStrip.
 - ~37 P2 polish items per [SPEC-READINESS.md](./SPEC-READINESS.md). None block impl.
 
 ### Tracked design debt
-[SPEC-READINESS.md](./SPEC-READINESS.md) has every closed gap with a stable ID (G-XX.PY.Z) and resolution note. Future drift catchable by re-running the verification audit pattern: see [`feedback_spec_corpus_parallel_close_verify_pattern`](../.claude/projects/-Users-josephkim-dev-clawtalk/memory/feedback_spec_corpus_parallel_close_verify_pattern.md) for the audit shape.
+[SPEC-READINESS.md](./SPEC-READINESS.md) has every closed gap with a stable ID (G-XX.PY.Z) and resolution note. Future drift is catchable by re-running the same parallel verification pattern used in the 2026-05-30 spec-readiness pass.
 
 ---
 
@@ -316,6 +317,8 @@ Each phase has explicit entry/exit criteria in §05.
 | Security model (auth + RLS + secrets + CSRF + audit) | [SECURITY.md](./SECURITY.md) |
 | Phase 13 eval harness contract | [eval-suite.md](./eval-suite.md) |
 | Term reconciliation (shipped names ↔ canonical names) | [GLOSSARY.md](./GLOSSARY.md) |
+| Current implementation audit + cutover recommendation | [IMPLEMENTATION-READINESS.md](./IMPLEMENTATION-READINESS.md) |
+| Live implementation tracker | [roadmap.md](./roadmap.md) |
 | Doc-corpus precedence + reading order | [README.md](./README.md) |
 | Gap-closure history + tracker | [SPEC-READINESS.md](./SPEC-READINESS.md) |
 | Durable engineering knowledge | [engineering-notes.md](./engineering-notes.md) |
@@ -331,7 +334,7 @@ If you're about to write code, here's where to start by task type:
 
 | Task | Start here |
 |---|---|
-| Writing the `agent_role_templates` seed migration | [03-agents.md](./03-agents.md) §2 (the 5 templates) + [11 §4](./11-data-model.md) (column shape) + the existing 0038 migration as the file format reference |
+| Writing the `agent_role_templates` seed | [03-agents.md](./03-agents.md) §2 (the 5 templates) + [11 §4](./11-data-model.md) (column shape) + the baseline seed path |
 | Rewriting `src/clawtalk/talks/scheduler.ts` for v8 jobs | [12 §5](./12-jobs.md) (Path A single-txn claim + Path B sweep) + [11 §8](./11-data-model.md) (jobs table) |
 | Rewriting `src/clawtalk/talks/queue-consumer.ts` | [12 §5](./12-jobs.md) (atomic claim) + [11 §3](./11-data-model.md) (runs CHECK invariant + partial uniques) |
 | Rewriting the executor | [06 §7](./06-agent-system-design.md) (prompt assembly) + [11 §3](./11-data-model.md) (runs/messages/snapshots) + [12 §3](./12-jobs.md) (job output emit) |
@@ -339,7 +342,7 @@ If you're about to write code, here's where to start by task type:
 | Building the Jobs UI | [04 §18](./04-api-contracts.md) (Jobs endpoints) + [12 §6](./12-jobs.md) (lifecycle & surfacing) |
 | Building Forge surfaces | [04 §17](./04-api-contracts.md) (Forge endpoints) + [10](./10-forge-design-handoff.md) (visual handoff) + [09 §13](./09-autonomous-content-improvement-prd.md) (phased plan) |
 | Building Home (Inbox / Recommendations / News) | [07](./07-homepage-system-design.md) is huge; start with §6 (Inbox), §7 (Recommendations), §8 (News) |
-| Implementing RLS policies (greenfield migration applies the canonical patterns) | [11 §12.1](./11-data-model.md) (canonical pattern) + [11 §12.2](./11-data-model.md) (admin exceptions) |
+| Implementing RLS policies (greenfield baseline applies the canonical patterns) | [11 §12.1](./11-data-model.md) (canonical pattern) + [11 §12.2](./11-data-model.md) (admin exceptions) |
 | Writing §14 verification tests | [11 §14](./11-data-model.md) (24 invariants with expected-failure cases) |
 | Writing eval-gate scenarios | [eval-suite.md](./eval-suite.md) (harness contract) + [03-agents.md](./03-agents.md) (role rubric) + [06 §14.6](./06-agent-system-design.md) (`AgentAuditResult`) |
 | Frontend onboarding | [01](./01-product-spec.md) + the prototype (`ClawTalk Salon.html`) + [02](./02-visual-system.md) |
@@ -347,23 +350,24 @@ If you're about to write code, here's where to start by task type:
 
 ---
 
-## 14. Cutover risk: the moment the migration lands
+## 14. Cutover risk: the moment the baseline lands
 
-> **Status (2026-05-30):** Confirmed empirically. PR #502 attempted to land the migration as `0039_clawtalk_greenfield.sql`. CI ran and **38/38 accessor tests + 21/30 google-drive tests failed** because they target the dropped legacy tables — exactly as this section predicted. PR #502 was closed; the migration SQL is now parked at [`docs/canonical-greenfield-migration.sql`](./canonical-greenfield-migration.sql) until the src/ rewrite is ready. The cutover-strategy choice below is the gating decision.
+> **Status (2026-05-30):** Confirmed empirically twice. PR #502 attempted to land the schema as a destructive `0039_clawtalk_greenfield.sql`; CI ran and **38/38 accessor tests + 21/30 google-drive tests failed** because they target the dropped legacy tables. A fresh local audit against the current worktree reproduced the same class of failures: backend tests still query `talks.owner_id`, `users.role`, and `registered_agents` while the DB shape has moved on. PR #502 was closed; the schema SQL is now parked at [`docs/canonical-greenfield-migration.sql`](./canonical-greenfield-migration.sql) until the src/ rewrite is ready.
 
-The greenfield migration is **destructive**. The moment it lands on `main`:
+The active greenfield baseline is a **reset**, not a compatibility migration. The moment it lands on `main`:
 
-1. **All 37 legacy tables are gone** (`talk_runs`, `talk_messages`, `talk_threads`, `talk_jobs`, `registered_agents`, `contents`, `content_edits`, `content_proposals`, NanoClaw user/oauth tables, etc.).
-2. **Local data is wiped.** Per CLAUDE.md, this is by design — Joseph is the only user and the data is dogfood. Joseph re-OAuths Google / Anthropic / Forge SSR providers after the migration.
-3. **Existing `src/` code that references the dropped tables CRASHES IMMEDIATELY.** Every accessor in `src/clawtalk/db/*` that targets `talk_runs` / `talk_messages` / `registered_agents` / `contents` / `content_edits` will throw on first call. Every route in `src/clawtalk/web/routes/*` that depends on those accessors will return 500s.
-4. **The webapp breaks.** Every page that fetches from the broken routes will fall back to error states.
+1. **The old Supabase migration stream is no longer active.** The implementation branch resets/recreates the database and applies `0001_clawtalk_greenfield.sql` from zero.
+2. **All legacy product tables are absent from the final schema** (`talk_runs`, `talk_messages`, `talk_threads`, `talk_jobs`, `registered_agents`, `contents`, `content_edits`, `content_proposals`, NanoClaw user/oauth tables, etc.).
+3. **Local/staging data is wiped.** Per CLAUDE.md and D0, this is by design — Joseph is the only user and the data is dogfood. Joseph re-OAuths Google / Anthropic / Forge SSR providers after the reset.
+4. **Existing `src/` code that references the legacy tables CRASHES IMMEDIATELY.** Every accessor in `src/clawtalk/db/*` that targets `talk_runs` / `talk_messages` / `registered_agents` / `contents` / `content_edits` will throw on first call. Every route in `src/clawtalk/web/routes/*` that depends on those accessors will return 500s.
+5. **The webapp breaks.** Every page that fetches from the broken routes will fall back to error states.
 
 This is why [SPEC-READINESS.md](./SPEC-READINESS.md) flags **cutover sequencing plan** as the one remaining design-shaped item. Two paths:
 
-- **Big-bang cutover.** One coordinated PR that lands the migration + every src/ + webapp/ rewrite + the seed in a single squash-merge. Maximum carnage, single transition window, simplest mental model. Joseph has zero downstream users; downtime is "ClawTalk doesn't work for an hour."
+- **Big-bang cutover.** One coordinated branch that lands the fresh baseline + every src/ + webapp/ rewrite + the seed before merging. Maximum churn, single transition window, simplest mental model. Joseph has zero downstream users; downtime is "ClawTalk doesn't work while the branch is mid-cutover."
 - **Feature-flag cutover.** Branch the code paths behind `CT_GREENFIELD` (or similar). Old paths read the legacy tables, new paths read the greenfield tables. Migrate per Phase. Higher complexity (dual-path code; runtime forks; double the test surface) for the benefit of "the prod webapp keeps working for the human while I'm migrating."
 
-Both are valid. The right choice depends on whether Joseph wants to keep dogfooding the shipped app during the rewrite. **The migration stays parked at [`canonical-greenfield-migration.sql`](./canonical-greenfield-migration.sql) until this decision lands; it moves to `supabase/migrations/0040+_*.sql` only at cutover.**
+**Recommendation:** use the big-bang cutover branch. The codebase is too schema-entangled for a clean dual-path flag, and D0 makes dogfood data disposable. **The schema reference stays parked at [`canonical-greenfield-migration.sql`](./canonical-greenfield-migration.sql) until the first implementation PR; the active implementation creates `supabase/migrations/0001_clawtalk_greenfield.sql`, resets/recreates Supabase, and removes or archives the old active migration stream.** See [IMPLEMENTATION-READINESS.md](./IMPLEMENTATION-READINESS.md).
 
 ---
 
@@ -394,11 +398,11 @@ The clawtalk repo dogfooded a multi-agent reasoning product through the NanoClaw
 
 But the schema couldn't bear weight beyond what it proved: per-user RLS, threads everywhere, the `contents` / `registered_agents` vocabulary, jobs-as-messages, no tenancy. Two design rebuilds (v7 → v8 jobs spec; the 11-data-model greenfield) and one spec-readiness close pass (~38 P0 + ~72 P1 gaps closed) brought the design to the point where the rebuild is writable from spec.
 
-The migration is now written and validated locally. The next milestones are:
+The schema is now written and validated as a docs-side canonical reference. The next milestones are:
 
-1. **Land PR #500** (design-debt resolutions) and **PR #502** (the migration).
-2. **Write the `agent_role_templates` seed** (mechanical follow-up).
-3. **Decide the cutover sequencing** (big-bang vs feature-flag).
-4. **Begin §05 Phase 2** (workspace switcher + auth), then the rest of the phases in order.
+1. **Create the implementation cutover branch.**
+2. **Replace the active Supabase migration stream with `supabase/migrations/0001_clawtalk_greenfield.sql` on that branch.**
+3. **Write the `agent_role_templates` seed + first-signin workspace bootstrap.**
+4. **Add the §11 verification tests, then begin the greenfield accessor/API rewrite.**
 
 When this is done, ClawTalk has a multi-tenant, jobs-aware, Forge-ready, Home-driven, eval-gated, RLS-enforced architecture that the shipped prototype could never have grown into incrementally. That's the bet of this refactor.

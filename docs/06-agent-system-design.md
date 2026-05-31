@@ -329,7 +329,7 @@ Plus two **system** role templates for Forge (§3.6 / D3):
 - `forge_rewriter`
 - `forge_critic`
 
-The five user-facing role templates live in `agent_role_templates` (§11 §4) with their `system_prompt` / `method_default` text seeded verbatim from `03-agents.md` (do not paraphrase in code). The two Forge system role templates are seeded from [`09-talk-doc-improvement.md`](./09-talk-doc-improvement.md) §9.
+The five user-facing role templates live in `agent_role_templates` (§11 §4) with their `system_prompt` / `method_default` text seeded verbatim from `03-agents.md` (do not paraphrase in code). The two Forge system role templates are seeded from the Forge loop responsibilities in [`09-autonomous-content-improvement-prd.md`](./09-autonomous-content-improvement-prd.md); final rewriter/critic prompt text is a Joseph-authored implementation input.
 
 ### 3.3 Workspace Agent
 
@@ -516,7 +516,7 @@ Seed values both rows must carry:
 - `role_key`, `default_name`, `default_handle`, `default_initials`, `default_accent`, `default_accent_dark`
 - `default_model_id` (FK to `llm_models.id`) — Joseph chooses at impl time.
 - `default_temperature` — Joseph chooses at impl time.
-- `job`, `system_prompt` — **placeholder at this layer.** The canonical content lives in [`09`](./09-talk-doc-improvement.md) §9; the role template seed copies that text verbatim. TODO: Joseph to write the actual prompts at impl time.
+- `job`, `system_prompt` — **placeholder at this layer.** The behavioral contract lives in [`09`](./09-autonomous-content-improvement-prd.md); Joseph writes the actual rewriter/critic prompts at impl time.
 - `method_default text[]` — short procedural steps mirroring §09's rewriter/critic loop.
 - `version int` — `1` on initial seed.
 
@@ -538,7 +538,7 @@ Seed values both rows must carry:
 - `DELETE /agents/:id` on a system row returns `403 Forbidden`. System agents cannot be soft- or hard-deleted by user-facing surfaces.
 - Talk UI never lists rewriter/critic as targets for @mention.
 
-Cross-references: see §11 §4 (`agents.is_system` column + design note), §11 §12.3 (system-agent visibility on `agents` — filtered at the query layer, not RLS), and [`09-talk-doc-improvement.md`](./09-talk-doc-improvement.md) §9 (canonical rewriter/critic prompt content).
+Cross-references: see §11 §4 (`agents.is_system` column + design note), §11 §12.3 (system-agent visibility on `agents` — filtered at the query layer, not RLS), and [`09-autonomous-content-improvement-prd.md`](./09-autonomous-content-improvement-prd.md) (Forge loop responsibilities for the rewriter/critic).
 
 ## 4. User-Facing Agent Editor
 
@@ -1098,7 +1098,7 @@ Do not store user-editable raw system prompts here in v1.
 - `version int not null`
 - `updated_at`
 
-The canonical default content for the five user-facing roles comes from `03-agents.md` and `shared/data.jsx`. The two Forge system-agent roles seed their `system_prompt` / `method_default` from [`09-talk-doc-improvement.md`](./09-talk-doc-improvement.md) §9 (the canonical rewriter / critic prompt content).
+The canonical default content for the five user-facing roles comes from `03-agents.md` and `shared/data.jsx`. The two Forge system-agent roles seed their `job` / `method_default` from [`09-autonomous-content-improvement-prd.md`](./09-autonomous-content-improvement-prd.md)'s rewriter/critic responsibilities; final `system_prompt` text is written during implementation.
 
 ### 10.3 `team_compositions`
 

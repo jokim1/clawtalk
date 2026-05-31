@@ -517,7 +517,7 @@ Full data model + scheduler semantics + UI flows live in **[12-jobs.md](./12-job
 
 Internal mechanics: rewriter + critic roles are `is_system` agents (DECISIONS D3); each scoring round calls SSR/Synthetical with a stable `idempotency_key`; held-out personas persist for reproducibility.
 
-Full PRD: **[09-improver-spec.md](./09-improver-spec.md)**. Design handoff: [10-improver-design.md](./10-improver-design.md). Schema: §11 §9 (`ssr_connections`, `forge_audiences`, `forge_personas`, `forge_reference_sets`, `forge_questions`, `forge_audience_personas`, `improvement_runs`, `improvement_run_held_out_personas`, `document_versions`). API surface: §04 §17.
+Full PRD: **[09-autonomous-content-improvement-prd.md](./09-autonomous-content-improvement-prd.md)**. Design handoff: [10-forge-design-handoff.md](./10-forge-design-handoff.md). Schema: §11 §9 (`ssr_connections`, `forge_audiences`, `forge_personas`, `forge_reference_sets`, `forge_questions`, `forge_audience_personas`, `improvement_runs`, `improvement_run_held_out_personas`, `document_versions`). API surface: §04 §17.
 
 Forge is **post-MVP** — it ships behind a feature flag and is not part of the v1 launch checklist. UI placement: as a Forge tab on the Document page (§4.7) for picking targets + reviewing past runs + gallery of winners, with an "Improve this with Forge" action surfaced from the document pane.
 

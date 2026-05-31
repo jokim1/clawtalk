@@ -218,5 +218,5 @@ The singleton coordinator:
 - [README.md](../README.md)
 - [REQUIREMENTS.md](REQUIREMENTS.md)
 - [SECURITY.md](SECURITY.md)
-- [UPSTREAM-PATCH-SURFACE.md](UPSTREAM-PATCH-SURFACE.md)
-- [OPERATIONS_UBUNTU.md](OPERATIONS_UBUNTU.md)
+- `UPSTREAM-PATCH-SURFACE.md` (retired; not present in the ClawTalk greenfield docs)
+- `OPERATIONS_UBUNTU.md` (retired; not present in the ClawTalk greenfield docs)

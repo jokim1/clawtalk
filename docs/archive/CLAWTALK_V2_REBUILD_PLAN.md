@@ -582,7 +582,7 @@ Engineering rules:
 ## 10. Agent System
 
 The complete v1 agent architecture is specified in
-[`06-agent-system-design.md`](./06-agent-system-design.md). Keep the rebuild
+[`06-agent-system-design.md`](../06-agent-system-design.md). Keep the rebuild
 plan thin and defer agent-design details to that doc.
 
 Implementation summary:
@@ -794,7 +794,7 @@ recommendation, News, Inbox, and optimization systems behind it.
 ## 16. Home, Sidebar, Inbox, Recommendations, And News
 
 The complete Home architecture is specified in
-[`07-homepage-system-design.md`](./07-homepage-system-design.md). Keep this
+[`07-homepage-system-design.md`](../07-homepage-system-design.md). Keep this
 rebuild plan thin and defer Home-system details to that doc.
 
 Implementation summary:

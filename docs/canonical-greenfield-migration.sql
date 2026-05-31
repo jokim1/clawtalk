@@ -1,19 +1,21 @@
 -- canonical-greenfield-migration.sql
 --
 -- REFERENCE COPY — NOT an active migration. This file does not auto-apply.
--- The executable migration lands in `supabase/migrations/0040_*.sql` (or higher)
--- when the §05 Phase 2–12 src/ rewrite is ready to cut over. Until then, this
--- file is the canonical source for what the greenfield migration looks like.
+-- The active implementation should be a fresh baseline at
+-- `supabase/migrations/0001_clawtalk_greenfield.sql`, applied to an
+-- empty/reset Supabase database after the old active migration stream is
+-- removed or archived.
 --
--- Why parked here: this migration drops 37 legacy tables in one CASCADE. The
--- src/ in main currently targets those tables; landing the migration without
--- the matching src/ rewrite breaks every accessor + route + test (verified
--- on 2026-05-30: 38/38 accessor tests fail, 21/30 google-drive tests fail).
--- Per Joseph's call, we hold the migration here as a docs-side reference
--- until impl is ready, rather than ship a broken main.
+-- Why parked here: this SQL was authored as a destructive drop/create script
+-- for the old migration stream. The src/ in main currently targets legacy
+-- tables; landing the schema without the matching src/ rewrite breaks every
+-- accessor + route + test (verified on 2026-05-30: 38/38 accessor tests fail,
+-- 21/30 google-drive tests fail). Per Joseph's call, we hold it here as a
+-- docs-side schema reference until impl is ready, rather than ship a broken
+-- main.
 --
 -- Validated against `supabase db reset --local` on 2026-05-30. Verified:
--- 62 final tables (50 greenfield + 12 kept), 2 views, 25 triggers,
+-- 62 final tables (50 greenfield + 12 reused runtime tables), 2 views, 25 triggers,
 -- 4 deferrable back-edge FKs, RLS policies generated for 39 member-write +
 -- 8 admin-write tables. Per-test verification:
 --   §14 #15 last-tab guard: PASS (rejects with CT001)
@@ -21,20 +23,18 @@
 --   §14 #23 home_inbox_items dedup: PASS (partial unique enforces; NULL ok)
 --   Auth-bridge trigger (handle_new_auth_user): PASS after display_name→name
 --
--- ClawTalk greenfield rebuild migration.
+-- ClawTalk greenfield rebuild schema reference.
 -- Per docs/05-build-plan.md Phase 1 + docs/11-data-model.md as the canonical schema source of truth.
 --
--- This migration:
---   Step 1. Drops every superseded legacy table (§11 §11.1) — 37 tables.
---   Step 2. ALTERs the kept tables (§11 §1 users columns; §11 §4 llm_provider_models.capabilities_json + unique index).
---   Step 3. Defines trigger function bodies + RLS helpers.
---   Step 4. CREATEs the greenfield tables in dependency order (§11 §1–§10) with composite FKs, partial uniques.
---   Step 5. Creates the llm_models view.
---   Step 6. Wires per-table updated_at + business triggers.
---   Step 7. Enables RLS + creates policies per §11 §12.1/§12.2/§12.4.
+-- IMPORTANT: before promoting this into the active implementation baseline,
+-- normalize it into final-state DDL:
+--   - create the reused runtime tables directly instead of relying on old migrations;
+--   - remove the legacy DROP/ALTER compatibility sequence;
+--   - keep the trigger bodies, RLS helpers, greenfield tables, views, indexes,
+--     policies, and verification expectations.
 --
--- Per CLAUDE.md "treat data as disposable", local users/talks/messages/runs/contents are wiped. Joseph's first
--- signin after this migration creates a fresh workspace + owner membership.
+-- Per CLAUDE.md "treat data as disposable", local users/talks/messages/runs/contents are wiped by
+-- resetting/recreating Supabase. Joseph's first signin after the baseline creates a fresh workspace + owner membership.
 
 begin;
 
@@ -1453,7 +1453,7 @@ create policy agent_role_templates_read on public.agent_role_templates
 commit;
 
 -- =============================================================================
--- END 0039_clawtalk_greenfield.sql
--- Per docs/05-build-plan.md Phase 1 Step 2: agent_role_templates seed runs in a follow-up
--- migration or in the POST /workspaces handler at workspace-creation time.
+-- END canonical greenfield schema reference
+-- Per docs/05-build-plan.md Phase 1 Step 2: agent_role_templates seed runs in the
+-- baseline seed path or in the POST /workspaces handler at workspace-creation time.
 -- =============================================================================
