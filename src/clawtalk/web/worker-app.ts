@@ -140,6 +140,23 @@ import {
   pollOpenAiCodexOauthRoute,
 } from './routes/agent-oauth.js';
 import {
+  archiveGreenfieldTalkRoute,
+  createGreenfieldFolderRoute,
+  createGreenfieldTalkRoute,
+  deleteGreenfieldFolderRoute,
+  getGreenfieldMeRoute,
+  getGreenfieldTalkRoute,
+  listGreenfieldAgentsRoute,
+  listGreenfieldFoldersRoute,
+  listGreenfieldTalkAgentsRoute,
+  listGreenfieldTalksRoute,
+  listGreenfieldTalkSidebarRoute,
+  listGreenfieldWorkspacesRoute,
+  patchGreenfieldFolderRoute,
+  patchGreenfieldTalkRoute,
+  switchGreenfieldWorkspaceRoute,
+} from './routes/greenfield-core.js';
+import {
   deleteWebSearchCredentialRoute,
   listWebSearchProvidersRoute,
   putWebSearchActiveProviderRoute,
@@ -223,25 +240,14 @@ import {
   type DispatchRunInProcessEnv,
 } from '../talks/dispatch-in-process.js';
 import { dispatchRun } from '../talks/queue-producer.js';
-import { ensureWorkspaceBootstrapForUser } from '../workspaces/bootstrap.js';
 import {
   cancelTalkChat,
   enqueueTalkChat,
-  createTalkFolderRoute,
-  createTalkRoute,
-  deleteTalkFolderRoute,
   deleteTalkMessagesRoute,
-  deleteTalkRoute,
   getTalkPolicyRoute,
-  getTalkRoute,
   getTalkRunContextRoute,
-  listTalkAgentsRoute,
   listTalkMessagesRoute,
   listTalkRunsRoute,
-  listTalkSidebarRoute,
-  listTalksRoute,
-  patchTalkFolderRoute,
-  patchTalkRoute,
   reorderTalkSidebarRoute,
   searchTalkMessagesRoute,
   updateTalkAgentsRoute,
@@ -359,7 +365,12 @@ function buildApp(): Hono<{ Variables: Variables }> {
   app.use('/api/v1/registered-agents/*', requireAuthMiddleware);
   app.use('/api/v1/web-search', requireAuthMiddleware);
   app.use('/api/v1/web-search/*', requireAuthMiddleware);
+  app.use('/api/v1/workspaces', requireAuthMiddleware);
+  app.use('/api/v1/workspaces/*', requireAuthMiddleware);
+  app.use('/api/v1/folders', requireAuthMiddleware);
+  app.use('/api/v1/folders/*', requireAuthMiddleware);
   app.use('/api/v1/workspace/*', requireAuthMiddleware);
+  app.use('/api/v1/teams', requireAuthMiddleware);
   app.use('/api/v1/talks', requireAuthMiddleware);
   app.use('/api/v1/talks/*', requireAuthMiddleware);
   app.use('/api/v1/contents/*', requireAuthMiddleware);
@@ -371,6 +382,7 @@ function buildApp(): Hono<{ Variables: Variables }> {
   // C1: gate /api/v1/me/* (Google account routes). The callback at
   // /api/v1/auth/google/callback stays public — Google redirects there
   // directly with no auth cookies of its own.
+  app.use('/api/v1/me', requireAuthMiddleware);
   app.use('/api/v1/me/*', requireAuthMiddleware);
   app.use('/api/v1/events', requireAuthMiddleware);
 
@@ -391,27 +403,20 @@ function buildApp(): Hono<{ Variables: Variables }> {
   // ── session/me: current user info + display-name patch ───────
   app.get('/api/v1/session/me', async (c) => {
     const auth = c.get('auth');
-    const user = await withUserContext(auth.userId, () =>
-      getUserById(auth.userId),
-    );
-    if (!user || !user.is_active) {
-      return c.json(
-        {
-          ok: false,
-          error: { code: 'unauthorized', message: 'Session is not active' },
-        },
-        401,
-      );
-    }
-    // Lazy first-sign-in bootstrap. Idempotent fast path is a single
-    // SELECT, so safe to run on every session probe. Failures must not
-    // block the session response — keep going.
-    try {
-      await ensureWorkspaceBootstrapForUser(auth.userId);
-    } catch (err) {
-      console.warn('[session/me] ensureWorkspaceBootstrapForUser failed', err);
-    }
-    return c.json({ ok: true, data: { user: normalizeUser(user) } });
+    const result = await getGreenfieldMeRoute({
+      auth,
+      requestedWorkspaceId: requestedWorkspaceId(c),
+    });
+    return jsonResponse(result);
+  });
+
+  app.get('/api/v1/me', async (c) => {
+    const auth = c.get('auth');
+    const result = await getGreenfieldMeRoute({
+      auth,
+      requestedWorkspaceId: requestedWorkspaceId(c),
+    });
+    return jsonResponse(result);
   });
 
   app.patch('/api/v1/session/me', async (c) => {
@@ -459,6 +464,125 @@ function buildApp(): Hono<{ Variables: Variables }> {
       );
     }
     return c.json({ ok: true, data: { user: normalizeUser(updated) } });
+  });
+
+  // ── Greenfield workspace shell ───────────────────────────────
+  app.get('/api/v1/workspaces', async (c) => {
+    const auth = c.get('auth');
+    const rl = checkRateLimit({ principalId: auth.userId, bucket: 'read' });
+    if (!rl.allowed) return rateLimitedResponse(c, rl);
+    const result = await listGreenfieldWorkspacesRoute({ auth });
+    return jsonResponse(result);
+  });
+
+  app.post('/api/v1/workspaces/switch', async (c) => {
+    const auth = c.get('auth');
+    const rl = checkRateLimit({ principalId: auth.userId, bucket: 'write' });
+    if (!rl.allowed) return rateLimitedResponse(c, rl);
+    const csrfFail = checkCsrf(c, auth);
+    if (csrfFail) return csrfFail;
+    const payload = await readJsonBody<{ workspaceId?: string }>(c);
+    if (!payload.ok) return invalidJsonResponse(c, payload.error);
+    const result = await switchGreenfieldWorkspaceRoute({
+      auth,
+      workspaceId: payload.data.workspaceId,
+    });
+    return jsonResponse(result);
+  });
+
+  app.get('/api/v1/folders', async (c) => {
+    const auth = c.get('auth');
+    const rl = checkRateLimit({ principalId: auth.userId, bucket: 'read' });
+    if (!rl.allowed) return rateLimitedResponse(c, rl);
+    const result = await listGreenfieldFoldersRoute({
+      auth,
+      workspaceId: requestedWorkspaceId(c),
+    });
+    return jsonResponse(result);
+  });
+
+  app.post('/api/v1/folders', async (c) => {
+    const auth = c.get('auth');
+    const rl = checkRateLimit({ principalId: auth.userId, bucket: 'write' });
+    if (!rl.allowed) return rateLimitedResponse(c, rl);
+    const csrfFail = checkCsrf(c, auth);
+    if (csrfFail) return csrfFail;
+    const payload = await readJsonBody<{ title?: string }>(c);
+    if (!payload.ok) return invalidJsonResponse(c, payload.error);
+    const result = await createGreenfieldFolderRoute({
+      auth,
+      workspaceId: requestedWorkspaceId(c),
+      title: payload.data.title,
+    });
+    return jsonResponse(result);
+  });
+
+  app.patch('/api/v1/folders/:id', async (c) => {
+    const auth = c.get('auth');
+    const rl = checkRateLimit({ principalId: auth.userId, bucket: 'write' });
+    if (!rl.allowed) return rateLimitedResponse(c, rl);
+    const csrfFail = checkCsrf(c, auth);
+    if (csrfFail) return csrfFail;
+    const folderId = decodeIdParam(c, 'id');
+    if (!folderId.ok) return folderId.response;
+    const payload = await readJsonBody<{
+      title?: string;
+      sortOrder?: number;
+    }>(c);
+    if (!payload.ok) return invalidJsonResponse(c, payload.error);
+    const result = await patchGreenfieldFolderRoute({
+      auth,
+      workspaceId: requestedWorkspaceId(c),
+      folderId: folderId.value,
+      title: payload.data.title,
+      sortOrder:
+        typeof payload.data.sortOrder === 'number'
+          ? payload.data.sortOrder
+          : undefined,
+    });
+    return jsonResponse(result);
+  });
+
+  app.delete('/api/v1/folders/:id', async (c) => {
+    const auth = c.get('auth');
+    const rl = checkRateLimit({ principalId: auth.userId, bucket: 'write' });
+    if (!rl.allowed) return rateLimitedResponse(c, rl);
+    const csrfFail = checkCsrf(c, auth);
+    if (csrfFail) return csrfFail;
+    const folderId = decodeIdParam(c, 'id');
+    if (!folderId.ok) return folderId.response;
+    const result = await deleteGreenfieldFolderRoute({
+      auth,
+      workspaceId: requestedWorkspaceId(c),
+      folderId: folderId.value,
+    });
+    return jsonResponse(result);
+  });
+
+  app.get('/api/v1/workspace/agents', async (c) => {
+    const auth = c.get('auth');
+    const rl = checkRateLimit({ principalId: auth.userId, bucket: 'read' });
+    if (!rl.allowed) return rateLimitedResponse(c, rl);
+    const result = await listGreenfieldAgentsRoute({
+      auth,
+      workspaceId: requestedWorkspaceId(c),
+    });
+    return jsonResponse(result);
+  });
+
+  app.get('/api/v1/teams', async (c) => {
+    const auth = c.get('auth');
+    const rl = checkRateLimit({ principalId: auth.userId, bucket: 'read' });
+    if (!rl.allowed) return rateLimitedResponse(c, rl);
+    const result = await listGreenfieldAgentsRoute({
+      auth,
+      workspaceId: requestedWorkspaceId(c),
+    });
+    if (!result.body.ok) return jsonResponse(result);
+    return jsonResponse({
+      statusCode: result.statusCode,
+      body: { ok: true, data: { teams: result.body.data.teams } },
+    });
   });
 
   // ── ai-agents.ts: page composite + provider credentials ──────
@@ -1162,12 +1286,11 @@ function buildApp(): Hono<{ Variables: Variables }> {
     const auth = c.get('auth');
     const rl = checkRateLimit({ userId: auth.userId, bucket: 'read' });
     if (!rl.allowed) return rateLimitedResponse(c, rl);
-    const limit = parsePositiveInt(c.req.query('limit'));
-    const offset = parseNonNegativeInt(c.req.query('offset'));
-    const result = await listTalksRoute({
+    const result = await listGreenfieldTalksRoute({
       auth,
-      limit: limit ?? undefined,
-      offset: offset ?? undefined,
+      workspaceId: requestedWorkspaceId(c),
+      folderId: c.req.query('folder') ?? c.req.query('folderId') ?? 'all',
+      includeArchived: c.req.query('include_archived') === 'true',
     });
     return jsonResponse(result);
   });
@@ -1176,7 +1299,10 @@ function buildApp(): Hono<{ Variables: Variables }> {
     const auth = c.get('auth');
     const rl = checkRateLimit({ userId: auth.userId, bucket: 'read' });
     if (!rl.allowed) return rateLimitedResponse(c, rl);
-    const result = await listTalkSidebarRoute({ auth });
+    const result = await listGreenfieldTalkSidebarRoute({
+      auth,
+      workspaceId: requestedWorkspaceId(c),
+    });
     return jsonResponse(result);
   });
 
@@ -1186,11 +1312,12 @@ function buildApp(): Hono<{ Variables: Variables }> {
     if (!rl.allowed) return rateLimitedResponse(c, rl);
     const csrfFail = checkCsrf(c, auth);
     if (csrfFail) return csrfFail;
-    const payload = await readJsonBody<{ title?: string }>(c);
+    const payload = await readJsonBody<Record<string, unknown>>(c);
     if (!payload.ok) return invalidJsonResponse(c, payload.error);
-    const result = await createTalkRoute({
+    const result = await createGreenfieldTalkRoute({
       auth,
-      title: payload.data.title,
+      workspaceId: requestedWorkspaceId(c),
+      body: payload.data,
     });
     return jsonResponse(result);
   });
@@ -1203,8 +1330,9 @@ function buildApp(): Hono<{ Variables: Variables }> {
     if (csrfFail) return csrfFail;
     const payload = await readJsonBody<{ title?: string }>(c);
     if (!payload.ok) return invalidJsonResponse(c, payload.error);
-    const result = await createTalkFolderRoute({
+    const result = await createGreenfieldFolderRoute({
       auth,
+      workspaceId: requestedWorkspaceId(c),
       title: payload.data.title,
     });
     return jsonResponse(result);
@@ -1216,7 +1344,11 @@ function buildApp(): Hono<{ Variables: Variables }> {
     if (!rl.allowed) return rateLimitedResponse(c, rl);
     const talkId = decodeIdParam(c, 'talkId');
     if (!talkId.ok) return talkId.response;
-    const result = await getTalkRoute({ auth, talkId: talkId.value });
+    const result = await getGreenfieldTalkRoute({
+      auth,
+      workspaceId: requestedWorkspaceId(c),
+      talkId: talkId.value,
+    });
     return jsonResponse(result);
   });
 
@@ -1232,23 +1364,17 @@ function buildApp(): Hono<{ Variables: Variables }> {
       title?: string;
       folderId?: string | null;
       orchestrationMode?: 'ordered' | 'panel';
+      mode?: string;
+      rounds?: number;
+      roundsLimit?: number;
+      sortOrder?: number;
     }>(c);
     if (!payload.ok) return invalidJsonResponse(c, payload.error);
-    const result = await patchTalkRoute({
+    const result = await patchGreenfieldTalkRoute({
       auth,
+      workspaceId: requestedWorkspaceId(c),
       talkId: talkId.value,
-      title:
-        typeof payload.data.title === 'string' ? payload.data.title : undefined,
-      folderId:
-        typeof payload.data.folderId === 'string' ||
-        payload.data.folderId === null
-          ? payload.data.folderId
-          : undefined,
-      orchestrationMode:
-        payload.data.orchestrationMode === 'ordered' ||
-        payload.data.orchestrationMode === 'panel'
-          ? payload.data.orchestrationMode
-          : undefined,
+      body: payload.data,
     });
     return jsonResponse(result);
   });
@@ -1261,7 +1387,11 @@ function buildApp(): Hono<{ Variables: Variables }> {
     if (csrfFail) return csrfFail;
     const talkId = decodeIdParam(c, 'id');
     if (!talkId.ok) return talkId.response;
-    const result = await deleteTalkRoute({ auth, talkId: talkId.value });
+    const result = await archiveGreenfieldTalkRoute({
+      auth,
+      workspaceId: requestedWorkspaceId(c),
+      talkId: talkId.value,
+    });
     return jsonResponse(result);
   });
 
@@ -1273,13 +1403,20 @@ function buildApp(): Hono<{ Variables: Variables }> {
     if (csrfFail) return csrfFail;
     const folderId = decodeIdParam(c, 'id');
     if (!folderId.ok) return folderId.response;
-    const payload = await readJsonBody<{ title?: string }>(c);
+    const payload = await readJsonBody<{ title?: string; sortOrder?: number }>(
+      c,
+    );
     if (!payload.ok) return invalidJsonResponse(c, payload.error);
-    const result = await patchTalkFolderRoute({
+    const result = await patchGreenfieldFolderRoute({
       auth,
+      workspaceId: requestedWorkspaceId(c),
       folderId: folderId.value,
       title:
         typeof payload.data.title === 'string' ? payload.data.title : undefined,
+      sortOrder:
+        typeof payload.data.sortOrder === 'number'
+          ? payload.data.sortOrder
+          : undefined,
     });
     return jsonResponse(result);
   });
@@ -1292,8 +1429,9 @@ function buildApp(): Hono<{ Variables: Variables }> {
     if (csrfFail) return csrfFail;
     const folderId = decodeIdParam(c, 'id');
     if (!folderId.ok) return folderId.response;
-    const result = await deleteTalkFolderRoute({
+    const result = await deleteGreenfieldFolderRoute({
       auth,
+      workspaceId: requestedWorkspaceId(c),
       folderId: folderId.value,
     });
     return jsonResponse(result);
@@ -1468,7 +1606,11 @@ function buildApp(): Hono<{ Variables: Variables }> {
     if (!rl.allowed) return rateLimitedResponse(c, rl);
     const talkId = decodeIdParam(c, 'talkId');
     if (!talkId.ok) return talkId.response;
-    const result = await listTalkAgentsRoute({ auth, talkId: talkId.value });
+    const result = await listGreenfieldTalkAgentsRoute({
+      auth,
+      workspaceId: requestedWorkspaceId(c),
+      talkId: talkId.value,
+    });
     return jsonResponse(result);
   });
 
@@ -2583,6 +2725,15 @@ function normalizeUser(user: {
     role: user.role,
     createdAt: user.created_at,
   };
+}
+
+function requestedWorkspaceId(c: Context): string | null {
+  return (
+    c.req.header('x-workspace-id') ??
+    c.req.header('x-clawtalk-workspace-id') ??
+    c.req.query('workspaceId') ??
+    null
+  );
 }
 
 /** Translate a route handler envelope into an HTTP response. */
