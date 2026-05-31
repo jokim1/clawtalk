@@ -36,13 +36,8 @@
 //                                         routes over context_sources
 //   /api/v1/talks/:talkId/state[/...]   — greenfield-api.ts read-only
 //                                         compatibility surface
-//   /api/v1/talks/:talkId/jobs[/...]    — talk-jobs.ts (CRUD +
-//                                         pause/resume/run-now; the
-//                                         run-now mount creates a
-//                                         trigger row but the queue
-//                                         consumer is Node-only until
-//                                         the Cloudflare Queues port
-//                                         lands)
+//   /api/v1/talks/:talkId/jobs[/...]    — greenfield-api.ts compatibility
+//                                         routes over jobs/runs
 //   /api/v1/talks/:talkId/attachments[/...] — talk-attachments.ts
 //   /api/v1/talks/:talkId/threads[/...]     — talk-threads.ts (list +
 //                                         create + PATCH + DELETE)
@@ -150,17 +145,6 @@ import {
   uploadTalkAttachmentRoute,
 } from './routes/talk-attachments.js';
 import {
-  createTalkJobRoute,
-  deleteTalkJobRoute,
-  getTalkJobRoute,
-  listTalkJobRunsRoute,
-  listTalkJobsRoute,
-  patchTalkJobRoute,
-  pauseTalkJobRoute,
-  resumeTalkJobRoute,
-  runTalkJobNowRoute,
-} from './routes/talk-jobs.js';
-import {
   disconnectGoogleAccountRoute,
   expandScopesRoute,
   getGooglePickerTokenRoute,
@@ -183,7 +167,6 @@ import {
   deleteTalkResourceRoute,
   listTalkResourcesRoute,
 } from './routes/talk-resources.js';
-import { dispatchRun } from '../talks/queue-producer.js';
 import {
   getTalkRunContextRoute,
   reorderTalkSidebarRoute,
@@ -1189,182 +1172,6 @@ function buildApp(): Hono<{ Variables: Variables }> {
   app.get('/api/v1/events', userEventsUpgradeRoute);
   app.get('/api/v1/talks/:talkId/events', talkEventsUpgradeRoute);
 
-  // ── talk-jobs.ts: jobs CRUD + lifecycle ──────────────────────
-  // The job CRUD endpoints write to postgres via withUserContext.
-  // run-now creates a trigger row but does NOT wake any worker —
-  // the Cloudflare Queues consumer is pending a follow-up unit.
-  app.get('/api/v1/talks/:talkId/jobs', async (c) => {
-    const auth = c.get('auth');
-    const rl = checkRateLimit({ principalId: auth.userId, bucket: 'read' });
-    if (!rl.allowed) return rateLimitedResponse(c, rl);
-    const result = await listTalkJobsRoute({
-      auth,
-      talkId: c.req.param('talkId'),
-    });
-    return jsonResponse(result);
-  });
-
-  app.get('/api/v1/talks/:talkId/jobs/:jobId', async (c) => {
-    const auth = c.get('auth');
-    const rl = checkRateLimit({ principalId: auth.userId, bucket: 'read' });
-    if (!rl.allowed) return rateLimitedResponse(c, rl);
-    const result = await getTalkJobRoute({
-      auth,
-      talkId: c.req.param('talkId'),
-      jobId: c.req.param('jobId'),
-    });
-    return jsonResponse(result);
-  });
-
-  app.get('/api/v1/talks/:talkId/jobs/:jobId/runs', async (c) => {
-    const auth = c.get('auth');
-    const rl = checkRateLimit({ principalId: auth.userId, bucket: 'read' });
-    if (!rl.allowed) return rateLimitedResponse(c, rl);
-    const limit = parsePositiveInt(c.req.query('limit'));
-    const result = await listTalkJobRunsRoute({
-      auth,
-      talkId: c.req.param('talkId'),
-      jobId: c.req.param('jobId'),
-      limit: limit ?? undefined,
-    });
-    return jsonResponse(result);
-  });
-
-  app.post('/api/v1/talks/:talkId/jobs', async (c) => {
-    const auth = c.get('auth');
-    const rl = checkRateLimit({ principalId: auth.userId, bucket: 'write' });
-    if (!rl.allowed) return rateLimitedResponse(c, rl);
-    const csrfFail = checkCsrf(c, auth);
-    if (csrfFail) return csrfFail;
-    const payload = await readJsonBody<{
-      title?: string;
-      prompt?: string;
-      targetAgentId?: string;
-      schedule?: Record<string, unknown>;
-      timezone?: string;
-      sourceScope?: Record<string, unknown>;
-    }>(c);
-    if (!payload.ok) return invalidJsonResponse(c, payload.error);
-    const result = await createTalkJobRoute({
-      auth,
-      talkId: c.req.param('talkId'),
-      title: typeof payload.data.title === 'string' ? payload.data.title : '',
-      prompt:
-        typeof payload.data.prompt === 'string' ? payload.data.prompt : '',
-      targetAgentId:
-        typeof payload.data.targetAgentId === 'string'
-          ? payload.data.targetAgentId
-          : '',
-      schedule: (payload.data.schedule ?? null) as any,
-      timezone:
-        typeof payload.data.timezone === 'string' ? payload.data.timezone : '',
-      sourceScope: (payload.data.sourceScope ?? null) as any,
-    });
-    return jsonResponse(result);
-  });
-
-  app.patch('/api/v1/talks/:talkId/jobs/:jobId', async (c) => {
-    const auth = c.get('auth');
-    const rl = checkRateLimit({ principalId: auth.userId, bucket: 'write' });
-    if (!rl.allowed) return rateLimitedResponse(c, rl);
-    const csrfFail = checkCsrf(c, auth);
-    if (csrfFail) return csrfFail;
-    const payload = await readJsonBody<{
-      title?: string;
-      prompt?: string;
-      targetAgentId?: string;
-      schedule?: Record<string, unknown>;
-      timezone?: string;
-      sourceScope?: Record<string, unknown>;
-    }>(c);
-    if (!payload.ok) return invalidJsonResponse(c, payload.error);
-    const result = await patchTalkJobRoute({
-      auth,
-      talkId: c.req.param('talkId'),
-      jobId: c.req.param('jobId'),
-      title:
-        typeof payload.data.title === 'string' ? payload.data.title : undefined,
-      prompt:
-        typeof payload.data.prompt === 'string'
-          ? payload.data.prompt
-          : undefined,
-      targetAgentId:
-        typeof payload.data.targetAgentId === 'string'
-          ? payload.data.targetAgentId
-          : undefined,
-      schedule: payload.data.schedule as any,
-      timezone:
-        typeof payload.data.timezone === 'string'
-          ? payload.data.timezone
-          : undefined,
-      sourceScope: payload.data.sourceScope as any,
-    });
-    return jsonResponse(result);
-  });
-
-  app.delete('/api/v1/talks/:talkId/jobs/:jobId', async (c) => {
-    const auth = c.get('auth');
-    const rl = checkRateLimit({ principalId: auth.userId, bucket: 'write' });
-    if (!rl.allowed) return rateLimitedResponse(c, rl);
-    const csrfFail = checkCsrf(c, auth);
-    if (csrfFail) return csrfFail;
-    const result = await deleteTalkJobRoute({
-      auth,
-      talkId: c.req.param('talkId'),
-      jobId: c.req.param('jobId'),
-    });
-    return jsonResponse(result);
-  });
-
-  app.post('/api/v1/talks/:talkId/jobs/:jobId/pause', async (c) => {
-    const auth = c.get('auth');
-    const rl = checkRateLimit({ principalId: auth.userId, bucket: 'write' });
-    if (!rl.allowed) return rateLimitedResponse(c, rl);
-    const csrfFail = checkCsrf(c, auth);
-    if (csrfFail) return csrfFail;
-    const result = await pauseTalkJobRoute({
-      auth,
-      talkId: c.req.param('talkId'),
-      jobId: c.req.param('jobId'),
-    });
-    return jsonResponse(result);
-  });
-
-  app.post('/api/v1/talks/:talkId/jobs/:jobId/resume', async (c) => {
-    const auth = c.get('auth');
-    const rl = checkRateLimit({ principalId: auth.userId, bucket: 'write' });
-    if (!rl.allowed) return rateLimitedResponse(c, rl);
-    const csrfFail = checkCsrf(c, auth);
-    if (csrfFail) return csrfFail;
-    const result = await resumeTalkJobRoute({
-      auth,
-      talkId: c.req.param('talkId'),
-      jobId: c.req.param('jobId'),
-    });
-    return jsonResponse(result);
-  });
-
-  app.post('/api/v1/talks/:talkId/jobs/:jobId/run-now', async (c) => {
-    const auth = c.get('auth');
-    const rl = checkRateLimit({ principalId: auth.userId, bucket: 'write' });
-    if (!rl.allowed) return rateLimitedResponse(c, rl);
-    const csrfFail = checkCsrf(c, auth);
-    if (csrfFail) return csrfFail;
-    const result = await runTalkJobNowRoute({
-      auth,
-      talkId: c.req.param('talkId'),
-      jobId: c.req.param('jobId'),
-    });
-    if (
-      result.statusCode === 202 &&
-      result.body.ok &&
-      'runId' in result.body.data
-    ) {
-      await dispatchRun({ runId: result.body.data.runId });
-    }
-    return jsonResponse(result);
-  });
-
   // ── talk-attachments.ts: upload + list + content download ────
   app.post('/api/v1/talks/:talkId/attachments', async (c) => {
     const auth = c.get('auth');
@@ -1596,11 +1403,4 @@ function decodeIdParam(c: Context, paramName: string): DecodedIdParam {
       400,
     ),
   };
-}
-
-function parsePositiveInt(value: string | undefined): number | null {
-  if (!value) return null;
-  const n = Number(value);
-  if (!Number.isFinite(n) || !Number.isInteger(n) || n <= 0) return null;
-  return n;
 }

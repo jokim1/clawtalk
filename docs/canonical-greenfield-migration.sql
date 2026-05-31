@@ -849,7 +849,7 @@ create table public.jobs (
   claimed_at timestamptz,
   archived_at timestamptz,
   last_run_at timestamptz,
-  last_run_status text check (last_run_status is null or last_run_status in ('completed','failed')),
+  last_run_status text check (last_run_status is null or last_run_status in ('completed','failed','cancelled')),
   run_count int not null default 0 check (run_count >= 0),
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),

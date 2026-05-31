@@ -25,6 +25,7 @@ import {
   failGreenfieldRun,
   findNextGreenfieldRunnableOrderedSibling,
   getGreenfieldQueueRunById,
+  getGreenfieldRunPromptSnapshotText,
   getGreenfieldTriggerMessageById,
   markGreenfieldRunRunning,
   type GreenfieldQueueRunRecord,
@@ -150,140 +151,142 @@ export async function processTalkRunMessage(
   const cancelPollMs = input.cancelPollIntervalMs ?? DEFAULT_CANCEL_POLL_MS;
   const dispatch = input.dispatch ?? dispatchRun;
 
-  if (!run.trigger_message_id) {
-    await failRun(
-      run,
-      'trigger_message_missing',
-      'Run missing trigger message reference',
-    );
-  } else {
-    const triggerMessage = await getGreenfieldTriggerMessageById(
-      run.trigger_message_id,
-    );
-    if (!triggerMessage) {
+  const promptInput = run.trigger_message_id
+    ? await getGreenfieldTriggerMessageById(run.trigger_message_id)
+    : {
+        id: null,
+        workspace_id: run.workspace_id,
+        talk_id: run.talk_id,
+        body: await getGreenfieldRunPromptSnapshotText(run.id),
+      };
+  if (!promptInput?.body) {
+    if (run.trigger_message_id) {
       await failRun(
         run,
         'trigger_message_not_found',
         `Trigger message not found: ${run.trigger_message_id}`,
       );
     } else {
-      const cancelController = new AbortController();
-      const pollerStop = new AbortController();
-      const cancelPoller = (async () => {
-        while (!pollerStop.signal.aborted) {
-          const slept = await sleepUntil(cancelPollMs, pollerStop.signal);
-          if (!slept) return; // poller stopped — exit cleanly
-          try {
-            const current = await getGreenfieldQueueRunById(run.id);
-            if (current?.status === 'cancelled') {
-              cancelController.abort('cancelled');
-              return;
-            }
-            if (current && current.status !== 'running') {
-              // Some other path already flipped status — stop polling.
-              return;
-            }
-          } catch (err) {
-            logger.warn(
-              { err, runId: run.id },
-              'cancel poll failed; continuing',
-            );
-          }
-        }
-      })();
-
-      let sanitizer: TalkResponseStreamSanitizer | null = null;
-      const emit = (event: TalkExecutionEvent): void => {
-        let routed: TalkExecutionEvent = event;
-        if (event.type === 'talk_response_started') {
-          sanitizer = createTalkResponseStreamSanitizer();
-        } else if (event.type === 'talk_response_delta') {
-          if (!sanitizer) sanitizer = createTalkResponseStreamSanitizer();
-          const deltaText = sanitizer.push(event.deltaText);
-          if (!deltaText) return;
-          routed = { ...event, deltaText };
-        } else if (
-          event.type === 'talk_response_completed' ||
-          event.type === 'talk_response_failed' ||
-          event.type === 'talk_response_cancelled'
-        ) {
-          sanitizer = null;
-        }
-        emitOutboxEventOutsideTx({
-          topic: `talk:${routed.talkId}`,
-          eventType: routed.type,
-          payload: routed as unknown as Record<string, unknown>,
-          ownerIds: run.owner_ids,
-        }).catch((err) => {
-          logger.warn({ err, eventType: routed.type }, 'outbox emit failed');
-        });
-      };
-
-      try {
-        const executionStartedAt = Date.now();
-        const output = await executor.execute(
-          {
-            runId: run.id,
-            talkId: run.talk_id,
-            threadId: run.talk_id,
-            requestedBy: run.requested_by,
-            triggerMessageId: triggerMessage.id,
-            triggerContent: triggerMessage.body ?? '',
-            jobId: run.job_id ?? null,
-            targetAgentId: run.target_agent_id,
-            responseGroupId: run.response_group_id ?? null,
-            sequenceIndex: run.sequence_index ?? null,
-          },
-          cancelController.signal,
-          emit,
-        );
-        const latencyMs = Date.now() - executionStartedAt;
-        void extractChannelReplyControl(output.content);
-        const responseContent = stripInternalTalkResponseText(output.content);
-        const responseMetadata = output.metadataJson
-          ? (JSON.parse(output.metadataJson) as Record<string, unknown>)
-          : null;
-
-        const completed = await completeGreenfieldRun({
-          runId: run.id,
-          responseMessageId: randomUUID(),
-          responseContent,
-          responseMetadata,
-          agentId: output.agentId,
-          agentNickname: output.agentNickname,
-          providerId: output.providerId,
-          modelId: output.modelId,
-          latencyMs,
-          usage: output.usage,
-          responseSequenceInRun: output.responseSequenceInRun,
-        });
-        if (!completed.applied) {
-          logger.debug(
-            { runId: run.id, talkId: run.talk_id },
-            'Run completion skipped due to non-running status',
-          );
-        }
-      } catch (err) {
-        if (isAbortError(err)) {
-          if (await isCancelled(run.id)) {
-            // Cancel route already flipped status + emitted the
-            // talk_run_cancelled outbox event. Nothing more to do.
+      await failRun(
+        run,
+        'prompt_snapshot_missing',
+        'Run missing prompt snapshot text',
+      );
+    }
+  } else {
+    const cancelController = new AbortController();
+    const pollerStop = new AbortController();
+    const cancelPoller = (async () => {
+      while (!pollerStop.signal.aborted) {
+        const slept = await sleepUntil(cancelPollMs, pollerStop.signal);
+        if (!slept) return; // poller stopped — exit cleanly
+        try {
+          const current = await getGreenfieldQueueRunById(run.id);
+          if (current?.status === 'cancelled') {
+            cancelController.abort('cancelled');
             return;
           }
-          await failRun(run, 'execution_aborted', errorMessageText(err));
+          if (current && current.status !== 'running') {
+            // Some other path already flipped status — stop polling.
+            return;
+          }
+        } catch (err) {
+          logger.warn({ err, runId: run.id }, 'cancel poll failed; continuing');
+        }
+      }
+    })();
+
+    let sanitizer: TalkResponseStreamSanitizer | null = null;
+    const emit = (event: TalkExecutionEvent): void => {
+      let routed: TalkExecutionEvent = event;
+      if (event.type === 'talk_response_started') {
+        sanitizer = createTalkResponseStreamSanitizer();
+      } else if (event.type === 'talk_response_delta') {
+        if (!sanitizer) sanitizer = createTalkResponseStreamSanitizer();
+        const deltaText = sanitizer.push(event.deltaText);
+        if (!deltaText) return;
+        routed = { ...event, deltaText };
+      } else if (
+        event.type === 'talk_response_completed' ||
+        event.type === 'talk_response_failed' ||
+        event.type === 'talk_response_cancelled'
+      ) {
+        sanitizer = null;
+      }
+      emitOutboxEventOutsideTx({
+        topic: `talk:${routed.talkId}`,
+        eventType: routed.type,
+        payload: routed as unknown as Record<string, unknown>,
+        ownerIds: run.owner_ids,
+      }).catch((err) => {
+        logger.warn({ err, eventType: routed.type }, 'outbox emit failed');
+      });
+    };
+
+    try {
+      const executionStartedAt = Date.now();
+      const output = await executor.execute(
+        {
+          runId: run.id,
+          talkId: run.talk_id,
+          threadId: run.talk_id,
+          requestedBy: run.requested_by,
+          triggerMessageId: promptInput.id ?? '',
+          triggerContent: promptInput.body,
+          jobId: run.job_id ?? null,
+          targetAgentId: run.target_agent_id,
+          responseGroupId: run.response_group_id ?? null,
+          sequenceIndex: run.sequence_index ?? null,
+        },
+        cancelController.signal,
+        emit,
+      );
+      const latencyMs = Date.now() - executionStartedAt;
+      void extractChannelReplyControl(output.content);
+      const responseContent = stripInternalTalkResponseText(output.content);
+      const responseMetadata = output.metadataJson
+        ? (JSON.parse(output.metadataJson) as Record<string, unknown>)
+        : null;
+
+      const completed = await completeGreenfieldRun({
+        runId: run.id,
+        responseMessageId: randomUUID(),
+        responseContent,
+        responseMetadata,
+        agentId: output.agentId,
+        agentNickname: output.agentNickname,
+        providerId: output.providerId,
+        modelId: output.modelId,
+        latencyMs,
+        usage: output.usage,
+        responseSequenceInRun: output.responseSequenceInRun,
+      });
+      if (!completed.applied) {
+        logger.debug(
+          { runId: run.id, talkId: run.talk_id },
+          'Run completion skipped due to non-running status',
+        );
+      }
+    } catch (err) {
+      if (isAbortError(err)) {
+        if (await isCancelled(run.id)) {
+          // Cancel route already flipped status + emitted the
+          // talk_run_cancelled outbox event. Nothing more to do.
           return;
         }
-        await failRun(
-          run,
-          err instanceof TalkExecutorError ? err.code : 'execution_failed',
-          errorMessageText(err),
-          err instanceof TalkExecutorError ? err.metadata : null,
-        );
-      } finally {
-        pollerStop.abort();
-        cancelController.abort('done');
-        await cancelPoller.catch(() => {});
+        await failRun(run, 'execution_aborted', errorMessageText(err));
+        return;
       }
+      await failRun(
+        run,
+        err instanceof TalkExecutorError ? err.code : 'execution_failed',
+        errorMessageText(err),
+        err instanceof TalkExecutorError ? err.metadata : null,
+      );
+    } finally {
+      pollerStop.abort();
+      cancelController.abort('done');
+      await cancelPoller.catch(() => {});
     }
   }
 

@@ -70,7 +70,7 @@
 
 **G-11.P1.9 · `agent_role_templates.role_key text pk` with no CHECK. ✅ CLOSED 2026-05-29.** Added CHECK enum: `strategist|critic|researcher|editor|quant|forge_rewriter|forge_critic`.
 
-**G-11.P1.10 · `runs.response_group_id`, `runs.last_run_status`, `jobs.block_reason` text without CHECKs. ✅ CLOSED 2026-05-29.** `response_group_id` length-bounded (1..64); `last_run_status` CHECK `(null or in ('completed','failed'))`; `block_reason` CHECK against the 5 known values. `sequence_index` and `run_count` also got `>= 0` CHECKs.
+**G-11.P1.10 · `runs.response_group_id`, `runs.last_run_status`, `jobs.block_reason` text without CHECKs. ✅ CLOSED 2026-05-29.** `response_group_id` length-bounded (1..64); `last_run_status` CHECK `(null or in ('completed','failed','cancelled'))`; `block_reason` CHECK against the 5 known values. `sequence_index` and `run_count` also got `>= 0` CHECKs.
 
 **G-11.P1.11 · `talk_agent_snapshots.source_agent_id` NULL behavior. ✅ CLOSED 2026-05-29.** Added inline note next to `unique (snapshot_group_id, source_agent_id)`: NULL semantics intentional; historical attribution lives in the snapshot's frozen fields, not in this FK.
 

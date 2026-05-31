@@ -129,7 +129,6 @@ async function sweepStuckRunningRuns(): Promise<void> {
           'Run exceeded the 1h stuck-running threshold and was reaped by the scheduler',
       });
       if (result.applied) {
-        await markGreenfieldJobRunFinished(run.id, 'failed');
         if (run.talk_mode === 'ordered') {
           await dispatchNextOrderedSibling(run);
         }
@@ -235,7 +234,6 @@ async function sweepStuckQueuedRuns(): Promise<void> {
   for (const run of stuck) {
     try {
       if (await failQueuedGreenfieldRun(run.id)) {
-        await markGreenfieldJobRunFinished(run.id, 'failed');
         if (run.talk_mode === 'ordered') {
           await dispatchNextOrderedSibling(run);
         }
@@ -290,6 +288,17 @@ async function failQueuedGreenfieldRun(runId: string): Promise<boolean> {
       returning id
     `;
     if (updated.length !== 1) return null;
+    if (run.job_id) {
+      await txSql`
+        update public.jobs
+        set last_run_at = now(),
+            last_run_status = 'failed',
+            run_count = run_count + 1,
+            updated_at = now()
+        where workspace_id = ${run.workspace_id}::uuid
+          and id = ${run.job_id}::uuid
+      `;
+    }
 
     const eventId = await emitOutboxEventOnSql(txSql, {
       topic: `talk:${run.talk_id}`,
@@ -319,22 +328,4 @@ async function failQueuedGreenfieldRun(runId: string): Promise<boolean> {
   if (!pendingNotify) return false;
   enqueueOutboxNotify(pendingNotify);
   return true;
-}
-
-async function markGreenfieldJobRunFinished(
-  runId: string,
-  status: 'completed' | 'failed',
-): Promise<void> {
-  const db = getDbPg();
-  await db`
-    update public.jobs j
-    set
-      last_run_at = r.finished_at,
-      last_run_status = ${status},
-      run_count = run_count + 1
-    from public.runs r
-    where r.id = ${runId}::uuid
-      and r.job_id = j.id
-      and r.finished_at is not null
-  `;
 }

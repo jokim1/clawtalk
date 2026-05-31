@@ -5,7 +5,10 @@ import {
   type GreenfieldChatRunRecord,
 } from '../../talks/greenfield-chat-accessors.js';
 import type { GreenfieldMessageRecord } from '../../talks/greenfield-detail-accessors.js';
-import { getGreenfieldTalk } from '../../talks/greenfield-accessors.js';
+import {
+  getGreenfieldTalk,
+  type GreenfieldTalkRecord,
+} from '../../talks/greenfield-accessors.js';
 import {
   resolveWorkspaceForUser,
   type WorkspaceSummaryRecord,
@@ -47,6 +50,18 @@ function error(
 
 function isUuid(value: string): boolean {
   return UUID_RE.test(value);
+}
+
+function canEditTalkJobs(input: {
+  workspace: WorkspaceSummaryRecord;
+  talk: GreenfieldTalkRecord;
+  userId: string;
+}): boolean {
+  return (
+    input.workspace.role === 'owner' ||
+    input.workspace.role === 'admin' ||
+    input.talk.created_by === input.userId
+  );
 }
 
 async function withResolvedWorkspace<T>(
@@ -343,6 +358,11 @@ export async function cancelGreenfieldChatRoute(input: {
       workspaceId: ctx.workspace.id,
       talkId: input.talkId,
       userId: input.auth.userId,
+      includeJobRuns: canEditTalkJobs({
+        workspace: ctx.workspace,
+        talk,
+        userId: input.auth.userId,
+      }),
     });
     if (cancelled.cancelledRuns === 0) {
       return error(

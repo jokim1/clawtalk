@@ -17,6 +17,10 @@ import {
 } from './greenfield-accessors.js';
 import { enqueueGreenfieldChatTurn } from './greenfield-chat-accessors.js';
 import {
+  createGreenfieldJob,
+  createGreenfieldJobRunNow,
+} from './greenfield-job-accessors.js';
+import {
   completeGreenfieldRun,
   getGreenfieldQueueRunById,
   markGreenfieldRunRunning,
@@ -157,6 +161,58 @@ async function setupRun(opts?: {
       messageId: turn.message.id,
       runIds: turn.runs.map((run) => run.id),
       responseGroupId: turn.runs[0]!.response_group_id!,
+    };
+  });
+}
+
+async function setupJobRun(opts?: { status?: 'queued' | 'running' }): Promise<{
+  workspaceId: string;
+  talkId: string;
+  jobId: string;
+  runId: string;
+}> {
+  const workspaceId = await ensureWorkspaceBootstrapForUser(OWNER_ID);
+  return withUserContext(OWNER_ID, async () => {
+    const agentIds = await listDefaultTalkAgentIds({ workspaceId });
+    const talk = await createGreenfieldTalk({
+      workspaceId,
+      createdBy: OWNER_ID,
+      title: 'Queue Consumer Job Test Talk',
+      agentIds: [agentIds[0]!],
+    });
+    const job = await createGreenfieldJob({
+      workspaceId,
+      talkId: talk.id,
+      title: 'DLQ Job',
+      prompt: 'DLQ job prompt',
+      agentId: agentIds[0]!,
+      schedule: { kind: 'interval', everyHours: 1 },
+      timezone: 'UTC',
+      sourceScope: { allowWeb: false, toolIds: [] },
+      createdBy: OWNER_ID,
+    });
+    const enqueued = await createGreenfieldJobRunNow({
+      workspaceId,
+      talkId: talk.id,
+      jobId: job.id,
+      requestedBy: OWNER_ID,
+    });
+    if (enqueued.status !== 'enqueued') {
+      throw new Error(`Failed to enqueue job run: ${enqueued.status}`);
+    }
+    if (opts?.status === 'running') {
+      const db = getDbPg();
+      await db`
+        update public.runs
+        set status = 'running', started_at = now()
+        where id = ${enqueued.runId}::uuid
+      `;
+    }
+    return {
+      workspaceId,
+      talkId: talk.id,
+      jobId: job.id,
+      runId: enqueued.runId,
     };
   });
 }
@@ -628,6 +684,30 @@ describe('processDlqMessage', () => {
     await processDlqMessage({ runId: runIds[0]! });
     const run = await getGreenfieldQueueRunById(runIds[0]!);
     expect(run?.status).toBe('failed');
+  });
+
+  it('updates the parent job summary when a job run exhausts DLQ retries', async () => {
+    const { jobId, runId } = await setupJobRun();
+
+    await processDlqMessage({ runId });
+
+    const db = getDbPg();
+    const rows = await db<
+      Array<{
+        run_count: number;
+        last_run_status: string | null;
+        last_run_at: string | null;
+      }>
+    >`
+      select run_count, last_run_status, last_run_at
+      from public.jobs
+      where id = ${jobId}::uuid
+    `;
+    expect(rows[0]).toMatchObject({
+      run_count: 1,
+      last_run_status: 'failed',
+    });
+    expect(rows[0]?.last_run_at).not.toBeNull();
   });
 
   it('is a no-op on an already-terminal run', async () => {

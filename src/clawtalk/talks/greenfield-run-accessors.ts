@@ -61,6 +61,23 @@ function terminalStatuses(): GreenfieldRunStatus[] {
   return ['completed', 'failed', 'cancelled'];
 }
 
+async function updateJobTerminalBookkeepingOnSql(
+  sql: Sql,
+  run: Pick<GreenfieldQueueRunRecord, 'workspace_id' | 'job_id'>,
+  status: 'completed' | 'failed' | 'cancelled',
+): Promise<void> {
+  if (!run.job_id) return;
+  await sql`
+    update public.jobs
+    set last_run_at = now(),
+        last_run_status = ${status},
+        run_count = run_count + 1,
+        updated_at = now()
+    where workspace_id = ${run.workspace_id}::uuid
+      and id = ${run.job_id}::uuid
+  `;
+}
+
 function errorJson(input: {
   code: string;
   message: string;
@@ -136,6 +153,22 @@ export async function getGreenfieldTriggerMessageById(
     limit 1
   `;
   return rows[0] ?? null;
+}
+
+export async function getGreenfieldRunPromptSnapshotText(
+  runId: string,
+): Promise<string | null> {
+  const db = getDbPg();
+  const rows = await db<{ prompt_text_redacted: string | null }[]>`
+    select rps.prompt_text_redacted
+    from public.runs r
+    join public.run_prompt_snapshots rps
+      on rps.workspace_id = r.workspace_id
+     and rps.id = r.prompt_snapshot_id
+    where r.id = ${runId}::uuid
+    limit 1
+  `;
+  return rows[0]?.prompt_text_redacted ?? null;
 }
 
 export async function markGreenfieldRunRunning(
@@ -275,6 +308,7 @@ export async function completeGreenfieldRun(input: {
       where workspace_id = ${run.workspace_id}::uuid
         and id = ${run.talk_id}::uuid
     `;
+    await updateJobTerminalBookkeepingOnSql(txSql, run, 'completed');
 
     const messageAppendedEventId = await emitOutboxEventOnSql(txSql, {
       topic: `talk:${run.talk_id}`,
@@ -365,6 +399,7 @@ export async function failGreenfieldRun(input: {
         returning id
       `;
       if (failed.length !== 1) return null;
+      await updateJobTerminalBookkeepingOnSql(txSql, run, 'failed');
 
       const eventId = await emitOutboxEventOnSql(txSql, {
         topic: `talk:${run.talk_id}`,
@@ -478,6 +513,7 @@ export async function failGreenfieldDlqRun(input: {
         returning id
       `;
       if (updated.length !== 1) return null;
+      await updateJobTerminalBookkeepingOnSql(txSql, run, 'failed');
 
       const eventId = await emitOutboxEventOnSql(txSql, {
         topic: `talk:${run.talk_id}`,
@@ -520,6 +556,7 @@ export async function failGreenfieldDlqRun(input: {
       returning id
     `;
     if (fallback.length === 1) {
+      await updateJobTerminalBookkeepingOnSql(db, run, 'failed');
       logger.error(
         { err, runId: run.id },
         'failGreenfieldDlqRun: marked run failed without outbox event after atomic finalization failed',

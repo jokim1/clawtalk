@@ -92,11 +92,13 @@ export async function emitOutboxEventOnSql(
   sql: Sql,
   input: EmitOutboxEventInput,
 ): Promise<number> {
-  const rows = await sql<{ event_id: number }[]>`
+  await sql`
     insert into public.event_outbox (topic, event_type, payload)
     values (${input.topic}, ${input.eventType},
             ${sql.json(input.payload as never)})
-    returning event_id::int
+  `;
+  const rows = await sql<{ event_id: number }[]>`
+    select currval('public.event_outbox_event_id_seq')::int as event_id
   `;
   return rows[0]!.event_id;
 }

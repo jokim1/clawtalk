@@ -31,7 +31,7 @@ A Job belongs to a **Talk** (and its Workspace) and targets **one agent** from t
 2. **No triggering `messages` row is written.** Conversation runs from `/chat` write a user message and reference it via `runs.trigger_message_id`; scheduler/manual runs leave `trigger_message_id = NULL`. The job's prompt lives in the snapshot, not in the Talk's message stream — there is nothing for `messages.author_kind` to be (user/agent are the only values). The agent's reply is the only message produced by a job fire.
 3. The run executes through the **standard queue → executor → event stream** (no special path). The executor reads the prompt from `runs.prompt_snapshot_id.prompt_text_redacted` — not from the live `jobs.prompt`, so editing the job mid-queue affects the NEXT fire, not the in-flight one.
 4. The result lands per the job's **output targets** (§3).
-5. Bookkeeping updates **only on terminal status** (`completed` / `failed`) via `markTalkJobRunFinished`: `last_run_at = run.finished_at`, `last_run_status`, `run_count++`, and the next slot's `next_due_at` (already advanced in the claim txn — see §5). An Inbox item is raised: `job_output_ready` on success (with `ref_id = run.id` for at-least-once dedup), `job_blocked` on dependency failure.
+5. Bookkeeping updates **only on terminal status** (`completed` / `failed` / `cancelled`) via terminal run handling: `last_run_at = run.finished_at`, `last_run_status`, `run_count++`, and the next slot's `next_due_at` (already advanced in the claim txn — see §5). An Inbox item is raised: `job_output_ready` on success (with `ref_id = run.id` for at-least-once dedup), `job_blocked` on dependency failure.
 
 A job is conceptually **"a saved run that fires itself."** No threads, no separate deliverable object — it produces a run, and runs already know how to land a message and/or propose a Document edit.
 
@@ -146,7 +146,7 @@ Driven by the existing every-minute cron tick (`scheduler.ts` mechanism is kept;
    - The targeted agent (`jobs.agent_id`) is in `talk_agents(workspace_id, talk_id, agent_id)`.
    - The agent's `model_id` references an enabled `llm_models` row.
    - If `emit_document_append = true`: `SELECT 1 FROM documents WHERE primary_talk_id = job.talk_id` returns a row.
-   - Every entry in `source_scope_json.tool_ids` has a matching enabled `talk_tools(workspace_id, talk_id, tool_id, enabled=true)` row.
+   - `source_scope_json.allow_web=true` has at least one enabled Talk web-tool row, and every entry in `source_scope_json.tool_ids` has a matching enabled `talk_tools(workspace_id, talk_id, tool_id, enabled=true)` row.
    - For each tool that the static `tool_id → required_service` catalog (`11` §6) says depends on a connector, the corresponding `connectors(workspace_id, service, authorized=true)` row exists. A tool that's toggled on in `talk_tools` but whose service connector is unauthorized would fail at executor time with no actionable signal; checking it here turns the failure into a deterministic block.
 
    ANY failure → `UPDATE jobs SET status='blocked', block_reason=<the specific reason>, next_due_at=NULL, claimed_at=NULL` + `INSERT INTO home_inbox_items (workspace_id, type, ref_id, ...) VALUES (..., 'job_blocked', NULL, ...)` — both in the SAME transaction. COMMIT. No snapshots, no `runs` row, no queue dispatch. Path A ends for this job. The next tick will see `status='blocked'` and skip claim entirely.
@@ -219,10 +219,10 @@ A schema CHECK enforces the invariant: `(archived_at is not null) OR (status='ac
 
 ### Bookkeeping (terminal-only)
 
-`last_run_at`, `last_run_status`, and `run_count` are written **only** by `markTalkJobRunFinished` when a run reaches a terminal status (`completed` or `failed`, including stuck-swept failures). The scheduler does NOT touch them at run-insert time; in-flight state is observable via the `runs` table directly. Manual run-now follows the same rule.
+`last_run_at`, `last_run_status`, and `run_count` are written **only** when a run reaches a terminal status (`completed`, `failed` including stuck-swept failures, or `cancelled`). The scheduler does NOT touch them at run-insert time; in-flight state is observable via the `runs` table directly. Manual run-now follows the same rule.
 
 - `last_run_at = run.finished_at`.
-- `last_run_status` = `'completed'` or `'failed'` (no `'queued'`, no `'running'`).
+- `last_run_status` = `'completed'`, `'failed'`, or `'cancelled'` (no `'queued'`, no `'running'`).
 - `run_count` is incremented on every terminal status — including stuck-swept failures, which ARE terminal `failed` (no special case).
 
 ### Unblock path (event-driven for v1)
@@ -262,7 +262,7 @@ This doc owns behavior; `11` owns the DDL. Key column-deltas from the shipped `t
 
 - **Add to `jobs`** (`11` §8): `workspace_id` (replaces shipped `owner_id` for tenancy), `emit_talk_message bool`, `emit_document_append bool` + CHECK at-least-one, `archived_at timestamptz`, lifecycle CHECK per §6, `jobs_active` view with `security_invoker = true`.
 - **Drop from `jobs`**: `thread_id` (threads gone), `deliverable_kind`, `report_output_id`, `output_targets text[]`, `document_append_mode`, dead `connectorIds`/`channelBindingIds` keys inside `source_scope_json`.
-- **Tighten `source_scope_json`** to the typed shape `{ allow_web: bool, tool_ids: text[] }`. `tool_ids` validates against `talk_tools.tool_id text` at fire time (§5 Path A step 2).
+- **Tighten `source_scope_json`** to the typed shape `{ allow_web: bool, tool_ids: text[] }`. `allow_web` validates against the Talk web-tool family and `tool_ids` validates against `talk_tools.tool_id text` at fire time (§5 Path A step 2).
 - **`block_reason text`** — known values documented: `agent_missing`, `model_disabled`, `no_primary_document`, `tool_not_enabled`, `connector_not_authorized`. Free text allows future reasons without migration; the documented set is the UI contract.
 - **Add to `runs`** (`11` §3): `scheduled_for timestamptz`, the CHECK invariant for scheduler/manual runs, and a partial unique `(job_id, scheduled_for) where job_id is not null and scheduled_for is not null` for slot dedup. Change `runs.job_id` FK from `on delete set null (job_id)` to `on delete restrict` so history survives job archive.
 - **Add to `home_inbox_items`** (`11` §7): `ref_id uuid` + partial unique `(workspace_id, type, ref_id) where ref_id is not null`.
@@ -303,7 +303,7 @@ This doc owns behavior; `11` owns the DDL. Key column-deltas from the shipped `t
 12. **Inbox idempotency for `job_output_ready`.** Replay the consumer's completion path; second `home_inbox_items` INSERT hits the unique `(workspace_id, type, ref_id)` index; no duplicate.
 13. **`block_reason='no_primary_document'` specifically.** Delete the primary doc; verify the exact `block_reason` value (not just a generic block).
 14. **Prompt snapshot immutability.** Insert a scheduler run with a snapshot; edit `jobs.prompt`; let the run execute; the executor reads the snapshot's `prompt_text_redacted`, not the new `jobs.prompt`.
-15. **Tool-id validation.** Configure a job with `source_scope_json.tool_ids` containing an entry not enabled in `talk_tools`; next fire blocks with `block_reason='tool_not_enabled'`.
+15. **Tool-id validation.** Configure a job with `source_scope_json.allow_web=true` while web tools are disabled, or with `tool_ids` containing an entry not enabled in `talk_tools`; next fire blocks with `block_reason='tool_not_enabled'`.
 16. **`runs.job_id RESTRICT`.** Attempt to hard-delete a job with `run_count > 0`; the FK rejects. The archive path succeeds (sets `archived_at`).
 17. **Empty primary tab append.** Primary doc has zero blocks in its primary tab; the executor emits `document_edits` with `after_block_id=NULL`; the row commits (op-shape check allows it); the accept path materializes the block as the tab's first.
 18. **Concurrent queue delivery.** Simulate two consumer workers delivering the same queued `run.id` concurrently; one consumer's atomic `update runs set status='running' where id=$1 and status='queued' returning *` returns a row; the other returns empty; only one executor proceeds.

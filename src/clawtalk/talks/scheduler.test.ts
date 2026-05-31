@@ -6,6 +6,7 @@ import {
   getDbPg,
   initPgDatabase,
   type RequestExecutionContext,
+  withUserContext,
 } from '../../db.js';
 import { ensureWorkspaceBootstrapForUser } from '../workspaces/bootstrap.js';
 import {
@@ -13,6 +14,10 @@ import {
   listDefaultTalkAgentIds,
 } from './greenfield-accessors.js';
 import { enqueueGreenfieldChatTurn } from './greenfield-chat-accessors.js';
+import {
+  createGreenfieldJob,
+  createGreenfieldJobRunNow,
+} from './greenfield-job-accessors.js';
 import { runScheduledTick, type ScheduledTickEnv } from './scheduler.js';
 
 const TEST_DB_URL = 'postgresql://postgres:postgres@127.0.0.1:54432/postgres';
@@ -98,6 +103,7 @@ async function createTalkFixture(options?: {
 }): Promise<{
   workspaceId: string;
   talkId: string;
+  agentIds: string[];
   runIds: string[];
   responseGroupId: string;
 }> {
@@ -125,6 +131,7 @@ async function createTalkFixture(options?: {
   return {
     workspaceId,
     talkId: talk.id,
+    agentIds,
     runIds: enqueued.runs.map((run) => run.id),
     responseGroupId: enqueued.runs[0]!.response_group_id!,
   };
@@ -184,6 +191,129 @@ describe('greenfield scheduled tick safety sweeps', () => {
       status: 'failed',
       error_json: { code: 'stuck_running_swept' },
     });
+  });
+
+  it('records one terminal bookkeeping update for a stuck running job run', async () => {
+    const { workspaceId, talkId, agentIds, runIds } = await createTalkFixture();
+    const db = getDbPg();
+    await db`
+      update public.runs
+      set status = 'completed',
+          started_at = coalesce(started_at, now()),
+          finished_at = now()
+      where id in ${db(runIds)}
+    `;
+    const job = await withUserContext(USER_ID, () =>
+      createGreenfieldJob({
+        workspaceId,
+        talkId,
+        title: 'Swept Job',
+        prompt: 'Sweep me',
+        agentId: agentIds[0]!,
+        schedule: { kind: 'interval', everyHours: 1 },
+        timezone: 'UTC',
+        sourceScope: { allowWeb: false, toolIds: [] },
+        createdBy: USER_ID,
+      }),
+    );
+    const enqueued = await withUserContext(USER_ID, () =>
+      createGreenfieldJobRunNow({
+        workspaceId,
+        talkId,
+        jobId: job.id,
+        requestedBy: USER_ID,
+      }),
+    );
+    if (enqueued.status !== 'enqueued') {
+      throw new Error(`Expected job run to enqueue, got ${enqueued.status}`);
+    }
+    const runId = enqueued.runId;
+    await db`
+      update public.runs
+      set status = 'running',
+          started_at = now() - interval '2 hours'
+      where id = ${runId}::uuid
+    `;
+
+    await runTick();
+
+    const rows = await db<
+      Array<{
+        run_count: number;
+        last_run_status: string | null;
+        last_run_at: string | null;
+      }>
+    >`
+      select run_count, last_run_status, last_run_at
+      from public.jobs
+      where id = ${job.id}::uuid
+    `;
+    expect(rows[0]).toMatchObject({
+      run_count: 1,
+      last_run_status: 'failed',
+    });
+    expect(rows[0]?.last_run_at).not.toBeNull();
+  });
+
+  it('records one terminal bookkeeping update for a stuck queued job run', async () => {
+    const { workspaceId, talkId, agentIds, runIds } = await createTalkFixture();
+    const db = getDbPg();
+    await db`
+      update public.runs
+      set status = 'completed',
+          started_at = coalesce(started_at, now()),
+          finished_at = now()
+      where id in ${db(runIds)}
+    `;
+    const job = await withUserContext(USER_ID, () =>
+      createGreenfieldJob({
+        workspaceId,
+        talkId,
+        title: 'Queued Sweep Job',
+        prompt: 'Sweep queued',
+        agentId: agentIds[0]!,
+        schedule: { kind: 'interval', everyHours: 1 },
+        timezone: 'UTC',
+        sourceScope: { allowWeb: false, toolIds: [] },
+        createdBy: USER_ID,
+      }),
+    );
+    const enqueued = await withUserContext(USER_ID, () =>
+      createGreenfieldJobRunNow({
+        workspaceId,
+        talkId,
+        jobId: job.id,
+        requestedBy: USER_ID,
+      }),
+    );
+    if (enqueued.status !== 'enqueued') {
+      throw new Error(`Expected job run to enqueue, got ${enqueued.status}`);
+    }
+    const runId = enqueued.runId;
+    await db`
+      update public.runs
+      set created_at = now() - interval '10 minutes'
+      where id = ${runId}::uuid
+    `;
+
+    await runTick();
+
+    const rows = await db<
+      Array<{
+        run_count: number;
+        last_run_status: string | null;
+        last_run_at: string | null;
+      }>
+    >`
+      select run_count, last_run_status, last_run_at
+      from public.jobs
+      where id = ${job.id}::uuid
+    `;
+    expect(rows[0]).toMatchObject({
+      run_count: 1,
+      last_run_status: 'failed',
+    });
+    expect(rows[0]?.last_run_at).not.toBeNull();
   });
 
   it('promotes the next ordered sibling after reaping a stuck running step', async () => {

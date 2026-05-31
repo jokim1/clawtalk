@@ -43,6 +43,17 @@ import {
   uploadGreenfieldTalkContextSourceRoute,
 } from './greenfield-context.js';
 import {
+  createGreenfieldTalkJobRoute,
+  deleteGreenfieldTalkJobRoute,
+  getGreenfieldTalkJobRoute,
+  listGreenfieldTalkJobRunsRoute,
+  listGreenfieldTalkJobsRoute,
+  patchGreenfieldTalkJobRoute,
+  pauseGreenfieldTalkJobRoute,
+  resumeGreenfieldTalkJobRoute,
+  runGreenfieldTalkJobNowRoute,
+} from './greenfield-jobs.js';
+import {
   acceptGreenfieldContentEditRoute,
   acceptGreenfieldContentEditRunRoute,
   createGreenfieldTalkContentRoute,
@@ -1262,6 +1273,230 @@ export function mountGreenfieldApiRoutes(app: GreenfieldApp): void {
       return jsonResponse(result);
     },
   );
+
+  // ── Greenfield jobs compatibility routes ─────────────────────
+  app.get('/api/v1/talks/:talkId/jobs', async (c) => {
+    const auth = c.get('auth');
+    const rl = checkRateLimit({ principalId: auth.userId, bucket: 'read' });
+    if (!rl.allowed) return rateLimitedResponse(c, rl);
+    const result = await listGreenfieldTalkJobsRoute({
+      auth,
+      workspaceId: requestedWorkspaceId(c),
+      talkId: c.req.param('talkId'),
+    });
+    return jsonResponse(result);
+  });
+
+  app.get('/api/v1/talks/:talkId/jobs/:jobId', async (c) => {
+    const auth = c.get('auth');
+    const rl = checkRateLimit({ principalId: auth.userId, bucket: 'read' });
+    if (!rl.allowed) return rateLimitedResponse(c, rl);
+    const result = await getGreenfieldTalkJobRoute({
+      auth,
+      workspaceId: requestedWorkspaceId(c),
+      talkId: c.req.param('talkId'),
+      jobId: c.req.param('jobId'),
+    });
+    return jsonResponse(result);
+  });
+
+  app.get('/api/v1/talks/:talkId/jobs/:jobId/runs', async (c) => {
+    const auth = c.get('auth');
+    const rl = checkRateLimit({ principalId: auth.userId, bucket: 'read' });
+    if (!rl.allowed) return rateLimitedResponse(c, rl);
+    const limit = parsePositiveInt(c.req.query('limit'));
+    const result = await listGreenfieldTalkJobRunsRoute({
+      auth,
+      workspaceId: requestedWorkspaceId(c),
+      talkId: c.req.param('talkId'),
+      jobId: c.req.param('jobId'),
+      limit: limit ?? undefined,
+    });
+    return jsonResponse(result);
+  });
+
+  app.post('/api/v1/talks/:talkId/jobs', async (c) => {
+    const auth = c.get('auth');
+    const rl = checkRateLimit({ principalId: auth.userId, bucket: 'write' });
+    if (!rl.allowed) return rateLimitedResponse(c, rl);
+    const csrfFail = checkCsrf(c, auth);
+    if (csrfFail) return csrfFail;
+    const payload = await readJsonBody<{
+      title?: unknown;
+      prompt?: unknown;
+      agentId?: unknown;
+      targetAgentId?: unknown;
+      schedule?: unknown;
+      scheduleJson?: unknown;
+      timezone?: unknown;
+      sourceScope?: unknown;
+      sourceScopeJson?: unknown;
+      emitTalkMessage?: unknown;
+      emitDocumentAppend?: unknown;
+      catchUp?: unknown;
+    }>(c);
+    if (!payload.ok) return invalidJsonResponse(c, payload.error);
+    const result = await createGreenfieldTalkJobRoute({
+      auth,
+      workspaceId: requestedWorkspaceId(c),
+      talkId: c.req.param('talkId'),
+      title: typeof payload.data.title === 'string' ? payload.data.title : '',
+      prompt:
+        typeof payload.data.prompt === 'string' ? payload.data.prompt : '',
+      agentId:
+        typeof payload.data.agentId === 'string'
+          ? payload.data.agentId
+          : undefined,
+      targetAgentId:
+        typeof payload.data.targetAgentId === 'string'
+          ? payload.data.targetAgentId
+          : undefined,
+      schedule: payload.data.schedule,
+      scheduleJson: payload.data.scheduleJson,
+      timezone:
+        typeof payload.data.timezone === 'string' ? payload.data.timezone : '',
+      sourceScope: payload.data.sourceScope,
+      sourceScopeJson: payload.data.sourceScopeJson,
+      emitTalkMessage:
+        typeof payload.data.emitTalkMessage === 'boolean'
+          ? payload.data.emitTalkMessage
+          : undefined,
+      emitDocumentAppend:
+        typeof payload.data.emitDocumentAppend === 'boolean'
+          ? payload.data.emitDocumentAppend
+          : undefined,
+      catchUp: payload.data.catchUp,
+    });
+    return jsonResponse(result);
+  });
+
+  app.patch('/api/v1/talks/:talkId/jobs/:jobId', async (c) => {
+    const auth = c.get('auth');
+    const rl = checkRateLimit({ principalId: auth.userId, bucket: 'write' });
+    if (!rl.allowed) return rateLimitedResponse(c, rl);
+    const csrfFail = checkCsrf(c, auth);
+    if (csrfFail) return csrfFail;
+    const payload = await readJsonBody<{
+      title?: unknown;
+      prompt?: unknown;
+      agentId?: unknown;
+      targetAgentId?: unknown;
+      schedule?: unknown;
+      scheduleJson?: unknown;
+      timezone?: unknown;
+      sourceScope?: unknown;
+      sourceScopeJson?: unknown;
+      emitTalkMessage?: unknown;
+      emitDocumentAppend?: unknown;
+      catchUp?: unknown;
+    }>(c);
+    if (!payload.ok) return invalidJsonResponse(c, payload.error);
+    const result = await patchGreenfieldTalkJobRoute({
+      auth,
+      workspaceId: requestedWorkspaceId(c),
+      talkId: c.req.param('talkId'),
+      jobId: c.req.param('jobId'),
+      title:
+        typeof payload.data.title === 'string' ? payload.data.title : undefined,
+      prompt:
+        typeof payload.data.prompt === 'string'
+          ? payload.data.prompt
+          : undefined,
+      agentId:
+        typeof payload.data.agentId === 'string'
+          ? payload.data.agentId
+          : undefined,
+      targetAgentId:
+        typeof payload.data.targetAgentId === 'string'
+          ? payload.data.targetAgentId
+          : undefined,
+      schedule: payload.data.schedule,
+      scheduleJson: payload.data.scheduleJson,
+      timezone:
+        typeof payload.data.timezone === 'string'
+          ? payload.data.timezone
+          : undefined,
+      sourceScope: payload.data.sourceScope,
+      sourceScopeJson: payload.data.sourceScopeJson,
+      emitTalkMessage:
+        typeof payload.data.emitTalkMessage === 'boolean'
+          ? payload.data.emitTalkMessage
+          : undefined,
+      emitDocumentAppend:
+        typeof payload.data.emitDocumentAppend === 'boolean'
+          ? payload.data.emitDocumentAppend
+          : undefined,
+      catchUp: payload.data.catchUp,
+    });
+    return jsonResponse(result);
+  });
+
+  app.delete('/api/v1/talks/:talkId/jobs/:jobId', async (c) => {
+    const auth = c.get('auth');
+    const rl = checkRateLimit({ principalId: auth.userId, bucket: 'write' });
+    if (!rl.allowed) return rateLimitedResponse(c, rl);
+    const csrfFail = checkCsrf(c, auth);
+    if (csrfFail) return csrfFail;
+    const result = await deleteGreenfieldTalkJobRoute({
+      auth,
+      workspaceId: requestedWorkspaceId(c),
+      talkId: c.req.param('talkId'),
+      jobId: c.req.param('jobId'),
+    });
+    return jsonResponse(result);
+  });
+
+  app.post('/api/v1/talks/:talkId/jobs/:jobId/pause', async (c) => {
+    const auth = c.get('auth');
+    const rl = checkRateLimit({ principalId: auth.userId, bucket: 'write' });
+    if (!rl.allowed) return rateLimitedResponse(c, rl);
+    const csrfFail = checkCsrf(c, auth);
+    if (csrfFail) return csrfFail;
+    const result = await pauseGreenfieldTalkJobRoute({
+      auth,
+      workspaceId: requestedWorkspaceId(c),
+      talkId: c.req.param('talkId'),
+      jobId: c.req.param('jobId'),
+    });
+    return jsonResponse(result);
+  });
+
+  app.post('/api/v1/talks/:talkId/jobs/:jobId/resume', async (c) => {
+    const auth = c.get('auth');
+    const rl = checkRateLimit({ principalId: auth.userId, bucket: 'write' });
+    if (!rl.allowed) return rateLimitedResponse(c, rl);
+    const csrfFail = checkCsrf(c, auth);
+    if (csrfFail) return csrfFail;
+    const result = await resumeGreenfieldTalkJobRoute({
+      auth,
+      workspaceId: requestedWorkspaceId(c),
+      talkId: c.req.param('talkId'),
+      jobId: c.req.param('jobId'),
+    });
+    return jsonResponse(result);
+  });
+
+  app.post('/api/v1/talks/:talkId/jobs/:jobId/run-now', async (c) => {
+    const auth = c.get('auth');
+    const rl = checkRateLimit({ principalId: auth.userId, bucket: 'write' });
+    if (!rl.allowed) return rateLimitedResponse(c, rl);
+    const csrfFail = checkCsrf(c, auth);
+    if (csrfFail) return csrfFail;
+    const result = await runGreenfieldTalkJobNowRoute({
+      auth,
+      workspaceId: requestedWorkspaceId(c),
+      talkId: c.req.param('talkId'),
+      jobId: c.req.param('jobId'),
+    });
+    if (
+      result.statusCode === 202 &&
+      result.body.ok &&
+      'runId' in result.body.data
+    ) {
+      await dispatchRun({ runId: result.body.data.runId });
+    }
+    return jsonResponse(result);
+  });
 
   // ── Greenfield chat enqueue + cancel (Queues port U2) ─────────
   app.post('/api/v1/talks/:talkId/chat', async (c) => {
