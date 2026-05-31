@@ -14,6 +14,7 @@ import {
   listGreenfieldTalkSidebarRoute,
   listGreenfieldTalksRoute,
   patchGreenfieldTalkRoute,
+  updateGreenfieldTalkAgentsRoute,
 } from './greenfield-core.js';
 
 const USER_ID = '0c929292-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
@@ -262,6 +263,202 @@ describe('greenfield core routes', () => {
       ok: true,
       data: { talks: [{ id: created.body.data.talk.id, status: 'archived' }] },
     });
+  });
+
+  it('replaces a talk roster using greenfield agents and display order', async () => {
+    const workspaceId = await currentWorkspaceId();
+    const agents = await listGreenfieldAgentsRoute({
+      auth: auth(),
+      workspaceId,
+    });
+    if (!agents.body.ok) throw new Error('Expected agent route to succeed');
+    const initialAgentIds = agents.body.data.agents
+      .slice(0, 3)
+      .map((agent) => agent.id);
+    const created = await createGreenfieldTalkRoute({
+      auth: auth(),
+      workspaceId,
+      body: { title: 'Roster Talk', team: initialAgentIds },
+    });
+    expect(created.statusCode).toBe(201);
+    if (!created.body.ok) throw new Error('Expected talk route to succeed');
+
+    const expectedAgentIds = [
+      agents.body.data.agents[4]!.id,
+      agents.body.data.agents[3]!.id,
+    ];
+    const updated = await updateGreenfieldTalkAgentsRoute({
+      auth: auth(),
+      workspaceId,
+      talkId: created.body.data.talk.id,
+      agents: [
+        { id: expectedAgentIds[1], displayOrder: 1 },
+        { id: expectedAgentIds[0], displayOrder: 0 },
+      ],
+    });
+
+    expect(updated.statusCode).toBe(200);
+    if (!updated.body.ok) throw new Error('Expected roster update to succeed');
+    expect(updated.body.data.agents.map((agent) => agent.id)).toEqual(
+      expectedAgentIds,
+    );
+    expect(updated.body.data.agents.map((agent) => agent.displayOrder)).toEqual(
+      [0, 1],
+    );
+
+    const listed = await listGreenfieldTalkAgentsRoute({
+      auth: auth(),
+      workspaceId,
+      talkId: created.body.data.talk.id,
+    });
+    expect(listed.statusCode).toBe(200);
+    if (!listed.body.ok) throw new Error('Expected roster route to succeed');
+    expect(listed.body.data.agents.map((agent) => agent.id)).toEqual(
+      expectedAgentIds,
+    );
+
+    const fetched = await getGreenfieldTalkRoute({
+      auth: auth(),
+      workspaceId,
+      talkId: created.body.data.talk.id,
+    });
+    expect(fetched.body).toMatchObject({
+      ok: true,
+      data: { talk: { agents: expectedAgentIds } },
+    });
+  });
+
+  it('rejects invalid or unavailable greenfield talk roster updates', async () => {
+    const workspaceId = await currentWorkspaceId();
+    const agents = await listGreenfieldAgentsRoute({
+      auth: auth(),
+      workspaceId,
+    });
+    if (!agents.body.ok) throw new Error('Expected agent route to succeed');
+    const initialAgentIds = agents.body.data.agents
+      .slice(0, 2)
+      .map((agent) => agent.id);
+    const created = await createGreenfieldTalkRoute({
+      auth: auth(),
+      workspaceId,
+      body: { title: 'Roster Validation Talk', team: initialAgentIds },
+    });
+    expect(created.statusCode).toBe(201);
+    if (!created.body.ok) throw new Error('Expected talk route to succeed');
+
+    const duplicate = await updateGreenfieldTalkAgentsRoute({
+      auth: auth(),
+      workspaceId,
+      talkId: created.body.data.talk.id,
+      agents: [initialAgentIds[0], initialAgentIds[0]],
+    });
+    expect(duplicate.statusCode).toBe(400);
+    expect(duplicate.body).toMatchObject({
+      ok: false,
+      error: { code: 'invalid_talk_agents' },
+    });
+
+    const empty = await updateGreenfieldTalkAgentsRoute({
+      auth: auth(),
+      workspaceId,
+      talkId: created.body.data.talk.id,
+      agents: [],
+    });
+    expect(empty.statusCode).toBe(400);
+    expect(empty.body).toMatchObject({
+      ok: false,
+      error: { code: 'invalid_talk_agents' },
+    });
+
+    const tooMany = await updateGreenfieldTalkAgentsRoute({
+      auth: auth(),
+      workspaceId,
+      talkId: created.body.data.talk.id,
+      agents: [
+        '10000000-0000-4000-8000-000000000001',
+        '10000000-0000-4000-8000-000000000002',
+        '10000000-0000-4000-8000-000000000003',
+        '10000000-0000-4000-8000-000000000004',
+        '10000000-0000-4000-8000-000000000005',
+        '10000000-0000-4000-8000-000000000006',
+      ],
+    });
+    expect(tooMany.statusCode).toBe(400);
+    expect(tooMany.body).toMatchObject({
+      ok: false,
+      error: { code: 'invalid_talk_agents' },
+    });
+
+    const missingTalk = await updateGreenfieldTalkAgentsRoute({
+      auth: auth(),
+      workspaceId,
+      talkId: '10000000-0000-4000-8000-000000000099',
+      agents: [initialAgentIds[0]],
+    });
+    expect(missingTalk.statusCode).toBe(404);
+    expect(missingTalk.body).toMatchObject({
+      ok: false,
+      error: { code: 'talk_not_found' },
+    });
+
+    const db = getDbPg();
+    const systemAgents = await db<Array<{ id: string }>>`
+      select id
+      from public.agents
+      where workspace_id = ${workspaceId}::uuid
+        and is_system = true
+      order by id asc
+      limit 1
+    `;
+    expect(systemAgents).toHaveLength(1);
+    const systemAgent = await updateGreenfieldTalkAgentsRoute({
+      auth: auth(),
+      workspaceId,
+      talkId: created.body.data.talk.id,
+      agents: [systemAgents[0]!.id],
+    });
+    expect(systemAgent.statusCode).toBe(400);
+    expect(systemAgent.body).toMatchObject({
+      ok: false,
+      error: { code: 'invalid_talk_agents' },
+    });
+
+    await seedAuthUser(
+      OTHER_USER_ID,
+      'other-greenfield@clawtalk.local',
+      'Other User',
+    );
+    const otherMe = await getGreenfieldMeRoute({ auth: auth(OTHER_USER_ID) });
+    if (!otherMe.body.ok) throw new Error('Expected other session to succeed');
+    const otherAgents = await listGreenfieldAgentsRoute({
+      auth: auth(OTHER_USER_ID),
+      workspaceId: otherMe.body.data.currentWorkspaceId,
+    });
+    if (!otherAgents.body.ok) {
+      throw new Error('Expected other agent route to succeed');
+    }
+
+    const foreign = await updateGreenfieldTalkAgentsRoute({
+      auth: auth(),
+      workspaceId,
+      talkId: created.body.data.talk.id,
+      agents: [otherAgents.body.data.agents[0]!.id],
+    });
+    expect(foreign.statusCode).toBe(400);
+    expect(foreign.body).toMatchObject({
+      ok: false,
+      error: { code: 'invalid_talk_agents' },
+    });
+
+    const listed = await listGreenfieldTalkAgentsRoute({
+      auth: auth(),
+      workspaceId,
+      talkId: created.body.data.talk.id,
+    });
+    if (!listed.body.ok) throw new Error('Expected roster route to succeed');
+    expect(listed.body.data.agents.map((agent) => agent.id)).toEqual(
+      initialAgentIds,
+    );
   });
 
   it('rejects a workspace id that belongs to another user', async () => {

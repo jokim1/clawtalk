@@ -357,3 +357,61 @@ export async function listGreenfieldTalkAgents(input: {
     order by ta.sort_order asc, a.name asc
   `;
 }
+
+export async function replaceGreenfieldTalkAgents(input: {
+  workspaceId: string;
+  talkId: string;
+  agentIds: string[];
+}): Promise<
+  | { status: 'ok'; agents: GreenfieldTalkAgentRecord[] }
+  | { status: 'talk_not_found' }
+  | { status: 'agents_unavailable' }
+> {
+  const db = getDbPg();
+  // Route callers enter through withResolvedWorkspace -> withUserContext, so
+  // this full replace runs in one transaction. Lock the parent talk row to
+  // serialize concurrent roster replacements for the same talk.
+  const talks = await db<{ id: string }[]>`
+    select id
+    from public.talks
+    where workspace_id = ${input.workspaceId}::uuid
+      and id = ${input.talkId}::uuid
+    for update
+  `;
+  if (talks.length === 0) return { status: 'talk_not_found' };
+
+  const available = await db<{ id: string }[]>`
+    select id
+    from public.agents
+    where workspace_id = ${input.workspaceId}::uuid
+      and id in ${db(input.agentIds)}
+      and is_system = false
+      and enabled = true
+  `;
+  if (available.length !== input.agentIds.length) {
+    return { status: 'agents_unavailable' };
+  }
+
+  await db`
+    delete from public.talk_agents
+    where workspace_id = ${input.workspaceId}::uuid
+      and talk_id = ${input.talkId}::uuid
+  `;
+  for (const [index, agentId] of input.agentIds.entries()) {
+    await db`
+      insert into public.talk_agents (workspace_id, talk_id, agent_id, sort_order)
+      values (
+        ${input.workspaceId}::uuid,
+        ${input.talkId}::uuid,
+        ${agentId}::uuid,
+        ${index}
+      )
+    `;
+  }
+
+  const agents = await listGreenfieldTalkAgents({
+    workspaceId: input.workspaceId,
+    talkId: input.talkId,
+  });
+  return { status: 'ok', agents };
+}

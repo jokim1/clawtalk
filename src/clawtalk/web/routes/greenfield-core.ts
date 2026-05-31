@@ -16,6 +16,7 @@ import {
   listGreenfieldFolders,
   listGreenfieldTalkAgents,
   listGreenfieldTalks,
+  replaceGreenfieldTalkAgents,
   updateGreenfieldFolder,
   updateGreenfieldTalk,
   type GreenfieldFolderRecord,
@@ -63,6 +64,7 @@ type WorkspaceContext = {
 
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const MAX_TALK_AGENTS = 5;
 
 function ok<T>(data: T, statusCode = 200): RouteResult<T> {
   return { statusCode, body: { ok: true, data } };
@@ -549,6 +551,59 @@ function normalizeRounds(value: unknown): 1 | 2 | 3 | 5 | undefined {
   return undefined;
 }
 
+function normalizeTalkAgentRoster(
+  input: unknown,
+): { agentIds: string[] } | { error: string } {
+  if (!Array.isArray(input)) {
+    return { error: 'agents must be an array' };
+  }
+  if (input.length === 0) {
+    return { error: 'at least one talk agent is required' };
+  }
+  if (input.length > MAX_TALK_AGENTS) {
+    return { error: `at most ${MAX_TALK_AGENTS} talk agents are allowed` };
+  }
+
+  const seen = new Set<string>();
+  const entries: Array<{ id: string; displayOrder: number; index: number }> =
+    [];
+  for (const [index, raw] of input.entries()) {
+    const rawObject =
+      raw && typeof raw === 'object'
+        ? (raw as Record<string, unknown>)
+        : undefined;
+    const id =
+      typeof raw === 'string'
+        ? raw.trim()
+        : typeof rawObject?.id === 'string'
+          ? rawObject.id.trim()
+          : '';
+    if (!id || !isUuid(id)) {
+      return { error: 'each talk agent id must be a UUID' };
+    }
+    if (seen.has(id)) {
+      return { error: 'talk agent ids must be unique' };
+    }
+    seen.add(id);
+    const displayOrder =
+      typeof rawObject?.displayOrder === 'number'
+        ? Math.max(0, Math.floor(rawObject.displayOrder))
+        : typeof rawObject?.sortOrder === 'number'
+          ? Math.max(0, Math.floor(rawObject.sortOrder))
+          : index;
+    entries.push({ id, displayOrder, index });
+  }
+
+  return {
+    agentIds: entries
+      .sort(
+        (left, right) =>
+          left.displayOrder - right.displayOrder || left.index - right.index,
+      )
+      .map((entry) => entry.id),
+  };
+}
+
 export async function createGreenfieldTalkRoute(input: {
   auth: AuthContext;
   workspaceId?: string | null;
@@ -769,6 +824,52 @@ export async function listGreenfieldTalkAgentsRoute(input: {
     return ok({
       talkId: input.talkId,
       agents: agents.map(toTalkAgentApiRecord),
+    });
+  });
+}
+
+export async function updateGreenfieldTalkAgentsRoute(input: {
+  auth: AuthContext;
+  workspaceId?: string | null;
+  talkId: string;
+  agents: unknown;
+}): Promise<
+  RouteResult<{
+    talkId: string;
+    agents: ReturnType<typeof toTalkAgentApiRecord>[];
+  }>
+> {
+  if (!isUuid(input.talkId)) {
+    return error(400, 'invalid_talk_id', 'Talk id must be a UUID.');
+  }
+  const normalized = normalizeTalkAgentRoster(input.agents);
+  if ('error' in normalized) {
+    return error(
+      400,
+      'invalid_talk_agents',
+      normalized.error || 'talk agents are invalid',
+    );
+  }
+
+  return withResolvedWorkspace(input.auth, input.workspaceId, async (ctx) => {
+    const result = await replaceGreenfieldTalkAgents({
+      workspaceId: ctx.workspace.id,
+      talkId: input.talkId,
+      agentIds: normalized.agentIds,
+    });
+    if (result.status === 'talk_not_found') {
+      return error(404, 'talk_not_found', 'Talk not found.');
+    }
+    if (result.status === 'agents_unavailable') {
+      return error(
+        400,
+        'invalid_talk_agents',
+        'One or more agents are unavailable.',
+      );
+    }
+    return ok({
+      talkId: input.talkId,
+      agents: result.agents.map(toTalkAgentApiRecord),
     });
   });
 }

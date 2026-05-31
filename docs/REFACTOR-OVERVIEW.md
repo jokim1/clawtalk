@@ -34,7 +34,8 @@ This is not "evolve the schema." This is "the schema we have constrains every fe
 | ✅ Cutover branch | Greenfield execution ports: queue consumer, executor, and scheduler sweeps target `runs` / `messages` / `talk_agent_snapshots`                                | Commits `55c3d7e`, `3863628`, `c53df5a`                                                                                      |
 | ✅ Cutover branch | Greenfield run-state hardening: atomic outbox transitions, notify flush ownership, ordered/parallel sequencing, scheduler sweeps, DLQ retry behavior          | Commit `2363ee1` (`fix: harden greenfield run state machine`)                                                                |
 | ✅ Cutover branch | Greenfield API mount extraction: `/me`, workspace/folder/talk CRUD, snapshot/detail/content/thread compatibility, and chat mounts live in `greenfield-api.ts` | API shell extraction slice                                                                                                   |
-| 🔄 Active next    | Retire remaining legacy API collisions: talk roster mutation, policy/tools, context/resources, jobs, and document edit compatibility paths                    | Next slices                                                                                                                  |
+| ✅ Cutover branch | Greenfield talk roster mutation: `PUT /api/v1/talks/:talkId/agents` now replaces `talk_agents` against workspace agents                                       | API collision cleanup slice                                                                                                  |
+| 🔄 Active next    | Retire remaining legacy API collisions: policy/tools, context/resources, jobs, and document edit compatibility paths                                          | Next slices                                                                                                                  |
 | ⏭️ Next           | webapp/ rewrite per §05 Phases (every page touches new tables)                                                                                                | Phased                                                                                                                       |
 | ⏭️ Next           | §14 verification test suite (24 invariants)                                                                                                                   | Phased                                                                                                                       |
 | ⏭️ Next           | Phase 13 eval gate (harness contract done; scenarios + grader prompts TBD)                                                                                    | Phased                                                                                                                       |
@@ -255,23 +256,23 @@ For per-doc detail:
 
 Detail in [05-build-plan.md](./05-build-plan.md). Summary table:
 
-| Phase  | What                                                                                                                                          | Status                                                           |
-| ------ | --------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------- |
-| **0**  | Project setup — commit to Workers/Hono/DO/Hyperdrive/Queues stack                                                                             | ✅ existing infra                                                |
-| **1**  | Fresh Supabase baseline (`supabase/migrations/0001_clawtalk_greenfield.sql`) + `agent_role_templates` seed + first-signin workspace bootstrap | ✅ committed on `codex/clawtalk-greenfield-cutover`              |
-| **2**  | Workspace switcher + auth                                                                                                                     | ✅ greenfield `/me`, workspace list, and switch routes mounted   |
-| **3**  | Folders + Talks CRUD + roster                                                                                                                 | 🔄 folder/talk CRUD + roster reads mounted; roster mutation next |
-| **4**  | Chat → executor → queue consumer → outbox → DO streaming end-to-end                                                                           | 🔄 backend + chat mount committed; frontend integration next     |
-| **5**  | Agents page + role templates + prompt assembly                                                                                                | ⏭️                                                               |
-| **6**  | Per-Talk tool toggles + workspace-global connectors                                                                                           | ⏭️                                                               |
-| **7**  | Documents + tabs + blocks + document_edits accept path                                                                                        | ⏭️                                                               |
-| **8**  | Context: URLs / files / past talks / rules / news binding                                                                                     | ⏭️                                                               |
-| **9**  | Jobs: scheduler.ts single-txn claim + queue-consumer atomic claim + UI + inbox emit                                                           | ⏭️                                                               |
-| **10** | Home: inbox + recommendations + news (deterministic generators first)                                                                         | ⏭️                                                               |
-| **11** | Audit + analytics + reset/admin tools                                                                                                         | ⏭️                                                               |
-| **12** | Polish, perf, dark mode                                                                                                                       | ⏭️                                                               |
-| **13** | Offline agent eval gate (launch-blocking — see [eval-suite.md](./eval-suite.md))                                                              | ⏭️                                                               |
-| **14** | Forge (post-MVP): improvement-run executor + SSR connector + gallery + winner-promote                                                         | ⏭️                                                               |
+| Phase  | What                                                                                                                                          | Status                                                         |
+| ------ | --------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------- |
+| **0**  | Project setup — commit to Workers/Hono/DO/Hyperdrive/Queues stack                                                                             | ✅ existing infra                                              |
+| **1**  | Fresh Supabase baseline (`supabase/migrations/0001_clawtalk_greenfield.sql`) + `agent_role_templates` seed + first-signin workspace bootstrap | ✅ committed on `codex/clawtalk-greenfield-cutover`            |
+| **2**  | Workspace switcher + auth                                                                                                                     | ✅ greenfield `/me`, workspace list, and switch routes mounted |
+| **3**  | Folders + Talks CRUD + roster                                                                                                                 | ✅ folder/talk CRUD + roster read/write routes mounted         |
+| **4**  | Chat → executor → queue consumer → outbox → DO streaming end-to-end                                                                           | 🔄 backend + chat mount committed; frontend integration next   |
+| **5**  | Agents page + role templates + prompt assembly                                                                                                | ⏭️                                                             |
+| **6**  | Per-Talk tool toggles + workspace-global connectors                                                                                           | ⏭️                                                             |
+| **7**  | Documents + tabs + blocks + document_edits accept path                                                                                        | ⏭️                                                             |
+| **8**  | Context: URLs / files / past talks / rules / news binding                                                                                     | ⏭️                                                             |
+| **9**  | Jobs: scheduler.ts single-txn claim + queue-consumer atomic claim + UI + inbox emit                                                           | ⏭️                                                             |
+| **10** | Home: inbox + recommendations + news (deterministic generators first)                                                                         | ⏭️                                                             |
+| **11** | Audit + analytics + reset/admin tools                                                                                                         | ⏭️                                                             |
+| **12** | Polish, perf, dark mode                                                                                                                       | ⏭️                                                             |
+| **13** | Offline agent eval gate (launch-blocking — see [eval-suite.md](./eval-suite.md))                                                              | ⏭️                                                             |
+| **14** | Forge (post-MVP): improvement-run executor + SSR connector + gallery + winner-promote                                                         | ⏭️                                                             |
 
 Each phase has explicit entry/exit criteria in §05.
 
@@ -296,7 +297,7 @@ Each phase has explicit entry/exit criteria in §05.
 ### Open
 
 - Forge `forge_rewriter` + `forge_critic` system prompts — §06 §3.6 still has implementation placeholders; Joseph writes the production prompt text before Forge runtime work ships.
-- API shell/resource decomposition — greenfield route modules and their Hono mount layer now cover `/me`, workspace/folders/talk CRUD, snapshot/detail/content/thread compatibility, and chat enqueue/cancel. The next implementation slices should retire remaining legacy route collisions before the frontend Talk rewrite.
+- API shell/resource decomposition — greenfield route modules and their Hono mount layer now cover `/me`, workspace/folders/talk CRUD, roster read/write, snapshot/detail/content/thread compatibility, and chat enqueue/cancel. The next implementation slices should retire remaining legacy route collisions before the frontend Talk rewrite.
 - Phase 13 eval scenario content + grader prompts — [eval-suite.md](./eval-suite.md) locks the harness contract but defers scenario content.
 - Per-page visual design for new surfaces — [02-visual-system.md](./02-visual-system.md) covers tokens but doesn't have component-level designs for Jobs UI, Forge gallery / run-detail / Audiences, home Forge surfacing, DocTabStrip.
 - ~37 P2 polish items per [SPEC-READINESS.md](./SPEC-READINESS.md). None block impl.
@@ -411,7 +412,7 @@ But the schema couldn't bear weight beyond what it proved: per-user RLS, threads
 The schema reference has now been promoted into the active cutover branch, and the first backend runtime spine is committed through greenfield workspace/talk routes, API mount extraction, chat enqueue, queue consumption, execution, scheduler sweeps, and run-state hardening. The next milestones are:
 
 1. **Retire remaining legacy route/accessor collisions one family at a time.**
-2. **Port talk roster mutation, policy/tools, context/resources, jobs, and document edit compatibility paths to greenfield contracts.**
+2. **Port policy/tools, context/resources, jobs, and document edit compatibility paths to greenfield contracts.**
 3. **Keep `worker-app.ts` as public/auth/health/WebSocket glue rather than product-resource logic.**
 4. **Start the frontend shell and Talk rewrite once the backend API no longer depends on legacy table families for core Talk workflows.**
 

@@ -28,7 +28,7 @@ Static shape observed on 2026-05-31:
 
 | Area                     | Finding                                                                                                                                                                                                                                   |
 | ------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Backend route surface    | `src/clawtalk/web/worker-app.ts` is 2,081 LOC after delegating greenfield shell/detail/chat mounts to `src/clawtalk/web/routes/greenfield-api.ts` (884 LOC). Remaining shell work is retiring legacy route collisions.                    |
+| Backend route surface    | `src/clawtalk/web/worker-app.ts` is 2,062 LOC after delegating greenfield shell/detail/chat mounts to `src/clawtalk/web/routes/greenfield-api.ts` (904 LOC). Remaining shell work is retiring legacy route collisions.                    |
 | Backend data layer       | `src/clawtalk/db/accessors.ts` is 3,363 LOC and still centralizes legacy Talk/thread/message/run behavior. It is a rewrite boundary, not a file to keep extending.                                                                        |
 | Executor/context         | `new-executor.ts` is 2,869 LOC and `context-loader.ts` is 2,680 LOC. Salvage the proven streaming/tool/context ideas, but rewrite the DB contract and split responsibilities.                                                             |
 | Frontend Talk page       | `webapp/src/pages/TalkDetailPage.tsx` is 10,815 LOC. This is the largest snappiness and maintainability risk; rewrite as feature modules with server-state boundaries.                                                                    |
@@ -88,7 +88,7 @@ Start with a refactor branch and proceed in this order:
    - Replace `worker-app.ts` route mounting with resource route modules.
    - Greenfield shell/detail/chat routes now mount through `greenfield-api.ts`; `worker-app.ts` keeps public auth/health/content-images/WebSocket patterns plus legacy surfaces that still need cutover.
    - Keep public auth, health, content-image serving, and WebSocket upgrade patterns.
-   - Finish the remaining legacy route collisions: talk roster mutation, policy/tools, context/resources, jobs, and document edit compatibility paths.
+   - Finish the remaining legacy route collisions: policy/tools, context/resources, jobs, and document edit compatibility paths.
 
 4. **Talk execution vertical slice** 🔄 partially underway
    - New `/chat` writes `messages`, freezes `talk_agent_snapshots`, creates `runs`, enqueues to `TALK_RUN_QUEUE`, and streams through `event_outbox`.

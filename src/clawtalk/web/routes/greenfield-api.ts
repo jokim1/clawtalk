@@ -49,6 +49,7 @@ import {
   patchGreenfieldFolderRoute,
   patchGreenfieldTalkRoute,
   switchGreenfieldWorkspaceRoute,
+  updateGreenfieldTalkAgentsRoute,
 } from './greenfield-core.js';
 
 type Variables = {
@@ -490,6 +491,25 @@ export function mountGreenfieldApiRoutes(app: GreenfieldApp): void {
       auth,
       workspaceId: requestedWorkspaceId(c),
       talkId: talkId.value,
+    });
+    return jsonResponse(result);
+  });
+
+  app.put('/api/v1/talks/:talkId/agents', async (c) => {
+    const auth = c.get('auth');
+    const rl = checkRateLimit({ userId: auth.userId, bucket: 'write' });
+    if (!rl.allowed) return rateLimitedResponse(c, rl);
+    const csrfFail = checkCsrf(c, auth);
+    if (csrfFail) return csrfFail;
+    const talkId = decodeIdParam(c, 'talkId');
+    if (!talkId.ok) return talkId.response;
+    const payload = await readJsonBody<{ agents?: unknown }>(c);
+    if (!payload.ok) return invalidJsonResponse(c, payload.error);
+    const result = await updateGreenfieldTalkAgentsRoute({
+      auth,
+      workspaceId: requestedWorkspaceId(c),
+      talkId: talkId.value,
+      agents: payload.data.agents,
     });
     return jsonResponse(result);
   });
