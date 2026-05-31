@@ -7,6 +7,7 @@ import {
   createGreenfieldFolderRoute,
   createGreenfieldTalkRoute,
   getGreenfieldMeRoute,
+  getGreenfieldTalkPolicyRoute,
   getGreenfieldTalkRoute,
   listGreenfieldAgentsRoute,
   listGreenfieldFoldersRoute,
@@ -15,6 +16,7 @@ import {
   listGreenfieldTalksRoute,
   patchGreenfieldTalkRoute,
   updateGreenfieldTalkAgentsRoute,
+  updateGreenfieldTalkPolicyRoute,
 } from './greenfield-core.js';
 
 const USER_ID = '0c929292-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
@@ -459,6 +461,236 @@ describe('greenfield core routes', () => {
     expect(listed.body.data.agents.map((agent) => agent.id)).toEqual(
       initialAgentIds,
     );
+  });
+
+  it('serves the legacy talk policy facade from the greenfield roster', async () => {
+    const workspaceId = await currentWorkspaceId();
+    const agents = await listGreenfieldAgentsRoute({
+      auth: auth(),
+      workspaceId,
+    });
+    if (!agents.body.ok) throw new Error('Expected agent route to succeed');
+    const initialAgentIds = agents.body.data.agents
+      .slice(0, 2)
+      .map((agent) => agent.id);
+    const initialAgentNames = agents.body.data.agents
+      .slice(0, 2)
+      .map((agent) => agent.name);
+    const created = await createGreenfieldTalkRoute({
+      auth: auth(),
+      workspaceId,
+      body: { title: 'Policy Facade Talk', team: initialAgentIds },
+    });
+    expect(created.statusCode).toBe(201);
+    if (!created.body.ok) throw new Error('Expected talk route to succeed');
+
+    const fetched = await getGreenfieldTalkPolicyRoute({
+      auth: auth(),
+      workspaceId,
+      talkId: created.body.data.talk.id,
+    });
+    expect(fetched.statusCode).toBe(200);
+    expect(fetched.body).toEqual({
+      ok: true,
+      data: {
+        talkId: created.body.data.talk.id,
+        agents: initialAgentNames,
+        limits: { maxAgents: 5, maxAgentChars: 80 },
+      },
+    });
+
+    const updated = await updateGreenfieldTalkPolicyRoute({
+      auth: auth(),
+      workspaceId,
+      talkId: created.body.data.talk.id,
+      agents: ['  Alpha  ', 'Alpha', 'Beta'],
+    });
+    expect(updated.statusCode).toBe(200);
+    expect(updated.body).toEqual({
+      ok: true,
+      data: {
+        talkId: created.body.data.talk.id,
+        agents: initialAgentNames,
+        limits: { maxAgents: 5, maxAgentChars: 80 },
+      },
+    });
+
+    const listed = await listGreenfieldTalkAgentsRoute({
+      auth: auth(),
+      workspaceId,
+      talkId: created.body.data.talk.id,
+    });
+    if (!listed.body.ok) throw new Error('Expected roster route to succeed');
+    expect(listed.body.data.agents.map((agent) => agent.id)).toEqual(
+      initialAgentIds,
+    );
+
+    const empty = await updateGreenfieldTalkPolicyRoute({
+      auth: auth(),
+      workspaceId,
+      talkId: created.body.data.talk.id,
+      agents: [],
+    });
+    expect(empty.body).toEqual(fetched.body);
+
+    const legacySizedPayload = await updateGreenfieldTalkPolicyRoute({
+      auth: auth(),
+      workspaceId,
+      talkId: created.body.data.talk.id,
+      agents: ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L'],
+    });
+    expect(legacySizedPayload.statusCode).toBe(200);
+    expect(legacySizedPayload.body).toEqual(fetched.body);
+  });
+
+  it('rejects invalid greenfield talk policy requests', async () => {
+    const workspaceId = await currentWorkspaceId();
+    const agents = await listGreenfieldAgentsRoute({
+      auth: auth(),
+      workspaceId,
+    });
+    if (!agents.body.ok) throw new Error('Expected agent route to succeed');
+    const created = await createGreenfieldTalkRoute({
+      auth: auth(),
+      workspaceId,
+      body: {
+        title: 'Policy Validation Talk',
+        team: agents.body.data.agents.slice(0, 1).map((agent) => agent.id),
+      },
+    });
+    expect(created.statusCode).toBe(201);
+    if (!created.body.ok) throw new Error('Expected talk route to succeed');
+
+    const nonArray = await updateGreenfieldTalkPolicyRoute({
+      auth: auth(),
+      workspaceId,
+      talkId: created.body.data.talk.id,
+      agents: 'Alpha',
+    });
+    expect(nonArray.statusCode).toBe(400);
+    expect(nonArray.body).toMatchObject({
+      ok: false,
+      error: { code: 'invalid_agents' },
+    });
+
+    const legacyLoosePayload = await updateGreenfieldTalkPolicyRoute({
+      auth: auth(),
+      workspaceId,
+      talkId: created.body.data.talk.id,
+      agents: ['Alpha', 12, null, 'x'.repeat(81)],
+    });
+    expect(legacyLoosePayload.statusCode).toBe(200);
+    expect(legacyLoosePayload.body).toMatchObject({
+      ok: true,
+      data: { talkId: created.body.data.talk.id },
+    });
+
+    const tooMany = await updateGreenfieldTalkPolicyRoute({
+      auth: auth(),
+      workspaceId,
+      talkId: created.body.data.talk.id,
+      agents: ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M'],
+    });
+    expect(tooMany.statusCode).toBe(400);
+    expect(tooMany.body).toMatchObject({
+      ok: false,
+      error: { code: 'invalid_agents' },
+    });
+
+    const missingTalk = await updateGreenfieldTalkPolicyRoute({
+      auth: auth(),
+      workspaceId,
+      talkId: '10000000-0000-4000-8000-000000000099',
+      agents: ['Alpha'],
+    });
+    expect(missingTalk.statusCode).toBe(404);
+    expect(missingTalk.body).toMatchObject({
+      ok: false,
+      error: { code: 'talk_not_found' },
+    });
+
+    const missingTalkGet = await getGreenfieldTalkPolicyRoute({
+      auth: auth(),
+      workspaceId,
+      talkId: '10000000-0000-4000-8000-000000000099',
+    });
+    expect(missingTalkGet.statusCode).toBe(404);
+    expect(missingTalkGet.body).toMatchObject({
+      ok: false,
+      error: { code: 'talk_not_found' },
+    });
+
+    const malformedId = await getGreenfieldTalkPolicyRoute({
+      auth: auth(),
+      workspaceId,
+      talkId: 'not-a-uuid',
+    });
+    expect(malformedId.statusCode).toBe(400);
+    expect(malformedId.body).toMatchObject({
+      ok: false,
+      error: { code: 'invalid_talk_id' },
+    });
+  });
+
+  it('rejects cross-workspace greenfield talk policy access', async () => {
+    const workspaceId = await currentWorkspaceId();
+    await seedAuthUser(
+      OTHER_USER_ID,
+      'other-policy@clawtalk.local',
+      'Other Policy User',
+    );
+    const otherMe = await getGreenfieldMeRoute({ auth: auth(OTHER_USER_ID) });
+    if (!otherMe.body.ok) throw new Error('Expected other session to succeed');
+    const otherAgents = await listGreenfieldAgentsRoute({
+      auth: auth(OTHER_USER_ID),
+      workspaceId: otherMe.body.data.currentWorkspaceId,
+    });
+    if (!otherAgents.body.ok) {
+      throw new Error('Expected other agent route to succeed');
+    }
+    const otherTalk = await createGreenfieldTalkRoute({
+      auth: auth(OTHER_USER_ID),
+      workspaceId: otherMe.body.data.currentWorkspaceId,
+      body: {
+        title: 'Other Workspace Policy Talk',
+        team: otherAgents.body.data.agents.slice(0, 1).map((agent) => agent.id),
+      },
+    });
+    if (!otherTalk.body.ok) throw new Error('Expected other talk to succeed');
+
+    const forbiddenWorkspace = await getGreenfieldTalkPolicyRoute({
+      auth: auth(),
+      workspaceId: otherMe.body.data.currentWorkspaceId,
+      talkId: otherTalk.body.data.talk.id,
+    });
+    expect(forbiddenWorkspace.statusCode).toBe(403);
+    expect(forbiddenWorkspace.body).toMatchObject({
+      ok: false,
+      error: { code: 'workspace_forbidden' },
+    });
+
+    const hiddenTalkGet = await getGreenfieldTalkPolicyRoute({
+      auth: auth(),
+      workspaceId,
+      talkId: otherTalk.body.data.talk.id,
+    });
+    expect(hiddenTalkGet.statusCode).toBe(404);
+    expect(hiddenTalkGet.body).toMatchObject({
+      ok: false,
+      error: { code: 'talk_not_found' },
+    });
+
+    const hiddenTalkPut = await updateGreenfieldTalkPolicyRoute({
+      auth: auth(),
+      workspaceId,
+      talkId: otherTalk.body.data.talk.id,
+      agents: ['Alpha'],
+    });
+    expect(hiddenTalkPut.statusCode).toBe(404);
+    expect(hiddenTalkPut.body).toMatchObject({
+      ok: false,
+      error: { code: 'talk_not_found' },
+    });
   });
 
   it('rejects a workspace id that belongs to another user', async () => {

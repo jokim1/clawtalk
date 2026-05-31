@@ -816,15 +816,6 @@ export type TalkActionConfirmation = {
   resolvedAt: string | null;
 };
 
-export type TalkPolicy = {
-  talkId: string;
-  agents: string[];
-  limits: {
-    maxAgents: number;
-    maxAgentChars: number;
-  };
-};
-
 export type TalkAgent = {
   id: string;
   nickname: string;
@@ -1474,26 +1465,6 @@ export async function rejectContentEditRun(input: {
       method: 'POST',
       includeJson: true,
       body: '{}',
-    },
-  );
-}
-
-export async function getTalkPolicy(talkId: string): Promise<TalkPolicy> {
-  return apiRequest<TalkPolicy>(
-    `/api/v1/talks/${encodeURIComponent(talkId)}/policy`,
-  );
-}
-
-export async function updateTalkPolicy(input: {
-  talkId: string;
-  agents: string[];
-}): Promise<TalkPolicy> {
-  return apiMutationRequest<TalkPolicy>(
-    `/api/v1/talks/${encodeURIComponent(input.talkId)}/policy`,
-    {
-      method: 'PUT',
-      includeJson: true,
-      body: JSON.stringify({ agents: input.agents }),
     },
   );
 }

@@ -26,9 +26,10 @@
 //   /api/v1/registered-agents[/...] — agent-management.ts (CRUD,
 //                                     fallback config, main agent,
 //                                     effective tools)
-//   /api/v1/talks[/...]             — talks.ts (talks + folders +
-//                                     messages + agents + runs +
-//                                     policy + project-mount)
+//   /api/v1/talks[/...]             — greenfield-api.ts for the
+//                                     greenfield shell/detail/chat/policy
+//                                     surface; legacy route modules only for
+//                                     not-yet-cut-over collisions
 //   /api/v1/talk-folders[/...]      — talks.ts (folder CRUD)
 //   /api/v1/user/tool-permissions   — user-settings.ts
 //   /api/v1/talks/:talkId/context[/...] — talk-context.ts (goal +
@@ -209,10 +210,8 @@ import {
 } from './routes/talk-resources.js';
 import { dispatchRun } from '../talks/queue-producer.js';
 import {
-  getTalkPolicyRoute,
   getTalkRunContextRoute,
   reorderTalkSidebarRoute,
-  updateTalkPolicyRoute,
 } from './routes/talks.js';
 import { getTalkToolsRoute, updateTalkToolRoute } from './routes/talk-tools.js';
 import {
@@ -1058,7 +1057,7 @@ function buildApp(): Hono<{ Variables: Variables }> {
     return jsonResponse(result);
   });
 
-  // ── talks.ts: legacy sidebar reorder + policy/tool gates ─────
+  // ── talks.ts: legacy sidebar reorder + tool gates ────────────
   app.post('/api/v1/talks/sidebar/reorder', async (c) => {
     const auth = c.get('auth');
     const rl = checkRateLimit({ userId: auth.userId, bucket: 'write' });
@@ -1184,34 +1183,6 @@ function buildApp(): Hono<{ Variables: Variables }> {
       auth,
       talkId: talkId.value,
       runId: runId.value,
-    });
-    return jsonResponse(result);
-  });
-
-  app.get('/api/v1/talks/:talkId/policy', async (c) => {
-    const auth = c.get('auth');
-    const rl = checkRateLimit({ userId: auth.userId, bucket: 'read' });
-    if (!rl.allowed) return rateLimitedResponse(c, rl);
-    const talkId = decodeIdParam(c, 'talkId');
-    if (!talkId.ok) return talkId.response;
-    const result = await getTalkPolicyRoute({ auth, talkId: talkId.value });
-    return jsonResponse(result);
-  });
-
-  app.put('/api/v1/talks/:talkId/policy', async (c) => {
-    const auth = c.get('auth');
-    const rl = checkRateLimit({ userId: auth.userId, bucket: 'write' });
-    if (!rl.allowed) return rateLimitedResponse(c, rl);
-    const csrfFail = checkCsrf(c, auth);
-    if (csrfFail) return csrfFail;
-    const talkId = decodeIdParam(c, 'talkId');
-    if (!talkId.ok) return talkId.response;
-    const payload = await readJsonBody<{ agents?: unknown }>(c);
-    if (!payload.ok) return invalidJsonResponse(c, payload.error);
-    const result = await updateTalkPolicyRoute({
-      auth,
-      talkId: talkId.value,
-      agents: payload.data.agents,
     });
     return jsonResponse(result);
   });
