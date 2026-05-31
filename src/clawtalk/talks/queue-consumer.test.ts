@@ -9,16 +9,16 @@ import {
   withRequestScopedDb,
   withUserContext,
 } from '../../db.js';
+import { getOutboxEventsForTopics } from '../db/accessors.js';
 import {
-  createTalk,
-  createTalkMessage,
-  createTalkRun,
-  getOrCreateDefaultThread,
-  getOutboxEventsForTopics,
-  getTalkRunById,
-  markRunRunning,
-  markTalkRunStatus,
-} from '../db/accessors.js';
+  createGreenfieldTalk,
+  listDefaultTalkAgentIds,
+} from './greenfield-accessors.js';
+import { enqueueGreenfieldChatTurn } from './greenfield-chat-accessors.js';
+import {
+  getGreenfieldQueueRunById,
+  markGreenfieldRunRunning,
+} from './greenfield-run-accessors.js';
 import type {
   TalkExecutor,
   TalkExecutorInput,
@@ -30,6 +30,7 @@ import {
   processDlqMessage,
   processTalkRunMessage,
 } from './queue-consumer.js';
+import { ensureWorkspaceBootstrapForUser } from '../workspaces/bootstrap.js';
 
 const TEST_DB_URL = 'postgresql://postgres:postgres@127.0.0.1:54432/postgres';
 const OWNER_ID = '0c777777-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
@@ -38,16 +39,21 @@ async function seedAuthUser(id: string, email: string): Promise<void> {
   const db = getDbPg();
   await db`
     insert into auth.users (id, email, raw_user_meta_data)
-    values (${id}::uuid, ${email}::text,
-            jsonb_build_object('full_name', ${email}::text))
-    on conflict (id) do nothing
+    values (
+      ${id}::uuid,
+      ${email}::text,
+      jsonb_build_object('full_name', ${email}::text)
+    )
+    on conflict (id) do update set
+      email = excluded.email,
+      raw_user_meta_data = excluded.raw_user_meta_data
   `;
 }
 
 async function purge(): Promise<void> {
   const db = getDbPg();
-  await db`delete from public.talks where owner_id = ${OWNER_ID}::uuid`;
   await db`delete from public.event_outbox where topic like 'talk:%'`;
+  await db`delete from public.workspaces where owner_id = ${OWNER_ID}::uuid`;
 }
 
 beforeAll(async () => {
@@ -65,39 +71,64 @@ beforeEach(async () => {
 });
 
 async function setupRun(opts?: {
-  sequenceIndex?: number;
-  responseGroupId?: string;
+  agentCount?: number;
   status?: 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
-  agentId?: string;
-}): Promise<{ runId: string; talkId: string; messageId: string }> {
-  return await withUserContext(OWNER_ID, async () => {
-    const talk = await createTalk({
-      ownerId: OWNER_ID,
-      topicTitle: 'Queue Consumer Test Talk',
+}): Promise<{
+  workspaceId: string;
+  talkId: string;
+  messageId: string;
+  runIds: string[];
+  responseGroupId: string;
+}> {
+  const workspaceId = await ensureWorkspaceBootstrapForUser(OWNER_ID);
+  return withUserContext(OWNER_ID, async () => {
+    const agentIds = (
+      await listDefaultTalkAgentIds({
+        workspaceId,
+      })
+    ).slice(0, opts?.agentCount ?? 1);
+    const talk = await createGreenfieldTalk({
+      workspaceId,
+      createdBy: OWNER_ID,
+      title: 'Queue Consumer Test Talk',
+      agentIds,
     });
-    const threadId = await getOrCreateDefaultThread({
+    const turn = await enqueueGreenfieldChatTurn({
+      workspaceId,
       talkId: talk.id,
-      ownerId: OWNER_ID,
-    });
-    const message = await createTalkMessage({
-      ownerId: OWNER_ID,
-      talkId: talk.id,
-      threadId,
-      role: 'user',
+      userId: OWNER_ID,
       content: 'trigger me',
+      targetAgentIds: agentIds,
     });
-    const run = await createTalkRun({
-      ownerId: OWNER_ID,
+    if (!turn.ok) {
+      throw new Error(`Failed to enqueue greenfield test turn: ${turn.reason}`);
+    }
+    if (opts?.status && opts.status !== 'queued') {
+      const db = getDbPg();
+      await db`
+        update public.runs
+        set
+          status = ${opts.status},
+          started_at = case
+            when ${opts.status} in ('running', 'completed', 'failed', 'cancelled')
+              then coalesce(started_at, now())
+            else started_at
+          end,
+          finished_at = case
+            when ${opts.status} in ('completed', 'failed', 'cancelled')
+              then coalesce(finished_at, now())
+            else finished_at
+          end
+        where id in ${db(turn.runs.map((run) => run.id))}
+      `;
+    }
+    return {
+      workspaceId,
       talkId: talk.id,
-      threadId,
-      requestedBy: OWNER_ID,
-      status: opts?.status ?? 'queued',
-      triggerMessageId: message.id,
-      targetAgentId: opts?.agentId ?? null,
-      responseGroupId: opts?.responseGroupId ?? null,
-      sequenceIndex: opts?.sequenceIndex ?? null,
-    });
-    return { runId: run.id, talkId: talk.id, messageId: message.id };
+      messageId: turn.message.id,
+      runIds: turn.runs.map((run) => run.id),
+      responseGroupId: turn.runs[0]!.response_group_id!,
+    };
   });
 }
 
@@ -158,11 +189,11 @@ function makeMockExecutor(behavior: {
   };
 }
 
-describe('markRunRunning', () => {
-  it('queued → running emits talk_run_started', async () => {
-    const { runId, talkId } = await setupRun();
+describe('markGreenfieldRunRunning', () => {
+  it('queued to running emits talk_run_started', async () => {
+    const { runIds, talkId } = await setupRun();
 
-    const result = await markRunRunning(runId);
+    const result = await markGreenfieldRunRunning(runIds[0]!);
     expect(result.status).toBe('claimed');
     if (result.status !== 'claimed') return;
     expect(result.run.status).toBe('running');
@@ -173,119 +204,118 @@ describe('markRunRunning', () => {
   });
 
   it('returns terminal for completed runs', async () => {
-    const { runId } = await setupRun({ status: 'completed' });
-    const result = await markRunRunning(runId);
+    const { runIds } = await setupRun({ status: 'completed' });
+    const result = await markGreenfieldRunRunning(runIds[0]!);
     expect(result.status).toBe('terminal');
   });
 
   it('returns not_found for missing runs', async () => {
-    const result = await markRunRunning('11111111-1111-1111-1111-111111111111');
+    const result = await markGreenfieldRunRunning(
+      '11111111-1111-1111-1111-111111111111',
+    );
     expect(result.status).toBe('not_found');
   });
 
-  it('does not re-claim a running row (duplicate-delivery safety)', async () => {
-    const { runId, talkId } = await setupRun();
+  it('does not re-claim a running row', async () => {
+    const { runIds, talkId } = await setupRun();
 
-    const first = await markRunRunning(runId);
+    const first = await markGreenfieldRunRunning(runIds[0]!);
     expect(first.status).toBe('claimed');
     const baselineCount = (
       await getOutboxEventsForTopics([`talk:${talkId}`], 0)
     ).filter((e) => e.event_type === 'talk_run_started').length;
 
-    // A duplicate / redelivered message for an already-running row must NOT
-    // re-claim — re-claiming would let the run execute twice. It returns
-    // 'already_running' so the consumer acks, and emits no second start.
-    const second = await markRunRunning(runId);
+    const second = await markGreenfieldRunRunning(runIds[0]!);
     expect(second.status).toBe('already_running');
     const afterCount = (
       await getOutboxEventsForTopics([`talk:${talkId}`], 0)
     ).filter((e) => e.event_type === 'talk_run_started').length;
-
     expect(afterCount).toBe(baselineCount);
   });
 
   it('blocks claim when a lower-sequence sibling is still active', async () => {
-    const groupId = '0c777777-cccc-cccc-cccc-cccccccccccc';
-    const first = await setupRun({
-      sequenceIndex: 0,
-      responseGroupId: groupId,
-      status: 'queued',
-    });
-    const second = await setupRun({
-      sequenceIndex: 1,
-      responseGroupId: groupId,
-      status: 'queued',
-    });
+    const { runIds } = await setupRun({ agentCount: 2 });
 
-    const firstClaim = await markRunRunning(first.runId);
+    const firstClaim = await markGreenfieldRunRunning(runIds[0]!);
     expect(firstClaim.status).toBe('claimed');
 
-    const secondClaim = await markRunRunning(second.runId);
+    const secondClaim = await markGreenfieldRunRunning(runIds[1]!);
     expect(secondClaim.status).toBe('blocked_by_sibling');
 
-    await markTalkRunStatus(first.runId, 'completed', {
-      endedAt: new Date().toISOString(),
-    });
-    const secondClaimAfter = await markRunRunning(second.runId);
+    const db = getDbPg();
+    await db`
+      update public.runs
+      set status = 'completed', finished_at = now()
+      where id = ${runIds[0]}::uuid
+    `;
+    const secondClaimAfter = await markGreenfieldRunRunning(runIds[1]!);
     expect(secondClaimAfter.status).toBe('claimed');
   });
 });
 
 describe('processTalkRunMessage', () => {
   it('runs the executor to completion and flips status to completed', async () => {
-    const { runId, talkId } = await setupRun();
+    const { runIds, talkId } = await setupRun();
     const { ctx, drain } = makeMockCtx();
 
     const env: DbScopeEnvBindings = {};
     await withRequestScopedDb(TEST_DB_URL, ctx, env, async () => {
       await processTalkRunMessage({
-        runId,
+        runId: runIds[0]!,
         executor: makeMockExecutor({ output: { content: 'all done' } }),
         cancelPollIntervalMs: 50_000,
       });
     });
     await drain();
 
-    const run = await getTalkRunById(runId);
+    const run = await getGreenfieldQueueRunById(runIds[0]!);
     expect(run?.status).toBe('completed');
+
+    const db = getDbPg();
+    const messages = await db<{ author_kind: string; body: string | null }[]>`
+      select author_kind, body
+      from public.messages
+      where talk_id = ${talkId}::uuid
+      order by created_at asc
+    `;
+    expect(messages).toMatchObject([
+      { author_kind: 'user', body: 'trigger me' },
+      { author_kind: 'agent', body: 'all done' },
+    ]);
 
     const events = await getOutboxEventsForTopics([`talk:${talkId}`], 0);
     const types = events.map((e) => e.event_type);
     expect(types).toContain('talk_run_started');
+    expect(types).toContain('message_appended');
     expect(types).toContain('talk_run_completed');
   });
 
   it('throws BlockedBySiblingError when a sibling is still active', async () => {
-    const groupId = '0c777777-dddd-dddd-dddd-dddddddddddd';
-    const first = await setupRun({
-      sequenceIndex: 0,
-      responseGroupId: groupId,
-    });
-    const second = await setupRun({
-      sequenceIndex: 1,
-      responseGroupId: groupId,
-    });
-    void first;
+    const { runIds } = await setupRun({ agentCount: 2 });
 
     const { ctx } = makeMockCtx();
     const env: DbScopeEnvBindings = {};
-    await expect(
-      withRequestScopedDb(TEST_DB_URL, ctx, env, async () => {
+    let thrown: unknown;
+    await withRequestScopedDb(TEST_DB_URL, ctx, env, async () => {
+      try {
         await processTalkRunMessage({
-          runId: second.runId,
+          runId: runIds[1]!,
           executor: makeMockExecutor({ output: { content: 'should not run' } }),
         });
-      }),
-    ).rejects.toBeInstanceOf(BlockedBySiblingError);
+      } catch (error) {
+        thrown = error;
+      }
+    });
+    expect(thrown).toBeInstanceOf(BlockedBySiblingError);
   });
 
   it('returns without error when the run is already terminal', async () => {
-    const { runId } = await setupRun({ status: 'completed' });
+    const { runIds } = await setupRun({ status: 'completed' });
     const { ctx } = makeMockCtx();
     const env: DbScopeEnvBindings = {};
     await withRequestScopedDb(TEST_DB_URL, ctx, env, async () => {
       await processTalkRunMessage({
-        runId,
+        runId: runIds[0]!,
         executor: makeMockExecutor({
           throwError: new Error('should not be called'),
         }),
@@ -293,27 +323,25 @@ describe('processTalkRunMessage', () => {
     });
   });
 
-  it('acks without executing when the run is already running (duplicate delivery)', async () => {
-    // Simulates a second at-least-once delivery (or sweep + promotion both
-    // enqueuing the same runId) arriving while another invocation owns the
-    // run. The executor must not fire — double-execution is the bug.
-    const { runId } = await setupRun({ status: 'running' });
+  it('acks without executing when the run is already running', async () => {
+    const { runIds } = await setupRun({ status: 'running' });
     const { ctx } = makeMockCtx();
     const env: DbScopeEnvBindings = {};
     await withRequestScopedDb(TEST_DB_URL, ctx, env, async () => {
       await processTalkRunMessage({
-        runId,
+        runId: runIds[0]!,
         executor: makeMockExecutor({
           throwError: new Error('duplicate delivery must not execute'),
         }),
       });
     });
-    // Untouched — still running, not flipped or failed by the duplicate.
-    expect(await getTalkRunById(runId).then((r) => r?.status)).toBe('running');
+    expect(
+      await getGreenfieldQueueRunById(runIds[0]!).then((r) => r?.status),
+    ).toBe('running');
   });
 
   it('aborts execution and ack-returns when status flips to cancelled mid-run', async () => {
-    const { runId } = await setupRun();
+    const { runIds } = await setupRun();
     const { ctx, drain } = makeMockCtx();
 
     let releaseExecutor: () => void = () => {};
@@ -324,42 +352,37 @@ describe('processTalkRunMessage', () => {
     const env: DbScopeEnvBindings = {};
     const runPromise = withRequestScopedDb(TEST_DB_URL, ctx, env, async () => {
       await processTalkRunMessage({
-        runId,
+        runId: runIds[0]!,
         executor: makeMockExecutor({ waitFor: executorBlock }),
         cancelPollIntervalMs: 50,
       });
     });
 
-    await new Promise((r) => setTimeout(r, 150));
-    await markTalkRunStatus(runId, 'cancelled', {
-      endedAt: new Date().toISOString(),
-    });
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    const db = getDbPg();
+    await db`
+      update public.runs
+      set status = 'cancelled', finished_at = now()
+      where id = ${runIds[0]}::uuid
+    `;
     releaseExecutor();
 
     await expect(runPromise).resolves.toBeUndefined();
     await drain();
 
-    const run = await getTalkRunById(runId);
+    const run = await getGreenfieldQueueRunById(runIds[0]!);
     expect(run?.status).toBe('cancelled');
   });
 
   it('promotes the next ordered sibling after a run completes', async () => {
-    const groupId = '0c999999-1111-1111-1111-111111111111';
-    const first = await setupRun({
-      sequenceIndex: 0,
-      responseGroupId: groupId,
-    });
-    const second = await setupRun({
-      sequenceIndex: 1,
-      responseGroupId: groupId,
-    });
-
+    const { runIds } = await setupRun({ agentCount: 2 });
     const dispatched: string[] = [];
     const { ctx, drain } = makeMockCtx();
     const env: DbScopeEnvBindings = {};
+
     await withRequestScopedDb(TEST_DB_URL, ctx, env, async () => {
       await processTalkRunMessage({
-        runId: first.runId,
+        runId: runIds[0]!,
         executor: makeMockExecutor({ output: { content: 'step 0 done' } }),
         cancelPollIntervalMs: 50_000,
         dispatch: async ({ runId }) => {
@@ -369,33 +392,23 @@ describe('processTalkRunMessage', () => {
     });
     await drain();
 
-    expect(await getTalkRunById(first.runId).then((r) => r?.status)).toBe(
-      'completed',
-    );
-    expect(dispatched).toEqual([second.runId]);
+    expect(
+      await getGreenfieldQueueRunById(runIds[0]!).then((r) => r?.status),
+    ).toBe('completed');
+    expect(dispatched).toEqual([runIds[1]]);
   });
 
-  it('promotes the next ordered sibling even when the run FAILS (the bug fix)', async () => {
-    const groupId = '0c999999-2222-2222-2222-222222222222';
-    const first = await setupRun({
-      sequenceIndex: 0,
-      responseGroupId: groupId,
-    });
-    const second = await setupRun({
-      sequenceIndex: 1,
-      responseGroupId: groupId,
-    });
-
+  it('promotes the next ordered sibling even when the run fails', async () => {
+    const { runIds } = await setupRun({ agentCount: 2 });
     const dispatched: string[] = [];
     const { ctx, drain } = makeMockCtx();
     const env: DbScopeEnvBindings = {};
+
     await withRequestScopedDb(TEST_DB_URL, ctx, env, async () => {
       await processTalkRunMessage({
-        runId: first.runId,
+        runId: runIds[0]!,
         executor: makeMockExecutor({
-          throwError: new Error(
-            'provider.nvidia upstream timed out (HTTP 524 <none>)',
-          ),
+          throwError: new Error('provider upstream timed out'),
         }),
         cancelPollIntervalMs: 50_000,
         dispatch: async ({ runId }) => {
@@ -405,29 +418,27 @@ describe('processTalkRunMessage', () => {
     });
     await drain();
 
-    // The failed step must not strand its siblings — the next one is woken.
-    expect(await getTalkRunById(first.runId).then((r) => r?.status)).toBe(
-      'failed',
-    );
-    expect(dispatched).toEqual([second.runId]);
+    expect(
+      await getGreenfieldQueueRunById(runIds[0]!).then((r) => r?.status),
+    ).toBe('failed');
+    expect(dispatched).toEqual([runIds[1]]);
   });
 
   it('does not promote when the finished run is the last ordered step', async () => {
-    const groupId = '0c999999-3333-3333-3333-333333333333';
-    // Lower sibling already terminal so the last step is claimable.
-    await setupRun({
-      sequenceIndex: 0,
-      responseGroupId: groupId,
-      status: 'completed',
-    });
-    const last = await setupRun({ sequenceIndex: 1, responseGroupId: groupId });
+    const { runIds } = await setupRun({ agentCount: 2 });
+    const db = getDbPg();
+    await db`
+      update public.runs
+      set status = 'completed', started_at = now(), finished_at = now()
+      where id = ${runIds[0]}::uuid
+    `;
 
     const dispatched: string[] = [];
     const { ctx, drain } = makeMockCtx();
     const env: DbScopeEnvBindings = {};
     await withRequestScopedDb(TEST_DB_URL, ctx, env, async () => {
       await processTalkRunMessage({
-        runId: last.runId,
+        runId: runIds[1]!,
         executor: makeMockExecutor({ output: { content: 'final step' } }),
         cancelPollIntervalMs: 50_000,
         dispatch: async ({ runId }) => {
@@ -439,38 +450,17 @@ describe('processTalkRunMessage', () => {
 
     expect(dispatched).toEqual([]);
   });
-
-  it('does not promote for a non-ordered (panel/single) run', async () => {
-    const { runId } = await setupRun(); // no responseGroupId, no sequenceIndex
-
-    const dispatched: string[] = [];
-    const { ctx, drain } = makeMockCtx();
-    const env: DbScopeEnvBindings = {};
-    await withRequestScopedDb(TEST_DB_URL, ctx, env, async () => {
-      await processTalkRunMessage({
-        runId,
-        executor: makeMockExecutor({ output: { content: 'solo' } }),
-        cancelPollIntervalMs: 50_000,
-        dispatch: async ({ runId: nextId }) => {
-          dispatched.push(nextId);
-        },
-      });
-    });
-    await drain();
-
-    expect(dispatched).toEqual([]);
-  });
 });
 
 describe('processDlqMessage', () => {
   it('flips a queued run to failed with dlq_exhausted and emits talk_run_failed', async () => {
-    const { runId, talkId } = await setupRun({ status: 'queued' });
+    const { runIds, talkId } = await setupRun({ status: 'queued' });
 
-    await processDlqMessage({ runId });
+    await processDlqMessage({ runId: runIds[0]! });
 
-    const run = await getTalkRunById(runId);
+    const run = await getGreenfieldQueueRunById(runIds[0]!);
     expect(run?.status).toBe('failed');
-    expect(run?.cancel_reason).toContain('dlq_exhausted');
+    expect(run?.error_json).toMatchObject({ code: 'dlq_exhausted' });
 
     const events = await getOutboxEventsForTopics([`talk:${talkId}`], 0);
     const failed = events.find((e) => e.event_type === 'talk_run_failed');
@@ -481,16 +471,16 @@ describe('processDlqMessage', () => {
   });
 
   it('flips a running run to failed', async () => {
-    const { runId } = await setupRun({ status: 'running' });
-    await processDlqMessage({ runId });
-    const run = await getTalkRunById(runId);
+    const { runIds } = await setupRun({ status: 'running' });
+    await processDlqMessage({ runId: runIds[0]! });
+    const run = await getGreenfieldQueueRunById(runIds[0]!);
     expect(run?.status).toBe('failed');
   });
 
   it('is a no-op on an already-terminal run', async () => {
-    const { runId } = await setupRun({ status: 'completed' });
-    await processDlqMessage({ runId });
-    const run = await getTalkRunById(runId);
+    const { runIds } = await setupRun({ status: 'completed' });
+    await processDlqMessage({ runId: runIds[0]! });
+    const run = await getGreenfieldQueueRunById(runIds[0]!);
     expect(run?.status).toBe('completed');
   });
 
