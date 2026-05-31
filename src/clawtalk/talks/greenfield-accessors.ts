@@ -44,6 +44,11 @@ export interface GreenfieldTalkAgentRecord {
   enabled: boolean;
 }
 
+export interface GreenfieldTalkToolRecord {
+  tool_id: string;
+  enabled: boolean;
+}
+
 export async function listGreenfieldFolders(input: {
   workspaceId: string;
 }): Promise<GreenfieldFolderRecord[]> {
@@ -414,4 +419,50 @@ export async function replaceGreenfieldTalkAgents(input: {
     talkId: input.talkId,
   });
   return { status: 'ok', agents };
+}
+
+export async function listGreenfieldTalkTools(input: {
+  workspaceId: string;
+  talkId: string;
+}): Promise<GreenfieldTalkToolRecord[]> {
+  const db = getDbPg();
+  return db<GreenfieldTalkToolRecord[]>`
+    select tool_id, enabled
+    from public.talk_tools
+    where workspace_id = ${input.workspaceId}::uuid
+      and talk_id = ${input.talkId}::uuid
+    order by tool_id asc
+  `;
+}
+
+export async function setGreenfieldTalkTools(input: {
+  workspaceId: string;
+  talkId: string;
+  toolIds: string[];
+  enabled: boolean;
+}): Promise<GreenfieldTalkToolRecord[] | null> {
+  const db = getDbPg();
+  const rows = await db<GreenfieldTalkToolRecord[]>`
+    with talk_row as (
+      select id
+      from public.talks
+      where workspace_id = ${input.workspaceId}::uuid
+        and id = ${input.talkId}::uuid
+    ),
+    requested_tools as (
+      select unnest(${input.toolIds}::text[]) as tool_id
+    )
+    insert into public.talk_tools (workspace_id, talk_id, tool_id, enabled)
+    select
+      ${input.workspaceId}::uuid,
+      talk_row.id,
+      requested_tools.tool_id,
+      ${input.enabled}::boolean
+    from talk_row
+    cross join requested_tools
+    on conflict (talk_id, tool_id) do update
+      set enabled = excluded.enabled
+    returning tool_id, enabled
+  `;
+  return rows.length === 0 ? null : rows;
 }

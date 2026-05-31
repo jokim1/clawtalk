@@ -41,6 +41,7 @@ import {
   getGreenfieldTalkPolicyRoute,
   getGreenfieldMeRoute,
   getGreenfieldTalkRoute,
+  getGreenfieldTalkToolsRoute,
   listGreenfieldAgentsRoute,
   listGreenfieldFoldersRoute,
   listGreenfieldTalkAgentsRoute,
@@ -52,6 +53,7 @@ import {
   switchGreenfieldWorkspaceRoute,
   updateGreenfieldTalkAgentsRoute,
   updateGreenfieldTalkPolicyRoute,
+  updateGreenfieldTalkToolRoute,
 } from './greenfield-core.js';
 
 type Variables = {
@@ -512,6 +514,39 @@ export function mountGreenfieldApiRoutes(app: GreenfieldApp): void {
       workspaceId: requestedWorkspaceId(c),
       talkId: talkId.value,
       agents: payload.data.agents,
+    });
+    return jsonResponse(result);
+  });
+
+  app.get('/api/v1/talks/:talkId/tools', async (c) => {
+    const auth = c.get('auth');
+    const rl = checkRateLimit({ userId: auth.userId, bucket: 'read' });
+    if (!rl.allowed) return rateLimitedResponse(c, rl);
+    const talkId = decodeIdParam(c, 'talkId');
+    if (!talkId.ok) return talkId.response;
+    const result = await getGreenfieldTalkToolsRoute({
+      auth,
+      workspaceId: requestedWorkspaceId(c),
+      talkId: talkId.value,
+    });
+    return jsonResponse(result);
+  });
+
+  app.patch('/api/v1/talks/:talkId/tools', async (c) => {
+    const auth = c.get('auth');
+    const rl = checkRateLimit({ userId: auth.userId, bucket: 'write' });
+    if (!rl.allowed) return rateLimitedResponse(c, rl);
+    const csrfFail = checkCsrf(c, auth);
+    if (csrfFail) return csrfFail;
+    const talkId = decodeIdParam(c, 'talkId');
+    if (!talkId.ok) return talkId.response;
+    const payload = await readJsonBody(c);
+    if (!payload.ok) return invalidJsonResponse(c, payload.error);
+    const result = await updateGreenfieldTalkToolRoute({
+      auth,
+      workspaceId: requestedWorkspaceId(c),
+      talkId: talkId.value,
+      body: payload.data,
     });
     return jsonResponse(result);
   });

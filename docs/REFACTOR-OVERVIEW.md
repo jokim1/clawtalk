@@ -36,7 +36,8 @@ This is not "evolve the schema." This is "the schema we have constrains every fe
 | ✅ Cutover branch | Greenfield API mount extraction: `/me`, workspace/folder/talk CRUD, snapshot/detail/content/thread compatibility, and chat mounts live in `greenfield-api.ts` | API shell extraction slice                                                                                                   |
 | ✅ Cutover branch | Greenfield talk roster mutation: `PUT /api/v1/talks/:talkId/agents` now replaces `talk_agents` against workspace agents                                       | API collision cleanup slice                                                                                                  |
 | ✅ Cutover branch | Greenfield talk policy facade: `GET/PUT /api/v1/talks/:talkId/policy` now derives from `talk_agents`, preserves the old no-op `PUT` leniency, reports the 5-agent roster cap, and skips a legacy policy mirror | API collision cleanup slice                                                                                                  |
-| 🔄 Active next    | Retire remaining legacy API collisions: tools, context/resources, jobs, and document edit compatibility paths                                                 | Next slices                                                                                                                  |
+| ✅ Cutover branch | Greenfield talk tools route: `GET/PATCH /api/v1/talks/:talkId/tools` now materializes light-family toggles into canonical `talk_tools.tool_id` rows, freezes active families plus resolved effective tool permissions into run prompt snapshots, and emits `talk_tools_changed` | API collision cleanup slice                                                                                                  |
+| 🔄 Active next    | Retire remaining legacy API collisions: context/resources, jobs, and document edit compatibility paths                                                        | Next slices                                                                                                                  |
 | ⏭️ Next           | webapp/ rewrite per §05 Phases (every page touches new tables)                                                                                                | Phased                                                                                                                       |
 | ⏭️ Next           | §14 verification test suite (24 invariants)                                                                                                                   | Phased                                                                                                                       |
 | ⏭️ Next           | Phase 13 eval gate (harness contract done; scenarios + grader prompts TBD)                                                                                    | Phased                                                                                                                       |
@@ -298,7 +299,7 @@ Each phase has explicit entry/exit criteria in §05.
 ### Open
 
 - Forge `forge_rewriter` + `forge_critic` system prompts — §06 §3.6 still has implementation placeholders; Joseph writes the production prompt text before Forge runtime work ships.
-- API shell/resource decomposition — greenfield route modules and their Hono mount layer now cover `/me`, workspace/folders/talk CRUD, roster read/write, the legacy policy facade, snapshot/detail/content/thread compatibility, and chat enqueue/cancel. The next implementation slices should retire remaining legacy route collisions before the frontend Talk rewrite.
+- API shell/resource decomposition — greenfield route modules and their Hono mount layer now cover `/me`, workspace/folders/talk CRUD, roster read/write, the legacy policy facade, talk tools, snapshot/detail/content/thread compatibility, and chat enqueue/cancel. The next implementation slices should retire remaining legacy route collisions before the frontend Talk rewrite.
 - Phase 13 eval scenario content + grader prompts — [eval-suite.md](./eval-suite.md) locks the harness contract but defers scenario content.
 - Per-page visual design for new surfaces — [02-visual-system.md](./02-visual-system.md) covers tokens but doesn't have component-level designs for Jobs UI, Forge gallery / run-detail / Audiences, home Forge surfacing, DocTabStrip.
 - ~37 P2 polish items per [SPEC-READINESS.md](./SPEC-READINESS.md). None block impl.
@@ -413,7 +414,7 @@ But the schema couldn't bear weight beyond what it proved: per-user RLS, threads
 The schema reference has now been promoted into the active cutover branch, and the first backend runtime spine is committed through greenfield workspace/talk routes, API mount extraction, chat enqueue, queue consumption, execution, scheduler sweeps, and run-state hardening. The next milestones are:
 
 1. **Retire remaining legacy route/accessor collisions one family at a time.**
-2. **Port tools, context/resources, jobs, and document edit compatibility paths to greenfield contracts.**
+2. **Port context/resources, jobs, and document edit compatibility paths to greenfield contracts.**
 3. **Keep `worker-app.ts` as public/auth/health/WebSocket glue rather than product-resource logic.**
 4. **Start the frontend shell and Talk rewrite once the backend API no longer depends on legacy table families for core Talk workflows.**
 

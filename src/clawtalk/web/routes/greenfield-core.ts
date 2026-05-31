@@ -1,5 +1,10 @@
 import { withUserContext } from '../../../db.js';
 import {
+  TALK_TOOL_FAMILIES,
+  TALK_TOOL_IDS_BY_FAMILY,
+  normalizeTalkToolFamiliesFromRows,
+} from '../../db/agent-accessors.js';
+import {
   listWorkspaceAgents,
   listWorkspaceTeams,
   type GreenfieldAgentRecord,
@@ -15,14 +20,18 @@ import {
   listDefaultTalkAgentIds,
   listGreenfieldFolders,
   listGreenfieldTalkAgents,
+  listGreenfieldTalkTools,
   listGreenfieldTalks,
   replaceGreenfieldTalkAgents,
+  setGreenfieldTalkTools,
   updateGreenfieldFolder,
   updateGreenfieldTalk,
   type GreenfieldFolderRecord,
   type GreenfieldTalkAgentRecord,
   type GreenfieldTalkRecord,
+  type GreenfieldTalkToolRecord,
 } from '../../talks/greenfield-accessors.js';
+import { emitOutboxEvent } from '../../talks/outbox-emit.js';
 import {
   getWorkspaceUser,
   listWorkspacesForUser,
@@ -873,6 +882,139 @@ export async function updateGreenfieldTalkAgentsRoute(input: {
       talkId: input.talkId,
       agents: result.agents.map(toTalkAgentApiRecord),
     });
+  });
+}
+
+function toTalkToolsActiveMap(
+  rows: GreenfieldTalkToolRecord[],
+): Record<string, boolean> {
+  return normalizeTalkToolFamiliesFromRows(rows);
+}
+
+function toolIdsForFamily(family: string): string[] {
+  const toolIds = TALK_TOOL_IDS_BY_FAMILY[family];
+  if (!toolIds) {
+    throw new Error(`Unhandled greenfield talk tool family: ${family}`);
+  }
+  return toolIds;
+}
+
+function talkToolsPayload(input: {
+  talkId: string;
+  rows: GreenfieldTalkToolRecord[];
+}): {
+  talkId: string;
+  active: Record<string, boolean>;
+  available: string[];
+} {
+  return {
+    talkId: input.talkId,
+    active: toTalkToolsActiveMap(input.rows),
+    available: TALK_TOOL_FAMILIES,
+  };
+}
+
+type NormalizedToolPatch =
+  | { ok: true; family: string; enabled: boolean }
+  | { ok: false; error: string };
+
+function normalizeTalkToolPatch(body: unknown): NormalizedToolPatch {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) {
+    return { ok: false, error: 'request body must be an object' };
+  }
+  const raw = body as Record<string, unknown>;
+  const family = raw.family;
+  const enabled = raw.enabled;
+  if (typeof family !== 'string' || family.trim().length === 0) {
+    return { ok: false, error: 'family must be a non-empty string' };
+  }
+  if (typeof enabled !== 'boolean') {
+    return { ok: false, error: 'enabled must be a boolean' };
+  }
+  const normalizedFamily = family.trim();
+  if (!TALK_TOOL_FAMILIES.includes(normalizedFamily)) {
+    return {
+      ok: false,
+      error: `unknown family '${normalizedFamily}' — must be one of ${TALK_TOOL_FAMILIES.join(
+        ', ',
+      )}`,
+    };
+  }
+  return { ok: true, family: normalizedFamily, enabled };
+}
+
+export async function getGreenfieldTalkToolsRoute(input: {
+  auth: AuthContext;
+  workspaceId?: string | null;
+  talkId: string;
+}): Promise<
+  RouteResult<{
+    talkId: string;
+    active: Record<string, boolean>;
+    available: string[];
+  }>
+> {
+  if (!isUuid(input.talkId)) {
+    return error(400, 'invalid_talk_id', 'Talk id must be a UUID.');
+  }
+  return withResolvedWorkspace(input.auth, input.workspaceId, async (ctx) => {
+    const talk = await getGreenfieldTalk({
+      workspaceId: ctx.workspace.id,
+      talkId: input.talkId,
+    });
+    if (!talk) return error(404, 'talk_not_found', 'Talk not found.');
+    const rows = await listGreenfieldTalkTools({
+      workspaceId: ctx.workspace.id,
+      talkId: input.talkId,
+    });
+    return ok(talkToolsPayload({ talkId: input.talkId, rows }));
+  });
+}
+
+export async function updateGreenfieldTalkToolRoute(input: {
+  auth: AuthContext;
+  workspaceId?: string | null;
+  talkId: string;
+  body: unknown;
+}): Promise<
+  RouteResult<{
+    talkId: string;
+    active: Record<string, boolean>;
+    available: string[];
+  }>
+> {
+  if (!isUuid(input.talkId)) {
+    return error(400, 'invalid_talk_id', 'Talk id must be a UUID.');
+  }
+  const normalized = normalizeTalkToolPatch(input.body);
+  if (!normalized.ok) {
+    return error(400, 'invalid_tool_toggle', normalized.error);
+  }
+
+  return withResolvedWorkspace(input.auth, input.workspaceId, async (ctx) => {
+    const updated = await setGreenfieldTalkTools({
+      workspaceId: ctx.workspace.id,
+      talkId: input.talkId,
+      toolIds: toolIdsForFamily(normalized.family),
+      enabled: normalized.enabled,
+    });
+    if (!updated) return error(404, 'talk_not_found', 'Talk not found.');
+
+    const rows = await listGreenfieldTalkTools({
+      workspaceId: ctx.workspace.id,
+      talkId: input.talkId,
+    });
+    const payload = talkToolsPayload({ talkId: input.talkId, rows });
+    await emitOutboxEvent({
+      topic: `talk:${input.talkId}`,
+      eventType: 'talk_tools_changed',
+      payload: {
+        talkId: input.talkId,
+        active: payload.active,
+      },
+      ownerIds: [input.auth.userId],
+    });
+    return ok(payload);
   });
 }
 

@@ -79,11 +79,21 @@ workspace_members (
   created_at,
   primary key (workspace_id, user_id)
 )
+
+user_tool_permissions (
+  user_id uuid not null references users(id) on delete cascade,
+  tool_id text not null,
+  allowed boolean not null default true,
+  requires_approval boolean not null default false,
+  updated_at,
+  primary key (user_id, tool_id)
+)
 ```
 
 - `workspace_role` includes **`guest`** (the prototype's account switcher shows a Guest workspace) in addition to owner/admin/member.
 - On signup: create the user, their first `workspace`, and an `owner` membership.
 - `workspace_members` is the **RLS keystone** — every other policy joins through it (§12). To avoid policy recursion (a `workspace_members` policy can't itself subselect from `workspace_members`), reads on `workspace_members` policy on `user_id = auth.uid()` directly; mutations go through a `security definer` helper. The same helper (`is_workspace_member(ws uuid)`) is used by other tables' policies so the membership lookup runs once, plan-cached, without recursion (§12).
+- `user_tool_permissions` is user-owned, not workspace-owned. It stores per-runtime-tool allow/approval overrides that are folded into `run_prompt_snapshots.tool_manifest_json.effectiveTools` when a chat turn is enqueued.
 - **User deletion semantics:** `users.id` is referenced by `workspaces.owner_id`, `workspace_members.user_id`, `talks.created_by`, `runs.requested_by`, `jobs.created_by`, `messages.author_user_id`, `improvement_runs.owner_id`, `agent_feedback_events.actor_user_id`, `talk_reads.user_id`, etc. Default is **`ON DELETE RESTRICT`** for ownership/authorship columns (reassign or anonymize first) and **`ON DELETE CASCADE`** for membership/read-state columns. The app exposes a "leave workspace" + "transfer ownership" flow; hard user delete is admin-only.
 - **Reuse vs. rewrite.** `users` is kept. `workspaces` + `workspace_members` are net-new (today's app is user-owned, no tenant table — D5).
 
@@ -1171,6 +1181,7 @@ In the active baseline, `users` is defined directly with the §1 target columns 
 
 - **Write-policy roles.** Most workspace writes (creating Talks/Documents/Agents/Jobs/messages, editing prompts, toggling tools, accepting `document_edits`) gate on `is_workspace_member`. Admin-only writes gate on `is_workspace_admin`: invite/remove members, update member roles, manage connectors (authorize/revoke), delete the workspace, transfer ownership, approve `home_optimization_proposals`, manage `home_algorithm_versions`/`home_algorithm_assignments`. The full policy text for each table is generated mechanically from this rule + the table's column set; the convention is documented in [the build plan](./05-build-plan.md).
 - **`workspace_members` itself** uses non-recursive policies: `using (user_id = auth.uid())` for reads (a member sees their own memberships); `using (is_workspace_admin(workspace_id))` for writes.
+- **`user_tool_permissions` is user-scoped, not workspace-scoped.** Policy is `using/with check (user_id = auth.uid())`, matching the tool-settings route and the effective-tool resolver.
 - **Join tables carry `workspace_id`** (`talk_agents`, `talk_tools`, `team_composition_agents`, `doc_tab_coeditors`, `connector_bindings`, `talk_reads`, `forge_audience_personas`, `improvement_run_held_out_personas`) so the predicate applies directly — no fragile parent joins.
 - **Composite FKs** prevent cross-workspace references (a child's `(workspace_id, parent_id)` must match the parent) on every snapshot/run/edit/Forge table that carries denormalized `workspace_id`.
 - `documents`/`doc_tabs`/`doc_blocks`/`document_edits` scope by `workspace_id` directly — a concrete win over the legacy contents-via-`talk_threads` RLS (D4).

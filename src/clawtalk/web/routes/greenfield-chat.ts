@@ -290,6 +290,13 @@ export async function enqueueGreenfieldChatRoute(input: {
           'Wait for the current round to finish or cancel it before sending another message.',
         );
       }
+      if (result.reason === 'agent_model_not_found') {
+        return error(
+          409,
+          'agent_model_not_found',
+          'A selected agent references a model that is not available.',
+        );
+      }
       return error(
         400,
         'talk_agent_not_found',

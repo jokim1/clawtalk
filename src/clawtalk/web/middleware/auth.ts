@@ -47,10 +47,10 @@ export async function authenticateRequestPg(
     // (e.g. scripts/latency-bench.ts) can authenticate against the
     // same JWKS-verified Supabase access tokens the SPA uses.
     const bearer = parseBearerHeader(headers.authorization);
-    const ebAt =
-      bearer ?? parseCookieHeader(headers.cookie)[ACCESS_TOKEN_COOKIE];
-    if (!ebAt) return { kind: 'unauthorized', reason: 'missing' };
-    const result = await verifyJwt(ebAt, env);
+    const cookieToken = parseCookieHeader(headers.cookie)[ACCESS_TOKEN_COOKIE];
+    const token = bearer ?? cookieToken;
+    if (!token) return { kind: 'unauthorized', reason: 'missing' };
+    const result = await verifyJwt(token, env);
     if (result.kind === 'expired') {
       return { kind: 'unauthorized', reason: 'expired' };
     }
@@ -68,7 +68,7 @@ export async function authenticateRequestPg(
         // gate on `auth.role === 'admin'` need to migrate to RLS
         // queries instead.
         role: 'owner',
-        authType: 'bearer',
+        authType: bearer ? 'bearer' : 'cookie',
       },
     };
   }

@@ -20,7 +20,7 @@ import type { JWK, KeyLike } from 'jose';
 
 import { initPgDatabase } from '../../db.js';
 import { CLAWTALK_ALLOWED_ORIGINS } from '../config.js';
-import { ACCESS_TOKEN_COOKIE } from './cookies.js';
+import { ACCESS_TOKEN_COOKIE, CSRF_TOKEN_COOKIE } from './cookies.js';
 import { _resetWorkerAppForTests, getWorkerApp } from './worker-app.js';
 
 const PROJECT_URL = 'https://test-project.supabase.co';
@@ -56,6 +56,13 @@ function envForWorker(): Record<string, unknown> {
     SUPABASE_PUBLISHABLE_KEY: 'pk_test',
     JWKS_CACHE: fakeKv,
   };
+}
+
+function cookiePairFromSetCookie(setCookies: string[], name: string): string {
+  const cookie = setCookies.find((value) => value.startsWith(`${name}=`));
+  if (!cookie) throw new Error(`Missing ${name} Set-Cookie header`);
+  const [pair] = cookie.split(';', 1);
+  return pair ?? '';
 }
 
 async function mintJwt(opts?: {
@@ -190,7 +197,7 @@ describe('worker-app — auth-protected routes', () => {
     const body = await res.json();
     expect(body).toMatchObject({
       ok: true,
-      data: { userId, authType: 'bearer', role: 'owner' },
+      data: { userId, authType: 'cookie', role: 'owner' },
     });
   });
 
@@ -243,7 +250,8 @@ describe('worker-app — chat enqueue mount (Queues port U2)', () => {
         {
           method: 'POST',
           headers: {
-            cookie: `${ACCESS_TOKEN_COOKIE}=${jwt}`,
+            cookie: `${ACCESS_TOKEN_COOKIE}=${jwt}; ${CSRF_TOKEN_COOKIE}=csrf-chat`,
+            'x-csrf-token': 'csrf-chat',
             'content-type': 'application/json',
           },
           body: JSON.stringify({ content: 'hi' }),
@@ -287,10 +295,174 @@ describe('worker-app — chat enqueue mount (Queues port U2)', () => {
         {
           method: 'POST',
           headers: {
-            cookie: `${ACCESS_TOKEN_COOKIE}=${jwt}`,
+            cookie: `${ACCESS_TOKEN_COOKIE}=${jwt}; ${CSRF_TOKEN_COOKIE}=csrf-cancel`,
+            'x-csrf-token': 'csrf-cancel',
             'content-type': 'application/json',
           },
           body: JSON.stringify({}),
+        },
+      ),
+      undefined,
+      envForWorker(),
+    );
+    expect(res.status).not.toBe(501);
+    expect(res.status).not.toBe(500);
+    const body = (await res.json()) as { error?: { code?: string } };
+    expect(body.error?.code).not.toBe('not_implemented_in_worker');
+    expect(body.error?.code).not.toBe('internal_error');
+  });
+});
+
+describe('worker-app — cookie auth CSRF guard', () => {
+  it('rejects a non-tools cookie-auth mutation without CSRF before route handling', async () => {
+    const app = getWorkerApp();
+    const jwt = await mintJwt();
+    const res = await app.request(
+      new Request('https://app.test/api/v1/talks', {
+        method: 'POST',
+        headers: {
+          cookie: `${ACCESS_TOKEN_COOKIE}=${jwt}`,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({ title: 'Missing CSRF' }),
+      }),
+      undefined,
+      envForWorker(),
+    );
+    expect(res.status).toBe(403);
+    const body = (await res.json()) as { error?: { code?: string } };
+    expect(body.error?.code).toBe('csrf_failed');
+  });
+
+  it('accepts the real eb_csrf cookie issued by auth callback on cookie-auth mutations', async () => {
+    const app = getWorkerApp();
+    const jwt = await mintJwt();
+    const callback = await app.request(
+      new Request('https://app.test/api/v1/auth/callback', {
+        method: 'POST',
+        headers: {
+          origin: VALID_ORIGIN,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          accessToken: jwt,
+          refreshToken: VALID_RT,
+        }),
+      }),
+      undefined,
+      envForWorker(),
+    );
+    expect(callback.status).toBe(204);
+    const setCookies = callback.headers.getSetCookie();
+    const accessPair = cookiePairFromSetCookie(setCookies, 'eb_at');
+    const csrfPair = cookiePairFromSetCookie(setCookies, 'eb_csrf');
+    const csrfValue = decodeURIComponent(csrfPair.split('=', 2)[1] ?? '');
+    expect(csrfValue).toMatch(/^[A-Za-z0-9_-]{43}$/);
+
+    const res = await app.request(
+      new Request(
+        'https://app.test/api/v1/talks/10000000-0000-4000-8000-000000000aaa/tools',
+        {
+          method: 'PATCH',
+          headers: {
+            cookie: `${accessPair}; ${csrfPair}`,
+            'x-csrf-token': csrfValue,
+            'content-type': 'application/json',
+          },
+          body: JSON.stringify({ family: 'web', enabled: true }),
+        },
+      ),
+      undefined,
+      envForWorker(),
+    );
+    expect(res.status).not.toBe(403);
+    const body = (await res.json()) as { error?: { code?: string } };
+    expect(body.error?.code).not.toBe('csrf_failed');
+  });
+});
+
+describe('worker-app — greenfield tools mount', () => {
+  it('GET /api/v1/talks/:talkId/tools is mounted (no longer 501)', async () => {
+    const app = getWorkerApp();
+    const jwt = await mintJwt();
+    const res = await app.request(
+      new Request(
+        'https://app.test/api/v1/talks/00000000-0000-0000-0000-000000000aaa/tools',
+        {
+          headers: { cookie: `${ACCESS_TOKEN_COOKIE}=${jwt}` },
+        },
+      ),
+      undefined,
+      envForWorker(),
+    );
+    expect(res.status).not.toBe(501);
+    expect(res.status).not.toBe(500);
+    const body = (await res.json()) as { error?: { code?: string } };
+    expect(body.error?.code).not.toBe('not_implemented_in_worker');
+    expect(body.error?.code).not.toBe('internal_error');
+  });
+
+  it('PATCH /api/v1/talks/:talkId/tools rejects cookie auth without CSRF', async () => {
+    const app = getWorkerApp();
+    const jwt = await mintJwt();
+    const res = await app.request(
+      new Request(
+        'https://app.test/api/v1/talks/10000000-0000-4000-8000-000000000aaa/tools',
+        {
+          method: 'PATCH',
+          headers: {
+            cookie: `${ACCESS_TOKEN_COOKIE}=${jwt}`,
+            'content-type': 'application/json',
+          },
+          body: JSON.stringify({ family: 'web', enabled: true }),
+        },
+      ),
+      undefined,
+      envForWorker(),
+    );
+    expect(res.status).toBe(403);
+    const body = (await res.json()) as { error?: { code?: string } };
+    expect(body.error?.code).toBe('csrf_failed');
+  });
+
+  it('PATCH /api/v1/talks/:talkId/tools lets bearer auth bypass CSRF', async () => {
+    const app = getWorkerApp();
+    const jwt = await mintJwt();
+    const res = await app.request(
+      new Request(
+        'https://app.test/api/v1/talks/10000000-0000-4000-8000-000000000aaa/tools',
+        {
+          method: 'PATCH',
+          headers: {
+            authorization: `Bearer ${jwt}`,
+            'content-type': 'application/json',
+          },
+          body: JSON.stringify({ family: 'web', enabled: true }),
+        },
+      ),
+      undefined,
+      envForWorker(),
+    );
+    expect(res.status).not.toBe(403);
+    const body = (await res.json()) as { error?: { code?: string } };
+    expect(body.error?.code).not.toBe('csrf_failed');
+  });
+
+  it('PATCH /api/v1/talks/:talkId/tools is mounted (no longer 501)', async () => {
+    const app = getWorkerApp();
+    const jwt = await mintJwt();
+    const csrf = 'csrf-tools';
+    const res = await app.request(
+      new Request(
+        'https://app.test/api/v1/talks/10000000-0000-4000-8000-000000000aaa/tools',
+        {
+          method: 'PATCH',
+          headers: {
+            cookie: `${ACCESS_TOKEN_COOKIE}=${jwt}; ${CSRF_TOKEN_COOKIE}=${csrf}`,
+            'x-csrf-token': csrf,
+            'content-type': 'application/json',
+          },
+          body: JSON.stringify({ family: 'web', enabled: true }),
         },
       ),
       undefined,

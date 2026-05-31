@@ -29,7 +29,12 @@ import { randomUUID } from 'node:crypto';
 
 import type postgres from 'postgres';
 
-import { getCurrentUserId, getDbPg, getOutOfBandSql } from '../../db.js';
+import {
+  getCurrentUserId,
+  getDbPg,
+  getOutOfBandSql,
+  type Sql,
+} from '../../db.js';
 import { logger } from '../../logger.js';
 import { resolveCredentialKindSnapshot } from '../agents/execution-resolver.js';
 import { emitOutboxEvent } from '../talks/outbox-emit.js';
@@ -1850,15 +1855,28 @@ export async function appendOutboxEvent(input: {
   // (to avoid JS number-precision loss on >2^53 values). Cast to int so
   // we get a JS number back. ClawTalk's outbox throughput is nowhere
   // close to int range; revisit if that changes.
-  await db`
-    insert into public.event_outbox (topic, event_type, payload)
-    values (${input.topic}, ${input.eventType},
-            ${db.json(input.payload as never)})
-  `;
-  const rows = await db<{ event_id: number }[]>`
-    select currval('public.event_outbox_event_id_seq')::int as event_id
-  `;
-  return rows[0]!.event_id;
+  const insert = async (sql: Sql): Promise<number> => {
+    await sql`
+      insert into public.event_outbox (topic, event_type, payload)
+      values (${input.topic}, ${input.eventType},
+              ${sql.json(input.payload as never)})
+    `;
+    const rows = await sql<{ event_id: number }[]>`
+      select currval('public.event_outbox_event_id_seq')::int as event_id
+    `;
+    return rows[0]!.event_id;
+  };
+  const maybeTransaction = db as Sql & {
+    begin?: <T>(fn: (sql: Sql) => Promise<T>) => Promise<T>;
+    savepoint?: unknown;
+  };
+  if (
+    typeof maybeTransaction.savepoint === 'function' ||
+    typeof maybeTransaction.begin !== 'function'
+  ) {
+    return insert(db);
+  }
+  return maybeTransaction.begin(insert);
 }
 
 /**

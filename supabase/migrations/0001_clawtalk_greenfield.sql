@@ -374,6 +374,15 @@ create table public.workspace_members (
   primary key (workspace_id, user_id)
 );
 
+create table public.user_tool_permissions (
+  user_id uuid not null references public.users(id) on delete cascade,
+  tool_id text not null,
+  allowed boolean not null default true,
+  requires_approval boolean not null default false,
+  updated_at timestamptz not null default now(),
+  primary key (user_id, tool_id)
+);
+create index user_tool_permissions_user_idx on public.user_tool_permissions (user_id);
 
 -- Workspace-shared LLM credentials are tenant-scoped in the greenfield model.
 create table public.workspace_provider_secrets (
@@ -1789,6 +1798,12 @@ create policy workspace_members_write on public.workspace_members
   for all
   using       (public.is_workspace_admin(workspace_id))
   with check  (public.is_workspace_admin(workspace_id));
+
+alter table public.user_tool_permissions enable row level security;
+create policy user_tool_permissions_owner on public.user_tool_permissions
+  for all
+  using       (user_id = auth.uid())
+  with check  (user_id = auth.uid());
 
 -- Member-write tables (the canonical pattern)
 do $$

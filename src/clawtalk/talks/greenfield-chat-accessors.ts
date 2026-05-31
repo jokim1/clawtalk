@@ -1,6 +1,11 @@
 import { randomUUID } from 'node:crypto';
 
 import { getDbPg } from '../../db.js';
+import {
+  buildEffectiveToolsFromTalkToolRows,
+  listUserToolPermissionsForUser,
+  normalizeTalkToolFamiliesFromRows,
+} from '../db/agent-accessors.js';
 import { emitOutboxEvent } from './outbox-emit.js';
 import type { GreenfieldMessageRecord } from './greenfield-detail-accessors.js';
 
@@ -37,6 +42,7 @@ interface GreenfieldChatRosterAgentRecord {
   accent: string;
   accent_dark: string | null;
   model_id: string;
+  provider_id: string | null;
   temperature: string | number;
   persona: string | null;
   focus: string | null;
@@ -58,7 +64,8 @@ export type EnqueueGreenfieldChatTurnResult =
         | 'talk_not_found'
         | 'talk_archived'
         | 'talk_round_active'
-        | 'talk_agent_not_found';
+        | 'talk_agent_not_found'
+        | 'agent_model_not_found';
     };
 
 export async function enqueueGreenfieldChatTurn(input: {
@@ -107,6 +114,7 @@ export async function enqueueGreenfieldChatTurn(input: {
       a.accent,
       a.accent_dark,
       a.model_id,
+      lpm.provider_id,
       a.temperature,
       a.persona,
       a.focus,
@@ -117,6 +125,13 @@ export async function enqueueGreenfieldChatTurn(input: {
     join public.agents a
       on a.workspace_id = ta.workspace_id
      and a.id = ta.agent_id
+    left join lateral (
+      select provider_id
+      from public.llm_provider_models
+      where model_id = a.model_id
+      order by provider_id asc
+      limit 1
+    ) lpm on true
     where ta.workspace_id = ${input.workspaceId}::uuid
       and ta.talk_id = ${input.talkId}::uuid
       and a.enabled = true
@@ -143,6 +158,9 @@ export async function enqueueGreenfieldChatTurn(input: {
   ) {
     return { ok: false, reason: 'talk_agent_not_found' };
   }
+  if (selectedAgents.some((agent) => !agent.provider_id)) {
+    return { ok: false, reason: 'agent_model_not_found' };
+  }
 
   const rounds = await db<{ round: number }[]>`
     select greatest(
@@ -163,6 +181,23 @@ export async function enqueueGreenfieldChatTurn(input: {
   const round = rounds[0]?.round ?? 1;
   const responseGroupId = randomUUID();
   const snapshotGroupId = randomUUID();
+  const toolRows = await db<{ tool_id: string; enabled: boolean }[]>`
+    select tool_id, enabled
+    from public.talk_tools
+    where workspace_id = ${input.workspaceId}::uuid
+      and talk_id = ${input.talkId}::uuid
+  `;
+  const activeToolFamilies = normalizeTalkToolFamiliesFromRows(toolRows);
+  const userToolPermissions = await listUserToolPermissionsForUser(
+    input.userId,
+  );
+  const toolManifest = {
+    active: activeToolFamilies,
+    effectiveTools: buildEffectiveToolsFromTalkToolRows(
+      toolRows,
+      userToolPermissions,
+    ),
+  };
 
   const insertedMessages = await db<GreenfieldMessageRecord[]>`
     insert into public.messages (
@@ -282,6 +317,37 @@ export async function enqueueGreenfieldChatTurn(input: {
         error_json
     `;
     const run = insertedRuns[0]!;
+    const promptSnapshots = await db<{ id: string }[]>`
+      insert into public.run_prompt_snapshots (
+        workspace_id,
+        run_id,
+        talk_id,
+        agent_snapshot_id,
+        model_id,
+        provider,
+        role_template_version,
+        prompt_assembly_version,
+        tool_manifest_json
+      )
+      values (
+        ${input.workspaceId}::uuid,
+        ${run.id}::uuid,
+        ${input.talkId}::uuid,
+        ${snapshot.id}::uuid,
+        ${snapshot.model_id},
+        ${agent.provider_id},
+        ${agent.created_from_template_version},
+        1,
+        ${db.json(toolManifest as never)}
+      )
+      returning id
+    `;
+    await db`
+      update public.runs
+      set prompt_snapshot_id = ${promptSnapshots[0]!.id}::uuid
+      where workspace_id = ${input.workspaceId}::uuid
+        and id = ${run.id}::uuid
+    `;
     runs.push({
       ...run,
       target_agent_id: agent.id,

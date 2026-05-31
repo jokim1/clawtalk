@@ -5,7 +5,12 @@ import {
   type ExecutionEvent,
 } from '../agents/agent-router.js';
 import type { LlmMessage } from '../agents/llm-client.js';
-import type { RegisteredAgentRecord } from '../db/agent-accessors.js';
+import {
+  buildEffectiveToolsFromTalkToolRows,
+  listUserToolPermissionsForUser,
+  type EffectiveToolAccess,
+  type RegisteredAgentRecord,
+} from '../db/agent-accessors.js';
 import {
   TalkExecutorError,
   type TalkExecutionEvent,
@@ -36,6 +41,7 @@ type GreenfieldExecutorRunRow = {
   persona: string | null;
   focus: string | null;
   method: string[] | null;
+  tool_manifest_json: unknown | null;
 };
 
 type GreenfieldHistoryMessageRow = {
@@ -155,7 +161,8 @@ async function getGreenfieldExecutorRun(
       tas.handle,
       tas.persona,
       tas.focus,
-      tas.method
+      tas.method,
+      rps.tool_manifest_json
     from public.runs r
     join public.talks t
       on t.workspace_id = r.workspace_id
@@ -166,10 +173,66 @@ async function getGreenfieldExecutorRun(
      and tas.id = r.agent_snapshot_id
     join public.llm_provider_models lpm
       on lpm.model_id = r.model_id
+    left join public.run_prompt_snapshots rps
+      on rps.workspace_id = r.workspace_id
+     and rps.id = r.prompt_snapshot_id
     where r.id = ${runId}::uuid
     limit 1
   `;
   return rows[0] ?? null;
+}
+
+function parseToolManifestEffectiveTools(
+  value: unknown,
+): EffectiveToolAccess[] | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const effectiveTools = (value as Record<string, unknown>).effectiveTools;
+  if (!Array.isArray(effectiveTools)) return null;
+
+  const parsed: EffectiveToolAccess[] = [];
+  for (const entry of effectiveTools) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+      return null;
+    }
+    const record = entry as Record<string, unknown>;
+    if (
+      typeof record.toolFamily !== 'string' ||
+      !Array.isArray(record.runtimeTools) ||
+      record.runtimeTools.some((tool) => typeof tool !== 'string') ||
+      typeof record.enabled !== 'boolean' ||
+      typeof record.requiresApproval !== 'boolean'
+    ) {
+      return null;
+    }
+    parsed.push({
+      toolFamily: record.toolFamily,
+      runtimeTools: record.runtimeTools,
+      enabled: record.enabled,
+      requiresApproval: record.requiresApproval,
+    });
+  }
+  return parsed;
+}
+
+async function loadGreenfieldEffectiveTools(
+  run: GreenfieldExecutorRunRow,
+): Promise<EffectiveToolAccess[]> {
+  const frozenEffectiveTools = parseToolManifestEffectiveTools(
+    run.tool_manifest_json,
+  );
+  if (frozenEffectiveTools) return frozenEffectiveTools;
+
+  const userPermissions = await listUserToolPermissionsForUser(
+    run.requested_by,
+  );
+  const db = getDbPg();
+  const rows = await db<{ tool_id: string; enabled: boolean }[]>`
+    select tool_id, enabled
+    from public.talk_tools
+    where workspace_id = ${run.workspace_id}::uuid
+      and talk_id = ${run.talk_id}::uuid
+  `;
+  return buildEffectiveToolsFromTalkToolRows(rows, userPermissions);
 }
 
 async function loadGreenfieldHistory(
@@ -516,7 +579,10 @@ export class GreenfieldTalkExecutor implements TalkExecutor {
         stepUserMessage.userMessageText,
       ].join('\n\n'),
     );
-    const agent = toRegisteredAgentRecord(run);
+    const [agent, effectiveTools] = await Promise.all([
+      Promise.resolve(toRegisteredAgentRecord(run)),
+      loadGreenfieldEffectiveTools(run),
+    ]);
 
     const result = await executeWithResolvedAgent(
       agent,
@@ -534,7 +600,7 @@ export class GreenfieldTalkExecutor implements TalkExecutor {
           principalUserId: input.requestedBy,
           workspaceId: run.workspace_id,
         },
-        effectiveTools: [],
+        effectiveTools,
       },
     );
 

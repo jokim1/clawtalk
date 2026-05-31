@@ -665,13 +665,9 @@ describe('worker-app integration — talk-resources gates', () => {
 // ---------------------------------------------------------------------------
 // CSRF gate — direct middleware tests.
 //
-// Note on scope: the cloud-mode auth middleware always issues
-// `authType: 'bearer'`, so `validateCsrfTokenPg` short-circuits to `ok`
-// for every Worker request today. The CSRF gate is wired on the new
-// routes so that if/when cookie-auth is re-introduced (legacy
-// device-code path, or a future first-party cookie flow), the
-// double-submit check is in place. These tests prove the wiring is
-// correct: with `authType: 'cookie'` the gate fires.
+// Note on scope: the cloud-mode auth middleware marks Supabase access tokens
+// from the eb_at cookie as `authType: 'cookie'`, so browser mutators must pass
+// the double-submit check. Authorization: Bearer API clients bypass CSRF.
 // ---------------------------------------------------------------------------
 
 describe('CSRF gate wired on /resources mutators', () => {
@@ -705,7 +701,7 @@ describe('CSRF gate wired on /resources mutators', () => {
     expect(result.ok).toBe(false);
   });
 
-  it('bearer auth bypasses CSRF (current cloud mode)', () => {
+  it('bearer auth bypasses CSRF for API clients', () => {
     const result = validateCsrfTokenPg({
       method: 'POST',
       authType: 'bearer',

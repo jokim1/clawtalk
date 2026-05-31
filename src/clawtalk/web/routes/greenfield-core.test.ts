@@ -9,6 +9,7 @@ import {
   getGreenfieldMeRoute,
   getGreenfieldTalkPolicyRoute,
   getGreenfieldTalkRoute,
+  getGreenfieldTalkToolsRoute,
   listGreenfieldAgentsRoute,
   listGreenfieldFoldersRoute,
   listGreenfieldTalkAgentsRoute,
@@ -17,10 +18,29 @@ import {
   patchGreenfieldTalkRoute,
   updateGreenfieldTalkAgentsRoute,
   updateGreenfieldTalkPolicyRoute,
+  updateGreenfieldTalkToolRoute,
 } from './greenfield-core.js';
 
 const USER_ID = '0c929292-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
 const OTHER_USER_ID = '0c929292-bbbb-bbbb-bbbb-bbbbbbbbbbbb';
+const EXPECTED_TALK_TOOL_FAMILIES = [
+  'web',
+  'connectors',
+  'google_read',
+  'google_write',
+  'gmail_read',
+  'gmail_send',
+  'messaging',
+];
+const EXPECTED_TALK_TOOL_IDS_BY_FAMILY: Record<string, string[]> = {
+  web: ['web-search', 'web-fetch', 'news-monitor'],
+  connectors: ['linear', 'github-read', 'notion-read'],
+  google_read: ['gdrive-read'],
+  google_write: ['gdrive-write'],
+  gmail_read: ['gmail-read'],
+  gmail_send: ['gmail-send'],
+  messaging: ['messaging'],
+};
 
 function auth(userId = USER_ID): AuthContext {
   return {
@@ -461,6 +481,349 @@ describe('greenfield core routes', () => {
     expect(listed.body.data.agents.map((agent) => agent.id)).toEqual(
       initialAgentIds,
     );
+  });
+
+  it('serves and updates greenfield talk tools from talk_tools', async () => {
+    const workspaceId = await currentWorkspaceId();
+    const agents = await listGreenfieldAgentsRoute({
+      auth: auth(),
+      workspaceId,
+    });
+    if (!agents.body.ok) throw new Error('Expected agent route to succeed');
+    const created = await createGreenfieldTalkRoute({
+      auth: auth(),
+      workspaceId,
+      body: {
+        title: 'Tools Facade Talk',
+        team: agents.body.data.agents.slice(0, 1).map((agent) => agent.id),
+      },
+    });
+    expect(created.statusCode).toBe(201);
+    if (!created.body.ok) throw new Error('Expected talk route to succeed');
+
+    const initial = await getGreenfieldTalkToolsRoute({
+      auth: auth(),
+      workspaceId,
+      talkId: created.body.data.talk.id,
+    });
+    expect(initial.statusCode).toBe(200);
+    expect(initial.body).toEqual({
+      ok: true,
+      data: {
+        talkId: created.body.data.talk.id,
+        active: {},
+        available: EXPECTED_TALK_TOOL_FAMILIES,
+      },
+    });
+
+    const db = getDbPg();
+    const beforeRows = await db<{ count: number }[]>`
+      select count(*)::int as count
+      from public.event_outbox
+      where event_type = 'talk_tools_changed'
+    `;
+    const beforeCount = beforeRows[0]?.count ?? 0;
+
+    const enabled = await updateGreenfieldTalkToolRoute({
+      auth: auth(),
+      workspaceId,
+      talkId: created.body.data.talk.id,
+      body: { family: 'web', enabled: true },
+    });
+    expect(enabled.statusCode).toBe(200);
+    expect(enabled.body).toMatchObject({
+      ok: true,
+      data: {
+        talkId: created.body.data.talk.id,
+        active: { web: true },
+        available: EXPECTED_TALK_TOOL_FAMILIES,
+      },
+    });
+
+    const persistedOn = await db<Array<{ tool_id: string; enabled: boolean }>>`
+      select tool_id, enabled
+      from public.talk_tools
+      where workspace_id = ${workspaceId}::uuid
+        and talk_id = ${created.body.data.talk.id}::uuid
+      order by tool_id asc
+    `;
+    expect(persistedOn).toEqual([
+      { tool_id: 'news-monitor', enabled: true },
+      { tool_id: 'web-fetch', enabled: true },
+      { tool_id: 'web-search', enabled: true },
+    ]);
+
+    const disabled = await updateGreenfieldTalkToolRoute({
+      auth: auth(),
+      workspaceId,
+      talkId: created.body.data.talk.id,
+      body: { family: 'web', enabled: false },
+    });
+    expect(disabled.statusCode).toBe(200);
+    expect(disabled.body).toMatchObject({
+      ok: true,
+      data: { active: { web: false } },
+    });
+
+    const afterRows = await db<{ count: number }[]>`
+      select count(*)::int as count
+      from public.event_outbox
+      where event_type = 'talk_tools_changed'
+    `;
+    expect((afterRows[0]?.count ?? 0) - beforeCount).toBe(2);
+    const latest = await db<
+      Array<{ payload: { talkId: string; active: Record<string, boolean> } }>
+    >`
+      select payload
+      from public.event_outbox
+      where event_type = 'talk_tools_changed'
+      order by event_id desc
+      limit 1
+    `;
+    expect(latest[0]?.payload).toEqual({
+      talkId: created.body.data.talk.id,
+      active: { web: false },
+    });
+  });
+
+  it('persists every talk tool family using the canonical greenfield tool ids', async () => {
+    const workspaceId = await currentWorkspaceId();
+    const agents = await listGreenfieldAgentsRoute({
+      auth: auth(),
+      workspaceId,
+    });
+    if (!agents.body.ok) throw new Error('Expected agent route to succeed');
+    const created = await createGreenfieldTalkRoute({
+      auth: auth(),
+      workspaceId,
+      body: {
+        title: 'Canonical Tool Id Talk',
+        team: agents.body.data.agents.slice(0, 1).map((agent) => agent.id),
+      },
+    });
+    expect(created.statusCode).toBe(201);
+    if (!created.body.ok) throw new Error('Expected talk route to succeed');
+
+    for (const family of EXPECTED_TALK_TOOL_FAMILIES) {
+      const result = await updateGreenfieldTalkToolRoute({
+        auth: auth(),
+        workspaceId,
+        talkId: created.body.data.talk.id,
+        body: { family, enabled: true },
+      });
+      expect(result.statusCode).toBe(200);
+      expect(result.body).toMatchObject({
+        ok: true,
+        data: {
+          active: { [family]: true },
+          available: EXPECTED_TALK_TOOL_FAMILIES,
+        },
+      });
+    }
+
+    const db = getDbPg();
+    const persisted = await db<Array<{ tool_id: string; enabled: boolean }>>`
+      select tool_id, enabled
+      from public.talk_tools
+      where workspace_id = ${workspaceId}::uuid
+        and talk_id = ${created.body.data.talk.id}::uuid
+      order by tool_id asc
+    `;
+    const expectedToolIds = EXPECTED_TALK_TOOL_FAMILIES.flatMap(
+      (family) => EXPECTED_TALK_TOOL_IDS_BY_FAMILY[family] ?? [],
+    ).sort();
+    expect(persisted).toEqual(
+      expectedToolIds.map((toolId) => ({ tool_id: toolId, enabled: true })),
+    );
+  });
+
+  it('reports a compound talk tool family active when any canonical tool is enabled', async () => {
+    const workspaceId = await currentWorkspaceId();
+    const agents = await listGreenfieldAgentsRoute({
+      auth: auth(),
+      workspaceId,
+    });
+    if (!agents.body.ok) throw new Error('Expected agent route to succeed');
+    const created = await createGreenfieldTalkRoute({
+      auth: auth(),
+      workspaceId,
+      body: {
+        title: 'Partial Tools Facade Talk',
+        team: agents.body.data.agents.slice(0, 1).map((agent) => agent.id),
+      },
+    });
+    expect(created.statusCode).toBe(201);
+    if (!created.body.ok) throw new Error('Expected talk route to succeed');
+
+    const db = getDbPg();
+    await db`
+      insert into public.talk_tools (workspace_id, talk_id, tool_id, enabled)
+      values
+        (${workspaceId}::uuid, ${created.body.data.talk.id}::uuid, 'web-search', true),
+        (${workspaceId}::uuid, ${created.body.data.talk.id}::uuid, 'web-fetch', false),
+        (${workspaceId}::uuid, ${created.body.data.talk.id}::uuid, 'news-monitor', false)
+    `;
+
+    const result = await getGreenfieldTalkToolsRoute({
+      auth: auth(),
+      workspaceId,
+      talkId: created.body.data.talk.id,
+    });
+    expect(result.statusCode).toBe(200);
+    expect(result.body).toMatchObject({
+      ok: true,
+      data: { active: { web: true } },
+    });
+  });
+
+  it('rejects invalid greenfield talk tool requests', async () => {
+    const workspaceId = await currentWorkspaceId();
+    const agents = await listGreenfieldAgentsRoute({
+      auth: auth(),
+      workspaceId,
+    });
+    if (!agents.body.ok) throw new Error('Expected agent route to succeed');
+    const created = await createGreenfieldTalkRoute({
+      auth: auth(),
+      workspaceId,
+      body: {
+        title: 'Tools Validation Talk',
+        team: agents.body.data.agents.slice(0, 1).map((agent) => agent.id),
+      },
+    });
+    expect(created.statusCode).toBe(201);
+    if (!created.body.ok) throw new Error('Expected talk route to succeed');
+
+    const unknown = await updateGreenfieldTalkToolRoute({
+      auth: auth(),
+      workspaceId,
+      talkId: created.body.data.talk.id,
+      body: { family: 'shell', enabled: true },
+    });
+    expect(unknown.statusCode).toBe(400);
+    expect(unknown.body).toMatchObject({
+      ok: false,
+      error: { code: 'invalid_tool_toggle' },
+    });
+
+    const missingFamily = await updateGreenfieldTalkToolRoute({
+      auth: auth(),
+      workspaceId,
+      talkId: created.body.data.talk.id,
+      body: { enabled: true },
+    });
+    expect(missingFamily.statusCode).toBe(400);
+    expect(missingFamily.body).toMatchObject({
+      ok: false,
+      error: { code: 'invalid_tool_toggle' },
+    });
+
+    const missingEnabled = await updateGreenfieldTalkToolRoute({
+      auth: auth(),
+      workspaceId,
+      talkId: created.body.data.talk.id,
+      body: { family: 'web' },
+    });
+    expect(missingEnabled.statusCode).toBe(400);
+    expect(missingEnabled.body).toMatchObject({
+      ok: false,
+      error: { code: 'invalid_tool_toggle' },
+    });
+
+    const missingTalk = await updateGreenfieldTalkToolRoute({
+      auth: auth(),
+      workspaceId,
+      talkId: '10000000-0000-4000-8000-000000000099',
+      body: { family: 'web', enabled: true },
+    });
+    expect(missingTalk.statusCode).toBe(404);
+    expect(missingTalk.body).toMatchObject({
+      ok: false,
+      error: { code: 'talk_not_found' },
+    });
+
+    const missingTalkGet = await getGreenfieldTalkToolsRoute({
+      auth: auth(),
+      workspaceId,
+      talkId: '10000000-0000-4000-8000-000000000099',
+    });
+    expect(missingTalkGet.statusCode).toBe(404);
+    expect(missingTalkGet.body).toMatchObject({
+      ok: false,
+      error: { code: 'talk_not_found' },
+    });
+
+    const malformedId = await getGreenfieldTalkToolsRoute({
+      auth: auth(),
+      workspaceId,
+      talkId: 'not-a-uuid',
+    });
+    expect(malformedId.statusCode).toBe(400);
+    expect(malformedId.body).toMatchObject({
+      ok: false,
+      error: { code: 'invalid_talk_id' },
+    });
+  });
+
+  it('rejects cross-workspace greenfield talk tools access', async () => {
+    const workspaceId = await currentWorkspaceId();
+    await seedAuthUser(
+      OTHER_USER_ID,
+      'other-tools@clawtalk.local',
+      'Other Tools User',
+    );
+    const otherMe = await getGreenfieldMeRoute({ auth: auth(OTHER_USER_ID) });
+    if (!otherMe.body.ok) throw new Error('Expected other session to succeed');
+    const otherAgents = await listGreenfieldAgentsRoute({
+      auth: auth(OTHER_USER_ID),
+      workspaceId: otherMe.body.data.currentWorkspaceId,
+    });
+    if (!otherAgents.body.ok) {
+      throw new Error('Expected other agent route to succeed');
+    }
+    const otherTalk = await createGreenfieldTalkRoute({
+      auth: auth(OTHER_USER_ID),
+      workspaceId: otherMe.body.data.currentWorkspaceId,
+      body: {
+        title: 'Other Workspace Tools Talk',
+        team: otherAgents.body.data.agents.slice(0, 1).map((agent) => agent.id),
+      },
+    });
+    if (!otherTalk.body.ok) throw new Error('Expected other talk to succeed');
+
+    const forbiddenWorkspace = await getGreenfieldTalkToolsRoute({
+      auth: auth(),
+      workspaceId: otherMe.body.data.currentWorkspaceId,
+      talkId: otherTalk.body.data.talk.id,
+    });
+    expect(forbiddenWorkspace.statusCode).toBe(403);
+    expect(forbiddenWorkspace.body).toMatchObject({
+      ok: false,
+      error: { code: 'workspace_forbidden' },
+    });
+
+    const hiddenTalkGet = await getGreenfieldTalkToolsRoute({
+      auth: auth(),
+      workspaceId,
+      talkId: otherTalk.body.data.talk.id,
+    });
+    expect(hiddenTalkGet.statusCode).toBe(404);
+    expect(hiddenTalkGet.body).toMatchObject({
+      ok: false,
+      error: { code: 'talk_not_found' },
+    });
+
+    const hiddenTalkPatch = await updateGreenfieldTalkToolRoute({
+      auth: auth(),
+      workspaceId,
+      talkId: otherTalk.body.data.talk.id,
+      body: { family: 'web', enabled: true },
+    });
+    expect(hiddenTalkPatch.statusCode).toBe(404);
+    expect(hiddenTalkPatch.body).toMatchObject({
+      ok: false,
+      error: { code: 'talk_not_found' },
+    });
   });
 
   it('serves the legacy talk policy facade from the greenfield roster', async () => {

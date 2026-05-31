@@ -75,6 +75,12 @@ function mockResolvedExecution(content: string): {
     agent: { id: string; system_prompt: string | null; model_id: string };
     context: { systemPrompt: string };
     userMessage: string;
+    effectiveTools: Array<{
+      toolFamily: string;
+      enabled: boolean;
+      runtimeTools: string[];
+      requiresApproval: boolean;
+    }>;
     credentialScope:
       | { principalUserId?: string | null; workspaceId?: string | null }
       | null
@@ -94,6 +100,7 @@ function mockResolvedExecution(content: string): {
           systemPrompt: context?.systemPrompt ?? '',
         },
         userMessage: typeof userMessage === 'string' ? userMessage : '',
+        effectiveTools: options.effectiveTools ?? [],
         credentialScope: options.credentialScope,
       });
       options.emit?.({
@@ -204,6 +211,178 @@ describe('GreenfieldTalkExecutor queue integration', () => {
       tokens_out: 7,
       message_body: 'Greenfield answer',
     });
+  });
+
+  it('freezes talk_tools into the run snapshot and passes them to execution', async () => {
+    const { workspaceId, talkId, agentIds } = await createTalkFixture();
+    const db = getDbPg();
+    await db`
+      insert into public.talk_tools (workspace_id, talk_id, tool_id, enabled)
+      values
+        (${workspaceId}::uuid, ${talkId}::uuid, 'web-search', true),
+        (${workspaceId}::uuid, ${talkId}::uuid, 'web-fetch', false),
+        (${workspaceId}::uuid, ${talkId}::uuid, 'news-monitor', false),
+        (${workspaceId}::uuid, ${talkId}::uuid, 'linear', true),
+        (${workspaceId}::uuid, ${talkId}::uuid, 'gdrive-read', false)
+    `;
+    const permissionTable = await db<{ exists: boolean }[]>`
+      select to_regclass('public.user_tool_permissions') is not null as exists
+    `;
+    const hasPermissionTable = permissionTable[0]?.exists === true;
+    if (hasPermissionTable) {
+      await db`
+        insert into public.user_tool_permissions (
+          user_id, tool_id, allowed, requires_approval
+        )
+        values (${USER_ID}::uuid, 'web_search', true, true)
+        on conflict (user_id, tool_id) do update set
+          allowed = excluded.allowed,
+          requires_approval = excluded.requires_approval,
+          updated_at = now()
+      `;
+    }
+
+    const enqueued = await enqueueGreenfieldChatTurn({
+      workspaceId,
+      talkId,
+      userId: USER_ID,
+      content: 'Use web context.',
+      targetAgentIds: agentIds,
+    });
+    if (!enqueued.ok) throw new Error(`enqueue failed: ${enqueued.reason}`);
+
+    await db`
+      update public.talk_tools
+      set enabled = false
+      where workspace_id = ${workspaceId}::uuid
+        and talk_id = ${talkId}::uuid
+        and tool_id in ('web-search', 'web-fetch', 'news-monitor')
+    `;
+    if (hasPermissionTable) {
+      await db`
+        update public.user_tool_permissions
+        set allowed = false, requires_approval = false, updated_at = now()
+        where user_id = ${USER_ID}::uuid
+          and tool_id = 'web_search'
+      `;
+    }
+
+    const { calls } = mockResolvedExecution('Tool-gated answer');
+    await processTalkRunMessage({
+      runId: enqueued.runs[0]!.id,
+      dispatch: async () => {},
+      cancelPollIntervalMs: 10_000,
+    });
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.effectiveTools).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          toolFamily: 'web',
+          enabled: true,
+          runtimeTools: ['web_search'],
+          requiresApproval: hasPermissionTable,
+        }),
+        expect.objectContaining({
+          toolFamily: 'google_read',
+          enabled: false,
+        }),
+        expect.objectContaining({
+          toolFamily: 'connectors',
+          enabled: true,
+          runtimeTools: [],
+        }),
+      ]),
+    );
+
+    const snapshots = await db<
+      Array<{
+        tool_manifest_json: {
+          active?: Record<string, boolean>;
+          effectiveTools?: Array<{
+            toolFamily: string;
+            enabled: boolean;
+            requiresApproval: boolean;
+          }>;
+        } | null;
+      }>
+    >`
+      select rps.tool_manifest_json
+      from public.runs r
+      join public.run_prompt_snapshots rps
+        on rps.workspace_id = r.workspace_id
+       and rps.id = r.prompt_snapshot_id
+      where r.id = ${enqueued.runs[0]!.id}::uuid
+    `;
+    expect(snapshots[0]?.tool_manifest_json?.active).toMatchObject({
+      web: true,
+      google_read: false,
+    });
+    expect(snapshots[0]?.tool_manifest_json?.effectiveTools).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          toolFamily: 'web',
+          enabled: true,
+          runtimeTools: ['web_search'],
+          requiresApproval: hasPermissionTable,
+        }),
+        expect.objectContaining({
+          toolFamily: 'connectors',
+          enabled: true,
+          runtimeTools: [],
+        }),
+      ]),
+    );
+  });
+
+  it('does not over-grant tools when only the family-level active manifest is present', async () => {
+    const { workspaceId, talkId, agentIds } = await createTalkFixture();
+    const db = getDbPg();
+    await db`
+      insert into public.talk_tools (workspace_id, talk_id, tool_id, enabled)
+      values
+        (${workspaceId}::uuid, ${talkId}::uuid, 'web-search', true),
+        (${workspaceId}::uuid, ${talkId}::uuid, 'web-fetch', false),
+        (${workspaceId}::uuid, ${talkId}::uuid, 'news-monitor', false)
+    `;
+
+    const enqueued = await enqueueGreenfieldChatTurn({
+      workspaceId,
+      talkId,
+      userId: USER_ID,
+      content: 'Use only web search.',
+      targetAgentIds: agentIds,
+    });
+    if (!enqueued.ok) throw new Error(`enqueue failed: ${enqueued.reason}`);
+
+    await db`
+      update public.run_prompt_snapshots rps
+      set tool_manifest_json = jsonb_build_object(
+        'active', jsonb_build_object('web', true)
+      )
+      from public.runs r
+      where r.workspace_id = rps.workspace_id
+        and r.prompt_snapshot_id = rps.id
+        and r.id = ${enqueued.runs[0]!.id}::uuid
+    `;
+
+    const { calls } = mockResolvedExecution('Fallback tool-gated answer');
+    await processTalkRunMessage({
+      runId: enqueued.runs[0]!.id,
+      dispatch: async () => {},
+      cancelPollIntervalMs: 10_000,
+    });
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.effectiveTools).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          toolFamily: 'web',
+          enabled: true,
+          runtimeTools: ['web_search'],
+        }),
+      ]),
+    );
   });
 
   it('injects prior ordered outputs before running a downstream synthesis step', async () => {

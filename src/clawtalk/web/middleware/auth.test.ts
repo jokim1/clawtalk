@@ -172,7 +172,7 @@ describe('authenticateRequestPg — Worker mode', () => {
     }
     expect(result.auth.userId).toBe('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa');
     expect(result.auth.role).toBe('owner');
-    expect(result.auth.authType).toBe('bearer');
+    expect(result.auth.authType).toBe('cookie');
   });
 
   it('returns unauthorized.missing when eb_at cookie is absent', async () => {
@@ -217,6 +217,7 @@ describe('authenticateRequestPg — Worker mode', () => {
       throw new Error(`expected authenticated, got ${result.kind}`);
     }
     expect(result.auth.userId).toBe('bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb');
+    expect(result.auth.authType).toBe('bearer');
   });
 
   it('Authorization: Bearer wins over a stale cookie', async () => {
@@ -237,6 +238,7 @@ describe('authenticateRequestPg — Worker mode', () => {
       throw new Error(`expected authenticated, got ${result.kind}`);
     }
     expect(result.auth.userId).toBe('cccccccc-cccc-cccc-cccc-cccccccccccc');
+    expect(result.auth.authType).toBe('bearer');
   });
 
   it('ignores Authorization headers that are not Bearer', async () => {

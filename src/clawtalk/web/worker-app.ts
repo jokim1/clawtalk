@@ -27,7 +27,7 @@
 //                                     fallback config, main agent,
 //                                     effective tools)
 //   /api/v1/talks[/...]             — greenfield-api.ts for the
-//                                     greenfield shell/detail/chat/policy
+//                                     greenfield shell/detail/chat/policy/tools
 //                                     surface; legacy route modules only for
 //                                     not-yet-cut-over collisions
 //   /api/v1/talk-folders[/...]      — talks.ts (folder CRUD)
@@ -213,7 +213,6 @@ import {
   getTalkRunContextRoute,
   reorderTalkSidebarRoute,
 } from './routes/talks.js';
-import { getTalkToolsRoute, updateTalkToolRoute } from './routes/talk-tools.js';
 import {
   getEffectiveToolsRoute,
   listUserToolPermissionsRoute,
@@ -1057,7 +1056,7 @@ function buildApp(): Hono<{ Variables: Variables }> {
     return jsonResponse(result);
   });
 
-  // ── talks.ts: legacy sidebar reorder + tool gates ────────────
+  // ── talks.ts: legacy sidebar reorder ─────────────────────────
   app.post('/api/v1/talks/sidebar/reorder', async (c) => {
     const auth = c.get('auth');
     const rl = checkRateLimit({ userId: auth.userId, bucket: 'write' });
@@ -1139,34 +1138,6 @@ function buildApp(): Hono<{ Variables: Variables }> {
       itemId: payload.data.itemId,
       destinationFolderId: payload.data.destinationFolderId,
       destinationIndex: payload.data.destinationIndex,
-    });
-    return jsonResponse(result);
-  });
-
-  app.get('/api/v1/talks/:talkId/tools', async (c) => {
-    const auth = c.get('auth');
-    const rl = checkRateLimit({ userId: auth.userId, bucket: 'read' });
-    if (!rl.allowed) return rateLimitedResponse(c, rl);
-    const talkId = decodeIdParam(c, 'talkId');
-    if (!talkId.ok) return talkId.response;
-    const result = await getTalkToolsRoute({ auth, talkId: talkId.value });
-    return jsonResponse(result);
-  });
-
-  app.patch('/api/v1/talks/:talkId/tools', async (c) => {
-    const auth = c.get('auth');
-    const rl = checkRateLimit({ userId: auth.userId, bucket: 'write' });
-    if (!rl.allowed) return rateLimitedResponse(c, rl);
-    const csrfFail = checkCsrf(c, auth);
-    if (csrfFail) return csrfFail;
-    const talkId = decodeIdParam(c, 'talkId');
-    if (!talkId.ok) return talkId.response;
-    const payload = await readJsonBody(c);
-    if (!payload.ok) return invalidJsonResponse(c, payload.error);
-    const result = await updateTalkToolRoute({
-      auth,
-      talkId: talkId.value,
-      body: payload.data,
     });
     return jsonResponse(result);
   });

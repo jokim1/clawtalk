@@ -70,10 +70,90 @@ export const TOOL_FAMILY_MAP: Record<string, string[]> = {
 // so they're trivially restorable when the container story returns.
 export const HEAVY_FAMILIES = new Set(['shell', 'filesystem', 'browser']);
 
+export const TALK_TOOL_IDS_BY_FAMILY: Record<string, string[]> = {
+  web: ['web-search', 'web-fetch', 'news-monitor'],
+  connectors: ['linear', 'github-read', 'notion-read'],
+  google_read: ['gdrive-read'],
+  google_write: ['gdrive-write'],
+  gmail_read: ['gmail-read'],
+  gmail_send: ['gmail-send'],
+  messaging: ['messaging'],
+};
+
+export const TALK_RUNTIME_TOOLS_BY_TOOL_ID: Record<string, string[]> = {
+  'web-search': ['web_search'],
+  'web-fetch': ['web_fetch'],
+  'news-monitor': [],
+  linear: [],
+  'github-read': [],
+  'notion-read': [],
+  'gdrive-read': TOOL_FAMILY_MAP.google_read,
+  'gdrive-write': TOOL_FAMILY_MAP.google_write,
+  'gmail-read': TOOL_FAMILY_MAP.gmail_read,
+  'gmail-send': TOOL_FAMILY_MAP.gmail_send,
+  messaging: TOOL_FAMILY_MAP.messaging,
+};
+
 // The families that appear on the Talk tool bar (light only), in display order.
-export const TALK_TOOL_FAMILIES = Object.keys(TOOL_FAMILY_MAP).filter(
-  (f) => !HEAVY_FAMILIES.has(f),
-);
+export const TALK_TOOL_FAMILIES = Object.keys(TALK_TOOL_IDS_BY_FAMILY);
+assertTalkToolFamilyParity();
+
+function assertTalkToolFamilyParity(): void {
+  const runtimeFamilies = Object.keys(TOOL_FAMILY_MAP).filter(
+    (family) => !HEAVY_FAMILIES.has(family),
+  );
+  const storageFamilies = TALK_TOOL_FAMILIES;
+  const runtimeOnly = runtimeFamilies.filter(
+    (family) => !storageFamilies.includes(family),
+  );
+  const storageOnly = storageFamilies.filter(
+    (family) => !runtimeFamilies.includes(family),
+  );
+  const missingRuntimeMappings = Object.values(TALK_TOOL_IDS_BY_FAMILY)
+    .flat()
+    .filter((toolId) => !(toolId in TALK_RUNTIME_TOOLS_BY_TOOL_ID));
+  if (
+    runtimeOnly.length > 0 ||
+    storageOnly.length > 0 ||
+    missingRuntimeMappings.length > 0
+  ) {
+    throw new Error(
+      [
+        'Talk tool family maps are out of sync.',
+        runtimeOnly.length > 0
+          ? `Missing from TALK_TOOL_IDS_BY_FAMILY: ${runtimeOnly.join(', ')}.`
+          : '',
+        storageOnly.length > 0
+          ? `Missing from TOOL_FAMILY_MAP: ${storageOnly.join(', ')}.`
+          : '',
+        missingRuntimeMappings.length > 0
+          ? `Missing from TALK_RUNTIME_TOOLS_BY_TOOL_ID: ${missingRuntimeMappings.join(', ')}.`
+          : '',
+      ]
+        .filter(Boolean)
+        .join(' '),
+    );
+  }
+}
+
+type TalkToolStateRow = { tool_id: string; enabled: boolean };
+
+export function normalizeTalkToolFamiliesFromRows(
+  rows: TalkToolStateRow[],
+): Record<string, boolean> {
+  const enabledByToolId = new Map(
+    rows.map((row) => [row.tool_id, row.enabled]),
+  );
+  const active: Record<string, boolean> = {};
+  for (const family of TALK_TOOL_FAMILIES) {
+    const toolIds = TALK_TOOL_IDS_BY_FAMILY[family] ?? [];
+    if (!toolIds.some((toolId) => enabledByToolId.has(toolId))) continue;
+    active[family] = toolIds.some(
+      (toolId) => enabledByToolId.get(toolId) === true,
+    );
+  }
+  return active;
+}
 
 // ---------------------------------------------------------------------------
 // Record + snapshot types
@@ -504,9 +584,24 @@ export async function getUserToolPermission(
 
 export async function listUserToolPermissions(): Promise<UserToolPermission[]> {
   const db = getDbPg();
+  if (!(await hasUserToolPermissionsTable(db))) return [];
   const rows = await db<UserToolPermissionRecord[]>`
     select user_id, tool_id, allowed, requires_approval, updated_at
     from public.user_tool_permissions
+    order by tool_id asc
+  `;
+  return rows.map(toUserToolPermission);
+}
+
+export async function listUserToolPermissionsForUser(
+  userId: string,
+): Promise<UserToolPermission[]> {
+  const db = getDbPg();
+  if (!(await hasUserToolPermissionsTable(db))) return [];
+  const rows = await db<UserToolPermissionRecord[]>`
+    select user_id, tool_id, allowed, requires_approval, updated_at
+    from public.user_tool_permissions
+    where user_id = ${userId}::uuid
     order by tool_id asc
   `;
   return rows.map(toUserToolPermission);
@@ -543,6 +638,117 @@ export interface EffectiveToolAccess {
   requiresApproval: boolean;
 }
 
+export function buildEffectiveToolsFromActiveFamilies(
+  activeFamilies: Record<string, boolean> | null,
+  userPermissions: UserToolPermission[] = [],
+): EffectiveToolAccess[] {
+  const userPermissionMap = buildUserPermissionMap(userPermissions);
+  const result: EffectiveToolAccess[] = [];
+  for (const [family, tools] of Object.entries(TOOL_FAMILY_MAP)) {
+    const runtimeTools = tools.length > 0 ? [...tools] : [];
+
+    // Talk-active only. When activeFamilies is null the call is settings-side
+    // (no Talk context) and light families collapse to the user-permission
+    // gate below.
+    const talkEnabled =
+      activeFamilies === null ? true : activeFamilies[family] === true;
+    result.push(
+      buildEffectiveToolAccess({
+        family,
+        runtimeTools,
+        talkEnabled,
+        userPermissionMap,
+      }),
+    );
+  }
+  return result;
+}
+
+export function buildEffectiveToolsFromTalkToolRows(
+  rows: TalkToolStateRow[],
+  userPermissions: UserToolPermission[] = [],
+): EffectiveToolAccess[] {
+  const userPermissionMap = buildUserPermissionMap(userPermissions);
+  const enabledStorageToolIds = new Set(
+    rows.filter((row) => row.enabled).map((row) => row.tool_id),
+  );
+  const result: EffectiveToolAccess[] = [];
+
+  for (const [family, familyRuntimeTools] of Object.entries(TOOL_FAMILY_MAP)) {
+    const canonicalToolIds = TALK_TOOL_IDS_BY_FAMILY[family];
+    let runtimeTools = familyRuntimeTools.length > 0 ? familyRuntimeTools : [];
+    let talkEnabled = false;
+
+    if (canonicalToolIds) {
+      const enabledCanonicalToolIds = canonicalToolIds.filter((toolId) =>
+        enabledStorageToolIds.has(toolId),
+      );
+      const enabledRuntimeTools = new Set<string>();
+      for (const storageToolId of enabledCanonicalToolIds) {
+        for (const runtimeTool of TALK_RUNTIME_TOOLS_BY_TOOL_ID[
+          storageToolId
+        ] ?? []) {
+          enabledRuntimeTools.add(runtimeTool);
+        }
+      }
+      runtimeTools = familyRuntimeTools.filter((runtimeTool) =>
+        enabledRuntimeTools.has(runtimeTool),
+      );
+      talkEnabled =
+        runtimeTools.length > 0 ||
+        (familyRuntimeTools.length === 0 && enabledCanonicalToolIds.length > 0);
+    }
+
+    result.push(
+      buildEffectiveToolAccess({
+        family,
+        runtimeTools,
+        talkEnabled,
+        userPermissionMap,
+      }),
+    );
+  }
+  return result;
+}
+
+function buildUserPermissionMap(
+  userPermissions: UserToolPermission[],
+): Map<string, UserToolPermission> {
+  return new Map(
+    userPermissions.map((permission) => [permission.toolId, permission]),
+  );
+}
+
+function buildEffectiveToolAccess(input: {
+  family: string;
+  runtimeTools: string[];
+  talkEnabled: boolean;
+  userPermissionMap: Map<string, UserToolPermission>;
+}): EffectiveToolAccess {
+  // Heavy families (shell/filesystem/browser) need the removed Claude
+  // container; they are never enabled. Light families follow the Talk set.
+  let enabled = !HEAVY_FAMILIES.has(input.family) && input.talkEnabled;
+  let requiresApproval = false;
+  if (enabled && input.runtimeTools.length > 0) {
+    for (const tool of input.runtimeTools) {
+      const userPerm = input.userPermissionMap.get(tool);
+      if (userPerm && !userPerm.allowed) {
+        enabled = false;
+        break;
+      }
+      if (userPerm && userPerm.requiresApproval) {
+        requiresApproval = true;
+      }
+    }
+  }
+  return {
+    toolFamily: input.family,
+    runtimeTools: [...input.runtimeTools],
+    enabled,
+    requiresApproval,
+  };
+}
+
 /**
  * Compute effective tools for an agent given the *caller's* permissions.
  * Inside withUserContext the auth.uid() bound to the tx is implicitly the
@@ -550,7 +756,8 @@ export interface EffectiveToolAccess {
  *
  * Tools are a property of the Talk only — there is no per-agent tool list.
  * `opts.talkId` enables a light family iff the Talk currently has it toggled
- * on. Live read from `talks.active_tool_families_json`. Pass
+ * on. Live read from greenfield `talk_tools`, with a legacy JSON fallback for
+ * archived callers that still run on the old schema. Pass
  * `opts.activeFamilies` instead to use an explicit snapshot (e.g. queue
  * consumer reading from the enqueued message — keeps a multi-agent response
  * group on a frozen tool set even if the user toggles mid-stream). Pass
@@ -560,9 +767,10 @@ export interface EffectiveToolAccess {
  * Heavy families (shell/filesystem/browser) need the removed Claude container
  * and are NEVER enabled here, regardless of the Talk set.
  *
- * Connectors note: the `connectors` family has no runtime tool ids, so the
- * user-permission per-tool loop is a no-op for it. Connector access is
- * effectively gated only on talk-active (no per-tool user check).
+ * Connectors note: the `connectors` family currently has no static runtime
+ * tool ids. Greenfield `talk_tools` rows therefore preserve family enablement
+ * for dynamic `connector_*` tools, while other families expose only the
+ * runtime tool names mapped from enabled canonical tool rows.
  *
  * The ALWAYS_ALLOWED bypass (agent-router.ts:137) layers ABOVE this result —
  * tools in that set are NEVER filtered out by this function, since this
@@ -580,43 +788,20 @@ export async function getEffectiveToolsForAgent(
   if (!agent) return [];
 
   const userPermissions = await listUserToolPermissions();
-  const userPermissionMap = new Map(userPermissions.map((p) => [p.toolId, p]));
+  if (opts?.activeFamilies === undefined && opts?.talkId) {
+    const db = getDbPg();
+    if (await hasGreenfieldTalkToolsTable(db)) {
+      const rows = await db<{ tool_id: string; enabled: boolean }[]>`
+        select tool_id, enabled
+        from public.talk_tools
+        where talk_id = ${opts.talkId}::uuid
+      `;
+      return buildEffectiveToolsFromTalkToolRows(rows, userPermissions);
+    }
+  }
 
   const talkActive = await resolveActiveFamilies(opts);
-
-  const result: EffectiveToolAccess[] = [];
-  for (const [family, tools] of Object.entries(TOOL_FAMILY_MAP)) {
-    const runtimeTools = tools.length > 0 ? [...tools] : [];
-
-    // Talk-active only. When talkActive is null the call is settings-side
-    // (no Talk context) and light families collapse to the user-permission
-    // gate below.
-    const talkEnabled =
-      talkActive === null ? true : talkActive[family] === true;
-    // Heavy families (shell/filesystem/browser) need the removed Claude
-    // container; they are never enabled. Light families follow the Talk set.
-    let enabled = !HEAVY_FAMILIES.has(family) && talkEnabled;
-    let requiresApproval = false;
-    if (enabled && runtimeTools.length > 0) {
-      for (const tool of runtimeTools) {
-        const userPerm = userPermissionMap.get(tool);
-        if (userPerm && !userPerm.allowed) {
-          enabled = false;
-          break;
-        }
-        if (userPerm && userPerm.requiresApproval) {
-          requiresApproval = true;
-        }
-      }
-    }
-    result.push({
-      toolFamily: family,
-      runtimeTools,
-      enabled,
-      requiresApproval,
-    });
-  }
-  return result;
+  return buildEffectiveToolsFromActiveFamilies(talkActive, userPermissions);
 }
 
 async function resolveActiveFamilies(opts?: {
@@ -627,6 +812,7 @@ async function resolveActiveFamilies(opts?: {
   if (opts?.activeFamilies !== undefined) return opts.activeFamilies;
   if (!opts?.talkId) return null;
   const db = getDbPg();
+
   const rows = await db<
     { active_tool_families_json: Record<string, boolean> }[]
   >`
@@ -639,6 +825,29 @@ async function resolveActiveFamilies(opts?: {
   const raw = rows[0].active_tool_families_json;
   if (!raw || typeof raw !== 'object') return {};
   return raw;
+}
+
+let greenfieldTalkToolsTableExists: boolean | null = null;
+let userToolPermissionsTableExists: boolean | null = null;
+
+async function hasUserToolPermissionsTable(db: Sql): Promise<boolean> {
+  if (userToolPermissionsTableExists === true) return true;
+  const rows = await db<{ exists: boolean }[]>`
+    select to_regclass('public.user_tool_permissions') is not null as exists
+  `;
+  const exists = rows[0]?.exists === true;
+  if (exists) userToolPermissionsTableExists = true;
+  return exists;
+}
+
+async function hasGreenfieldTalkToolsTable(db: Sql): Promise<boolean> {
+  if (greenfieldTalkToolsTableExists === true) return true;
+  const rows = await db<{ exists: boolean }[]>`
+    select to_regclass('public.talk_tools') is not null as exists
+  `;
+  const exists = rows[0]?.exists === true;
+  if (exists) greenfieldTalkToolsTableExists = true;
+  return exists;
 }
 
 // ---------------------------------------------------------------------------
