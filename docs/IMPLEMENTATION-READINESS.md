@@ -1,4 +1,4 @@
-> **Status:** current implementation audit · **Date:** 2026-05-30
+> **Status:** live implementation bridge · **Date:** 2026-05-31
 > Orientation: [REFACTOR-OVERVIEW.md](./REFACTOR-OVERVIEW.md) · sequence: [05-build-plan.md](./05-build-plan.md) · schema: [11-data-model.md](./11-data-model.md)
 
 # ClawTalk Implementation Readiness
@@ -7,7 +7,7 @@ This is the live bridge between the greenfield docs and the codebase as it exist
 
 ## Verdict
 
-**Implementation started.** Phase 1 foundation is now active on `codex/clawtalk-greenfield-cutover`: the legacy Supabase migration stream is archived, the fresh baseline applies from an empty database, role templates are seeded, first-signin workspace bootstrap exists, and the first §11 invariant tests pass. The correct path remains a **greenfield application cutover on the existing Cloudflare/Supabase runtime**, not a dual-path incremental migration or a long chain of compatibility migrations.
+**Implementation is underway.** The cutover branch has committed the Phase 1 foundation plus the first backend greenfield runtime stack: workspace/talk route modules (`9f72e76`, `ff9b6d8`, `cac02ff`), queue consumer (`55c3d7e`), executor (`3863628`), scheduler sweeps (`c53df5a`), and the run-state hardening slice (`2363ee1`). The latest hardening slice keeps status updates, outbox rows, and notify delivery ownership aligned across queue, scheduler, DLQ, and in-process dispatch paths. The correct path remains a **greenfield application cutover on the existing Cloudflare/Supabase runtime**, not a dual-path incremental migration or a long chain of compatibility migrations.
 
 That means:
 
@@ -24,34 +24,35 @@ Reviewed:
 - Current source: `src/worker.ts`, `src/db.ts`, `src/clawtalk/web/worker-app.ts`, `src/clawtalk/web/routes/*`, `src/clawtalk/db/*`, `src/clawtalk/talks/*`, `src/clawtalk/agents/*`, `src/clawtalk/identity/*`, `src/clawtalk/llm/*`, `webapp/src/*`, `prototype/*`, `shared/data.jsx`.
 - Current migration stream: the active implementation branch has `supabase/migrations/0001_clawtalk_greenfield.sql`; historical `0001` through `0038` plus rollback baggage live under `docs/archive/legacy-supabase-migrations/`.
 
-Static shape observed on 2026-05-30:
+Static shape observed on 2026-05-31:
 
-| Area | Finding |
-|---|---|
-| Backend route surface | `src/clawtalk/web/worker-app.ts` is 2,695 LOC and mounts the legacy product API directly. This should be decomposed around greenfield resources during rewrite. |
-| Backend data layer | `src/clawtalk/db/accessors.ts` is 3,351 LOC and still centralizes legacy Talk/thread/message/run behavior. It is a rewrite boundary, not a file to keep extending. |
-| Executor/context | `new-executor.ts` is 2,869 LOC and `context-loader.ts` is 2,680 LOC. Salvage the proven streaming/tool/context ideas, but rewrite the DB contract and split responsibilities. |
-| Frontend Talk page | `webapp/src/pages/TalkDetailPage.tsx` is 10,815 LOC. This is the largest snappiness and maintainability risk; rewrite as feature modules with server-state boundaries. |
-| Frontend API client | `webapp/src/lib/api.ts` is 4,502 LOC and still exposes `Content`, `Thread`, `registered-agent`, and connector-era types. Replace with resource-specific clients generated from greenfield contracts or kept as small typed modules. |
-| Legacy schema references | 51 source files still reference `talk_threads`, `talk_runs`, `talk_messages`, `registered_agents`, `contents`, `content_edits`, or `talk_jobs`. |
-| Greenfield references | Greenfield concepts exist mainly in docs and some partial code (`workspace_*`, connector refactor, page-rasterization additions), not as a coherent runtime. |
-| Test corpus | 97 test files across backend + webapp. Many backend tests assert legacy schema behavior and should be rewritten, not repaired one-by-one. |
+| Area                     | Finding                                                                                                                                                                                                                             |
+| ------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Backend route surface    | `src/clawtalk/web/worker-app.ts` is 2,856 LOC and now wires greenfield route modules inline alongside legacy routes. The next slice should move greenfield mount glue out and retire covered legacy collisions.                     |
+| Backend data layer       | `src/clawtalk/db/accessors.ts` is 3,363 LOC and still centralizes legacy Talk/thread/message/run behavior. It is a rewrite boundary, not a file to keep extending.                                                                  |
+| Executor/context         | `new-executor.ts` is 2,869 LOC and `context-loader.ts` is 2,680 LOC. Salvage the proven streaming/tool/context ideas, but rewrite the DB contract and split responsibilities.                                                       |
+| Frontend Talk page       | `webapp/src/pages/TalkDetailPage.tsx` is 10,815 LOC. This is the largest snappiness and maintainability risk; rewrite as feature modules with server-state boundaries.                                                              |
+| Frontend API client      | `webapp/src/lib/api.ts` is 4,502 LOC and still exposes `Content`, `Thread`, `registered-agent`, and connector-era types. Replace with resource-specific clients generated from greenfield contracts or kept as small typed modules. |
+| Legacy schema references | 51 source files still reference `talk_threads`, `talk_runs`, `talk_messages`, `registered_agents`, `contents`, `content_edits`, or `talk_jobs`.                                                                                     |
+| Greenfield runtime       | Core/detail/chat routes, chat enqueue, queue consumer, executor, scheduler sweeps, outbox notify timing, and DLQ handling now target the greenfield tables. API shell cleanup and frontend integration remain.                      |
+| Test corpus              | 97 test files across backend + webapp. Many backend tests assert legacy schema behavior and should be rewritten, not repaired one-by-one.                                                                                           |
 
 ## Verification Run
 
 Commands run from `/Users/josephkim/.codex/worktrees/381b/clawtalk`:
 
-| Command | Result | Notes |
-|---|---|---|
-| `npm ci` | Pass | Local shell Node is `v22.22.1`, package requires `>=24 <25`; install completed with engine warnings. |
-| `npm --prefix webapp ci` | Pass | Same Node engine warning. |
-| `npm run typecheck` | Pass | After dependencies installed. |
-| `npm --prefix webapp run typecheck` | Pass | After dependencies installed. |
-| `npm --prefix webapp run test` | Pass | 30 files, 299 passed, 1 skipped. React Router v7 warnings and Tiptap duplicate-link warnings remain non-blocking. |
-| bundled Node 24 `scripts/run-vitest.mjs run` | Fails as expected | 41 passed / 26 failed files; 770 passed / 220 failed / 127 skipped tests. Dominant failure: tests and source expect legacy columns/tables (`talks.owner_id`, `users.role`, `registered_agents`) that are absent in the current DB shape. |
-| `npm run db:reset` | Pass | Applies the single active baseline `0001_clawtalk_greenfield.sql` from zero. |
-| bundled Node 24 `npm run typecheck` | Pass | After Phase 1 bootstrap/source edits. |
-| bundled Node 24 `scripts/run-vitest.mjs run src/clawtalk/workspaces/bootstrap.test.ts src/clawtalk/schema/greenfield-schema.test.ts` | Pass | 2 files, 5 tests. Covers workspace bootstrap, role/team seed idempotency, legacy table absence, last-tab guard, run trigger shape, and home inbox dedup. |
+| Command                                                                                                                              | Result            | Notes                                                                                                                                                                                                                                    |
+| ------------------------------------------------------------------------------------------------------------------------------------ | ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `npm ci`                                                                                                                             | Pass              | Local shell Node is `v22.22.1`, package requires `>=24 <25`; install completed with engine warnings.                                                                                                                                     |
+| `npm --prefix webapp ci`                                                                                                             | Pass              | Same Node engine warning.                                                                                                                                                                                                                |
+| `npm run typecheck`                                                                                                                  | Pass              | After dependencies installed.                                                                                                                                                                                                            |
+| `npm --prefix webapp run typecheck`                                                                                                  | Pass              | After dependencies installed.                                                                                                                                                                                                            |
+| `npm --prefix webapp run test`                                                                                                       | Pass              | 30 files, 299 passed, 1 skipped. React Router v7 warnings and Tiptap duplicate-link warnings remain non-blocking.                                                                                                                        |
+| bundled Node 24 `scripts/run-vitest.mjs run`                                                                                         | Fails as expected | 41 passed / 26 failed files; 770 passed / 220 failed / 127 skipped tests. Dominant failure: tests and source expect legacy columns/tables (`talks.owner_id`, `users.role`, `registered_agents`) that are absent in the current DB shape. |
+| `npm run db:reset`                                                                                                                   | Pass              | Applies the single active baseline `0001_clawtalk_greenfield.sql` from zero.                                                                                                                                                             |
+| bundled Node 24 `npm run typecheck`                                                                                                  | Pass              | After Phase 1 bootstrap/source edits.                                                                                                                                                                                                    |
+| bundled Node 24 `scripts/run-vitest.mjs run src/clawtalk/workspaces/bootstrap.test.ts src/clawtalk/schema/greenfield-schema.test.ts` | Pass              | 2 files, 5 tests. Covers workspace bootstrap, role/team seed idempotency, legacy table absence, last-tab guard, run trigger shape, and home inbox dedup.                                                                                 |
+| bundled Node 24 `scripts/run-vitest.mjs run ...greenfield slice tests...`                                                            | Pass              | 14 files, 107 tests after `2363ee1`. Covers atomic outbox rollback, notify timing, ordered/parallel state-machine behavior, scheduler sweeps, bootstrap idempotency, executor prompt semantics, and worker DLQ ack/retry behavior.       |
 
 The backend test failure is useful audit evidence: the code and tests are already straddling incompatible schema worlds. This confirms the docs' cutover warning and argues against a prolonged dual-path migration.
 
@@ -69,26 +70,29 @@ Rationale:
 
 Start with a refactor branch and proceed in this order:
 
-1. **Cutover foundation**
+1. **Cutover foundation** ✅ committed
    - Create a fresh Supabase baseline at `supabase/migrations/0001_clawtalk_greenfield.sql`.
    - Remove or archive the old `supabase/migrations/0001`-`0038` files from the active migration path. If using the same Supabase project, reset/recreate the database instead of preserving migration history.
    - Use `docs/canonical-greenfield-migration.sql` and `11-data-model.md` as source material, but normalize the active baseline into final-state DDL: create all final tables directly; no legacy `DROP`/`ALTER` compatibility sequence, no backfill.
    - Add the `agent_role_templates` seed and first-signin workspace bootstrap.
    - Add §11 verification tests first, including composite-FK, RLS, document-edit CAS, jobs invariants, and system-agent visibility.
 
-2. **Greenfield data access**
+2. **Greenfield data access** 🔄 partially committed
    - Create small accessors by resource: `workspaces`, `folders`, `talks`, `messages`, `runs`, `agents`, `documents`, `context`, `tools`, `connectors`, `jobs`, `home`, `forge`.
+   - Workspace/talk/chat/run accessors now exist for the first greenfield spine.
    - Remove reliance on the monolithic `db/accessors.ts` as call sites move.
    - Every user path enters through `withUserContext`; every service path is explicitly service-role.
 
-3. **API shell rewrite**
+3. **API shell rewrite** 🔄 active next
    - Replace `worker-app.ts` route mounting with resource route modules.
+   - Greenfield modules exist, but `worker-app.ts` still owns too much inline mounting and legacy/greenfield collision handling.
    - Keep public auth, health, content-image serving, and WebSocket upgrade patterns.
-   - Ship `/me`, workspace switching, folders/talks CRUD, and basic talk snapshot first.
+   - Finish `/me`, workspace switching, folders/talks CRUD, and basic talk snapshot coverage without legacy table dependencies.
 
-4. **Talk execution vertical slice**
+4. **Talk execution vertical slice** 🔄 partially underway
    - New `/chat` writes `messages`, freezes `talk_agent_snapshots`, creates `runs`, enqueues to `TALK_RUN_QUEUE`, and streams through `event_outbox`.
    - Queue consumer keeps the proven atomic-claim shape but targets `runs`.
+   - Committed hardening (`2363ee1`) already makes the run state machine safer: claim/complete/fail/DLQ transitions write outbox rows in the same transaction, notify fan-out happens post-commit, ordered/parallel sequencing is separated, and scheduler sweeps avoid promoting parallel siblings.
    - Executor reads prompt snapshots, `talk_tools`, connector authorization, and context through the new schema.
 
 5. **Frontend shell and Talk rewrite**
@@ -105,31 +109,30 @@ Start with a refactor branch and proceed in this order:
 
 The refactor is not only a schema cleanup. It should make ClawTalk feel faster:
 
-| Path | Target |
-|---|---|
-| App shell first render | Authenticated shell displays cached workspace + sidebar within 300 ms after bundle load. |
-| Talk open | Sidebar-to-Talk snapshot fetch under 250 ms local/staging p50, under 750 ms p95. |
-| Send message acknowledgment | `/chat` returns queued run IDs under 300 ms p50 before LLM work starts. |
-| First token | Preserve existing inline/queue optimization where possible; first streamed token under provider TTFT + 500 ms app overhead. |
-| Sidebar updates | WebSocket/outbox update visible within 250 ms after DB commit in local/staging. |
-| Document edit accept | Single pending edit accept under 300 ms p50, with CAS conflict reported cleanly. |
-| Frontend responsiveness | No single React component over 1,000 LOC in the rewritten greenfield UI; route-level bundles split for Home/Talk/Documents/Agents/Settings/Forge. |
+| Path                        | Target                                                                                                                                            |
+| --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| App shell first render      | Authenticated shell displays cached workspace + sidebar within 300 ms after bundle load.                                                          |
+| Talk open                   | Sidebar-to-Talk snapshot fetch under 250 ms local/staging p50, under 750 ms p95.                                                                  |
+| Send message acknowledgment | `/chat` returns queued run IDs under 300 ms p50 before LLM work starts.                                                                           |
+| First token                 | Preserve existing inline/queue optimization where possible; first streamed token under provider TTFT + 500 ms app overhead.                       |
+| Sidebar updates             | WebSocket/outbox update visible within 250 ms after DB commit in local/staging.                                                                   |
+| Document edit accept        | Single pending edit accept under 300 ms p50, with CAS conflict reported cleanly.                                                                  |
+| Frontend responsiveness     | No single React component over 1,000 LOC in the rewritten greenfield UI; route-level bundles split for Home/Talk/Documents/Agents/Settings/Forge. |
 
-## Cleanup Needed Before First Code PR
+## Cleanup Needed During Implementation
 
 These are documentation/project hygiene tasks, not product blockers:
 
-- Keep this file current as implementation starts.
+- Keep this file current after each committed slice.
 - Treat `SPEC-READINESS.md` and `DOC-AUDIT.md` as historical gap logs; live readiness is here.
 - Keep `docs/roadmap.md` focused on current implementation state.
 - Use the bundled Node 24 runtime or switch local shell to `.nvmrc` before backend tests.
 
 ## Next Ready Signal
 
-Phase 1 is ready to commit when:
+The next implementation slice should finish the greenfield API shell/resource boundary. It is ready to commit when:
 
-- The implementation branch exists.
-- The first PR scope stays limited to cutover foundation: fresh baseline schema, seed, bootstrap, and §11 verification tests.
-- `npm run db:reset`, backend typecheck, and the focused greenfield tests pass.
-
-As of this audit, those conditions are met except for branch creation and the first code PR. The docs are sufficient to begin.
+- `worker-app.ts` delegates the greenfield surfaces to small resource route modules instead of accumulating more logic inline.
+- `/me`, workspace resolution/switching, folders/talks CRUD, and basic talk snapshot contracts have explicit greenfield coverage and no accidental legacy table dependency.
+- Focused route/accessor tests cover auth/RLS behavior, workspace selection, and the happy/error paths for the new resource modules.
+- Node 24 typecheck, focused backend tests, gstack review, Karpathy diff review, and Claude review pass.
