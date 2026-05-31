@@ -252,12 +252,13 @@ describe('worker-app — chat enqueue mount (Queues port U2)', () => {
       undefined,
       envForWorker(),
     );
-    // Route is mounted: response is from enqueueTalkChat (404
-    // talk_not_found because the test DB has no fixture), not the
-    // 501 catch-all.
+    // Route is mounted and reaches the greenfield chat handler, not
+    // the 501 catch-all or a legacy-schema 500.
     expect(res.status).not.toBe(501);
+    expect(res.status).not.toBe(500);
     const body = (await res.json()) as { error?: { code?: string } };
     expect(body.error?.code).not.toBe('not_implemented_in_worker');
+    expect(body.error?.code).not.toBe('internal_error');
   });
 
   it('POST /api/v1/talks/:talkId/chat returns 401 without auth', async () => {
@@ -296,7 +297,9 @@ describe('worker-app — chat enqueue mount (Queues port U2)', () => {
       envForWorker(),
     );
     expect(res.status).not.toBe(501);
+    expect(res.status).not.toBe(500);
     const body = (await res.json()) as { error?: { code?: string } };
     expect(body.error?.code).not.toBe('not_implemented_in_worker');
+    expect(body.error?.code).not.toBe('internal_error');
   });
 });

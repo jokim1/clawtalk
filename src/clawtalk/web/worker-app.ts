@@ -55,10 +55,10 @@
 //                                         WebSocket forwarded to the
 //                                         UserEventHub DO)
 //   /api/v1/talks/:talkId/events    — events-upgrade.ts (talk-scope WS)
-//   /api/v1/talks/:talkId/chat      — talks.ts:enqueueTalkChat;
+//   /api/v1/talks/:talkId/chat      — greenfield-chat.ts;
 //                                         dispatches one queue
 //                                         message per run (U2).
-//   /api/v1/talks/:talkId/chat/cancel — talks.ts:cancelTalkChat;
+//   /api/v1/talks/:talkId/chat/cancel — greenfield-chat.ts;
 //                                         cooperative cancel via DB
 //                                         status flip — U3 consumer
 //                                         polls and bails.
@@ -218,6 +218,10 @@ import {
   searchGreenfieldMessagesRoute,
 } from './routes/greenfield-detail.js';
 import {
+  cancelGreenfieldChatRoute,
+  enqueueGreenfieldChatRoute,
+} from './routes/greenfield-chat.js';
+import {
   disconnectGoogleAccountRoute,
   expandScopesRoute,
   getGooglePickerTokenRoute,
@@ -246,8 +250,6 @@ import {
 } from '../talks/dispatch-in-process.js';
 import { dispatchRun } from '../talks/queue-producer.js';
 import {
-  cancelTalkChat,
-  enqueueTalkChat,
   getTalkPolicyRoute,
   getTalkRunContextRoute,
   reorderTalkSidebarRoute,
@@ -2503,9 +2505,9 @@ function buildApp(): Hono<{ Variables: Variables }> {
         400,
       );
     }
-    const idempotencyKey = c.req.header('idempotency-key') || null;
-    const result = await enqueueTalkChat({
+    const result = await enqueueGreenfieldChatRoute({
       talkId: c.req.param('talkId'),
+      workspaceId: requestedWorkspaceId(c),
       threadId:
         typeof parsed.data.threadId === 'string'
           ? parsed.data.threadId.trim() || null
@@ -2523,7 +2525,6 @@ function buildApp(): Hono<{ Variables: Variables }> {
             (entry): entry is string => typeof entry === 'string',
           )
         : null,
-      idempotencyKey,
     });
     if (result.statusCode === 202 && result.body.ok) {
       const runs = result.body.data.runs;
@@ -2562,8 +2563,9 @@ function buildApp(): Hono<{ Variables: Variables }> {
     // The queue consumer (U3) polls run.status during execution and
     // bails when it sees 'cancelled'. No in-process AbortController
     // wake needed — the cancelledRunning flag is discarded.
-    const result = await cancelTalkChat({
+    const result = await cancelGreenfieldChatRoute({
       talkId: c.req.param('talkId'),
+      workspaceId: requestedWorkspaceId(c),
       threadId:
         typeof parsed.data.threadId === 'string'
           ? parsed.data.threadId.trim() || null

@@ -1850,13 +1850,15 @@ export async function appendOutboxEvent(input: {
   // (to avoid JS number-precision loss on >2^53 values). Cast to int so
   // we get a JS number back. ClawTalk's outbox throughput is nowhere
   // close to int range; revisit if that changes.
-  const rows = await db<{ event_id: number }[]>`
+  await db`
     insert into public.event_outbox (topic, event_type, payload)
     values (${input.topic}, ${input.eventType},
             ${db.json(input.payload as never)})
-    returning event_id::int as event_id
   `;
-  return rows[0].event_id;
+  const rows = await db<{ event_id: number }[]>`
+    select currval('public.event_outbox_event_id_seq')::int as event_id
+  `;
+  return rows[0]!.event_id;
 }
 
 /**
