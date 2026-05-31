@@ -84,12 +84,39 @@ export interface GreenfieldDocumentEditRecord {
   proposed_by_agent_name: string | null;
   proposed_by_run_id: string | null;
   op: 'insert' | 'replace' | 'delete';
+  new_kind: string | null;
   new_text: string | null;
+  new_attrs_json: Record<string, unknown> | null;
   block_id: string | null;
+  after_block_id: string | null;
   created_at: string;
   base_block_version: number | null;
   base_list_version: number | null;
 }
+
+export type GreenfieldDocumentEditResolveResult =
+  | {
+      kind: 'ok';
+      document: GreenfieldDocumentRecord;
+      editIds: string[];
+      runId: string | null;
+    }
+  | { kind: 'not_found' }
+  | { kind: 'version_conflict'; currentVersion: number }
+  | { kind: 'anchor_missing'; anchorId: string }
+  | { kind: 'invalid_edit'; message: string };
+
+type GreenfieldDocumentBlockKind = GreenfieldDocumentBlockRecord['kind'];
+type GreenfieldDocumentEditRef = { id: string; tab_id: string };
+
+const BLOCK_KINDS = new Set<GreenfieldDocumentBlockKind>([
+  'h1',
+  'h2',
+  'p',
+  'li',
+  'meta',
+  'code',
+]);
 
 export async function listGreenfieldMessages(input: {
   workspaceId: string;
@@ -378,6 +405,7 @@ export async function replaceGreenfieldDocumentBlocks(input: {
   documentId: string;
   tabId: string;
   blocks: Array<{ kind: GreenfieldDocumentBlockRecord['kind']; text: string }>;
+  skipListVersionBump?: boolean;
 }): Promise<void> {
   const db = getDbPg();
   await db`
@@ -402,18 +430,59 @@ export async function replaceGreenfieldDocumentBlocks(input: {
     `;
   }
   await db`
-    update public.doc_tabs
-    set list_version = list_version + 1
-    where workspace_id = ${input.workspaceId}::uuid
-      and document_id = ${input.documentId}::uuid
-      and id = ${input.tabId}::uuid
-  `;
-  await db`
     update public.documents
     set last_edit_at = now()
     where workspace_id = ${input.workspaceId}::uuid
       and id = ${input.documentId}::uuid
   `;
+  if (input.skipListVersionBump !== true) {
+    await db`
+      update public.doc_tabs
+      set list_version = list_version + 1
+      where workspace_id = ${input.workspaceId}::uuid
+        and document_id = ${input.documentId}::uuid
+        and id = ${input.tabId}::uuid
+    `;
+  }
+}
+
+export async function bumpGreenfieldDocumentPatchVersion(input: {
+  workspaceId: string;
+  documentId: string;
+  tabId: string;
+  expectedListVersion: number;
+}): Promise<
+  | { kind: 'ok'; listVersion: number }
+  | { kind: 'version_conflict'; currentVersion: number }
+  | { kind: 'not_found' }
+> {
+  const db = getDbPg();
+  const bumpedRows = await db<{ list_version: number }[]>`
+    update public.doc_tabs
+    set list_version = list_version + 1
+    where workspace_id = ${input.workspaceId}::uuid
+      and document_id = ${input.documentId}::uuid
+      and id = ${input.tabId}::uuid
+      and list_version = ${input.expectedListVersion}
+    returning list_version
+  `;
+  const bumped = bumpedRows[0];
+  if (bumped) return { kind: 'ok', listVersion: bumped.list_version };
+
+  const currentRows = await db<{ list_version: number }[]>`
+    select list_version
+    from public.doc_tabs
+    where workspace_id = ${input.workspaceId}::uuid
+      and document_id = ${input.documentId}::uuid
+      and id = ${input.tabId}::uuid
+    limit 1
+  `;
+  const current = currentRows[0];
+  if (!current) return { kind: 'not_found' };
+  return {
+    kind: 'version_conflict',
+    currentVersion: current.list_version,
+  };
 }
 
 export async function updateGreenfieldDocumentTitle(input: {
@@ -444,8 +513,11 @@ export async function listPendingGreenfieldDocumentEdits(input: {
       a.name as proposed_by_agent_name,
       de.proposed_by_run_id,
       de.op,
+      de.new_kind,
       de.new_text,
+      de.new_attrs_json,
       de.block_id,
+      de.after_block_id,
       de.created_at,
       de.base_block_version,
       de.base_list_version
@@ -458,4 +530,715 @@ export async function listPendingGreenfieldDocumentEdits(input: {
       and de.status = 'pending'
     order by de.created_at asc, de.id asc
   `;
+}
+
+function normalizeBlockKind(
+  kind: string | null,
+): GreenfieldDocumentBlockKind | null {
+  if (!kind) return null;
+  return BLOCK_KINDS.has(kind as GreenfieldDocumentBlockKind)
+    ? (kind as GreenfieldDocumentBlockKind)
+    : null;
+}
+
+async function loadPendingGreenfieldDocumentEditForUpdate(input: {
+  workspaceId: string;
+  documentId: string;
+  editId: string;
+}): Promise<GreenfieldDocumentEditRecord | undefined> {
+  const db = getDbPg();
+  const rows = await db<GreenfieldDocumentEditRecord[]>`
+    select
+      de.id,
+      de.document_id,
+      de.tab_id,
+      de.proposed_by_agent_id,
+      a.name as proposed_by_agent_name,
+      de.proposed_by_run_id,
+      de.op,
+      de.new_kind,
+      de.new_text,
+      de.new_attrs_json,
+      de.block_id,
+      de.after_block_id,
+      de.created_at,
+      de.base_block_version,
+      de.base_list_version
+    from public.document_edits de
+    left join public.agents a
+      on a.workspace_id = de.workspace_id
+     and a.id = de.proposed_by_agent_id
+    where de.workspace_id = ${input.workspaceId}::uuid
+      and de.document_id = ${input.documentId}::uuid
+      and de.id = ${input.editId}::uuid
+      and de.status = 'pending'
+    for update of de
+  `;
+  return rows[0];
+}
+
+async function listPendingGreenfieldDocumentEditRefs(input: {
+  workspaceId: string;
+  documentId: string;
+  editIds: string[];
+}): Promise<GreenfieldDocumentEditRef[]> {
+  if (input.editIds.length === 0) return [];
+  const db = getDbPg();
+  return db<GreenfieldDocumentEditRef[]>`
+    select id, tab_id
+    from public.document_edits
+    where workspace_id = ${input.workspaceId}::uuid
+      and document_id = ${input.documentId}::uuid
+      and id in ${db(input.editIds)}
+      and status = 'pending'
+  `;
+}
+
+async function listPendingGreenfieldDocumentEditsByRun(input: {
+  workspaceId: string;
+  documentId: string;
+  runId: string;
+}): Promise<GreenfieldDocumentEditRecord[]> {
+  const db = getDbPg();
+  return db<GreenfieldDocumentEditRecord[]>`
+    select
+      de.id,
+      de.document_id,
+      de.tab_id,
+      de.proposed_by_agent_id,
+      a.name as proposed_by_agent_name,
+      de.proposed_by_run_id,
+      de.op,
+      de.new_kind,
+      de.new_text,
+      de.new_attrs_json,
+      de.block_id,
+      de.after_block_id,
+      de.created_at,
+      de.base_block_version,
+      de.base_list_version
+    from public.document_edits de
+    left join public.agents a
+      on a.workspace_id = de.workspace_id
+     and a.id = de.proposed_by_agent_id
+    where de.workspace_id = ${input.workspaceId}::uuid
+      and de.document_id = ${input.documentId}::uuid
+      and de.proposed_by_run_id = ${input.runId}::uuid
+      and de.status = 'pending'
+    order by de.created_at asc, de.id asc
+  `;
+}
+
+async function markDocumentEditSuperseded(input: {
+  workspaceId: string;
+  editId: string;
+}): Promise<void> {
+  const db = getDbPg();
+  await db`
+    update public.document_edits
+    set status = 'superseded',
+        resolved_at = now()
+    where workspace_id = ${input.workspaceId}::uuid
+      and id = ${input.editId}::uuid
+      and status = 'pending'
+  `;
+}
+
+async function touchDocumentAfterEdit(input: {
+  workspaceId: string;
+  documentId: string;
+}): Promise<void> {
+  const db = getDbPg();
+  await db`
+    update public.documents
+    set last_edit_at = now()
+    where workspace_id = ${input.workspaceId}::uuid
+      and id = ${input.documentId}::uuid
+  `;
+}
+
+async function validateGreenfieldDocumentEdit(
+  edit: GreenfieldDocumentEditRecord,
+  workspaceId: string,
+): Promise<
+  | { kind: 'ok' }
+  | { kind: 'version_conflict'; currentVersion: number }
+  | { kind: 'anchor_missing'; anchorId: string }
+  | { kind: 'invalid_edit'; message: string }
+> {
+  const db = getDbPg();
+
+  if (edit.op === 'insert') {
+    const newKind = normalizeBlockKind(edit.new_kind);
+    if (!newKind || edit.new_text === null || edit.base_list_version === null) {
+      return {
+        kind: 'invalid_edit',
+        message: 'Pending insert edit is missing its required payload.',
+      };
+    }
+    const tabRows = await db<{ list_version: number }[]>`
+      select list_version
+      from public.doc_tabs
+      where workspace_id = ${workspaceId}::uuid
+        and document_id = ${edit.document_id}::uuid
+        and id = ${edit.tab_id}::uuid
+      for update
+    `;
+    const tab = tabRows[0];
+    if (!tab) {
+      return { kind: 'anchor_missing', anchorId: edit.tab_id };
+    }
+    if (tab.list_version !== edit.base_list_version) {
+      return { kind: 'version_conflict', currentVersion: tab.list_version };
+    }
+    if (edit.after_block_id !== null) {
+      const anchorRows = await db<{ id: string }[]>`
+        select id
+        from public.doc_blocks
+        where workspace_id = ${workspaceId}::uuid
+          and document_id = ${edit.document_id}::uuid
+          and tab_id = ${edit.tab_id}::uuid
+          and id = ${edit.after_block_id}::uuid
+        for update
+      `;
+      if (!anchorRows[0]) {
+        return { kind: 'anchor_missing', anchorId: edit.after_block_id };
+      }
+    }
+    return { kind: 'ok' };
+  }
+
+  if (edit.block_id === null || edit.base_block_version === null) {
+    return {
+      kind: 'invalid_edit',
+      message: `Pending ${edit.op} edit is missing its target block.`,
+    };
+  }
+  if (edit.op === 'replace' && edit.new_text === null) {
+    return {
+      kind: 'invalid_edit',
+      message: 'Pending replace edit is missing replacement text.',
+    };
+  }
+  const newKind = normalizeBlockKind(edit.new_kind);
+  if (edit.op === 'replace' && edit.new_kind !== null && !newKind) {
+    return {
+      kind: 'invalid_edit',
+      message: 'Pending replace edit has an invalid block kind.',
+    };
+  }
+  const blockRows = await db<{ version: number }[]>`
+    select version
+    from public.doc_blocks
+    where workspace_id = ${workspaceId}::uuid
+      and document_id = ${edit.document_id}::uuid
+      and tab_id = ${edit.tab_id}::uuid
+      and id = ${edit.block_id}::uuid
+    for update
+  `;
+  const block = blockRows[0];
+  if (!block) {
+    return { kind: 'anchor_missing', anchorId: edit.block_id };
+  }
+  if (block.version !== edit.base_block_version) {
+    return { kind: 'version_conflict', currentVersion: block.version };
+  }
+  return { kind: 'ok' };
+}
+
+async function applyGreenfieldDocumentEdit(
+  edit: GreenfieldDocumentEditRecord,
+  workspaceId: string,
+  options: {
+    allowSupersededStatus?: boolean;
+    ignoreInsertListVersionConflict?: boolean;
+    insertOrderOffset?: number;
+    supersedeOnConflict?: boolean;
+  } = {},
+): Promise<
+  | { kind: 'ok' }
+  | { kind: 'version_conflict'; currentVersion: number }
+  | { kind: 'anchor_missing'; anchorId: string }
+  | { kind: 'invalid_edit'; message: string }
+> {
+  const db = getDbPg();
+
+  if (edit.op === 'insert') {
+    const newKind = normalizeBlockKind(edit.new_kind);
+    if (!newKind || edit.new_text === null || edit.base_list_version === null) {
+      return {
+        kind: 'invalid_edit',
+        message: 'Pending insert edit is missing its required payload.',
+      };
+    }
+    const tabRows = await db<{ list_version: number }[]>`
+      select list_version
+      from public.doc_tabs
+      where workspace_id = ${workspaceId}::uuid
+        and document_id = ${edit.document_id}::uuid
+        and id = ${edit.tab_id}::uuid
+      for update
+    `;
+    const tab = tabRows[0];
+    if (!tab) {
+      return { kind: 'anchor_missing', anchorId: edit.tab_id };
+    }
+    if (
+      tab.list_version !== edit.base_list_version &&
+      options.ignoreInsertListVersionConflict !== true
+    ) {
+      if (options.supersedeOnConflict === true) {
+        await markDocumentEditSuperseded({ workspaceId, editId: edit.id });
+      }
+      return { kind: 'version_conflict', currentVersion: tab.list_version };
+    }
+
+    let insertOrder = options.insertOrderOffset ?? 0;
+    if (edit.after_block_id !== null) {
+      const anchorRows = await db<{ sort_order: number }[]>`
+        select sort_order
+        from public.doc_blocks
+        where workspace_id = ${workspaceId}::uuid
+          and document_id = ${edit.document_id}::uuid
+          and tab_id = ${edit.tab_id}::uuid
+          and id = ${edit.after_block_id}::uuid
+        for update
+      `;
+      const anchor = anchorRows[0];
+      if (!anchor) {
+        if (options.supersedeOnConflict === true) {
+          await markDocumentEditSuperseded({ workspaceId, editId: edit.id });
+        }
+        return { kind: 'anchor_missing', anchorId: edit.after_block_id };
+      }
+      insertOrder = anchor.sort_order + 1 + (options.insertOrderOffset ?? 0);
+    }
+
+    await db`
+      update public.doc_blocks
+      set sort_order = -sort_order - 1000000
+      where workspace_id = ${workspaceId}::uuid
+        and document_id = ${edit.document_id}::uuid
+        and tab_id = ${edit.tab_id}::uuid
+        and sort_order >= ${insertOrder}
+    `;
+    await db`
+      insert into public.doc_blocks (
+        workspace_id, document_id, tab_id, sort_order, kind, text, attrs_json
+      )
+      values (
+        ${workspaceId}::uuid,
+        ${edit.document_id}::uuid,
+        ${edit.tab_id}::uuid,
+        ${insertOrder},
+        ${newKind},
+        ${edit.new_text},
+        ${db.json((edit.new_attrs_json ?? {}) as never)}
+      )
+    `;
+    // Insert accepts rely on document_edits_bump_versions_on_accept for the
+    // tab list_version bump; replace/delete bump list_version in this layer.
+    await db`
+      update public.doc_blocks
+      set sort_order = -sort_order - 999999
+      where workspace_id = ${workspaceId}::uuid
+        and document_id = ${edit.document_id}::uuid
+        and tab_id = ${edit.tab_id}::uuid
+        and sort_order <= ${-insertOrder - 1000000}
+    `;
+  } else if (edit.op === 'replace') {
+    if (edit.block_id === null || edit.base_block_version === null) {
+      return {
+        kind: 'invalid_edit',
+        message: 'Pending replace edit is missing its target block.',
+      };
+    }
+    if (edit.new_text === null) {
+      return {
+        kind: 'invalid_edit',
+        message: 'Pending replace edit is missing replacement text.',
+      };
+    }
+    const blockRows = await db<{ version: number }[]>`
+      select version
+      from public.doc_blocks
+      where workspace_id = ${workspaceId}::uuid
+        and document_id = ${edit.document_id}::uuid
+        and tab_id = ${edit.tab_id}::uuid
+        and id = ${edit.block_id}::uuid
+      for update
+    `;
+    const block = blockRows[0];
+    if (!block) {
+      if (options.supersedeOnConflict === true) {
+        await markDocumentEditSuperseded({ workspaceId, editId: edit.id });
+      }
+      return { kind: 'anchor_missing', anchorId: edit.block_id };
+    }
+    if (block.version !== edit.base_block_version) {
+      if (options.supersedeOnConflict === true) {
+        await markDocumentEditSuperseded({ workspaceId, editId: edit.id });
+      }
+      return { kind: 'version_conflict', currentVersion: block.version };
+    }
+    const newKind = normalizeBlockKind(edit.new_kind);
+    if (edit.new_kind !== null && !newKind) {
+      return {
+        kind: 'invalid_edit',
+        message: 'Pending replace edit has an invalid block kind.',
+      };
+    }
+    await db`
+      update public.doc_blocks
+      set text = ${edit.new_text},
+          kind = coalesce(${newKind}, kind),
+          attrs_json = coalesce(
+            ${edit.new_attrs_json === null ? null : db.json(edit.new_attrs_json as never)},
+            attrs_json
+          )
+      where workspace_id = ${workspaceId}::uuid
+        and document_id = ${edit.document_id}::uuid
+        and tab_id = ${edit.tab_id}::uuid
+        and id = ${edit.block_id}::uuid
+    `;
+  } else {
+    if (edit.block_id === null || edit.base_block_version === null) {
+      return {
+        kind: 'invalid_edit',
+        message: 'Pending delete edit is missing its target block.',
+      };
+    }
+    const blockRows = await db<{ version: number }[]>`
+      select version
+      from public.doc_blocks
+      where workspace_id = ${workspaceId}::uuid
+        and document_id = ${edit.document_id}::uuid
+        and tab_id = ${edit.tab_id}::uuid
+        and id = ${edit.block_id}::uuid
+      for update
+    `;
+    const block = blockRows[0];
+    if (!block) {
+      if (options.supersedeOnConflict === true) {
+        await markDocumentEditSuperseded({ workspaceId, editId: edit.id });
+      }
+      return { kind: 'anchor_missing', anchorId: edit.block_id };
+    }
+    if (block.version !== edit.base_block_version) {
+      if (options.supersedeOnConflict === true) {
+        await markDocumentEditSuperseded({ workspaceId, editId: edit.id });
+      }
+      return { kind: 'version_conflict', currentVersion: block.version };
+    }
+  }
+
+  const acceptedRows =
+    options.allowSupersededStatus === true
+      ? await db<{ id: string }[]>`
+          update public.document_edits
+          set status = 'accepted'
+          where workspace_id = ${workspaceId}::uuid
+            and id = ${edit.id}::uuid
+            and status in ('pending', 'superseded')
+          returning id
+        `
+      : await db<{ id: string }[]>`
+          update public.document_edits
+          set status = 'accepted'
+          where workspace_id = ${workspaceId}::uuid
+            and id = ${edit.id}::uuid
+            and status = 'pending'
+          returning id
+        `;
+  if (acceptedRows.length === 0) {
+    return { kind: 'anchor_missing', anchorId: edit.id };
+  }
+
+  if (edit.op === 'delete' && edit.block_id !== null) {
+    await db`
+      delete from public.doc_blocks
+      where workspace_id = ${workspaceId}::uuid
+        and document_id = ${edit.document_id}::uuid
+        and tab_id = ${edit.tab_id}::uuid
+        and id = ${edit.block_id}::uuid
+    `;
+    await db`
+      update public.doc_tabs
+      set list_version = list_version + 1
+      where workspace_id = ${workspaceId}::uuid
+        and document_id = ${edit.document_id}::uuid
+        and id = ${edit.tab_id}::uuid
+    `;
+  } else if (edit.op === 'replace') {
+    await db`
+      update public.doc_tabs
+      set list_version = list_version + 1
+      where workspace_id = ${workspaceId}::uuid
+        and document_id = ${edit.document_id}::uuid
+        and id = ${edit.tab_id}::uuid
+    `;
+  }
+
+  await touchDocumentAfterEdit({
+    workspaceId,
+    documentId: edit.document_id,
+  });
+  return { kind: 'ok' };
+}
+
+async function checkGreenfieldDocumentTabVersionsForUpdate(input: {
+  workspaceId: string;
+  documentId: string;
+  tabIds: string[];
+  expectedContentVersion?: number;
+}): Promise<
+  | { kind: 'ok' }
+  | { kind: 'version_conflict'; currentVersion: number }
+  | { kind: 'not_found' }
+> {
+  const tabIds = Array.from(new Set(input.tabIds)).sort();
+  if (tabIds.length === 0) return { kind: 'not_found' };
+  const db = getDbPg();
+  const rows = await db<{ id: string; list_version: number }[]>`
+    select id, list_version
+    from public.doc_tabs
+    where workspace_id = ${input.workspaceId}::uuid
+      and document_id = ${input.documentId}::uuid
+      and id in ${db(tabIds)}
+    order by id asc
+    for update
+  `;
+  if (rows.length !== tabIds.length) return { kind: 'not_found' };
+  if (input.expectedContentVersion !== undefined) {
+    const conflict = rows.find(
+      (row) => row.list_version !== input.expectedContentVersion,
+    );
+    if (conflict) {
+      return {
+        kind: 'version_conflict',
+        currentVersion: conflict.list_version,
+      };
+    }
+  }
+  return { kind: 'ok' };
+}
+
+export async function acceptGreenfieldDocumentEdit(input: {
+  workspaceId: string;
+  documentId: string;
+  editId: string;
+  expectedContentVersion?: number;
+}): Promise<GreenfieldDocumentEditResolveResult> {
+  const document = await getGreenfieldDocumentById(input);
+  if (!document) return { kind: 'not_found' };
+  if (
+    input.expectedContentVersion !== undefined &&
+    document.list_version !== input.expectedContentVersion
+  ) {
+    return {
+      kind: 'version_conflict',
+      currentVersion: document.list_version,
+    };
+  }
+  const refs = await listPendingGreenfieldDocumentEditRefs({
+    workspaceId: input.workspaceId,
+    documentId: input.documentId,
+    editIds: [input.editId],
+  });
+  const ref = refs[0];
+  if (!ref) return { kind: 'not_found' };
+  const versionCheck = await checkGreenfieldDocumentTabVersionsForUpdate({
+    workspaceId: input.workspaceId,
+    documentId: input.documentId,
+    tabIds: [ref.tab_id],
+  });
+  if (versionCheck.kind !== 'ok') return versionCheck;
+  const edit = await loadPendingGreenfieldDocumentEditForUpdate(input);
+  if (!edit) return { kind: 'not_found' };
+
+  const applied = await applyGreenfieldDocumentEdit(edit, input.workspaceId);
+  if (applied.kind !== 'ok') return applied;
+  const updated = await getGreenfieldDocumentById(input);
+  if (!updated) return { kind: 'not_found' };
+  return {
+    kind: 'ok',
+    document: updated,
+    editIds: [edit.id],
+    runId: edit.proposed_by_run_id,
+  };
+}
+
+export async function acceptGreenfieldDocumentEdits(input: {
+  workspaceId: string;
+  documentId: string;
+  editIds: string[];
+  expectedContentVersion?: number;
+}): Promise<GreenfieldDocumentEditResolveResult> {
+  const document = await getGreenfieldDocumentById(input);
+  if (!document) return { kind: 'not_found' };
+  if (
+    input.expectedContentVersion !== undefined &&
+    document.list_version !== input.expectedContentVersion
+  ) {
+    return {
+      kind: 'version_conflict',
+      currentVersion: document.list_version,
+    };
+  }
+  const refs = await listPendingGreenfieldDocumentEditRefs({
+    workspaceId: input.workspaceId,
+    documentId: input.documentId,
+    editIds: input.editIds,
+  });
+  const refsById = new Map(refs.map((ref) => [ref.id, ref]));
+  for (const editId of input.editIds) {
+    if (!refsById.has(editId)) return { kind: 'not_found' };
+  }
+  const versionCheck = await checkGreenfieldDocumentTabVersionsForUpdate({
+    workspaceId: input.workspaceId,
+    documentId: input.documentId,
+    tabIds: refs.map((ref) => ref.tab_id),
+  });
+  if (versionCheck.kind !== 'ok') return versionCheck;
+
+  const acceptedEditIds: string[] = [];
+  let runId: string | null = null;
+  const edits: GreenfieldDocumentEditRecord[] = [];
+  for (const editId of input.editIds) {
+    const edit = await loadPendingGreenfieldDocumentEditForUpdate({
+      workspaceId: input.workspaceId,
+      documentId: input.documentId,
+      editId,
+    });
+    if (!edit) return { kind: 'not_found' };
+    const validation = await validateGreenfieldDocumentEdit(
+      edit,
+      input.workspaceId,
+    );
+    if (validation.kind !== 'ok') return validation;
+    edits.push(edit);
+  }
+
+  const insertOffsets = new Map<string, number>();
+  for (const edit of edits) {
+    if (edit.op === 'insert') {
+      const offsetKey = `${edit.tab_id}:${edit.after_block_id ?? ''}`;
+      const insertOrderOffset = insertOffsets.get(offsetKey) ?? 0;
+      insertOffsets.set(offsetKey, insertOrderOffset + 1);
+      const applied = await applyGreenfieldDocumentEdit(
+        edit,
+        input.workspaceId,
+        {
+          allowSupersededStatus: true,
+          ignoreInsertListVersionConflict: true,
+          insertOrderOffset,
+          supersedeOnConflict: acceptedEditIds.length > 0,
+        },
+      );
+      if (applied.kind !== 'ok') {
+        if (acceptedEditIds.length > 0) continue;
+        return applied;
+      }
+      acceptedEditIds.push(edit.id);
+      runId ??= edit.proposed_by_run_id;
+      continue;
+    }
+    const pending = await loadPendingGreenfieldDocumentEditForUpdate({
+      workspaceId: input.workspaceId,
+      documentId: input.documentId,
+      editId: edit.id,
+    });
+    if (!pending) continue;
+    const applied = await applyGreenfieldDocumentEdit(
+      pending,
+      input.workspaceId,
+      {
+        supersedeOnConflict: acceptedEditIds.length > 0,
+      },
+    );
+    if (applied.kind !== 'ok') {
+      if (acceptedEditIds.length > 0) continue;
+      return applied;
+    }
+    acceptedEditIds.push(pending.id);
+    runId ??= pending.proposed_by_run_id;
+  }
+
+  const updated = await getGreenfieldDocumentById(input);
+  if (!updated) return { kind: 'not_found' };
+  return {
+    kind: 'ok',
+    document: updated,
+    editIds: acceptedEditIds,
+    runId,
+  };
+}
+
+export async function acceptGreenfieldDocumentEditRun(input: {
+  workspaceId: string;
+  documentId: string;
+  runId: string;
+  expectedContentVersion?: number;
+}): Promise<GreenfieldDocumentEditResolveResult> {
+  const edits = await listPendingGreenfieldDocumentEditsByRun(input);
+  if (edits.length === 0) return { kind: 'not_found' };
+  const result = await acceptGreenfieldDocumentEdits({
+    workspaceId: input.workspaceId,
+    documentId: input.documentId,
+    editIds: edits.map((edit) => edit.id),
+    expectedContentVersion: input.expectedContentVersion,
+  });
+  if (result.kind !== 'ok') return result;
+  return { ...result, runId: input.runId };
+}
+
+export async function rejectGreenfieldDocumentEdit(input: {
+  workspaceId: string;
+  documentId: string;
+  editId: string;
+}): Promise<
+  { kind: 'ok'; editId: string; runId: string | null } | { kind: 'not_found' }
+> {
+  const db = getDbPg();
+  const rows = await db<
+    Array<{ id: string; proposed_by_run_id: string | null }>
+  >`
+    update public.document_edits
+    set status = 'rejected',
+        resolved_at = now()
+    where workspace_id = ${input.workspaceId}::uuid
+      and document_id = ${input.documentId}::uuid
+      and id = ${input.editId}::uuid
+      and status = 'pending'
+    returning id, proposed_by_run_id
+  `;
+  const row = rows[0];
+  if (!row) return { kind: 'not_found' };
+  return { kind: 'ok', editId: row.id, runId: row.proposed_by_run_id };
+}
+
+export async function rejectGreenfieldDocumentEditRun(input: {
+  workspaceId: string;
+  documentId: string;
+  runId: string;
+}): Promise<
+  { kind: 'ok'; runId: string; editIds: string[] } | { kind: 'not_found' }
+> {
+  const db = getDbPg();
+  const rows = await db<{ id: string }[]>`
+    update public.document_edits
+    set status = 'rejected',
+        resolved_at = now()
+    where workspace_id = ${input.workspaceId}::uuid
+      and document_id = ${input.documentId}::uuid
+      and proposed_by_run_id = ${input.runId}::uuid
+      and status = 'pending'
+    returning id
+  `;
+  if (rows.length === 0) return { kind: 'not_found' };
+  return {
+    kind: 'ok',
+    runId: input.runId,
+    editIds: rows.map((row) => row.id),
+  };
 }

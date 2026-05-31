@@ -48,10 +48,10 @@
 //   /api/v1/talks/:talkId/attachments[/...] — talk-attachments.ts
 //   /api/v1/talks/:talkId/threads[/...]     — talk-threads.ts (list +
 //                                         create + PATCH + DELETE)
-//   /api/v1/threads/:threadId/content       — talk-contents.ts (GET +
-//                                         POST; talk-scoped /content
-//                                         routes resolve to the thread's
-//                                         default thread and delegate)
+//   /api/v1/threads/:threadId/content
+//   /api/v1/contents/:contentId[/...]       — greenfield-api.ts document
+//                                         compatibility routes over
+//                                         documents/doc_blocks/document_edits
 //   /api/v1/events                  — events-upgrade.ts (user-scope
 //                                         WebSocket forwarded to the
 //                                         UserEventHub DO)
@@ -179,12 +179,6 @@ import {
   resumeTalkJobRoute,
   runTalkJobNowRoute,
 } from './routes/talk-jobs.js';
-import {
-  acceptContentEditRoute,
-  acceptContentEditRunRoute,
-  rejectContentEditRoute,
-  rejectContentEditRunRoute,
-} from './routes/talk-contents.js';
 import {
   disconnectGoogleAccountRoute,
   expandScopesRoute,
@@ -1154,69 +1148,6 @@ function buildApp(): Hono<{ Variables: Variables }> {
       auth,
       talkId: talkId.value,
       runId: runId.value,
-    });
-    return jsonResponse(result);
-  });
-
-  // Pending-edit routes (legacy edit-log compatibility surface).
-  app.post('/api/v1/contents/:contentId/edits/:editId/accept', async (c) => {
-    const auth = c.get('auth');
-    const rl = checkRateLimit({ principalId: auth.userId, bucket: 'write' });
-    if (!rl.allowed) return rateLimitedResponse(c, rl);
-    const csrfFail = checkCsrf(c, auth);
-    if (csrfFail) return csrfFail;
-    const payload = await readJsonBody<{ expectedContentVersion?: unknown }>(c);
-    if (!payload.ok) return invalidJsonResponse(c, payload.error);
-    const result = await acceptContentEditRoute({
-      auth,
-      contentId: c.req.param('contentId'),
-      editId: c.req.param('editId'),
-      expectedContentVersion: payload.data.expectedContentVersion,
-    });
-    return jsonResponse(result);
-  });
-
-  app.post('/api/v1/contents/:contentId/edits/:editId/reject', async (c) => {
-    const auth = c.get('auth');
-    const rl = checkRateLimit({ principalId: auth.userId, bucket: 'write' });
-    if (!rl.allowed) return rateLimitedResponse(c, rl);
-    const csrfFail = checkCsrf(c, auth);
-    if (csrfFail) return csrfFail;
-    const result = await rejectContentEditRoute({
-      auth,
-      contentId: c.req.param('contentId'),
-      editId: c.req.param('editId'),
-    });
-    return jsonResponse(result);
-  });
-
-  app.post('/api/v1/contents/:contentId/runs/:runId/accept', async (c) => {
-    const auth = c.get('auth');
-    const rl = checkRateLimit({ principalId: auth.userId, bucket: 'write' });
-    if (!rl.allowed) return rateLimitedResponse(c, rl);
-    const csrfFail = checkCsrf(c, auth);
-    if (csrfFail) return csrfFail;
-    const payload = await readJsonBody<{ expectedContentVersion?: unknown }>(c);
-    if (!payload.ok) return invalidJsonResponse(c, payload.error);
-    const result = await acceptContentEditRunRoute({
-      auth,
-      contentId: c.req.param('contentId'),
-      runId: c.req.param('runId'),
-      expectedContentVersion: payload.data.expectedContentVersion,
-    });
-    return jsonResponse(result);
-  });
-
-  app.post('/api/v1/contents/:contentId/runs/:runId/reject', async (c) => {
-    const auth = c.get('auth');
-    const rl = checkRateLimit({ principalId: auth.userId, bucket: 'write' });
-    if (!rl.allowed) return rateLimitedResponse(c, rl);
-    const csrfFail = checkCsrf(c, auth);
-    if (csrfFail) return csrfFail;
-    const result = await rejectContentEditRunRoute({
-      auth,
-      contentId: c.req.param('contentId'),
-      runId: c.req.param('runId'),
     });
     return jsonResponse(result);
   });

@@ -1,10 +1,16 @@
 import { withUserContext } from '../../../db.js';
 import {
+  acceptGreenfieldDocumentEdit,
+  acceptGreenfieldDocumentEditRun,
+  acceptGreenfieldDocumentEdits,
+  bumpGreenfieldDocumentPatchVersion,
   getGreenfieldDocumentById,
   getGreenfieldDocumentForTalk,
   getGreenfieldThreadMetrics,
   listGreenfieldMessages,
   listGreenfieldRuns,
+  rejectGreenfieldDocumentEdit,
+  rejectGreenfieldDocumentEditRun,
   searchGreenfieldMessages,
   createGreenfieldDocumentForTalk,
   deleteGreenfieldMessages,
@@ -18,6 +24,7 @@ import {
   type GreenfieldRunRecord,
   type GreenfieldThreadMetrics,
 } from '../../talks/greenfield-detail-accessors.js';
+import { emitOutboxEvent } from '../../talks/outbox-emit.js';
 import {
   getGreenfieldTalk,
   listGreenfieldTalkAgents,
@@ -72,6 +79,24 @@ function failure<T>(result: RouteResult<T>): RouteResult<never> {
     result.body.error.code,
     result.body.error.message,
     result.body.error.details,
+  );
+}
+
+function versionConflict(currentVersion: number): RouteResult<never> {
+  return error(
+    409,
+    'version_conflict',
+    'This content changed since you started. Reload and retry.',
+    { currentVersion },
+  );
+}
+
+function anchorMissing(anchorId: string): RouteResult<never> {
+  return error(
+    409,
+    'anchor_missing',
+    'The target anchor no longer exists in the document.',
+    { anchorId },
   );
 }
 
@@ -485,11 +510,82 @@ function toPendingEditApi(edit: GreenfieldDocumentEditRecord): {
     messageId: null,
     kind: edit.op,
     baseContentVersion: edit.base_list_version ?? edit.base_block_version ?? 1,
-    targetAnchorId: edit.block_id,
+    targetAnchorId: edit.op === 'insert' ? edit.after_block_id : edit.block_id,
     newMarkdown: edit.new_text,
     rationale: null,
     createdAt: edit.created_at,
   };
+}
+
+function normalizePendingEditIds(value: unknown): string[] | null {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value)) return null;
+  const ids: string[] = [];
+  for (const item of value) {
+    if (typeof item !== 'string' || !isUuid(item)) return null;
+    ids.push(item);
+  }
+  return Array.from(new Set(ids));
+}
+
+function parseOptionalExpectedContentVersion(
+  value: unknown,
+): number | RouteResult<never> | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== 'number') {
+    return error(
+      400,
+      'invalid_expected_version',
+      'expectedContentVersion must be a number.',
+    );
+  }
+  return value;
+}
+
+async function emitContentEditResolved(input: {
+  document: GreenfieldDocumentRecord;
+  editIds: string[];
+  runId: string | null;
+  resolution: 'accepted' | 'rejected';
+  includeContentUpdated?: boolean;
+}): Promise<void> {
+  if (!input.document.primary_talk_id || !input.document.owner_id) return;
+  const content = toContentApi(input.document);
+  // Compatibility events expose the primary content bodyVersion. Edits against
+  // secondary tabs advance that tab's list_version without changing this signal.
+  await emitOutboxEvent({
+    topic: `talk:${input.document.primary_talk_id}`,
+    eventType: 'content_edit_resolved',
+    payload: {
+      contentId: input.document.id,
+      runId: input.runId ?? '',
+      editIds: input.editIds,
+      resolution: input.resolution,
+      version: content.bodyVersion,
+    },
+    ownerIds: [input.document.owner_id],
+  });
+  if (input.includeContentUpdated) {
+    await emitContentUpdated(input.document);
+  }
+}
+
+async function emitContentUpdated(
+  document: GreenfieldDocumentRecord,
+): Promise<void> {
+  if (!document.primary_talk_id || !document.owner_id) return;
+  const content = toContentApi(document);
+  await emitOutboxEvent({
+    topic: `talk:${document.primary_talk_id}`,
+    eventType: 'content_updated',
+    payload: {
+      contentId: document.id,
+      version: content.bodyVersion,
+      format: content.contentFormat,
+      appliedAnchorIds: [],
+    },
+    ownerIds: [document.owner_id],
+  });
 }
 
 function toSnapshotTalk(talk: GreenfieldTalkRecord): {
@@ -867,42 +963,120 @@ export async function patchGreenfieldContentRoute(input: {
       'expectedVersion is required.',
     );
   }
+  const pendingEditIds = normalizePendingEditIds(input.acceptPendingEditIds);
+  if (pendingEditIds === null) {
+    return error(
+      400,
+      'invalid_pending_edit_ids',
+      'acceptPendingEditIds must be an array of edit UUIDs.',
+    );
+  }
+  const title =
+    typeof input.title === 'string' ? input.title.trim() : undefined;
+  if (input.title !== undefined && (!title || title.length === 0)) {
+    return error(400, 'title_required', 'Content title is required.');
+  }
+  const wantsMarkdown = typeof input.bodyMarkdown === 'string';
+  const wantsHtml = typeof input.bodyHtml === 'string';
+  if (wantsMarkdown && wantsHtml) {
+    return error(
+      400,
+      'invalid_patch',
+      'PATCH must not include both bodyMarkdown and bodyHtml.',
+    );
+  }
+  const nextBody: string | null = wantsMarkdown
+    ? (input.bodyMarkdown as string)
+    : wantsHtml
+      ? htmlToText(input.bodyHtml as string)
+      : null;
+  const wantsPatchWrite = input.title !== undefined || nextBody !== null;
+  if (!wantsPatchWrite && pendingEditIds.length === 0) {
+    return error(
+      400,
+      'empty_patch',
+      'PATCH must include bodyMarkdown, bodyHtml, title, or acceptPendingEditIds.',
+    );
+  }
   return withResolvedWorkspace(input.auth, input.workspaceId, async (ctx) => {
     const document = await getGreenfieldDocumentById({
       workspaceId: ctx.workspace.id,
       documentId: input.contentId,
     });
     if (!document) return error(404, 'not_found', 'Content not found.');
-    if (document.list_version !== input.expectedVersion) {
+    if (document.format === 'markdown' && wantsHtml) {
       return error(
-        409,
-        'version_conflict',
-        'This content changed since you started. Reload and retry.',
-        { currentVersion: document.list_version },
+        400,
+        'format_mismatch',
+        'Content format is markdown; bodyMarkdown is required.',
       );
     }
-    if (input.title !== undefined) {
-      if (typeof input.title !== 'string' || !input.title.trim()) {
-        return error(400, 'title_required', 'Content title is required.');
+    if (document.format === 'html' && wantsMarkdown) {
+      return error(
+        400,
+        'format_mismatch',
+        'Content format is html; bodyHtml is required.',
+      );
+    }
+    if (document.list_version !== input.expectedVersion) {
+      return versionConflict(document.list_version);
+    }
+    let acceptedPendingEditIds: string[] = [];
+    let acceptedPendingEditRunId: string | null = null;
+    let workingListVersion = document.list_version;
+    if (pendingEditIds.length > 0) {
+      const accepted = await acceptGreenfieldDocumentEdits({
+        workspaceId: ctx.workspace.id,
+        documentId: document.id,
+        editIds: pendingEditIds,
+      });
+      switch (accepted.kind) {
+        case 'not_found':
+          return error(404, 'not_found', 'Pending edit not found.');
+        case 'version_conflict':
+          return versionConflict(accepted.currentVersion);
+        case 'anchor_missing':
+          return anchorMissing(accepted.anchorId);
+        case 'invalid_edit':
+          return error(409, 'invalid_pending_edit', accepted.message);
+        case 'ok':
+          acceptedPendingEditIds = accepted.editIds;
+          acceptedPendingEditRunId = accepted.runId;
+          workingListVersion = accepted.document.list_version;
+          break;
       }
+    }
+    if (input.title !== undefined || nextBody !== null) {
+      const bumped = await bumpGreenfieldDocumentPatchVersion({
+        workspaceId: ctx.workspace.id,
+        documentId: document.id,
+        tabId: document.tab_id,
+        expectedListVersion: workingListVersion,
+      });
+      switch (bumped.kind) {
+        case 'not_found':
+          return error(404, 'not_found', 'Content not found.');
+        case 'version_conflict':
+          return versionConflict(bumped.currentVersion);
+        case 'ok':
+          workingListVersion = bumped.listVersion;
+          break;
+      }
+    }
+    if (input.title !== undefined) {
       await updateGreenfieldDocumentTitle({
         workspaceId: ctx.workspace.id,
         documentId: document.id,
-        title: input.title.trim(),
+        title: title!,
       });
     }
-    const nextBody =
-      typeof input.bodyMarkdown === 'string'
-        ? input.bodyMarkdown
-        : typeof input.bodyHtml === 'string'
-          ? htmlToText(input.bodyHtml)
-          : null;
     if (nextBody !== null) {
       await replaceGreenfieldDocumentBlocks({
         workspaceId: ctx.workspace.id,
         documentId: document.id,
         tabId: document.tab_id,
         blocks: markdownToBlocks(nextBody),
+        skipListVersionBump: true,
       });
     }
     const updated = await getGreenfieldDocumentById({
@@ -910,7 +1084,193 @@ export async function patchGreenfieldContentRoute(input: {
       documentId: document.id,
     });
     if (!updated) return error(404, 'not_found', 'Content not found.');
-    return ok({ content: toContentApi(updated) });
+    if (acceptedPendingEditIds.length > 0) {
+      await emitContentEditResolved({
+        document: updated,
+        editIds: acceptedPendingEditIds,
+        runId: acceptedPendingEditRunId,
+        resolution: 'accepted',
+        includeContentUpdated: true,
+      });
+    } else if (wantsPatchWrite) {
+      await emitContentUpdated(updated);
+    }
+    return ok({
+      content: toContentApi(updated),
+      acceptedPendingEditIds,
+    });
+  });
+}
+
+export async function acceptGreenfieldContentEditRoute(input: {
+  auth: AuthContext;
+  workspaceId?: string | null;
+  contentId: string;
+  editId: string;
+  expectedContentVersion?: unknown;
+}): Promise<
+  RouteResult<{
+    content: ReturnType<typeof toContentApi>;
+    editId: string;
+    runId: string;
+  }>
+> {
+  if (!isUuid(input.contentId) || !isUuid(input.editId)) {
+    return error(400, 'invalid_id', 'Content id and edit id must be UUIDs.');
+  }
+  const expected = parseOptionalExpectedContentVersion(
+    input.expectedContentVersion,
+  );
+  if (typeof expected === 'object') return expected;
+  return withResolvedWorkspace(input.auth, input.workspaceId, async (ctx) => {
+    const result = await acceptGreenfieldDocumentEdit({
+      workspaceId: ctx.workspace.id,
+      documentId: input.contentId,
+      editId: input.editId,
+      expectedContentVersion: expected,
+    });
+    switch (result.kind) {
+      case 'not_found':
+        return error(404, 'not_found', 'Pending edit not found.');
+      case 'version_conflict':
+        return versionConflict(result.currentVersion);
+      case 'anchor_missing':
+        return anchorMissing(result.anchorId);
+      case 'invalid_edit':
+        return error(409, 'invalid_pending_edit', result.message);
+      case 'ok':
+        await emitContentEditResolved({
+          document: result.document,
+          editIds: result.editIds,
+          runId: result.runId,
+          resolution: 'accepted',
+          includeContentUpdated: true,
+        });
+        return ok({
+          content: toContentApi(result.document),
+          editId: result.editIds[0]!,
+          runId: result.runId ?? '',
+        });
+    }
+  });
+}
+
+export async function rejectGreenfieldContentEditRoute(input: {
+  auth: AuthContext;
+  workspaceId?: string | null;
+  contentId: string;
+  editId: string;
+}): Promise<RouteResult<{ editId: string; runId: string }>> {
+  if (!isUuid(input.contentId) || !isUuid(input.editId)) {
+    return error(400, 'invalid_id', 'Content id and edit id must be UUIDs.');
+  }
+  return withResolvedWorkspace(input.auth, input.workspaceId, async (ctx) => {
+    const document = await getGreenfieldDocumentById({
+      workspaceId: ctx.workspace.id,
+      documentId: input.contentId,
+    });
+    if (!document) return error(404, 'not_found', 'Content not found.');
+    const result = await rejectGreenfieldDocumentEdit({
+      workspaceId: ctx.workspace.id,
+      documentId: document.id,
+      editId: input.editId,
+    });
+    if (result.kind === 'not_found') {
+      return error(404, 'not_found', 'Pending edit not found.');
+    }
+    await emitContentEditResolved({
+      document,
+      editIds: [result.editId],
+      runId: result.runId,
+      resolution: 'rejected',
+    });
+    return ok({ editId: result.editId, runId: result.runId ?? '' });
+  });
+}
+
+export async function acceptGreenfieldContentEditRunRoute(input: {
+  auth: AuthContext;
+  workspaceId?: string | null;
+  contentId: string;
+  runId: string;
+  expectedContentVersion?: unknown;
+}): Promise<
+  RouteResult<{
+    content: ReturnType<typeof toContentApi>;
+    runId: string;
+    editIds: string[];
+  }>
+> {
+  if (!isUuid(input.contentId) || !isUuid(input.runId)) {
+    return error(400, 'invalid_id', 'Content id and run id must be UUIDs.');
+  }
+  const expected = parseOptionalExpectedContentVersion(
+    input.expectedContentVersion,
+  );
+  if (typeof expected === 'object') return expected;
+  return withResolvedWorkspace(input.auth, input.workspaceId, async (ctx) => {
+    const result = await acceptGreenfieldDocumentEditRun({
+      workspaceId: ctx.workspace.id,
+      documentId: input.contentId,
+      runId: input.runId,
+      expectedContentVersion: expected,
+    });
+    switch (result.kind) {
+      case 'not_found':
+        return error(404, 'not_found', 'Pending edit run not found.');
+      case 'version_conflict':
+        return versionConflict(result.currentVersion);
+      case 'anchor_missing':
+        return anchorMissing(result.anchorId);
+      case 'invalid_edit':
+        return error(409, 'invalid_pending_edit', result.message);
+      case 'ok':
+        await emitContentEditResolved({
+          document: result.document,
+          editIds: result.editIds,
+          runId: result.runId,
+          resolution: 'accepted',
+          includeContentUpdated: true,
+        });
+        return ok({
+          content: toContentApi(result.document),
+          runId: result.runId ?? '',
+          editIds: result.editIds,
+        });
+    }
+  });
+}
+
+export async function rejectGreenfieldContentEditRunRoute(input: {
+  auth: AuthContext;
+  workspaceId?: string | null;
+  contentId: string;
+  runId: string;
+}): Promise<RouteResult<{ runId: string; editIds: string[] }>> {
+  if (!isUuid(input.contentId) || !isUuid(input.runId)) {
+    return error(400, 'invalid_id', 'Content id and run id must be UUIDs.');
+  }
+  return withResolvedWorkspace(input.auth, input.workspaceId, async (ctx) => {
+    const document = await getGreenfieldDocumentById({
+      workspaceId: ctx.workspace.id,
+      documentId: input.contentId,
+    });
+    if (!document) return error(404, 'not_found', 'Content not found.');
+    const result = await rejectGreenfieldDocumentEditRun({
+      workspaceId: ctx.workspace.id,
+      documentId: document.id,
+      runId: input.runId,
+    });
+    if (result.kind === 'not_found') {
+      return error(404, 'not_found', 'Pending edit run not found.');
+    }
+    await emitContentEditResolved({
+      document,
+      editIds: result.editIds,
+      runId: result.runId,
+      resolution: 'rejected',
+    });
+    return ok({ runId: result.runId, editIds: result.editIds });
   });
 }
 

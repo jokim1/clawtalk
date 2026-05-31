@@ -475,3 +475,53 @@ describe('worker-app — greenfield tools mount', () => {
     expect(body.error?.code).not.toBe('internal_error');
   });
 });
+
+describe('worker-app — greenfield content edit compatibility mount', () => {
+  it('POST /api/v1/contents/:contentId/edits/:editId/accept is mounted', async () => {
+    const app = getWorkerApp();
+    const jwt = await mintJwt();
+    const res = await app.request(
+      new Request(
+        'https://app.test/api/v1/contents/10000000-0000-4000-8000-000000000aaa/edits/10000000-0000-4000-8000-000000000bbb/accept',
+        {
+          method: 'POST',
+          headers: {
+            authorization: `Bearer ${jwt}`,
+            'content-type': 'application/json',
+          },
+          body: JSON.stringify({ expectedContentVersion: 1 }),
+        },
+      ),
+      undefined,
+      envForWorker(),
+    );
+    expect(res.status).not.toBe(501);
+    expect(res.status).not.toBe(500);
+    const body = (await res.json()) as { error?: { code?: string } };
+    expect(body.error?.code).not.toBe('not_implemented_in_worker');
+    expect(body.error?.code).not.toBe('internal_error');
+  });
+
+  it('POST /api/v1/contents/:contentId/runs/:runId/reject rejects cookie auth without CSRF', async () => {
+    const app = getWorkerApp();
+    const jwt = await mintJwt();
+    const res = await app.request(
+      new Request(
+        'https://app.test/api/v1/contents/10000000-0000-4000-8000-000000000aaa/runs/10000000-0000-4000-8000-000000000ccc/reject',
+        {
+          method: 'POST',
+          headers: {
+            cookie: `${ACCESS_TOKEN_COOKIE}=${jwt}`,
+            'content-type': 'application/json',
+          },
+          body: '{}',
+        },
+      ),
+      undefined,
+      envForWorker(),
+    );
+    expect(res.status).toBe(403);
+    const body = (await res.json()) as { error?: { code?: string } };
+    expect(body.error?.code).toBe('csrf_failed');
+  });
+});

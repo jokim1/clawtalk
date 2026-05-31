@@ -128,7 +128,8 @@ This phase is the largest. Allocate accordingly.
 
 ## Phase 6 · Documents (week 6)
 
-- [ ] Doc CRUD + tab/block-level pending edit accept/reject (§04 §8). Accept path uses the `document_edits_bump_versions_on_accept` trigger from §11 §5 — CAS losers transition to `superseded` automatically.
+- [x] Compatibility pending-edit accept/reject: legacy content edit endpoints now resolve against `document_edits`, materialize accepted edits into `doc_blocks`, and preserve the current webapp response shape.
+- [ ] Full Doc CRUD + tab/block-level pending edit accept/reject (§04 §8). The remaining native document API should keep using the `document_edits_bump_versions_on_accept` trigger from §11 §5 — CAS losers transition to `superseded` automatically.
 - [ ] Primary-document semantics: 0 or 1 primary Talk per doc (§11 §5 unique partial index on `documents.primary_talk_id`), many supporting context uses.
 - [ ] Documents page: sortable table with columns Title · Fmt · Tabs · Folder · Primary Talk · Last activity · Words. Reference: `DocumentsScreen`.
 - [ ] Full-bleed doc editor: 720px column, serif typography, co-editor avatars (per-tab via `doc_tab_coeditors`) in meta strip, pending-edits banner. Reference: `DocEditorScreen`.

@@ -88,7 +88,7 @@ Start with a refactor branch and proceed in this order:
    - Replace `worker-app.ts` route mounting with resource route modules.
    - Greenfield shell/detail/chat routes now mount through `greenfield-api.ts`; `worker-app.ts` keeps public auth/health/content-images/WebSocket patterns plus legacy surfaces that still need cutover.
    - Keep public auth, health, content-image serving, and WebSocket upgrade patterns.
-   - Finish the remaining legacy route collisions: context/resources, jobs, and document edit compatibility paths.
+   - Finish the remaining legacy route collisions: context/resources and jobs.
 
 4. **Talk execution vertical slice** 🔄 partially underway
    - New `/chat` writes `messages`, freezes `talk_agent_snapshots`, creates `runs`, enqueues to `TALK_RUN_QUEUE`, and streams through `event_outbox`.
