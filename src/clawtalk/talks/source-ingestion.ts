@@ -4,7 +4,7 @@
  * Handles:
  *  - URL fetching with SSRF protection (connect-time enforcement)
  *  - HTML → text extraction
- *  - Status updates via updateSourceExtraction
+ *  - Status updates via an injected extraction updater
  */
 
 import { URL } from 'url';

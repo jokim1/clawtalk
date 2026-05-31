@@ -1,16 +1,24 @@
 import { getDbPg } from '../../db.js';
+import { logger } from '../../logger.js';
 import {
   executeWithResolvedAgent,
   type ExecutionContext,
   type ExecutionEvent,
 } from '../agents/agent-router.js';
-import type { LlmMessage } from '../agents/llm-client.js';
+import type { LlmContentBlock, LlmMessage } from '../agents/llm-client.js';
 import {
   buildEffectiveToolsFromTalkToolRows,
   listUserToolPermissionsForUser,
   type EffectiveToolAccess,
   type RegisteredAgentRecord,
 } from '../db/agent-accessors.js';
+import { resolveModelCapabilities } from '../llm/capabilities.js';
+import {
+  encodedSizeBytes,
+  MAX_RASTER_PAGES,
+  MAX_TOTAL_RASTER_PAYLOAD_BYTES,
+} from '../../shared/attachment-caps.js';
+import { loadPageImage } from './attachment-storage.js';
 import {
   TalkExecutorError,
   type TalkExecutionEvent,
@@ -52,10 +60,33 @@ type GreenfieldHistoryMessageRow = {
 };
 
 type GreenfieldContextSourceRow = {
+  id: string;
   kind: string;
   name: string;
   extracted_text: string | null;
   summary: string | null;
+  mime_type: string | null;
+  expected_page_count: number | null;
+  page_image_count: number;
+  page_indices: number[];
+  page_byte_sizes: number[];
+  sort_order: number | null;
+  source_ref: string | null;
+  compat_kind: string | null;
+};
+
+type GreenfieldContextSourceView = GreenfieldContextSourceRow & {
+  displayRef: string | null;
+  displayLabel: string;
+};
+
+type GreenfieldPdfPageSource = {
+  sourceId: string;
+  sourceRef: string;
+  title: string;
+  totalPages: number;
+  pageIndices: number[];
+  truncatedReason: 'image-limit' | 'payload-budget' | null;
 };
 
 type PriorOrderedOutput = {
@@ -76,6 +107,8 @@ const CHARS_TO_TOKENS = 0.25;
 const MAX_HISTORY_MESSAGES = 24;
 const MAX_SOURCE_CHARS = 12_000;
 const MAX_ORDERED_PRIOR_OUTPUT_CHARS = 24_000;
+const ESTIMATED_IMAGE_BLOCK_TOKENS = 3_000;
+const ESTIMATED_DOCUMENT_BLOCK_TOKENS = 8_000;
 const OMITTED_CONTEXT_MARKER = '[omitted due to context window]';
 const TRUNCATED_CONTEXT_SUFFIX = '\n\n[truncated for context window]';
 
@@ -269,33 +302,245 @@ async function loadGreenfieldHistory(
   });
 }
 
-async function loadGreenfieldSourceSection(
+function annotateGreenfieldContextSources(
+  rows: GreenfieldContextSourceRow[],
+): GreenfieldContextSourceView[] {
+  let sourceIndex = 0;
+  return rows.map((source) => {
+    const sourceOnlyIndex = source.kind === 'rule' ? null : sourceIndex++;
+    const fallbackSourceRef =
+      source.kind === 'rule' ? null : `S${(sourceOnlyIndex ?? 0) + 1}`;
+    const displayRef = source.source_ref || fallbackSourceRef;
+    const displayLabel =
+      source.kind === 'rule'
+        ? source.compat_kind === 'goal'
+          ? 'Goal'
+          : `Rule: ${source.name}`
+        : `Source ${displayRef}: ${source.name} (${source.kind})`;
+    return { ...source, displayRef, displayLabel };
+  });
+}
+
+async function loadGreenfieldContextSources(
   run: GreenfieldExecutorRunRow,
-): Promise<string | null> {
+): Promise<GreenfieldContextSourceView[]> {
   const db = getDbPg();
   const rows = await db<GreenfieldContextSourceRow[]>`
-    select kind, name, extracted_text, summary
-    from public.context_sources
-    where workspace_id = ${run.workspace_id}::uuid
-      and talk_id = ${run.talk_id}::uuid
-      and include_in_prompt = true
-    order by sort_order asc nulls last, created_at asc, id asc
+    select
+      s.id,
+      s.kind,
+      s.name,
+      s.extracted_text,
+      s.summary,
+      s.meta_json->>'mimeType' as mime_type,
+      s.expected_page_count,
+      coalesce(p.page_count, 0) as page_image_count,
+      coalesce(p.page_indices, '{}'::int[]) as page_indices,
+      coalesce(p.page_byte_sizes, '{}'::int[]) as page_byte_sizes,
+      s.sort_order,
+      s.meta_json->>'sourceRef' as source_ref,
+      s.meta_json->>'compatKind' as compat_kind
+    from public.context_sources s
+    left join (
+      select source_id,
+             count(*)::int as page_count,
+             array_agg(page_index order by page_index) as page_indices,
+             array_agg(byte_size order by page_index) as page_byte_sizes
+      from public.context_source_pages
+      where workspace_id = ${run.workspace_id}::uuid
+      group by source_id
+    ) p on p.source_id = s.id
+    where s.workspace_id = ${run.workspace_id}::uuid
+      and s.talk_id = ${run.talk_id}::uuid
+      and s.include_in_prompt = true
+    order by s.sort_order asc nulls last, s.created_at asc, s.id asc
     limit 20
   `;
+  return annotateGreenfieldContextSources(rows);
+}
+
+function buildGreenfieldSourceSection(
+  rows: GreenfieldContextSourceView[],
+): string | null {
   if (rows.length === 0) return null;
 
   const perSourceBudget = Math.max(
     500,
     Math.floor(MAX_SOURCE_CHARS / rows.length),
   );
-  const entries = rows.map((source, index) => {
+  const entries = rows.map((source) => {
     const body = source.summary?.trim() || source.extracted_text?.trim() || '';
     return [
-      `Source ${index + 1}: ${source.name} (${source.kind})`,
+      source.displayLabel,
       truncateText(body || 'No extracted text is available.', perSourceBudget),
     ].join('\n');
   });
   return ['Saved context sources:', ...entries].join('\n\n');
+}
+
+function selectGreenfieldPdfPageSources(input: {
+  run: GreenfieldExecutorRunRow;
+  sources: GreenfieldContextSourceView[];
+}): GreenfieldPdfPageSource[] {
+  const capabilities = resolveModelCapabilities({
+    providerId: input.run.provider_id,
+    modelId: input.run.model_id,
+  });
+  if (!capabilities.supports_vision) return [];
+  if (
+    capabilities.accepted_image_formats &&
+    !capabilities.accepted_image_formats.includes('image/jpeg')
+  ) {
+    return [];
+  }
+
+  let remainingImages = Math.max(
+    0,
+    Math.min(capabilities.max_images ?? MAX_RASTER_PAGES, MAX_RASTER_PAGES),
+  );
+  let remainingPayloadBytes = MAX_TOTAL_RASTER_PAYLOAD_BYTES;
+  if (remainingImages === 0) return [];
+
+  const selected: GreenfieldPdfPageSource[] = [];
+  for (const source of input.sources) {
+    if (remainingImages === 0) break;
+    const expectedPageCount = source.expected_page_count ?? null;
+    if (
+      source.kind !== 'file' ||
+      source.mime_type !== 'application/pdf' ||
+      expectedPageCount === null ||
+      expectedPageCount <= 0 ||
+      source.page_image_count !== expectedPageCount ||
+      source.page_indices.length === 0 ||
+      !source.displayRef
+    ) {
+      continue;
+    }
+
+    const pageIndices: number[] = [];
+    let truncationReason: 'image-limit' | 'payload-budget' | null = null;
+    for (let i = 0; i < source.page_indices.length; i += 1) {
+      if (pageIndices.length >= remainingImages) {
+        truncationReason = 'image-limit';
+        break;
+      }
+      const encodedBytes = encodedSizeBytes(source.page_byte_sizes[i] ?? 0);
+      if (encodedBytes > remainingPayloadBytes) {
+        truncationReason = 'payload-budget';
+        break;
+      }
+      pageIndices.push(source.page_indices[i]!);
+      remainingPayloadBytes -= encodedBytes;
+    }
+    if (pageIndices.length === 0) continue;
+    remainingImages -= pageIndices.length;
+    selected.push({
+      sourceId: source.id,
+      sourceRef: source.displayRef,
+      title: source.name,
+      totalPages: expectedPageCount,
+      pageIndices,
+      truncatedReason:
+        pageIndices.length < expectedPageCount
+          ? (truncationReason ?? 'image-limit')
+          : null,
+    });
+  }
+
+  return selected;
+}
+
+async function prependGreenfieldPdfPageImages(input: {
+  talkId: string;
+  userMessageText: string;
+  pageSources: GreenfieldPdfPageSource[];
+}): Promise<string | LlmContentBlock[]> {
+  if (input.pageSources.length === 0) return input.userMessageText;
+
+  const pageBlocks: LlmContentBlock[] = [
+    {
+      type: 'text',
+      text: 'Talk-level Context PDF page images (rasterized pages of saved PDFs; read these alongside the extracted text in the system prompt):',
+    },
+  ];
+  let attachedImages = 0;
+
+  for (const source of input.pageSources) {
+    if (source.truncatedReason) {
+      const reason =
+        source.truncatedReason === 'payload-budget'
+          ? 'the raster payload budget'
+          : 'the model image limit';
+      pageBlocks.push({
+        type: 'text',
+        text: `PDF [${source.sourceRef}] "${source.title}" - ${source.pageIndices.length} of ${source.totalPages} pages are attached because of ${reason}; use the extracted text in the system prompt for the remaining pages.`,
+      });
+    }
+    for (const pageIndex of source.pageIndices) {
+      try {
+        const buffer = await loadPageImage(
+          input.talkId,
+          source.sourceId,
+          pageIndex,
+        );
+        pageBlocks.push({
+          type: 'text',
+          text: `PDF [${source.sourceRef}] "${source.title}" - page ${
+            pageIndex + 1
+          } of ${source.totalPages}:`,
+        });
+        pageBlocks.push({
+          type: 'image',
+          mimeType: 'image/jpeg',
+          data: buffer.toString('base64'),
+          detail: 'auto',
+        });
+        attachedImages += 1;
+      } catch (err) {
+        logger.warn(
+          {
+            err,
+            talkId: input.talkId,
+            sourceId: source.sourceId,
+            sourceRef: source.sourceRef,
+            pageIndex,
+          },
+          'Failed to load greenfield context PDF page image - skipping',
+        );
+      }
+    }
+  }
+
+  if (attachedImages === 0) return input.userMessageText;
+  return [...pageBlocks, { type: 'text', text: input.userMessageText }];
+}
+
+function estimateContentTokens(content: string | LlmContentBlock[]): number {
+  if (typeof content === 'string') return estimateTokens(content);
+  return content.reduce((total, block) => {
+    if (block.type === 'text') return total + estimateTokens(block.text);
+    if (block.type === 'image') return total + ESTIMATED_IMAGE_BLOCK_TOKENS;
+    if (block.type === 'document') {
+      return total + ESTIMATED_DOCUMENT_BLOCK_TOKENS;
+    }
+    if (block.type === 'tool_use') {
+      return total + estimateTokens(JSON.stringify(block.input));
+    }
+    return total + estimateTokens(block.content);
+  }, 0);
+}
+
+async function loadGreenfieldSourceSection(
+  run: GreenfieldExecutorRunRow,
+): Promise<{
+  sourceSection: string | null;
+  pageSources: GreenfieldPdfPageSource[];
+}> {
+  const sources = await loadGreenfieldContextSources(run);
+  return {
+    sourceSection: buildGreenfieldSourceSection(sources),
+    pageSources: selectGreenfieldPdfPageSources({ run, sources }),
+  };
 }
 
 function formatPriorOutputs(
@@ -556,7 +801,7 @@ export class GreenfieldTalkExecutor implements TalkExecutor {
       );
     }
 
-    const [history, sourceSection, stepUserMessage] = await Promise.all([
+    const [history, sourceContext, stepUserMessage] = await Promise.all([
       loadGreenfieldHistory(run),
       loadGreenfieldSourceSection(run),
       buildGreenfieldStepUserMessageText({
@@ -567,18 +812,23 @@ export class GreenfieldTalkExecutor implements TalkExecutor {
         sequenceIndex: input.sequenceIndex,
       }),
     ]);
-    const context = buildContext({ run, history, sourceSection });
-    const estimatedContextTokens = estimateTokens(
-      [
-        context.systemPrompt,
-        ...context.history.map((message) =>
-          typeof message.content === 'string'
-            ? message.content
-            : JSON.stringify(message.content),
-        ),
-        stepUserMessage.userMessageText,
-      ].join('\n\n'),
-    );
+    const context = buildContext({
+      run,
+      history,
+      sourceSection: sourceContext.sourceSection,
+    });
+    const userMessageContent = await prependGreenfieldPdfPageImages({
+      talkId: run.talk_id,
+      userMessageText: stepUserMessage.userMessageText,
+      pageSources: sourceContext.pageSources,
+    });
+    const estimatedContextTokens =
+      estimateTokens(context.systemPrompt) +
+      context.history.reduce(
+        (total, message) => total + estimateContentTokens(message.content),
+        0,
+      ) +
+      estimateContentTokens(userMessageContent);
     const [agent, effectiveTools] = await Promise.all([
       Promise.resolve(toRegisteredAgentRecord(run)),
       loadGreenfieldEffectiveTools(run),
@@ -587,7 +837,7 @@ export class GreenfieldTalkExecutor implements TalkExecutor {
     const result = await executeWithResolvedAgent(
       agent,
       context,
-      stepUserMessage.userMessageText,
+      userMessageContent,
       {
         runId: input.runId,
         userId: input.requestedBy,

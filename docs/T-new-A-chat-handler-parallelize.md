@@ -57,7 +57,7 @@ File: `src/clawtalk/web/routes/talks.ts:1845-2128`. Work happens inside `withUse
 The two duplicates (#2 and #5) are this plan's targets. Per codex C2/C8, the deeper preflight + write costs (#7, #8) are bigger but require architectural understanding this plan doesn't provide.
 
 Verified during planning:
-- `canEditTalk` has 7 other callers (`talk-resources.ts ×2`, `talk-context.ts ×1`, `talk-threads.ts ×3`, test ×1) — export must stay.
+- `canEditTalk` has other legacy callers (`talk-resources.ts ×2`, `talk-threads.ts ×3`, test coverage) — export must stay until those surfaces are greenfielded.
 - `extractMentionTokens` is already a pure private function (`agent-registry.ts:181`) — split is trivial.
 - `canUserEditTalk` is "just another RLS visibility check" (per codex C3) — its only test today is `talk !== undefined`.
 - `getTalkForUser` hardcodes `access_role: 'owner'` (per codex C4) — not a real ACL; future sharing work will need to compute it properly.

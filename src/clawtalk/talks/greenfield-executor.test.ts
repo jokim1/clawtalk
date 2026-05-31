@@ -11,10 +11,15 @@ import {
 vi.mock('../agents/agent-router.js', () => ({
   executeWithResolvedAgent: vi.fn(),
 }));
+vi.mock('./attachment-storage.js', () => ({
+  loadPageImage: vi.fn(),
+}));
 
 import { closePgDatabase, getDbPg, initPgDatabase } from '../../db.js';
 import { executeWithResolvedAgent } from '../agents/agent-router.js';
+import type { LlmContentBlock } from '../agents/llm-client.js';
 import { ensureWorkspaceBootstrapForUser } from '../workspaces/bootstrap.js';
+import { loadPageImage } from './attachment-storage.js';
 import {
   createGreenfieldTalk,
   listDefaultTalkAgentIds,
@@ -74,7 +79,7 @@ function mockResolvedExecution(content: string): {
   calls: Array<{
     agent: { id: string; system_prompt: string | null; model_id: string };
     context: { systemPrompt: string };
-    userMessage: string;
+    userMessage: string | LlmContentBlock[];
     effectiveTools: Array<{
       toolFamily: string;
       enabled: boolean;
@@ -99,7 +104,7 @@ function mockResolvedExecution(content: string): {
         context: {
           systemPrompt: context?.systemPrompt ?? '',
         },
-        userMessage: typeof userMessage === 'string' ? userMessage : '',
+        userMessage,
         effectiveTools: options.effectiveTools ?? [],
         credentialScope: options.credentialScope,
       });
@@ -136,6 +141,7 @@ describe('GreenfieldTalkExecutor queue integration', () => {
 
   beforeEach(async () => {
     vi.mocked(executeWithResolvedAgent).mockReset();
+    vi.mocked(loadPageImage).mockReset();
     await deleteUser();
     await seedAuthUser();
   });
@@ -150,16 +156,43 @@ describe('GreenfieldTalkExecutor queue integration', () => {
     const db = getDbPg();
     await db`
       insert into public.context_sources (
-        workspace_id, talk_id, kind, name, extracted_text, added_by_user_id
+        workspace_id, talk_id, kind, name, extracted_text, meta_json,
+        include_in_prompt, sort_order, added_by_user_id
       )
-      values (
-        ${workspaceId}::uuid,
-        ${talkId}::uuid,
-        'rule',
-        'Launch rules',
-        'Use clear milestones.',
-        ${USER_ID}::uuid
-      )
+      values
+        (
+          ${workspaceId}::uuid,
+          ${talkId}::uuid,
+          'rule',
+          'Launch rules',
+          'Use clear milestones.',
+          ${db.json({ compatKind: 'rule' } as never)},
+          true,
+          -1,
+          ${USER_ID}::uuid
+        ),
+        (
+          ${workspaceId}::uuid,
+          ${talkId}::uuid,
+          'file',
+          'Fallback notes',
+          'Source fallback should ignore preceding rules.',
+          ${db.json({ compatKind: 'source', sourceType: 'text' } as never)},
+          true,
+          0,
+          ${USER_ID}::uuid
+        ),
+        (
+          ${workspaceId}::uuid,
+          ${talkId}::uuid,
+          'file',
+          'Launch notes',
+          'Budget is tight.',
+          ${db.json({ compatKind: 'source', sourceRef: 'S9', sourceType: 'text' } as never)},
+          true,
+          1,
+          ${USER_ID}::uuid
+        )
     `;
     const enqueued = await enqueueGreenfieldChatTurn({
       workspaceId,
@@ -180,8 +213,19 @@ describe('GreenfieldTalkExecutor queue integration', () => {
     expect(calls).toHaveLength(1);
     expect(calls[0]!.agent.id).toBe(agentIds[0]);
     expect(calls[0]!.agent.system_prompt).toContain('Role:');
+    expect(calls[0]!.context.systemPrompt).toContain('Rule: Launch rules');
     expect(calls[0]!.context.systemPrompt).toContain('Launch rules');
     expect(calls[0]!.context.systemPrompt).toContain('Use clear milestones.');
+    expect(calls[0]!.context.systemPrompt).toContain(
+      'Source S1: Fallback notes (file)',
+    );
+    expect(calls[0]!.context.systemPrompt).toContain(
+      'Source fallback should ignore preceding rules.',
+    );
+    expect(calls[0]!.context.systemPrompt).toContain(
+      'Source S9: Launch notes (file)',
+    );
+    expect(calls[0]!.context.systemPrompt).toContain('Budget is tight.');
     expect(calls[0]!.userMessage).toBe('Plan the launch.');
     expect(calls[0]!.credentialScope).toEqual({
       principalUserId: USER_ID,
@@ -210,6 +254,97 @@ describe('GreenfieldTalkExecutor queue integration', () => {
       tokens_in: 11,
       tokens_out: 7,
       message_body: 'Greenfield answer',
+    });
+  });
+
+  it('attaches complete greenfield PDF page images to the user turn', async () => {
+    const { workspaceId, talkId, agentIds } = await createTalkFixture();
+    const db = getDbPg();
+    const sources = await db<{ id: string }[]>`
+      insert into public.context_sources (
+        workspace_id, talk_id, kind, name, extracted_text, meta_json,
+        expected_page_count, include_in_prompt, sort_order, added_by_user_id
+      )
+      values (
+        ${workspaceId}::uuid,
+        ${talkId}::uuid,
+        'file',
+        'Scanned PDF',
+        null,
+        ${db.json({
+          compatKind: 'source',
+          sourceRef: 'S7',
+          sourceType: 'file',
+          mimeType: 'application/pdf',
+        } as never)},
+        2,
+        true,
+        6,
+        ${USER_ID}::uuid
+      )
+      returning id
+    `;
+    const sourceId = sources[0]!.id;
+    await db`
+      insert into public.context_source_pages (
+        workspace_id, source_id, page_index, byte_size, payload_ref
+      )
+      values
+        (${workspaceId}::uuid, ${sourceId}::uuid, 0, 123, 'page-0.jpg'),
+        (${workspaceId}::uuid, ${sourceId}::uuid, 1, 456, 'page-1.jpg')
+    `;
+    vi.mocked(loadPageImage).mockImplementation(
+      async (_talkId, _sourceId, pageIndex) =>
+        Buffer.from(`jpeg-page-${pageIndex}`),
+    );
+
+    const enqueued = await enqueueGreenfieldChatTurn({
+      workspaceId,
+      talkId,
+      userId: USER_ID,
+      content: 'Summarize the scanned PDF.',
+      targetAgentIds: agentIds,
+    });
+    if (!enqueued.ok) throw new Error(`enqueue failed: ${enqueued.reason}`);
+
+    const { calls } = mockResolvedExecution('PDF answer');
+    await processTalkRunMessage({
+      runId: enqueued.runs[0]!.id,
+      dispatch: async () => {},
+      cancelPollIntervalMs: 10_000,
+    });
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.context.systemPrompt).toContain(
+      'Source S7: Scanned PDF (file)',
+    );
+    expect(calls[0]!.context.systemPrompt).toContain(
+      'No extracted text is available.',
+    );
+    expect(loadPageImage).toHaveBeenNthCalledWith(1, talkId, sourceId, 0);
+    expect(loadPageImage).toHaveBeenNthCalledWith(2, talkId, sourceId, 1);
+
+    const userMessage = calls[0]!.userMessage;
+    expect(Array.isArray(userMessage)).toBe(true);
+    const blocks = userMessage as LlmContentBlock[];
+    const texts = blocks
+      .filter(
+        (block): block is Extract<LlmContentBlock, { type: 'text' }> =>
+          block.type === 'text',
+      )
+      .map((block) => block.text);
+    const images = blocks.filter(
+      (block): block is Extract<LlmContentBlock, { type: 'image' }> =>
+        block.type === 'image',
+    );
+    expect(texts.join('\n')).toContain('PDF [S7] "Scanned PDF" - page 1 of 2:');
+    expect(texts.join('\n')).toContain('PDF [S7] "Scanned PDF" - page 2 of 2:');
+    expect(texts.at(-1)).toBe('Summarize the scanned PDF.');
+    expect(images).toHaveLength(2);
+    expect(images[0]).toMatchObject({
+      type: 'image',
+      mimeType: 'image/jpeg',
+      data: Buffer.from('jpeg-page-0').toString('base64'),
     });
   });
 

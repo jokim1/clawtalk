@@ -164,7 +164,7 @@ export async function loadPageImage(
 
 /**
  * Delete page images by their known indices (no R2 list-by-prefix). The
- * caller passes the page indices recorded in talk_context_source_pages.
+ * caller passes the page indices recorded in the context page table.
  * R2.delete is idempotent — missing keys do not throw — so partial sets
  * and double-deletes are safe.
  */

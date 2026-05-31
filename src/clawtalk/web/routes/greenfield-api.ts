@@ -1,12 +1,20 @@
 import type { Context, Hono } from 'hono';
 
-import { withUserContext } from '../../../db.js';
+import {
+  withRequestScopedDb,
+  withUserContext,
+  type DbScopeEnvBindings,
+  type RequestExecutionContext,
+} from '../../../db.js';
+import { logger } from '../../../logger.js';
 import { getUserById, updateUserDisplayName } from '../../db/index.js';
 import {
   dispatchRunInProcess,
   type DispatchRunInProcessEnv,
 } from '../../talks/dispatch-in-process.js';
+import { updateGreenfieldContextSourceExtraction } from '../../talks/greenfield-context-accessors.js';
 import { dispatchRun } from '../../talks/queue-producer.js';
+import { ingestUrlSource } from '../../talks/source-ingestion.js';
 import { validateCsrfTokenPg } from '../middleware/csrf.js';
 import {
   checkRateLimit,
@@ -17,6 +25,23 @@ import {
   cancelGreenfieldChatRoute,
   enqueueGreenfieldChatRoute,
 } from './greenfield-chat.js';
+import {
+  createGreenfieldTalkContextRuleRoute,
+  createGreenfieldTalkContextSourceRoute,
+  deleteGreenfieldTalkContextRuleRoute,
+  deleteGreenfieldTalkContextSourceRoute,
+  deleteGreenfieldTalkStateEntryRoute,
+  getGreenfieldTalkContextRoute,
+  getGreenfieldTalkContextSourceContentRoute,
+  getGreenfieldTalkStateRoute,
+  listGreenfieldTalkContextRulesRoute,
+  patchGreenfieldTalkContextRuleRoute,
+  patchGreenfieldTalkContextSourceRoute,
+  retryGreenfieldTalkContextSourceRoute,
+  setGreenfieldTalkGoalRoute,
+  uploadGreenfieldTalkContextSourcePageImageRoute,
+  uploadGreenfieldTalkContextSourceRoute,
+} from './greenfield-context.js';
 import {
   acceptGreenfieldContentEditRoute,
   acceptGreenfieldContentEditRunRoute,
@@ -65,6 +90,100 @@ type Variables = {
 };
 
 type GreenfieldApp = Hono<{ Variables: Variables }>;
+type GreenfieldContextIngestionEnv = DbScopeEnvBindings & {
+  DB?: { connectionString?: string };
+};
+type ContextSourceRouteResult = {
+  body: {
+    ok: boolean;
+    data?: {
+      source?: {
+        id: string;
+        sourceType: string;
+        sourceUrl?: string | null;
+      };
+    };
+  };
+  scope?: {
+    workspaceId: string;
+    talkId: string;
+  };
+};
+
+function scheduleGreenfieldUrlSourceIngestion(
+  c: Context,
+  auth: AuthContext,
+  result: ContextSourceRouteResult,
+): void {
+  const source = result.body.ok ? result.body.data?.source : undefined;
+  if (!source || source.sourceType !== 'url' || !source.sourceUrl) return;
+  if (!result.scope) {
+    logger.warn(
+      { sourceId: source.id },
+      'greenfield context URL ingestion skipped: route scope missing',
+    );
+    return;
+  }
+
+  const env = c.env as GreenfieldContextIngestionEnv;
+  const connectionString = env.DB?.connectionString;
+  if (!connectionString) {
+    logger.warn(
+      { sourceId: source.id },
+      'greenfield context URL ingestion skipped: DB binding missing',
+    );
+    return;
+  }
+
+  const sourceUrl = source.sourceUrl;
+  c.executionCtx.waitUntil(
+    runGreenfieldUrlSourceIngestion({
+      auth,
+      connectionString,
+      ctx: c.executionCtx,
+      env,
+      source: { id: source.id, sourceUrl, ...result.scope },
+    }),
+  );
+}
+
+async function runGreenfieldUrlSourceIngestion(input: {
+  auth: AuthContext;
+  connectionString: string;
+  ctx: RequestExecutionContext;
+  env: GreenfieldContextIngestionEnv;
+  source: {
+    id: string;
+    sourceUrl: string;
+    workspaceId: string;
+    talkId: string;
+  };
+}): Promise<void> {
+  try {
+    await withRequestScopedDb(
+      input.connectionString,
+      input.ctx,
+      input.env,
+      async () => {
+        await ingestUrlSource(input.source.id, input.source.sourceUrl, {
+          updateExtraction: (updateInput) =>
+            withUserContext(input.auth.userId, () =>
+              updateGreenfieldContextSourceExtraction({
+                ...updateInput,
+                workspaceId: input.source.workspaceId,
+                talkId: input.source.talkId,
+              }),
+            ),
+        });
+      },
+    );
+  } catch (err) {
+    logger.warn(
+      { err, sourceId: input.source.id },
+      'greenfield context URL ingestion failed',
+    );
+  }
+}
 
 export function mountGreenfieldApiRoutes(app: GreenfieldApp): void {
   // ── session/me: current user info + display-name patch ───────
@@ -821,6 +940,328 @@ export function mountGreenfieldApiRoutes(app: GreenfieldApp): void {
     });
     return jsonResponse(result);
   });
+
+  // ── Greenfield context compatibility routes ─────────────────
+  app.get('/api/v1/talks/:talkId/context', async (c) => {
+    const auth = c.get('auth');
+    const rl = checkRateLimit({ principalId: auth.userId, bucket: 'read' });
+    if (!rl.allowed) return rateLimitedResponse(c, rl);
+    const result = await getGreenfieldTalkContextRoute({
+      auth,
+      workspaceId: requestedWorkspaceId(c),
+      talkId: c.req.param('talkId'),
+    });
+    return jsonResponse(result);
+  });
+
+  app.put('/api/v1/talks/:talkId/context/goal', async (c) => {
+    const auth = c.get('auth');
+    const rl = checkRateLimit({ principalId: auth.userId, bucket: 'write' });
+    if (!rl.allowed) return rateLimitedResponse(c, rl);
+    const csrfFail = checkCsrf(c, auth);
+    if (csrfFail) return csrfFail;
+    const payload = await readJsonBody<{ goalText?: string }>(c);
+    if (!payload.ok) return invalidJsonResponse(c, payload.error);
+    const result = await setGreenfieldTalkGoalRoute({
+      auth,
+      workspaceId: requestedWorkspaceId(c),
+      talkId: c.req.param('talkId'),
+      goalText:
+        typeof payload.data.goalText === 'string' ? payload.data.goalText : '',
+    });
+    return jsonResponse(result);
+  });
+
+  app.get('/api/v1/talks/:talkId/context/rules', async (c) => {
+    const auth = c.get('auth');
+    const rl = checkRateLimit({ principalId: auth.userId, bucket: 'read' });
+    if (!rl.allowed) return rateLimitedResponse(c, rl);
+    const result = await listGreenfieldTalkContextRulesRoute({
+      auth,
+      workspaceId: requestedWorkspaceId(c),
+      talkId: c.req.param('talkId'),
+    });
+    return jsonResponse(result);
+  });
+
+  app.post('/api/v1/talks/:talkId/context/rules', async (c) => {
+    const auth = c.get('auth');
+    const rl = checkRateLimit({ principalId: auth.userId, bucket: 'write' });
+    if (!rl.allowed) return rateLimitedResponse(c, rl);
+    const csrfFail = checkCsrf(c, auth);
+    if (csrfFail) return csrfFail;
+    const payload = await readJsonBody<{ ruleText?: string }>(c);
+    if (!payload.ok) return invalidJsonResponse(c, payload.error);
+    const result = await createGreenfieldTalkContextRuleRoute({
+      auth,
+      workspaceId: requestedWorkspaceId(c),
+      talkId: c.req.param('talkId'),
+      ruleText:
+        typeof payload.data.ruleText === 'string' ? payload.data.ruleText : '',
+    });
+    return jsonResponse(result);
+  });
+
+  app.patch('/api/v1/talks/:talkId/context/rules/:ruleId', async (c) => {
+    const auth = c.get('auth');
+    const rl = checkRateLimit({ principalId: auth.userId, bucket: 'write' });
+    if (!rl.allowed) return rateLimitedResponse(c, rl);
+    const csrfFail = checkCsrf(c, auth);
+    if (csrfFail) return csrfFail;
+    const payload = await readJsonBody<{
+      ruleText?: string;
+      isActive?: boolean;
+      sortOrder?: number;
+    }>(c);
+    if (!payload.ok) return invalidJsonResponse(c, payload.error);
+    const result = await patchGreenfieldTalkContextRuleRoute({
+      auth,
+      workspaceId: requestedWorkspaceId(c),
+      talkId: c.req.param('talkId'),
+      ruleId: c.req.param('ruleId'),
+      ruleText:
+        typeof payload.data.ruleText === 'string'
+          ? payload.data.ruleText
+          : undefined,
+      isActive:
+        typeof payload.data.isActive === 'boolean'
+          ? payload.data.isActive
+          : undefined,
+      sortOrder:
+        typeof payload.data.sortOrder === 'number'
+          ? payload.data.sortOrder
+          : undefined,
+    });
+    return jsonResponse(result);
+  });
+
+  app.delete('/api/v1/talks/:talkId/context/rules/:ruleId', async (c) => {
+    const auth = c.get('auth');
+    const rl = checkRateLimit({ principalId: auth.userId, bucket: 'write' });
+    if (!rl.allowed) return rateLimitedResponse(c, rl);
+    const csrfFail = checkCsrf(c, auth);
+    if (csrfFail) return csrfFail;
+    const result = await deleteGreenfieldTalkContextRuleRoute({
+      auth,
+      workspaceId: requestedWorkspaceId(c),
+      talkId: c.req.param('talkId'),
+      ruleId: c.req.param('ruleId'),
+    });
+    return jsonResponse(result);
+  });
+
+  app.get('/api/v1/talks/:talkId/state', async (c) => {
+    const auth = c.get('auth');
+    const rl = checkRateLimit({ principalId: auth.userId, bucket: 'read' });
+    if (!rl.allowed) return rateLimitedResponse(c, rl);
+    const result = await getGreenfieldTalkStateRoute({
+      auth,
+      workspaceId: requestedWorkspaceId(c),
+      talkId: c.req.param('talkId'),
+    });
+    return jsonResponse(result);
+  });
+
+  app.delete('/api/v1/talks/:talkId/state/:key', async (c) => {
+    const auth = c.get('auth');
+    const rl = checkRateLimit({ principalId: auth.userId, bucket: 'write' });
+    if (!rl.allowed) return rateLimitedResponse(c, rl);
+    const csrfFail = checkCsrf(c, auth);
+    if (csrfFail) return csrfFail;
+    const result = await deleteGreenfieldTalkStateEntryRoute({
+      auth,
+      workspaceId: requestedWorkspaceId(c),
+      talkId: c.req.param('talkId'),
+      key: c.req.param('key'),
+    });
+    return jsonResponse(result);
+  });
+
+  app.post('/api/v1/talks/:talkId/context/sources', async (c) => {
+    const auth = c.get('auth');
+    const rl = checkRateLimit({ principalId: auth.userId, bucket: 'write' });
+    if (!rl.allowed) return rateLimitedResponse(c, rl);
+    const csrfFail = checkCsrf(c, auth);
+    if (csrfFail) return csrfFail;
+    const payload = await readJsonBody<{
+      sourceType?: string;
+      title?: string;
+      note?: string | null;
+      sourceUrl?: string | null;
+      extractedText?: string | null;
+    }>(c);
+    if (!payload.ok) return invalidJsonResponse(c, payload.error);
+    const result = await createGreenfieldTalkContextSourceRoute({
+      auth,
+      workspaceId: requestedWorkspaceId(c),
+      talkId: c.req.param('talkId'),
+      sourceType:
+        typeof payload.data.sourceType === 'string'
+          ? payload.data.sourceType
+          : '',
+      title: typeof payload.data.title === 'string' ? payload.data.title : '',
+      note: typeof payload.data.note === 'string' ? payload.data.note : null,
+      sourceUrl:
+        typeof payload.data.sourceUrl === 'string'
+          ? payload.data.sourceUrl
+          : null,
+      extractedText:
+        typeof payload.data.extractedText === 'string'
+          ? payload.data.extractedText
+          : null,
+    });
+    scheduleGreenfieldUrlSourceIngestion(c, auth, result);
+    return jsonResponse(result);
+  });
+
+  app.post('/api/v1/talks/:talkId/context/sources/upload', async (c) => {
+    const auth = c.get('auth');
+    const rl = checkRateLimit({ principalId: auth.userId, bucket: 'write' });
+    if (!rl.allowed) return rateLimitedResponse(c, rl);
+    const csrfFail = checkCsrf(c, auth);
+    if (csrfFail) return csrfFail;
+    const body = await c.req.parseBody();
+    const file = body['file'];
+    if (!file || !(file instanceof File)) {
+      return c.json(
+        {
+          ok: false,
+          error: { code: 'file_required', message: 'A file field is required' },
+        },
+        400,
+      );
+    }
+    const arrayBuffer = await file.arrayBuffer();
+    const title = typeof body['title'] === 'string' ? body['title'] : undefined;
+    const result = await uploadGreenfieldTalkContextSourceRoute({
+      auth,
+      workspaceId: requestedWorkspaceId(c),
+      talkId: c.req.param('talkId'),
+      file: {
+        name: file.name || 'unnamed',
+        data: Buffer.from(arrayBuffer),
+        type: file.type || 'application/octet-stream',
+      },
+      title,
+    });
+    return jsonResponse(result);
+  });
+
+  app.post(
+    '/api/v1/talks/:talkId/context/sources/:sourceId/page-images/:index',
+    async (c) => {
+      const auth = c.get('auth');
+      const rl = checkRateLimit({ principalId: auth.userId, bucket: 'write' });
+      if (!rl.allowed) return rateLimitedResponse(c, rl);
+      const csrfFail = checkCsrf(c, auth);
+      if (csrfFail) return csrfFail;
+      const arrayBuffer = await c.req.arrayBuffer();
+      const result = await uploadGreenfieldTalkContextSourcePageImageRoute({
+        auth,
+        workspaceId: requestedWorkspaceId(c),
+        talkId: c.req.param('talkId'),
+        sourceId: c.req.param('sourceId'),
+        index: c.req.param('index'),
+        total: c.req.query('total'),
+        data: Buffer.from(arrayBuffer),
+      });
+      return jsonResponse(result);
+    },
+  );
+
+  app.get(
+    '/api/v1/talks/:talkId/context/sources/:sourceId/content',
+    async (c) => {
+      const auth = c.get('auth');
+      const rl = checkRateLimit({ principalId: auth.userId, bucket: 'read' });
+      if (!rl.allowed) return rateLimitedResponse(c, rl);
+      const result = await getGreenfieldTalkContextSourceContentRoute({
+        auth,
+        workspaceId: requestedWorkspaceId(c),
+        talkId: c.req.param('talkId'),
+        sourceId: c.req.param('sourceId'),
+      });
+      if ('headers' in result && result.headers) {
+        return new Response(result.body, {
+          status: result.statusCode,
+          headers: result.headers,
+        });
+      }
+      return jsonResponse(result);
+    },
+  );
+
+  app.patch('/api/v1/talks/:talkId/context/sources/:sourceId', async (c) => {
+    const auth = c.get('auth');
+    const rl = checkRateLimit({ principalId: auth.userId, bucket: 'write' });
+    if (!rl.allowed) return rateLimitedResponse(c, rl);
+    const csrfFail = checkCsrf(c, auth);
+    if (csrfFail) return csrfFail;
+    const payload = await readJsonBody<{
+      title?: string;
+      note?: string | null;
+      sortOrder?: number;
+      extractedText?: string | null;
+    }>(c);
+    if (!payload.ok) return invalidJsonResponse(c, payload.error);
+    const result = await patchGreenfieldTalkContextSourceRoute({
+      auth,
+      workspaceId: requestedWorkspaceId(c),
+      talkId: c.req.param('talkId'),
+      sourceId: c.req.param('sourceId'),
+      title:
+        typeof payload.data.title === 'string' ? payload.data.title : undefined,
+      note:
+        payload.data.note !== undefined
+          ? typeof payload.data.note === 'string'
+            ? payload.data.note
+            : null
+          : undefined,
+      sortOrder:
+        typeof payload.data.sortOrder === 'number'
+          ? payload.data.sortOrder
+          : undefined,
+      extractedText:
+        typeof payload.data.extractedText === 'string'
+          ? payload.data.extractedText
+          : undefined,
+    });
+    return jsonResponse(result);
+  });
+
+  app.delete('/api/v1/talks/:talkId/context/sources/:sourceId', async (c) => {
+    const auth = c.get('auth');
+    const rl = checkRateLimit({ principalId: auth.userId, bucket: 'write' });
+    if (!rl.allowed) return rateLimitedResponse(c, rl);
+    const csrfFail = checkCsrf(c, auth);
+    if (csrfFail) return csrfFail;
+    const result = await deleteGreenfieldTalkContextSourceRoute({
+      auth,
+      workspaceId: requestedWorkspaceId(c),
+      talkId: c.req.param('talkId'),
+      sourceId: c.req.param('sourceId'),
+    });
+    return jsonResponse(result);
+  });
+
+  app.post(
+    '/api/v1/talks/:talkId/context/sources/:sourceId/retry',
+    async (c) => {
+      const auth = c.get('auth');
+      const rl = checkRateLimit({ principalId: auth.userId, bucket: 'write' });
+      if (!rl.allowed) return rateLimitedResponse(c, rl);
+      const csrfFail = checkCsrf(c, auth);
+      if (csrfFail) return csrfFail;
+      const result = await retryGreenfieldTalkContextSourceRoute({
+        auth,
+        workspaceId: requestedWorkspaceId(c),
+        talkId: c.req.param('talkId'),
+        sourceId: c.req.param('sourceId'),
+      });
+      scheduleGreenfieldUrlSourceIngestion(c, auth, result);
+      return jsonResponse(result);
+    },
+  );
 
   // ── Greenfield chat enqueue + cancel (Queues port U2) ─────────
   app.post('/api/v1/talks/:talkId/chat', async (c) => {

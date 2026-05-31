@@ -881,6 +881,12 @@ create table public.context_sources (
   foreign key (workspace_id, source_talk_id) references public.talks(workspace_id, id) on delete cascade,
   unique (workspace_id, id)
 );
+create unique index context_sources_source_ref_unique
+  on public.context_sources (workspace_id, talk_id, (meta_json->>'sourceRef'))
+  where kind <> 'rule' and meta_json ? 'sourceRef';
+create unique index context_sources_goal_unique
+  on public.context_sources (workspace_id, talk_id)
+  where kind = 'rule' and meta_json->>'compatKind' = 'goal';
 
 -- PDF page-rasterization: one row per page JPEG for vision-but-not-PDF models
 -- (gpt-5-mini, gemini-2.5-flash, kimi-k2.6). Attached alongside extracted_text
