@@ -26,16 +26,16 @@ Reviewed:
 
 Static shape observed on 2026-05-31:
 
-| Area                     | Finding                                                                                                                                                                                                                             |
-| ------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Backend route surface    | `src/clawtalk/web/worker-app.ts` is 2,856 LOC and now wires greenfield route modules inline alongside legacy routes. The next slice should move greenfield mount glue out and retire covered legacy collisions.                     |
-| Backend data layer       | `src/clawtalk/db/accessors.ts` is 3,363 LOC and still centralizes legacy Talk/thread/message/run behavior. It is a rewrite boundary, not a file to keep extending.                                                                  |
-| Executor/context         | `new-executor.ts` is 2,869 LOC and `context-loader.ts` is 2,680 LOC. Salvage the proven streaming/tool/context ideas, but rewrite the DB contract and split responsibilities.                                                       |
-| Frontend Talk page       | `webapp/src/pages/TalkDetailPage.tsx` is 10,815 LOC. This is the largest snappiness and maintainability risk; rewrite as feature modules with server-state boundaries.                                                              |
-| Frontend API client      | `webapp/src/lib/api.ts` is 4,502 LOC and still exposes `Content`, `Thread`, `registered-agent`, and connector-era types. Replace with resource-specific clients generated from greenfield contracts or kept as small typed modules. |
-| Legacy schema references | 51 source files still reference `talk_threads`, `talk_runs`, `talk_messages`, `registered_agents`, `contents`, `content_edits`, or `talk_jobs`.                                                                                     |
-| Greenfield runtime       | Core/detail/chat routes, chat enqueue, queue consumer, executor, scheduler sweeps, outbox notify timing, and DLQ handling now target the greenfield tables. API shell cleanup and frontend integration remain.                      |
-| Test corpus              | 97 test files across backend + webapp. Many backend tests assert legacy schema behavior and should be rewritten, not repaired one-by-one.                                                                                           |
+| Area                     | Finding                                                                                                                                                                                                                                   |
+| ------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Backend route surface    | `src/clawtalk/web/worker-app.ts` is 2,081 LOC after delegating greenfield shell/detail/chat mounts to `src/clawtalk/web/routes/greenfield-api.ts` (884 LOC). Remaining shell work is retiring legacy route collisions.                    |
+| Backend data layer       | `src/clawtalk/db/accessors.ts` is 3,363 LOC and still centralizes legacy Talk/thread/message/run behavior. It is a rewrite boundary, not a file to keep extending.                                                                        |
+| Executor/context         | `new-executor.ts` is 2,869 LOC and `context-loader.ts` is 2,680 LOC. Salvage the proven streaming/tool/context ideas, but rewrite the DB contract and split responsibilities.                                                             |
+| Frontend Talk page       | `webapp/src/pages/TalkDetailPage.tsx` is 10,815 LOC. This is the largest snappiness and maintainability risk; rewrite as feature modules with server-state boundaries.                                                                    |
+| Frontend API client      | `webapp/src/lib/api.ts` is 4,502 LOC and still exposes `Content`, `Thread`, `registered-agent`, and connector-era types. Replace with resource-specific clients generated from greenfield contracts or kept as small typed modules.       |
+| Legacy schema references | 51 source files still reference `talk_threads`, `talk_runs`, `talk_messages`, `registered_agents`, `contents`, `content_edits`, or `talk_jobs`.                                                                                           |
+| Greenfield runtime       | Core/detail/chat routes, their Hono mount layer, chat enqueue, queue consumer, executor, scheduler sweeps, outbox notify timing, and DLQ handling now target greenfield tables. Legacy collision cleanup and frontend integration remain. |
+| Test corpus              | 97 test files across backend + webapp. Many backend tests assert legacy schema behavior and should be rewritten, not repaired one-by-one.                                                                                                 |
 
 ## Verification Run
 
@@ -53,6 +53,7 @@ Commands run from `/Users/josephkim/.codex/worktrees/381b/clawtalk`:
 | bundled Node 24 `npm run typecheck`                                                                                                  | Pass              | After Phase 1 bootstrap/source edits.                                                                                                                                                                                                    |
 | bundled Node 24 `scripts/run-vitest.mjs run src/clawtalk/workspaces/bootstrap.test.ts src/clawtalk/schema/greenfield-schema.test.ts` | Pass              | 2 files, 5 tests. Covers workspace bootstrap, role/team seed idempotency, legacy table absence, last-tab guard, run trigger shape, and home inbox dedup.                                                                                 |
 | bundled Node 24 `scripts/run-vitest.mjs run ...greenfield slice tests...`                                                            | Pass              | 14 files, 107 tests after `2363ee1`. Covers atomic outbox rollback, notify timing, ordered/parallel state-machine behavior, scheduler sweeps, bootstrap idempotency, executor prompt semantics, and worker DLQ ack/retry behavior.       |
+| bundled Node 24 `scripts/run-vitest.mjs run src/clawtalk/web/worker-app.test.ts src/clawtalk/web/routes/greenfield-*.test.ts`        | Pass              | 4 files, 20 tests after the greenfield API mount extraction. Confirms worker auth mounts and core/detail/chat route behavior still pass.                                                                                                 |
 
 The backend test failure is useful audit evidence: the code and tests are already straddling incompatible schema worlds. This confirms the docs' cutover warning and argues against a prolonged dual-path migration.
 
@@ -83,11 +84,11 @@ Start with a refactor branch and proceed in this order:
    - Remove reliance on the monolithic `db/accessors.ts` as call sites move.
    - Every user path enters through `withUserContext`; every service path is explicitly service-role.
 
-3. **API shell rewrite** 🔄 active next
+3. **API shell rewrite** 🔄 partially committed
    - Replace `worker-app.ts` route mounting with resource route modules.
-   - Greenfield modules exist, but `worker-app.ts` still owns too much inline mounting and legacy/greenfield collision handling.
+   - Greenfield shell/detail/chat routes now mount through `greenfield-api.ts`; `worker-app.ts` keeps public auth/health/content-images/WebSocket patterns plus legacy surfaces that still need cutover.
    - Keep public auth, health, content-image serving, and WebSocket upgrade patterns.
-   - Finish `/me`, workspace switching, folders/talks CRUD, and basic talk snapshot coverage without legacy table dependencies.
+   - Finish the remaining legacy route collisions: talk roster mutation, policy/tools, context/resources, jobs, and document edit compatibility paths.
 
 4. **Talk execution vertical slice** 🔄 partially underway
    - New `/chat` writes `messages`, freezes `talk_agent_snapshots`, creates `runs`, enqueues to `TALK_RUN_QUEUE`, and streams through `event_outbox`.
@@ -130,9 +131,9 @@ These are documentation/project hygiene tasks, not product blockers:
 
 ## Next Ready Signal
 
-The next implementation slice should finish the greenfield API shell/resource boundary. It is ready to commit when:
+The next implementation slice should retire the next set of legacy API collisions. It is ready to commit when:
 
-- `worker-app.ts` delegates the greenfield surfaces to small resource route modules instead of accumulating more logic inline.
-- `/me`, workspace resolution/switching, folders/talks CRUD, and basic talk snapshot contracts have explicit greenfield coverage and no accidental legacy table dependency.
-- Focused route/accessor tests cover auth/RLS behavior, workspace selection, and the happy/error paths for the new resource modules.
+- One remaining collision family moves off legacy route/accessor contracts without widening the slice.
+- Focused route/accessor tests cover auth/RLS behavior and happy/error paths for that resource family.
+- `worker-app.ts` continues shrinking or stays as mount-only glue for that family.
 - Node 24 typecheck, focused backend tests, gstack review, Karpathy diff review, and Claude review pass.
