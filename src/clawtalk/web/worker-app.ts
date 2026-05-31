@@ -198,20 +198,25 @@ import {
 import {
   acceptContentEditRoute,
   acceptContentEditRunRoute,
-  createTalkContentRoute,
-  createThreadContentRoute,
-  getTalkContentRoute,
-  getThreadContentRoute,
-  patchContentRoute,
   rejectContentEditRoute,
   rejectContentEditRunRoute,
 } from './routes/talk-contents.js';
 import {
-  createTalkThreadRoute,
-  deleteTalkThreadRoute,
-  listTalkThreadsRoute,
-  patchTalkThreadRoute,
-} from './routes/talk-threads.js';
+  createGreenfieldTalkContentRoute,
+  createGreenfieldThreadContentRoute,
+  createGreenfieldThreadRoute,
+  deleteGreenfieldMessagesRoute,
+  deleteGreenfieldThreadRoute,
+  getGreenfieldSnapshotRoute,
+  getGreenfieldTalkContentRoute,
+  getGreenfieldThreadContentRoute,
+  listGreenfieldMessagesRoute,
+  listGreenfieldRunsRoute,
+  listGreenfieldThreadsRoute,
+  patchGreenfieldContentRoute,
+  patchGreenfieldThreadRoute,
+  searchGreenfieldMessagesRoute,
+} from './routes/greenfield-detail.js';
 import {
   disconnectGoogleAccountRoute,
   expandScopesRoute,
@@ -243,17 +248,12 @@ import { dispatchRun } from '../talks/queue-producer.js';
 import {
   cancelTalkChat,
   enqueueTalkChat,
-  deleteTalkMessagesRoute,
   getTalkPolicyRoute,
   getTalkRunContextRoute,
-  listTalkMessagesRoute,
-  listTalkRunsRoute,
   reorderTalkSidebarRoute,
-  searchTalkMessagesRoute,
   updateTalkAgentsRoute,
   updateTalkPolicyRoute,
 } from './routes/talks.js';
-import { getTalkSnapshotRoute } from './routes/talk-snapshot.js';
 import { getTalkToolsRoute, updateTalkToolRoute } from './routes/talk-tools.js';
 import {
   getEffectiveToolsRoute,
@@ -1531,8 +1531,9 @@ function buildApp(): Hono<{ Variables: Variables }> {
     const limit = parsePositiveInt(c.req.query('limit'));
     const beforeCreatedAt = c.req.query('before') || undefined;
     const threadId = (c.req.query('threadId') || '').trim() || undefined;
-    const result = await listTalkMessagesRoute({
+    const result = await listGreenfieldMessagesRoute({
       auth,
+      workspaceId: requestedWorkspaceId(c),
       talkId: talkId.value,
       threadId,
       limit: limit ?? undefined,
@@ -1548,8 +1549,9 @@ function buildApp(): Hono<{ Variables: Variables }> {
     const talkId = decodeIdParam(c, 'talkId');
     if (!talkId.ok) return talkId.response;
     const threadId = (c.req.query('threadId') || '').trim() || undefined;
-    const result = await getTalkSnapshotRoute({
+    const result = await getGreenfieldSnapshotRoute({
       auth,
+      workspaceId: requestedWorkspaceId(c),
       talkId: talkId.value,
       threadId,
     });
@@ -1562,6 +1564,8 @@ function buildApp(): Hono<{ Variables: Variables }> {
     if (!rl.allowed) return rateLimitedResponse(c, rl);
     const csrfFail = checkCsrf(c, auth);
     if (csrfFail) return csrfFail;
+    const talkId = decodeIdParam(c, 'talkId');
+    if (!talkId.ok) return talkId.response;
     const payload = await readJsonBody<{
       messageIds?: unknown;
       threadId?: unknown;
@@ -1572,13 +1576,11 @@ function buildApp(): Hono<{ Variables: Variables }> {
           (value): value is string => typeof value === 'string',
         )
       : [];
-    const threadId =
-      typeof payload.data.threadId === 'string' ? payload.data.threadId : null;
-    const result = await deleteTalkMessagesRoute({
+    const result = await deleteGreenfieldMessagesRoute({
       auth,
-      talkId: c.req.param('talkId'),
+      workspaceId: requestedWorkspaceId(c),
+      talkId: talkId.value,
       messageIds,
-      threadId,
     });
     return jsonResponse(result);
   });
@@ -1591,8 +1593,9 @@ function buildApp(): Hono<{ Variables: Variables }> {
     if (!talkId.ok) return talkId.response;
     const query = c.req.query('q') || '';
     const limit = parsePositiveInt(c.req.query('limit'));
-    const result = await searchTalkMessagesRoute({
+    const result = await searchGreenfieldMessagesRoute({
       auth,
+      workspaceId: requestedWorkspaceId(c),
       talkId: talkId.value,
       query,
       limit: limit ?? undefined,
@@ -1666,7 +1669,11 @@ function buildApp(): Hono<{ Variables: Variables }> {
     if (!rl.allowed) return rateLimitedResponse(c, rl);
     const talkId = decodeIdParam(c, 'talkId');
     if (!talkId.ok) return talkId.response;
-    const result = await listTalkRunsRoute({ auth, talkId: talkId.value });
+    const result = await listGreenfieldRunsRoute({
+      auth,
+      workspaceId: requestedWorkspaceId(c),
+      talkId: talkId.value,
+    });
     return jsonResponse(result);
   });
 
@@ -1719,8 +1726,9 @@ function buildApp(): Hono<{ Variables: Variables }> {
     const auth = c.get('auth');
     const rl = checkRateLimit({ principalId: auth.userId, bucket: 'read' });
     if (!rl.allowed) return rateLimitedResponse(c, rl);
-    const result = await getTalkContentRoute({
+    const result = await getGreenfieldTalkContentRoute({
       auth,
+      workspaceId: requestedWorkspaceId(c),
       talkId: c.req.param('talkId'),
     });
     return jsonResponse(result);
@@ -1736,8 +1744,9 @@ function buildApp(): Hono<{ Variables: Variables }> {
       c,
     );
     if (!payload.ok) return invalidJsonResponse(c, payload.error);
-    const result = await createTalkContentRoute({
+    const result = await createGreenfieldTalkContentRoute({
       auth,
+      workspaceId: requestedWorkspaceId(c),
       talkId: c.req.param('talkId'),
       title: payload.data.title,
       format: payload.data.format,
@@ -1752,8 +1761,9 @@ function buildApp(): Hono<{ Variables: Variables }> {
     const auth = c.get('auth');
     const rl = checkRateLimit({ principalId: auth.userId, bucket: 'read' });
     if (!rl.allowed) return rateLimitedResponse(c, rl);
-    const result = await getThreadContentRoute({
+    const result = await getGreenfieldThreadContentRoute({
       auth,
+      workspaceId: requestedWorkspaceId(c),
       threadId: c.req.param('threadId'),
     });
     return jsonResponse(result);
@@ -1769,8 +1779,9 @@ function buildApp(): Hono<{ Variables: Variables }> {
       c,
     );
     if (!payload.ok) return invalidJsonResponse(c, payload.error);
-    const result = await createThreadContentRoute({
+    const result = await createGreenfieldThreadContentRoute({
       auth,
+      workspaceId: requestedWorkspaceId(c),
       threadId: c.req.param('threadId'),
       title: payload.data.title,
       format: payload.data.format,
@@ -1792,8 +1803,9 @@ function buildApp(): Hono<{ Variables: Variables }> {
       acceptPendingEditIds?: unknown;
     }>(c);
     if (!payload.ok) return invalidJsonResponse(c, payload.error);
-    const result = await patchContentRoute({
+    const result = await patchGreenfieldContentRoute({
       auth,
+      workspaceId: requestedWorkspaceId(c),
       contentId: c.req.param('contentId'),
       expectedVersion: payload.data.expectedVersion,
       bodyMarkdown: payload.data.bodyMarkdown,
@@ -2238,8 +2250,9 @@ function buildApp(): Hono<{ Variables: Variables }> {
     const auth = c.get('auth');
     const rl = checkRateLimit({ principalId: auth.userId, bucket: 'read' });
     if (!rl.allowed) return rateLimitedResponse(c, rl);
-    const result = await listTalkThreadsRoute({
+    const result = await listGreenfieldThreadsRoute({
       auth,
+      workspaceId: requestedWorkspaceId(c),
       talkId: c.req.param('talkId'),
     });
     return jsonResponse(result);
@@ -2253,14 +2266,10 @@ function buildApp(): Hono<{ Variables: Variables }> {
     if (csrfFail) return csrfFail;
     const payload = await readJsonBody<{ title?: unknown }>(c);
     if (!payload.ok) return invalidJsonResponse(c, payload.error);
-    const title =
-      typeof payload.data.title === 'string'
-        ? payload.data.title.trim() || null
-        : null;
-    const result = await createTalkThreadRoute({
+    const result = await createGreenfieldThreadRoute({
       auth,
+      workspaceId: requestedWorkspaceId(c),
       talkId: c.req.param('talkId'),
-      title,
     });
     return jsonResponse(result);
   });
@@ -2275,11 +2284,11 @@ function buildApp(): Hono<{ Variables: Variables }> {
       c,
     );
     if (!payload.ok) return invalidJsonResponse(c, payload.error);
-    const result = await patchTalkThreadRoute({
+    const result = await patchGreenfieldThreadRoute({
       auth,
+      workspaceId: requestedWorkspaceId(c),
       talkId: c.req.param('talkId'),
       threadId: c.req.param('threadId'),
-      body: payload.data,
     });
     return jsonResponse(result);
   });
@@ -2290,8 +2299,9 @@ function buildApp(): Hono<{ Variables: Variables }> {
     if (!rl.allowed) return rateLimitedResponse(c, rl);
     const csrfFail = checkCsrf(c, auth);
     if (csrfFail) return csrfFail;
-    const result = await deleteTalkThreadRoute({
+    const result = await deleteGreenfieldThreadRoute({
       auth,
+      workspaceId: requestedWorkspaceId(c),
       talkId: c.req.param('talkId'),
       threadId: c.req.param('threadId'),
     });
