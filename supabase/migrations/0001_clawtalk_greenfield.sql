@@ -1610,11 +1610,24 @@ declare
   role_sort int;
   seeded_agent_id uuid;
 begin
-  select wm.workspace_id
+  if auth.uid() is not null and auth.uid() <> target_user_id then
+    raise exception 'cannot bootstrap workspace for a different user'
+      using errcode = 'CT100';
+  end if;
+
+  -- First bootstrap can be reached from multiple tabs during initial app load.
+  -- Serialize per user so two concurrent calls cannot both create an owned
+  -- workspace before either sees the other's insert.
+  perform pg_advisory_xact_lock(
+    hashtext('clawtalk.ensure_user_workspace_bootstrap'),
+    hashtext(target_user_id::text)
+  );
+
+  select w.id
     into ws_id
-    from public.workspace_members wm
-    where wm.user_id = target_user_id
-    order by wm.created_at asc
+    from public.workspaces w
+    where w.owner_id = target_user_id
+    order by w.created_at asc
     limit 1;
 
   select nullif(trim(u.name), '')
@@ -1632,9 +1645,14 @@ begin
     values (user_name || '''s workspace', target_user_id)
     returning id into ws_id;
 
-    insert into public.workspace_members (workspace_id, user_id, role)
-    values (ws_id, target_user_id, 'owner');
   end if;
+
+  insert into public.workspace_members (workspace_id, user_id, role)
+  values (ws_id, target_user_id, 'owner')
+  on conflict (workspace_id, user_id) do update set
+    -- The workspace owner must always have an owner membership row. Repair
+    -- drift here so bootstrap leaves ownership and membership consistent.
+    role = 'owner';
 
   insert into public.agents (
     workspace_id, role_key, name, handle, initials, accent, accent_dark,
@@ -1650,20 +1668,9 @@ begin
   where t.role_key in ('strategist', 'critic', 'researcher', 'editor', 'quant')
   on conflict (workspace_id, role_key)
     where is_default = true and is_system = false
-  do update set
-    name = excluded.name,
-    handle = excluded.handle,
-    initials = excluded.initials,
-    accent = excluded.accent,
-    accent_dark = excluded.accent_dark,
-    model_id = excluded.model_id,
-    default_model_id = excluded.default_model_id,
-    temperature = excluded.temperature,
-    method = excluded.method,
-    is_custom = false,
-    enabled = true,
-    created_from_template_version = excluded.created_from_template_version,
-    updated_at = now();
+  -- Re-bootstrap must not reset user-edited default agents. Future template
+  -- version changes should ship as explicit migrations instead of silent reseeds.
+  do nothing;
 
   insert into public.agents (
     workspace_id, role_key, name, handle, initials, accent, accent_dark,
@@ -1679,21 +1686,9 @@ begin
   where t.role_key in ('forge_rewriter', 'forge_critic')
   on conflict (workspace_id, role_key)
     where is_system = true
-  do update set
-    name = excluded.name,
-    handle = excluded.handle,
-    initials = excluded.initials,
-    accent = excluded.accent,
-    accent_dark = excluded.accent_dark,
-    model_id = excluded.model_id,
-    default_model_id = excluded.default_model_id,
-    temperature = excluded.temperature,
-    method = excluded.method,
-    is_default = true,
-    is_custom = false,
-    enabled = true,
-    created_from_template_version = excluded.created_from_template_version,
-    updated_at = now();
+  -- Preserve existing system agents on repeated bootstrap. Template updates
+  -- should be deliberate migrations so production behavior is auditable.
+  do nothing;
 
   for team_rec in
     select *
@@ -1726,15 +1721,28 @@ begin
     )
     on conflict (workspace_id, name)
       where is_default = true
-    do update set
-      description = excluded.description,
-      icon = excluded.icon,
-      updated_at = now()
+    -- Preserve edited team definitions on repeated bootstrap. Template
+    -- membership changes should be handled by explicit migrations.
+    do nothing
     returning id into seeded_team_id;
 
-    delete from public.team_composition_agents
-      where workspace_id = ws_id and team_id = seeded_team_id;
+    if seeded_team_id is null then
+      select id
+        into seeded_team_id
+        from public.team_compositions
+        where workspace_id = ws_id
+          and name = team_rec.name
+          and is_default = true
+        limit 1;
+    end if;
 
+    if seeded_team_id is null then
+      continue;
+    end if;
+
+    -- Insert missing template roster edges on every bootstrap. Existing roster
+    -- rows and extra rows are preserved; this repairs interrupted bootstrap
+    -- without silently resetting edited sort_order values.
     role_sort := 0;
     foreach role in array team_rec.roles loop
       role_sort := role_sort + 1;
@@ -1752,8 +1760,7 @@ begin
           workspace_id, team_id, agent_id, sort_order
         )
         values (ws_id, seeded_team_id, seeded_agent_id, role_sort)
-        on conflict (team_id, agent_id) do update set
-          sort_order = excluded.sort_order;
+        on conflict (team_id, agent_id) do nothing;
       end if;
     end loop;
   end loop;

@@ -1,18 +1,27 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
-import { closePgDatabase, getDbPg, initPgDatabase } from '../../db.js';
+import {
+  closePgDatabase,
+  getDbPg,
+  initPgDatabase,
+  withUserContext,
+} from '../../db.js';
 import { ensureWorkspaceBootstrapForUser } from './bootstrap.js';
 
 const USER_ID = '0c909090-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
+const OTHER_USER_ID = '0c909090-bbbb-bbbb-bbbb-bbbbbbbbbbbb';
 
-async function seedAuthUser(): Promise<void> {
+async function seedAuthUser(
+  id = USER_ID,
+  email = 'bootstrap@clawtalk.local',
+): Promise<void> {
   const db = getDbPg();
   await db`
     insert into auth.users (id, email, raw_user_meta_data)
     values (
-      ${USER_ID}::uuid,
-      'bootstrap@clawtalk.local',
-      jsonb_build_object('full_name', 'Bootstrap User')
+      ${id}::uuid,
+      ${email}::text,
+      jsonb_build_object('full_name', ${email}::text)
     )
     on conflict (id) do nothing
   `;
@@ -21,10 +30,12 @@ async function seedAuthUser(): Promise<void> {
 async function deleteUser(): Promise<void> {
   const db = getDbPg();
   await db`
-    delete from public.workspaces where owner_id = ${USER_ID}::uuid
+    delete from public.workspaces
+    where owner_id in (${USER_ID}::uuid, ${OTHER_USER_ID}::uuid)
   `;
   await db`
-    delete from auth.users where id = ${USER_ID}::uuid
+    delete from auth.users
+    where id in (${USER_ID}::uuid, ${OTHER_USER_ID}::uuid)
   `;
 }
 
@@ -114,5 +125,252 @@ describe('workspace bootstrap', () => {
         (select count(*)::int from public.team_compositions where workspace_id = ${firstWorkspaceId}::uuid) as teams
     `;
     expect(counts[0]).toEqual({ workspaces: 1, agents: 7, teams: 3 });
+  });
+
+  it('serializes concurrent first bootstrap calls into one owned workspace', async () => {
+    await seedAuthUser();
+
+    const workspaceIds = await Promise.all(
+      Array.from({ length: 5 }, () => ensureWorkspaceBootstrapForUser(USER_ID)),
+    );
+
+    expect(new Set(workspaceIds).size).toBe(1);
+    const db = getDbPg();
+    const counts = await db<Array<{ workspaces: number; members: number }>>`
+      select
+        (select count(*)::int
+         from public.workspaces
+         where owner_id = ${USER_ID}::uuid) as workspaces,
+        (select count(*)::int
+         from public.workspace_members
+         where user_id = ${USER_ID}::uuid
+           and role = 'owner') as members
+    `;
+    expect(counts[0]).toEqual({ workspaces: 1, members: 1 });
+  });
+
+  it('repairs the owned workspace membership role to owner on re-bootstrap', async () => {
+    await seedAuthUser();
+
+    const workspaceId = await ensureWorkspaceBootstrapForUser(USER_ID);
+    const db = getDbPg();
+    await db`
+      update public.workspace_members
+      set role = 'member'
+      where workspace_id = ${workspaceId}::uuid
+        and user_id = ${USER_ID}::uuid
+    `;
+
+    await ensureWorkspaceBootstrapForUser(USER_ID);
+
+    const rows = await db<Array<{ role: string }>>`
+      select role
+      from public.workspace_members
+      where workspace_id = ${workspaceId}::uuid
+        and user_id = ${USER_ID}::uuid
+    `;
+    expect(rows[0]?.role).toBe('owner');
+  });
+
+  it('does not overwrite existing seeded agents or teams on later bootstrap calls', async () => {
+    await seedAuthUser();
+
+    const workspaceId = await ensureWorkspaceBootstrapForUser(USER_ID);
+    const db = getDbPg();
+    await db`
+      update public.agents
+      set name = 'Custom Strategist',
+          enabled = false,
+          is_custom = true
+      where workspace_id = ${workspaceId}::uuid
+        and role_key = 'strategist'
+        and is_default = true
+        and is_system = false
+    `;
+    await db`
+      update public.team_compositions
+      set description = 'Custom team description'
+      where workspace_id = ${workspaceId}::uuid
+        and name = 'Pricing crew'
+        and is_default = true
+    `;
+    await db`
+      delete from public.team_composition_agents
+      where workspace_id = ${workspaceId}::uuid
+        and team_id in (
+          select id
+          from public.team_compositions
+          where workspace_id = ${workspaceId}::uuid
+            and name = 'Pricing crew'
+            and is_default = true
+        )
+    `;
+
+    await ensureWorkspaceBootstrapForUser(USER_ID);
+
+    const agents = await db<
+      Array<{ name: string; enabled: boolean; is_custom: boolean }>
+    >`
+      select name, enabled, is_custom
+      from public.agents
+      where workspace_id = ${workspaceId}::uuid
+        and role_key = 'strategist'
+        and is_default = true
+        and is_system = false
+    `;
+    expect(agents[0]).toEqual({
+      name: 'Custom Strategist',
+      enabled: false,
+      is_custom: true,
+    });
+
+    const teams = await db<Array<{ description: string | null }>>`
+      select description
+      from public.team_compositions
+      where workspace_id = ${workspaceId}::uuid
+        and name = 'Pricing crew'
+        and is_default = true
+    `;
+    expect(teams[0]?.description).toBe('Custom team description');
+
+    const repairedTeamRows = await db<{ roles: string[] }[]>`
+      select array_agg(a.role_key order by tca.sort_order asc) as roles
+      from public.team_compositions tc
+      join public.team_composition_agents tca
+        on tca.workspace_id = tc.workspace_id
+       and tca.team_id = tc.id
+      join public.agents a
+        on a.workspace_id = tca.workspace_id
+       and a.id = tca.agent_id
+      where tc.workspace_id = ${workspaceId}::uuid
+        and tc.name = 'Pricing crew'
+        and tc.is_default = true
+      group by tc.id
+    `;
+    expect(repairedTeamRows[0]?.roles).toEqual([
+      'strategist',
+      'critic',
+      'quant',
+      'editor',
+    ]);
+  });
+
+  it('repairs missing default team roster edges without overwriting existing rows', async () => {
+    await seedAuthUser();
+
+    const workspaceId = await ensureWorkspaceBootstrapForUser(USER_ID);
+    const db = getDbPg();
+    await db`
+      update public.team_composition_agents tca
+      set sort_order = 99
+      from public.team_compositions tc
+      join public.agents a
+        on a.workspace_id = tc.workspace_id
+       and a.role_key = 'strategist'
+       and a.is_default = true
+       and a.is_system = false
+      where tca.workspace_id = tc.workspace_id
+        and tca.team_id = tc.id
+        and tca.agent_id = a.id
+        and tc.workspace_id = ${workspaceId}::uuid
+        and tc.name = 'Pricing crew'
+        and tc.is_default = true
+    `;
+    await db`
+      delete from public.team_composition_agents tca
+      using public.team_compositions tc, public.agents a
+      where tca.workspace_id = tc.workspace_id
+        and tca.team_id = tc.id
+        and tca.workspace_id = a.workspace_id
+        and tca.agent_id = a.id
+        and tc.workspace_id = ${workspaceId}::uuid
+        and tc.name = 'Pricing crew'
+        and tc.is_default = true
+        and a.role_key = 'quant'
+        and a.is_default = true
+        and a.is_system = false
+    `;
+
+    await ensureWorkspaceBootstrapForUser(USER_ID);
+
+    const rows = await db<
+      Array<{ role_key: string; sort_order: number | null }>
+    >`
+      select a.role_key, tca.sort_order
+      from public.team_compositions tc
+      join public.team_composition_agents tca
+        on tca.workspace_id = tc.workspace_id
+       and tca.team_id = tc.id
+      join public.agents a
+        on a.workspace_id = tca.workspace_id
+       and a.id = tca.agent_id
+      where tc.workspace_id = ${workspaceId}::uuid
+        and tc.name = 'Pricing crew'
+        and tc.is_default = true
+      order by a.role_key asc
+    `;
+    const sortByRole = new Map(
+      rows.map((row) => [row.role_key, row.sort_order]),
+    );
+    expect(sortByRole.get('quant')).toBe(3);
+    expect(sortByRole.get('strategist')).toBe(99);
+  });
+
+  it('bootstraps an owned workspace instead of seeding a workspace where the user is only a member', async () => {
+    await seedAuthUser();
+    await seedAuthUser(OTHER_USER_ID, 'other-bootstrap@clawtalk.local');
+
+    const db = getDbPg();
+    const sharedWorkspaces = await db<Array<{ id: string }>>`
+      insert into public.workspaces (name, owner_id)
+      values ('Shared workspace', ${OTHER_USER_ID}::uuid)
+      returning id
+    `;
+    const sharedWorkspaceId = sharedWorkspaces[0]!.id;
+    await db`
+      insert into public.workspace_members (workspace_id, user_id, role)
+      values
+        (${sharedWorkspaceId}::uuid, ${OTHER_USER_ID}::uuid, 'owner'),
+        (${sharedWorkspaceId}::uuid, ${USER_ID}::uuid, 'member')
+    `;
+
+    const workspaceId = await ensureWorkspaceBootstrapForUser(USER_ID);
+    expect(workspaceId).not.toBe(sharedWorkspaceId);
+
+    const ownedRows = await db<Array<{ owner_id: string; role: string }>>`
+      select w.owner_id::text, wm.role
+      from public.workspaces w
+      join public.workspace_members wm
+        on wm.workspace_id = w.id
+       and wm.user_id = ${USER_ID}::uuid
+      where w.id = ${workspaceId}::uuid
+    `;
+    expect(ownedRows[0]).toEqual({ owner_id: USER_ID, role: 'owner' });
+
+    const sharedAgents = await db<Array<{ count: number }>>`
+      select count(*)::int as count
+      from public.agents
+      where workspace_id = ${sharedWorkspaceId}::uuid
+    `;
+    expect(sharedAgents[0]?.count).toBe(0);
+  });
+
+  it('rejects authenticated attempts to bootstrap another user', async () => {
+    await seedAuthUser();
+    await seedAuthUser(OTHER_USER_ID, 'other-bootstrap@clawtalk.local');
+
+    await expect(
+      withUserContext(USER_ID, () =>
+        ensureWorkspaceBootstrapForUser(OTHER_USER_ID),
+      ),
+    ).rejects.toMatchObject({ code: 'CT100' });
+
+    const db = getDbPg();
+    const rows = await db<Array<{ count: number }>>`
+      select count(*)::int as count
+      from public.workspaces
+      where owner_id = ${OTHER_USER_ID}::uuid
+    `;
+    expect(rows[0]?.count).toBe(0);
   });
 });

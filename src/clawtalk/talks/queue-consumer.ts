@@ -18,6 +18,7 @@
 
 import { randomUUID } from 'crypto';
 
+import { flushCurrentNotifyQueue } from '../../db.js';
 import {
   completeGreenfieldRun,
   failGreenfieldDlqRun,
@@ -144,6 +145,7 @@ export async function processTalkRunMessage(
   }
 
   const run = claim.run;
+  await flushCurrentNotifyQueue();
   const executor = input.executor ?? new GreenfieldTalkExecutor();
   const cancelPollMs = input.cancelPollIntervalMs ?? DEFAULT_CANCEL_POLL_MS;
   const dispatch = input.dispatch ?? dispatchRun;
@@ -298,6 +300,7 @@ export async function processTalkRunMessage(
     try {
       const nextRunId = await findNextGreenfieldRunnableOrderedSibling({
         workspaceId: run.workspace_id,
+        talkId: run.talk_id,
         responseGroupId: run.response_group_id,
       });
       if (nextRunId) await dispatch({ runId: nextRunId });
@@ -361,9 +364,9 @@ function errorMessageText(err: unknown): string {
  * markGreenfieldRunRunning even returned).
  *
  * The handler flips the row to 'failed' with code 'dlq_exhausted'
- * and emits a talk_run_failed outbox event so the UI moves on. No
- * retries on the DLQ itself (max_retries=0 in wrangler.toml) — we
- * either succeed or log + ack. Either way the message is gone.
+ * and emits a talk_run_failed outbox event so the UI moves on. If the
+ * DB/outbox finalization throws, the Worker retries the DLQ message
+ * instead of acking away the last owner of the stranded run.
  */
 export async function processDlqMessage(input: {
   runId: string;

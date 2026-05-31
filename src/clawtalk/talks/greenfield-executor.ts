@@ -19,6 +19,7 @@ type GreenfieldExecutorRunRow = {
   workspace_id: string;
   talk_id: string;
   talk_title: string;
+  talk_mode: 'ordered' | 'parallel';
   round: number;
   status: string;
   model_id: string;
@@ -138,6 +139,7 @@ async function getGreenfieldExecutorRun(
       r.workspace_id,
       r.talk_id,
       t.title as talk_title,
+      t.mode as talk_mode,
       r.round,
       r.status,
       r.model_id,
@@ -270,10 +272,12 @@ function formatPriorGaps(priorGaps: PriorOrderedGap[]): string {
 export async function buildGreenfieldStepUserMessageText(input: {
   workspaceId: string;
   triggerContent: string;
+  talkMode?: 'ordered' | 'parallel' | null;
   responseGroupId?: string | null;
   sequenceIndex?: number | null;
 }): Promise<{ userMessageText: string; isSynthesis: boolean }> {
   if (
+    (input.talkMode ?? 'ordered') !== 'ordered' ||
     !input.responseGroupId ||
     typeof input.sequenceIndex !== 'number' ||
     input.sequenceIndex <= 0
@@ -495,6 +499,7 @@ export class GreenfieldTalkExecutor implements TalkExecutor {
       buildGreenfieldStepUserMessageText({
         workspaceId: run.workspace_id,
         triggerContent: input.triggerContent,
+        talkMode: run.talk_mode,
         responseGroupId: input.responseGroupId,
         sequenceIndex: input.sequenceIndex,
       }),

@@ -30,6 +30,7 @@ import {
 } from '../db/accessors.js';
 import {
   getCurrentNotifyQueue,
+  type Sql,
   getStreamingCoalesceMap,
   type NotifyQueueEntry,
 } from '../../db.js';
@@ -40,6 +41,21 @@ export interface EmitOutboxEventInput {
   eventType: string;
   payload: Record<string, unknown>;
   ownerIds: string[];
+}
+
+export function enqueueOutboxNotify(input: {
+  topic: string;
+  eventId: number;
+  ownerIds: string[];
+}): void {
+  const queue = getCurrentNotifyQueue();
+  if (!queue) return;
+  const entry: NotifyQueueEntry = {
+    topic: input.topic,
+    eventId: input.eventId,
+    ownerIds: input.ownerIds,
+  };
+  queue.push(entry);
 }
 
 /**
@@ -55,16 +71,34 @@ export async function emitOutboxEvent(
     eventType: input.eventType,
     payload: input.payload,
   });
-  const queue = getCurrentNotifyQueue();
-  if (queue) {
-    const entry: NotifyQueueEntry = {
-      topic: input.topic,
-      eventId,
-      ownerIds: input.ownerIds,
-    };
-    queue.push(entry);
-  }
+  enqueueOutboxNotify({
+    topic: input.topic,
+    eventId,
+    ownerIds: input.ownerIds,
+  });
   return eventId;
+}
+
+/**
+ * In-tx emit on an explicit sql/transaction handle. Used by queue-side
+ * completion code that needs several DB mutations plus their durable outbox
+ * rows to commit or roll back as one unit. The caller must queue notify
+ * entries only after the surrounding transaction resolves successfully.
+ *
+ * `ownerIds` are not stored in `event_outbox`; topic authorization happens
+ * when clients subscribe, and owner fan-out is only a notify-queue concern.
+ */
+export async function emitOutboxEventOnSql(
+  sql: Sql,
+  input: EmitOutboxEventInput,
+): Promise<number> {
+  const rows = await sql<{ event_id: number }[]>`
+    insert into public.event_outbox (topic, event_type, payload)
+    values (${input.topic}, ${input.eventType},
+            ${sql.json(input.payload as never)})
+    returning event_id::int
+  `;
+  return rows[0]!.event_id;
 }
 
 /**

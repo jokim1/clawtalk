@@ -542,6 +542,28 @@ export async function withNotifyQueueScope<T>(
 }
 
 /**
+ * Flush and clear the current notify queue before the enclosing
+ * `withNotifyQueueScope` exits. Call this only after the outbox rows being
+ * announced have committed; it is for long-running queue work where callers
+ * need early UI state, e.g. `talk_run_started` before model execution.
+ */
+export async function flushCurrentNotifyQueue(): Promise<void> {
+  const queue = notifyQueueStorage.getStore();
+  if (!queue || queue.length === 0) return;
+  const entries = queue.splice(0, queue.length);
+  const requestScope = requestScopedDbStorage.getStore();
+  const flush = flushNotifyQueue(entries, requestScope?.env ?? null).catch(
+    (err) => {
+      console.error('[notify-queue] explicit flush failed', err);
+    },
+  );
+  if (requestScope?.ctx) {
+    requestScope.ctx.waitUntil(flush);
+  }
+  await flush;
+}
+
+/**
  * Group `queue` entries by ownerId, then POST one batched notify per
  * owner to the UserEventHub DO. Each fan-out retries up to 3 times
  * on transient failure (D1: 100ms / 500ms / 2s backoff).

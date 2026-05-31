@@ -13,6 +13,7 @@ import { describe, expect, it, vi, beforeEach } from 'vitest';
 // vi.mock hoists. Declare both module mocks before any code that
 // resolves them so the helper picks up the stubbed implementations.
 vi.mock('../../db.js', () => ({
+  withNotifyQueueScope: vi.fn(async (_env, _ctx, fn) => fn()),
   withRequestScopedDb: vi.fn(async (_url, _ctx, _env, fn) => fn()),
 }));
 vi.mock('./queue-consumer.js', () => ({
@@ -27,7 +28,7 @@ vi.mock('../../logger.js', () => ({
   },
 }));
 
-import { withRequestScopedDb } from '../../db.js';
+import { withNotifyQueueScope, withRequestScopedDb } from '../../db.js';
 import { logger } from '../../logger.js';
 import {
   dispatchRunInProcess,
@@ -66,6 +67,29 @@ describe('dispatchRunInProcess', () => {
     expect(processTalkRunMessage).toHaveBeenCalledTimes(1);
     expect(processTalkRunMessage).toHaveBeenCalledWith({
       runId: 'run-abc',
+      attempts: 1,
+      maxRetries: 3,
+    });
+  });
+
+  it('opens a notify queue scope around in-process execution', async () => {
+    const env = buildEnv();
+    const ctx = buildCtx();
+
+    await dispatchRunInProcess({
+      env,
+      ctx,
+      runId: 'run-notify',
+    });
+
+    expect(withNotifyQueueScope).toHaveBeenCalledTimes(1);
+    expect(withNotifyQueueScope).toHaveBeenCalledWith(
+      env,
+      ctx,
+      expect.any(Function),
+    );
+    expect(processTalkRunMessage).toHaveBeenCalledWith({
+      runId: 'run-notify',
       attempts: 1,
       maxRetries: 3,
     });

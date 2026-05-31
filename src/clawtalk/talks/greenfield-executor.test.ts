@@ -46,7 +46,10 @@ async function deleteUser(): Promise<void> {
   await db`delete from auth.users where id = ${USER_ID}::uuid`;
 }
 
-async function createTalkFixture(options?: { agentCount?: number }): Promise<{
+async function createTalkFixture(options?: {
+  agentCount?: number;
+  mode?: 'ordered' | 'parallel';
+}): Promise<{
   workspaceId: string;
   talkId: string;
   agentIds: string[];
@@ -60,7 +63,7 @@ async function createTalkFixture(options?: { agentCount?: number }): Promise<{
     workspaceId,
     createdBy: USER_ID,
     title: 'Executor Talk',
-    mode: 'ordered',
+    mode: options?.mode ?? 'ordered',
     roundsLimit: 3,
     agentIds,
   });
@@ -245,5 +248,52 @@ describe('GreenfieldTalkExecutor queue integration', () => {
     expect(calls[0]!.userMessage).toContain('Compare the options.');
     expect(calls[0]!.userMessage).toContain('FIRST_AGENT_ANALYSIS');
     expect(calls[0]!.userMessage).toContain('Synthesize these perspectives');
+  });
+
+  it('does not inject prior outputs for parallel downstream steps', async () => {
+    const { workspaceId, talkId, agentIds } = await createTalkFixture({
+      agentCount: 2,
+      mode: 'parallel',
+    });
+    const enqueued = await enqueueGreenfieldChatTurn({
+      workspaceId,
+      talkId,
+      userId: USER_ID,
+      content: 'Compare the options.',
+      targetAgentIds: agentIds,
+    });
+    if (!enqueued.ok) throw new Error(`enqueue failed: ${enqueued.reason}`);
+    const firstRun = enqueued.runs[0]!;
+    const secondRun = enqueued.runs[1]!;
+
+    const db = getDbPg();
+    await db`
+      update public.runs
+      set status = 'completed', started_at = now(), finished_at = now()
+      where id = ${firstRun.id}::uuid
+    `;
+    await db`
+      insert into public.messages (
+        workspace_id, talk_id, round, author_kind, agent_snapshot_id, run_id, body
+      )
+      select workspace_id, talk_id, round, 'agent', agent_snapshot_id, id,
+             'FIRST_AGENT_ANALYSIS'
+      from public.runs
+      where id = ${firstRun.id}::uuid
+    `;
+
+    const { calls } = mockResolvedExecution('Parallel answer');
+    await processTalkRunMessage({
+      runId: secondRun.id,
+      dispatch: async () => {},
+      cancelPollIntervalMs: 10_000,
+    });
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.userMessage).toBe('Compare the options.');
+    expect(calls[0]!.userMessage).not.toContain('FIRST_AGENT_ANALYSIS');
+    expect(calls[0]!.userMessage).not.toContain(
+      'Synthesize these perspectives',
+    );
   });
 });

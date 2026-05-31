@@ -114,15 +114,15 @@ max_retries = 3
 dead_letter_queue = "clawtalk-talk-runs-dlq"
 
 # DLQ consumer — messages that exhaust max_retries above land here.
-# The handler flips the corresponding talk_runs row to 'failed' with
-# error_code='dlq_exhausted' so the UI moves on. No retries on the
-# DLQ itself: these messages are already post-failure and acking them
-# is unconditional.
+# The handler flips the corresponding runs row to 'failed' with
+# error_json.code='dlq_exhausted' so the UI moves on. Transient
+# DB/outbox infrastructure failures retry here too; scheduler sweeps
+# remain the final stuck-run backstop.
 [[queues.consumers]]
 queue = "clawtalk-talk-runs-dlq"
 max_batch_size = 5
 max_batch_timeout = 30
-max_retries = 0
+max_retries = 3
 
 # ─── Cron triggers — job scheduler ────────────────────────────────────
 #

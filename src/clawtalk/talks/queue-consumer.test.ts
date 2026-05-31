@@ -6,6 +6,7 @@ import {
   initPgDatabase,
   type DbScopeEnvBindings,
   type RequestExecutionContext,
+  withNotifyQueueScope,
   withRequestScopedDb,
   withUserContext,
 } from '../../db.js';
@@ -16,6 +17,7 @@ import {
 } from './greenfield-accessors.js';
 import { enqueueGreenfieldChatTurn } from './greenfield-chat-accessors.js';
 import {
+  completeGreenfieldRun,
   getGreenfieldQueueRunById,
   markGreenfieldRunRunning,
 } from './greenfield-run-accessors.js';
@@ -34,6 +36,31 @@ import { ensureWorkspaceBootstrapForUser } from '../workspaces/bootstrap.js';
 
 const TEST_DB_URL = 'postgresql://postgres:postgres@127.0.0.1:54432/postgres';
 const OWNER_ID = '0c777777-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
+
+interface MockHub {
+  env: DbScopeEnvBindings;
+  fetchCalls: Array<{ ownerId: string; body: string }>;
+}
+
+function makeMockEventHub(): MockHub {
+  const fetchCalls: MockHub['fetchCalls'] = [];
+  const namespace = {
+    idFromName: (name: string) =>
+      ({ __brand: 'UserEventHubId' as const, __name: name }) as never,
+    get: (id: never) => ({
+      fetch: async (input: Request | URL | string) => {
+        const body =
+          input instanceof Request ? await input.text() : '<no body>';
+        fetchCalls.push({
+          ownerId: (id as unknown as { __name: string }).__name,
+          body,
+        });
+        return new Response(null, { status: 200 });
+      },
+    }),
+  };
+  return { env: { USER_EVENT_HUB: namespace }, fetchCalls };
+}
 
 async function seedAuthUser(id: string, email: string): Promise<void> {
   const db = getDbPg();
@@ -72,6 +99,7 @@ beforeEach(async () => {
 
 async function setupRun(opts?: {
   agentCount?: number;
+  mode?: 'ordered' | 'parallel';
   status?: 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
 }): Promise<{
   workspaceId: string;
@@ -92,6 +120,7 @@ async function setupRun(opts?: {
       createdBy: OWNER_ID,
       title: 'Queue Consumer Test Talk',
       agentIds,
+      mode: opts?.mode,
     });
     const turn = await enqueueGreenfieldChatTurn({
       workspaceId,
@@ -150,6 +179,7 @@ function makeMockExecutor(behavior: {
   throwError?: Error;
   emitEvents?: TalkExecutionEvent[];
   waitFor?: Promise<unknown>;
+  onExecuteStart?: () => void;
 }): TalkExecutor {
   return {
     async execute(
@@ -157,6 +187,7 @@ function makeMockExecutor(behavior: {
       signal: AbortSignal,
       emit?: (event: TalkExecutionEvent) => void,
     ): Promise<TalkExecutorOutput> {
+      behavior.onExecuteStart?.();
       for (const event of behavior.emitEvents ?? []) {
         emit?.(event);
       }
@@ -251,20 +282,32 @@ describe('markGreenfieldRunRunning', () => {
     const secondClaimAfter = await markGreenfieldRunRunning(runIds[1]!);
     expect(secondClaimAfter.status).toBe('claimed');
   });
+
+  it('does not block sibling claims for parallel talks', async () => {
+    const { runIds } = await setupRun({ agentCount: 2, mode: 'parallel' });
+
+    const firstClaim = await markGreenfieldRunRunning(runIds[0]!);
+    expect(firstClaim.status).toBe('claimed');
+
+    const secondClaim = await markGreenfieldRunRunning(runIds[1]!);
+    expect(secondClaim.status).toBe('claimed');
+  });
 });
 
 describe('processTalkRunMessage', () => {
   it('runs the executor to completion and flips status to completed', async () => {
     const { runIds, talkId } = await setupRun();
     const { ctx, drain } = makeMockCtx();
+    const { env, fetchCalls } = makeMockEventHub();
 
-    const env: DbScopeEnvBindings = {};
     await withRequestScopedDb(TEST_DB_URL, ctx, env, async () => {
-      await processTalkRunMessage({
-        runId: runIds[0]!,
-        executor: makeMockExecutor({ output: { content: 'all done' } }),
-        cancelPollIntervalMs: 50_000,
-      });
+      await withNotifyQueueScope(env, ctx, () =>
+        processTalkRunMessage({
+          runId: runIds[0]!,
+          executor: makeMockExecutor({ output: { content: 'all done' } }),
+          cancelPollIntervalMs: 50_000,
+        }),
+      );
     });
     await drain();
 
@@ -288,6 +331,90 @@ describe('processTalkRunMessage', () => {
     expect(types).toContain('talk_run_started');
     expect(types).toContain('message_appended');
     expect(types).toContain('talk_run_completed');
+
+    expect(fetchCalls).toHaveLength(2);
+    const startEntries = JSON.parse(fetchCalls[0]!.body).entries;
+    const completionEntries = JSON.parse(fetchCalls[1]!.body).entries;
+    expect(startEntries).toHaveLength(1);
+    expect(completionEntries).toHaveLength(2);
+  });
+
+  it('flushes talk_run_started before executor completion', async () => {
+    const { runIds, talkId } = await setupRun();
+    const { ctx, drain } = makeMockCtx();
+    const { env, fetchCalls } = makeMockEventHub();
+    let releaseExecutor: () => void = () => {};
+    let markExecutorStarted: () => void = () => {};
+    const executorBlock = new Promise<void>((resolve) => {
+      releaseExecutor = resolve;
+    });
+    const executorStarted = new Promise<void>((resolve) => {
+      markExecutorStarted = resolve;
+    });
+
+    const runPromise = withRequestScopedDb(TEST_DB_URL, ctx, env, async () => {
+      await withNotifyQueueScope(env, ctx, () =>
+        processTalkRunMessage({
+          runId: runIds[0]!,
+          executor: makeMockExecutor({
+            waitFor: executorBlock,
+            onExecuteStart: () => {
+              markExecutorStarted();
+              expect(fetchCalls).toHaveLength(1);
+            },
+          }),
+          cancelPollIntervalMs: 50_000,
+        }),
+      );
+    });
+
+    await executorStarted;
+
+    expect(fetchCalls).toHaveLength(1);
+    const earlyEntries = JSON.parse(fetchCalls[0]!.body).entries as Array<{
+      eventId: number;
+    }>;
+    expect(earlyEntries).toHaveLength(1);
+    const earlyEvents = await getOutboxEventsForTopics(
+      [`talk:${talkId}`],
+      earlyEntries[0]!.eventId - 1,
+    );
+    expect(earlyEvents[0]?.event_type).toBe('talk_run_started');
+
+    releaseExecutor();
+    await runPromise;
+    await drain();
+    expect(fetchCalls.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('rolls back completion when assistant message persistence fails', async () => {
+    const { runIds, messageId, talkId } = await setupRun();
+
+    const claim = await markGreenfieldRunRunning(runIds[0]!);
+    expect(claim.status).toBe('claimed');
+
+    // completeGreenfieldRun uses responseMessageId as the inserted assistant
+    // message primary key, so reusing the user-turn message id forces a
+    // duplicate-key error after the run update inside the same transaction.
+    await expect(
+      completeGreenfieldRun({
+        runId: runIds[0]!,
+        responseMessageId: messageId,
+        responseContent: 'duplicate message id should abort completion',
+      }),
+    ).rejects.toBeTruthy();
+
+    const run = await getGreenfieldQueueRunById(runIds[0]!);
+    expect(run?.status).toBe('running');
+
+    const db = getDbPg();
+    const agentMessages = await db<{ count: number }[]>`
+      select count(*)::int as count
+      from public.messages
+      where talk_id = ${talkId}::uuid
+        and author_kind = 'agent'
+    `;
+    expect(agentMessages[0]?.count).toBe(0);
   });
 
   it('throws BlockedBySiblingError when a sibling is still active', async () => {
@@ -307,6 +434,32 @@ describe('processTalkRunMessage', () => {
       }
     });
     expect(thrown).toBeInstanceOf(BlockedBySiblingError);
+  });
+
+  it('processes a parallel sibling while a lower-sequence sibling is running', async () => {
+    const { runIds } = await setupRun({ agentCount: 2, mode: 'parallel' });
+    const firstClaim = await markGreenfieldRunRunning(runIds[0]!);
+    expect(firstClaim.status).toBe('claimed');
+
+    const { ctx, drain } = makeMockCtx();
+    const env: DbScopeEnvBindings = {};
+    await withRequestScopedDb(TEST_DB_URL, ctx, env, async () => {
+      await withNotifyQueueScope(env, ctx, () =>
+        processTalkRunMessage({
+          runId: runIds[1]!,
+          executor: makeMockExecutor({ output: { content: 'parallel done' } }),
+          cancelPollIntervalMs: 50_000,
+        }),
+      );
+    });
+    await drain();
+
+    expect(
+      await getGreenfieldQueueRunById(runIds[0]!).then((r) => r?.status),
+    ).toBe('running');
+    expect(
+      await getGreenfieldQueueRunById(runIds[1]!).then((r) => r?.status),
+    ).toBe('completed');
   });
 
   it('returns without error when the run is already terminal', async () => {
