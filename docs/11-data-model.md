@@ -1071,7 +1071,7 @@ Append-only; every state mutation (`04` §16). Distinct from `activity_events` (
 
 - **Cloudflare platform:** Workers, Queues (run dispatch), Durable Objects (`UserEventHub`), Hyperdrive, `scheduler.ts` cron.
 - **Event delivery:** `event_outbox` → `UserEventHub` DO (WebSocket Hibernation). All streaming rides this.
-- **LLM provider layer:** `llm_providers`, `llm_provider_models` (composite PK, seeds `llm_models`), `llm_provider_secrets`, `workspace_provider_secrets` — **shared LLM keys**, encrypted at rest, JIT decrypt.
+- **LLM provider layer:** `llm_providers`, `llm_provider_models` (composite PK, seeds `llm_models`), `llm_provider_secrets`, `workspace_provider_secrets` — **shared LLM keys**, encrypted at rest, JIT decrypt. Greenfield `workspace_provider_*` rows are tenant-scoped by `workspace_id`.
 
 **Explicitly NOT reused (D7 corrections):**
 

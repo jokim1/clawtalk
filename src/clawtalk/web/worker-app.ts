@@ -222,8 +222,8 @@ import {
   dispatchRunInProcess,
   type DispatchRunInProcessEnv,
 } from '../talks/dispatch-in-process.js';
-import { ensureMainTalkForUser } from '../talks/main-talk-bootstrap.js';
 import { dispatchRun } from '../talks/queue-producer.js';
+import { ensureWorkspaceBootstrapForUser } from '../workspaces/bootstrap.js';
 import {
   cancelTalkChat,
   enqueueTalkChat,
@@ -407,11 +407,9 @@ function buildApp(): Hono<{ Variables: Variables }> {
     // SELECT, so safe to run on every session probe. Failures must not
     // block the session response — keep going.
     try {
-      await withUserContext(auth.userId, () =>
-        ensureMainTalkForUser(auth.userId),
-      );
+      await ensureWorkspaceBootstrapForUser(auth.userId);
     } catch (err) {
-      console.warn('[session/me] ensureMainTalkForUser failed', err);
+      console.warn('[session/me] ensureWorkspaceBootstrapForUser failed', err);
     }
     return c.json({ ok: true, data: { user: normalizeUser(user) } });
   });

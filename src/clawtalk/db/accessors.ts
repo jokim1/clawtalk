@@ -3333,7 +3333,17 @@ export async function getUserById(
 ): Promise<UserRecord | undefined> {
   const db = getDbPg();
   const rows = await db<UserRecord[]>`
-    select * from public.users where id = ${userId}::uuid limit 1
+    select
+      id,
+      email::text as email,
+      name as display_name,
+      'owner'::text as role,
+      true as is_active,
+      created_at::text as created_at,
+      null::text as last_login_at
+    from public.users
+    where id = ${userId}::uuid
+    limit 1
   `;
   return rows[0];
 }
@@ -3345,7 +3355,7 @@ export async function updateUserDisplayName(input: {
   const db = getDbPg();
   await db`
     update public.users
-    set display_name = ${input.displayName}
+    set name = ${input.displayName}
     where id = ${input.userId}::uuid
   `;
 }

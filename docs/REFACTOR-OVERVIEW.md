@@ -27,15 +27,15 @@ This is not "evolve the schema." This is "the schema we have constrains every fe
 | ✅ Merged | PDF rasterization Lane B + Lane C T9 (consume page images + client render/upload) | PRs [#504](https://github.com/jokim1/clawtalk/pull/504) + [#505](https://github.com/jokim1/clawtalk/pull/505) |
 | ✅ Merged | PDF rasterization Lane C T10 (render-pages affordance + capability surfacing) | PR [#506](https://github.com/jokim1/clawtalk/pull/506) → main `696302d` |
 | ✅ Merged | Greenfield schema parked as docs-side canonical reference | PR #507 → main `b520932`; SQL held at [`docs/canonical-greenfield-migration.sql`](./canonical-greenfield-migration.sql) |
-| 🅿️ Parked | The active Supabase baseline | Lands as `supabase/migrations/0001_clawtalk_greenfield.sql` on the implementation cutover branch after the old active migration stream is removed or archived |
-| ⏭️ Next | `agent_role_templates` seed (Phase 1 Step 2) | First implementation PR |
-| ⏭️ Next | Cutover foundation: fresh baseline + seed + first-signin workspace bootstrap + §11 verification tests | First implementation PR |
+| ✅ Cutover branch | The active Supabase baseline | `supabase/migrations/0001_clawtalk_greenfield.sql`; old migrations archived under `docs/archive/legacy-supabase-migrations/` |
+| ✅ Cutover branch | `agent_role_templates` seed (Phase 1 Step 2) | Five user roles copied from `03-agents.md`; Forge system prompts remain placeholders until Joseph authors final copy |
+| ✅ Cutover branch | Cutover foundation: fresh baseline + seed + first-signin workspace bootstrap + §11 verification tests | Ready for Phase 1 commit |
 | ⏭️ Next | src/ rewrite per §05 Phases 2–12 (executor, scheduler, queue consumer, accessors, routes) | Phased |
 | ⏭️ Next | webapp/ rewrite per §05 Phases (every page touches new tables) | Phased |
 | ⏭️ Next | §14 verification test suite (24 invariants) | Phased |
 | ⏭️ Next | Phase 13 eval gate (harness contract done; scenarios + grader prompts TBD) | Phased |
 
-**Why the schema is parked, not active.** The schema reference is structurally complete and locally validated, but it was authored as a destructive drop/create script for the old migration stream. Shipping it on `main` without the matching src/ rewrite breaks every accessor + route + test — 38/38 accessor tests + 21/30 google-drive tests fail because they target the dropped legacy tables (CI run on PR #502 confirmed this exactly as §14 predicted). Per Joseph's docs-only posture: the SQL lives at [`docs/canonical-greenfield-migration.sql`](./canonical-greenfield-migration.sql) as the canonical reference. The implementation branch should convert it into a pure baseline at `supabase/migrations/0001_clawtalk_greenfield.sql`, reset/recreate Supabase, and remove or archive the old active migration stream instead of layering a `0040+` migration on top.
+**Why the schema was parked on main.** The schema reference was structurally complete and locally validated, but it was authored as a destructive drop/create script for the old migration stream. Shipping it on `main` without the matching src/ rewrite breaks every accessor + route + test — 38/38 accessor tests + 21/30 google-drive tests fail because they target the dropped legacy tables (CI run on PR #502 confirmed this exactly as §14 predicted). Per Joseph's docs-only posture, PR #507 parked it at [`docs/canonical-greenfield-migration.sql`](./canonical-greenfield-migration.sql). The cutover branch has now converted it into the pure active baseline at `supabase/migrations/0001_clawtalk_greenfield.sql`, archived the old active migration stream, and continues with the coordinated src/webapp rewrite rather than layering a `0040+` migration on top.
 
 For the current implementation audit, see [IMPLEMENTATION-READINESS.md](./IMPLEMENTATION-READINESS.md). For the full gap-by-gap close history, see [SPEC-READINESS.md](./SPEC-READINESS.md). For the canonical decisions, see [DECISIONS.md](./DECISIONS.md). For the phased build sequence, see [05-build-plan.md](./05-build-plan.md).
 
@@ -250,7 +250,7 @@ Detail in [05-build-plan.md](./05-build-plan.md). Summary table:
 | Phase | What | Status |
 |---|---|---|
 | **0** | Project setup — commit to Workers/Hono/DO/Hyperdrive/Queues stack | ✅ existing infra |
-| **1** | Fresh Supabase baseline (`supabase/migrations/0001_clawtalk_greenfield.sql`) + `agent_role_templates` seed + first-signin workspace bootstrap | 🅿️ schema reference parked; baseline/seed/bootstrap pending |
+| **1** | Fresh Supabase baseline (`supabase/migrations/0001_clawtalk_greenfield.sql`) + `agent_role_templates` seed + first-signin workspace bootstrap | ✅ implemented on `codex/clawtalk-greenfield-cutover`; focused §11 tests passing |
 | **2** | Workspace switcher + auth | ⏭️ |
 | **3** | Folders + Talks CRUD + roster | ⏭️ |
 | **4** | Chat → executor → queue consumer → outbox → DO streaming end-to-end | ⏭️ huge |
@@ -285,8 +285,8 @@ Each phase has explicit entry/exit criteria in §05.
 - 10 deferred design-debt items resolved (forge_audiences `is_default`, fitness shape, score scale, co-editor level, SSR freshness, etc.).
 
 ### Open
-- `agent_role_templates` seed (Phase 1 Step 2) — mechanical INSERT statements with prompts copied verbatim from [`03-agents.md`](./03-agents.md) for the five user-facing roles, plus placeholder Forge system-role prompts until Joseph writes the final rewriter/critic text. Not yet written; lands with the first implementation cutover baseline or workspace-bootstrap seed path.
-- Cutover foundation PR — replace the active migration stream with `supabase/migrations/0001_clawtalk_greenfield.sql`, add the seed/bootstrap path, and add §11 verification tests. [IMPLEMENTATION-READINESS.md](./IMPLEMENTATION-READINESS.md) recommends a big-bang cutover branch over a dual-path feature flag.
+- Forge `forge_rewriter` + `forge_critic` system prompts — §06 §3.6 still has implementation placeholders; Joseph writes the production prompt text before Forge runtime work ships.
+- Cutover foundation PR — baseline/seed/bootstrap/tests are implemented on `codex/clawtalk-greenfield-cutover`; next step is committing that Phase 1 boundary, then starting the greenfield accessor/API slice. [IMPLEMENTATION-READINESS.md](./IMPLEMENTATION-READINESS.md) recommends a big-bang cutover branch over a dual-path feature flag.
 - Forge `forge_rewriter` + `forge_critic` system prompts — §06 §3.6 has placeholder "TODO: Joseph to write at impl time."
 - Phase 13 eval scenario content + grader prompts — [eval-suite.md](./eval-suite.md) locks the harness contract but defers scenario content.
 - Per-page visual design for new surfaces — [02-visual-system.md](./02-visual-system.md) covers tokens but doesn't have component-level designs for Jobs UI, Forge gallery / run-detail / Audiences, home Forge surfacing, DocTabStrip.
@@ -352,7 +352,7 @@ If you're about to write code, here's where to start by task type:
 
 ## 14. Cutover risk: the moment the baseline lands
 
-> **Status (2026-05-30):** Confirmed empirically twice. PR #502 attempted to land the schema as a destructive `0039_clawtalk_greenfield.sql`; CI ran and **38/38 accessor tests + 21/30 google-drive tests failed** because they target the dropped legacy tables. A fresh local audit against the current worktree reproduced the same class of failures: backend tests still query `talks.owner_id`, `users.role`, and `registered_agents` while the DB shape has moved on. PR #502 was closed; the schema SQL is now parked at [`docs/canonical-greenfield-migration.sql`](./canonical-greenfield-migration.sql) until the src/ rewrite is ready.
+> **Status (2026-05-30):** Confirmed empirically twice. PR #502 attempted to land the schema as a destructive `0039_clawtalk_greenfield.sql`; CI ran and **38/38 accessor tests + 21/30 google-drive tests failed** because they target the dropped legacy tables. A fresh local audit against the current worktree reproduced the same class of failures: backend tests still query `talks.owner_id`, `users.role`, and `registered_agents` while the DB shape has moved on. PR #502 was closed; PR #507 parked the SQL at [`docs/canonical-greenfield-migration.sql`](./canonical-greenfield-migration.sql). The current cutover branch has promoted that reference into the active fresh baseline and is intentionally expected to keep legacy source tests red until the src/webapp rewrite catches up.
 
 The active greenfield baseline is a **reset**, not a compatibility migration. The moment it lands on `main`:
 
@@ -367,7 +367,7 @@ This is why [SPEC-READINESS.md](./SPEC-READINESS.md) flags **cutover sequencing 
 - **Big-bang cutover.** One coordinated branch that lands the fresh baseline + every src/ + webapp/ rewrite + the seed before merging. Maximum churn, single transition window, simplest mental model. Joseph has zero downstream users; downtime is "ClawTalk doesn't work while the branch is mid-cutover."
 - **Feature-flag cutover.** Branch the code paths behind `CT_GREENFIELD` (or similar). Old paths read the legacy tables, new paths read the greenfield tables. Migrate per Phase. Higher complexity (dual-path code; runtime forks; double the test surface) for the benefit of "the prod webapp keeps working for the human while I'm migrating."
 
-**Recommendation:** use the big-bang cutover branch. The codebase is too schema-entangled for a clean dual-path flag, and D0 makes dogfood data disposable. **The schema reference stays parked at [`canonical-greenfield-migration.sql`](./canonical-greenfield-migration.sql) until the first implementation PR; the active implementation creates `supabase/migrations/0001_clawtalk_greenfield.sql`, resets/recreates Supabase, and removes or archives the old active migration stream.** See [IMPLEMENTATION-READINESS.md](./IMPLEMENTATION-READINESS.md).
+**Recommendation:** use the big-bang cutover branch. The codebase is too schema-entangled for a clean dual-path flag, and D0 makes dogfood data disposable. **The active implementation now creates `supabase/migrations/0001_clawtalk_greenfield.sql`, resets/recreates Supabase, and removes or archives the old active migration stream.** See [IMPLEMENTATION-READINESS.md](./IMPLEMENTATION-READINESS.md).
 
 ---
 

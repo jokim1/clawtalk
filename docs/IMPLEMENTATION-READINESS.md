@@ -7,7 +7,7 @@ This is the live bridge between the greenfield docs and the codebase as it exist
 
 ## Verdict
 
-**Ready to start implementation.** The correct path is a **greenfield application cutover on the existing Cloudflare/Supabase runtime**, backed by a **fresh Supabase schema baseline**, not a dual-path incremental migration or a long chain of compatibility migrations.
+**Implementation started.** Phase 1 foundation is now active on `codex/clawtalk-greenfield-cutover`: the legacy Supabase migration stream is archived, the fresh baseline applies from an empty database, role templates are seeded, first-signin workspace bootstrap exists, and the first §11 invariant tests pass. The correct path remains a **greenfield application cutover on the existing Cloudflare/Supabase runtime**, not a dual-path incremental migration or a long chain of compatibility migrations.
 
 That means:
 
@@ -22,7 +22,7 @@ Reviewed:
 
 - Canonical docs: `01` through `12`, `DECISIONS.md`, `SECURITY.md`, `SPEC-READINESS.md`, `DOC-AUDIT.md`, `GLOSSARY.md`, `engineering-notes.md`, `eval-suite.md`, `canonical-greenfield-migration.sql`.
 - Current source: `src/worker.ts`, `src/db.ts`, `src/clawtalk/web/worker-app.ts`, `src/clawtalk/web/routes/*`, `src/clawtalk/db/*`, `src/clawtalk/talks/*`, `src/clawtalk/agents/*`, `src/clawtalk/identity/*`, `src/clawtalk/llm/*`, `webapp/src/*`, `prototype/*`, `shared/data.jsx`.
-- Current migration stream: `supabase/migrations/0001` through `0038` exists today and is historical implementation baggage. The greenfield SQL is parked in docs as a reference; the active implementation branch should replace the active stream with a fresh baseline migration.
+- Current migration stream: the active implementation branch has `supabase/migrations/0001_clawtalk_greenfield.sql`; historical `0001` through `0038` plus rollback baggage live under `docs/archive/legacy-supabase-migrations/`.
 
 Static shape observed on 2026-05-30:
 
@@ -49,6 +49,9 @@ Commands run from `/Users/josephkim/.codex/worktrees/381b/clawtalk`:
 | `npm --prefix webapp run typecheck` | Pass | After dependencies installed. |
 | `npm --prefix webapp run test` | Pass | 30 files, 299 passed, 1 skipped. React Router v7 warnings and Tiptap duplicate-link warnings remain non-blocking. |
 | bundled Node 24 `scripts/run-vitest.mjs run` | Fails as expected | 41 passed / 26 failed files; 770 passed / 220 failed / 127 skipped tests. Dominant failure: tests and source expect legacy columns/tables (`talks.owner_id`, `users.role`, `registered_agents`) that are absent in the current DB shape. |
+| `npm run db:reset` | Pass | Applies the single active baseline `0001_clawtalk_greenfield.sql` from zero. |
+| bundled Node 24 `npm run typecheck` | Pass | After Phase 1 bootstrap/source edits. |
+| bundled Node 24 `scripts/run-vitest.mjs run src/clawtalk/workspaces/bootstrap.test.ts src/clawtalk/schema/greenfield-schema.test.ts` | Pass | 2 files, 5 tests. Covers workspace bootstrap, role/team seed idempotency, legacy table absence, last-tab guard, run trigger shape, and home inbox dedup. |
 
 The backend test failure is useful audit evidence: the code and tests are already straddling incompatible schema worlds. This confirms the docs' cutover warning and argues against a prolonged dual-path migration.
 
@@ -121,12 +124,12 @@ These are documentation/project hygiene tasks, not product blockers:
 - Keep `docs/roadmap.md` focused on current implementation state.
 - Use the bundled Node 24 runtime or switch local shell to `.nvmrc` before backend tests.
 
-## Ready Signal
+## Next Ready Signal
 
-We are ready to start implementation when:
+Phase 1 is ready to commit when:
 
 - The implementation branch exists.
-- The first PR scope is limited to cutover foundation: fresh baseline schema, seed, bootstrap, and §11 verification tests.
-- The team accepts the big-bang cutover assumption above.
+- The first PR scope stays limited to cutover foundation: fresh baseline schema, seed, bootstrap, and §11 verification tests.
+- `npm run db:reset`, backend typecheck, and the focused greenfield tests pass.
 
 As of this audit, those conditions are met except for branch creation and the first code PR. The docs are sufficient to begin.
