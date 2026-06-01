@@ -1,4 +1,4 @@
-import { getDbPg } from '../../db.js';
+import { getDbPg, withTrustedDbWrites } from '../../db.js';
 
 export interface GreenfieldMessageRecord {
   id: string;
@@ -204,13 +204,15 @@ export async function deleteGreenfieldMessages(input: {
 }): Promise<string[]> {
   if (input.messageIds.length === 0) return [];
   const db = getDbPg();
-  await db`
-    update public.runs
-    set trigger_message_id = null
-    where workspace_id = ${input.workspaceId}::uuid
-      and talk_id = ${input.talkId}::uuid
-      and trigger_message_id in ${db(input.messageIds)}
-  `;
+  await withTrustedDbWrites(async () => {
+    await db`
+      update public.runs
+      set trigger_message_id = null
+      where workspace_id = ${input.workspaceId}::uuid
+        and talk_id = ${input.talkId}::uuid
+        and trigger_message_id in ${db(input.messageIds)}
+    `;
+  });
   const rows = await db<{ id: string }[]>`
     delete from public.messages
     where workspace_id = ${input.workspaceId}::uuid

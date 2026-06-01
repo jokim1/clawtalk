@@ -1,7 +1,13 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
-import { closePgDatabase, getDbPg, initPgDatabase } from '../../../db.js';
+import {
+  closePgDatabase,
+  getDbPg,
+  initPgDatabase,
+  withUserContext,
+} from '../../../db.js';
 import type { AuthContext } from '../types.js';
+import { cancelGreenfieldTalkRuns } from '../../talks/greenfield-chat-accessors.js';
 import {
   createGreenfieldTalkRoute,
   getGreenfieldMeRoute,
@@ -13,23 +19,27 @@ import {
 } from './greenfield-chat.js';
 
 const USER_ID = '0c949494-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
+const OTHER_USER_ID = '0c949494-bbbb-bbbb-bbbb-bbbbbbbbbbbb';
 
-function auth(): AuthContext {
+function auth(userId = USER_ID): AuthContext {
   return {
     sessionId: 'greenfield-chat-session',
-    userId: USER_ID,
+    userId,
     role: 'owner',
     authType: 'bearer',
   };
 }
 
-async function seedAuthUser(): Promise<void> {
+async function seedAuthUser(
+  userId = USER_ID,
+  email = 'greenfield-chat@clawtalk.local',
+): Promise<void> {
   const db = getDbPg();
   await db`
     insert into auth.users (id, email, raw_user_meta_data)
     values (
-      ${USER_ID}::uuid,
-      'greenfield-chat@clawtalk.local',
+      ${userId}::uuid,
+      ${email},
       jsonb_build_object('full_name', 'Chat User')
     )
     on conflict (id) do update set
@@ -42,7 +52,9 @@ async function deleteUser(): Promise<void> {
   const db = getDbPg();
   await db`delete from public.event_outbox where topic like 'talk:%'`;
   await db`delete from public.workspaces where owner_id = ${USER_ID}::uuid`;
+  await db`delete from public.workspaces where owner_id = ${OTHER_USER_ID}::uuid`;
   await db`delete from auth.users where id = ${USER_ID}::uuid`;
+  await db`delete from auth.users where id = ${OTHER_USER_ID}::uuid`;
 }
 
 async function createTalkFixture(): Promise<{
@@ -210,5 +222,48 @@ describe('greenfield chat routes', () => {
     expect(retried.statusCode).toBe(202);
     if (!retried.body.ok) throw new Error('Expected retry to succeed');
     expect(retried.body.data.message.metadata).toMatchObject({ round: 2 });
+  });
+
+  it('does not let a user-scoped accessor cancel another workspace talk', async () => {
+    await seedAuthUser(OTHER_USER_ID, 'greenfield-chat-other@clawtalk.local');
+    const { workspaceId, talkId } = await createTalkFixture();
+    const first = await enqueueGreenfieldChatRoute({
+      auth: auth(),
+      workspaceId,
+      talkId,
+      content: 'Keep these runs active',
+    });
+    expect(first.statusCode).toBe(202);
+
+    const directCancelled = await cancelGreenfieldTalkRuns({
+      workspaceId,
+      talkId,
+      userId: OTHER_USER_ID,
+      includeJobRuns: true,
+    });
+    expect(directCancelled).toEqual({
+      cancelledRuns: 0,
+      cancelledRunIds: [],
+    });
+
+    const cancelled = await withUserContext(OTHER_USER_ID, () =>
+      cancelGreenfieldTalkRuns({
+        workspaceId,
+        talkId,
+        userId: OTHER_USER_ID,
+        includeJobRuns: true,
+      }),
+    );
+
+    expect(cancelled).toEqual({ cancelledRuns: 0, cancelledRunIds: [] });
+    const db = getDbPg();
+    const activeRuns = await db<Array<{ count: number }>>`
+      select count(*)::int as count
+      from public.runs
+      where workspace_id = ${workspaceId}::uuid
+        and talk_id = ${talkId}::uuid
+        and status in ('queued', 'running', 'awaiting')
+    `;
+    expect(activeRuns[0]?.count).toBe(2);
   });
 });

@@ -397,7 +397,7 @@ None — the jobs spec is clean against §11 modulo §11's own gaps.
 
 **G-05.P0.3 · §05 not rewritten for D6/Forge/Jobs/Home. ✅ CLOSED 2026-05-29.** New Phase 9 (Jobs): scheduler.ts rewrite per §12 §5 + atomic claim + executor + UI + inbox emit. New Phase 14 (Forge, post-MVP): improvement-run executor + SSR + audiences UI + gallery + winner-promote → `document_edits.source='forge'`.
 
-**G-05.P0.4 · Risk register unfixed. ✅ CLOSED 2026-05-29.** "BullMQ / Sidekiq" dropped. New mitigation: CF Queues + scheduler.ts cron + atomic claim + §12 stuck-queued (5min) / stuck-running (1h) sweep.
+**G-05.P0.4 · Risk register unfixed. ✅ CLOSED 2026-05-29.** "BullMQ / Sidekiq" dropped. New mitigation: CF Queues + scheduler.ts cron + atomic claim + §12 stuck-queued re-dispatch (5min) / stuck-running fail sweep (1h).
 
 ### P1
 

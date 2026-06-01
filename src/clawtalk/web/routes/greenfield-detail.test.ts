@@ -148,7 +148,7 @@ async function seedMessages(input: {
       insert into public.runs (
         workspace_id, talk_id, round, snapshot_group_id, agent_snapshot_id,
         model_id, requested_by, response_group_id, sequence_index, status,
-        started_at, finished_at
+        trigger_message_id, started_at, finished_at
       )
       select
         ${input.workspaceId}::uuid,
@@ -161,6 +161,7 @@ async function seedMessages(input: {
         'response-1',
         0,
         'completed',
+        ${userMessage!.id}::uuid,
         now(),
         now()
       from snapshot
@@ -1425,5 +1426,12 @@ describe('greenfield detail routes', () => {
       ok: true,
       data: { messages: [{ id: seeded.agentMessageId }] },
     });
+    const db = getDbPg();
+    const runRows = await db<Array<{ trigger_message_id: string | null }>>`
+      select trigger_message_id
+      from public.runs
+      where id = ${seeded.runId}::uuid
+    `;
+    expect(runRows[0]?.trigger_message_id).toBeNull();
   });
 });

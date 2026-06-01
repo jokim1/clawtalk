@@ -8,7 +8,7 @@
 //
 // `dispatchRun` swallows send failures and logs — the run row is
 // already durably 'queued' by the surrounding tx, and the cron-trigger
-// stuck-run sweep (U4) picks up anything the queue loses.
+// stuck-queued sweep re-dispatches anything the queue loses.
 
 import { getRequestScopeEnvAndCtx } from '../../db.js';
 import { logger } from '../../logger.js';
@@ -23,8 +23,8 @@ export interface DispatchRunInput {
  * don't have to thread `env` through their signatures.
  *
  * Failure mode: logs and returns. Callers MUST have already committed
- * the `talk_runs` row to 'queued' state. The cron-trigger sweep picks
- * up any rows the queue dropped on the floor.
+ * the `runs` row to 'queued' state. The cron-trigger sweep re-dispatches
+ * any rows the queue dropped on the floor.
  */
 export async function dispatchRun(input: DispatchRunInput): Promise<void> {
   const { env } = getRequestScopeEnvAndCtx();

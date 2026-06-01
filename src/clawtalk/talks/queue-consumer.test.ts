@@ -8,6 +8,7 @@ import {
   type RequestExecutionContext,
   withNotifyQueueScope,
   withRequestScopedDb,
+  withTrustedDbWrites,
   withUserContext,
 } from '../../db.js';
 import { getOutboxEventsForTopics } from '../db/accessors.js';
@@ -137,23 +138,26 @@ async function setupRun(opts?: {
       throw new Error(`Failed to enqueue greenfield test turn: ${turn.reason}`);
     }
     if (opts?.status && opts.status !== 'queued') {
-      const db = getDbPg();
-      await db`
-        update public.runs
-        set
-          status = ${opts.status},
-          started_at = case
-            when ${opts.status} in ('running', 'completed', 'failed', 'cancelled')
-              then coalesce(started_at, now())
-            else started_at
-          end,
-          finished_at = case
-            when ${opts.status} in ('completed', 'failed', 'cancelled')
-              then coalesce(finished_at, now())
-            else finished_at
-          end
-        where id in ${db(turn.runs.map((run) => run.id))}
-      `;
+      const status = opts.status;
+      await withTrustedDbWrites(async () => {
+        const db = getDbPg();
+        await db`
+          update public.runs
+          set
+            status = ${status},
+            started_at = case
+              when ${status} in ('running', 'completed', 'failed', 'cancelled')
+                then coalesce(started_at, now())
+              else started_at
+            end,
+            finished_at = case
+              when ${status} in ('completed', 'failed', 'cancelled')
+                then coalesce(finished_at, now())
+              else finished_at
+            end
+          where id in ${db(turn.runs.map((run) => run.id))}
+        `;
+      });
     }
     return {
       workspaceId,
@@ -201,12 +205,14 @@ async function setupJobRun(opts?: { status?: 'queued' | 'running' }): Promise<{
       throw new Error(`Failed to enqueue job run: ${enqueued.status}`);
     }
     if (opts?.status === 'running') {
-      const db = getDbPg();
-      await db`
-        update public.runs
-        set status = 'running', started_at = now()
-        where id = ${enqueued.runId}::uuid
-      `;
+      await withTrustedDbWrites(async () => {
+        const db = getDbPg();
+        await db`
+          update public.runs
+          set status = 'running', started_at = now()
+          where id = ${enqueued.runId}::uuid
+        `;
+      });
     }
     return {
       workspaceId,

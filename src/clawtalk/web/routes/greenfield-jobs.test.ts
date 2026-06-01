@@ -20,6 +20,7 @@ import {
   cancelGreenfieldChatRoute,
   enqueueGreenfieldChatRoute,
 } from './greenfield-chat.js';
+import { cancelGreenfieldTalkRuns } from '../../talks/greenfield-chat-accessors.js';
 import {
   createGreenfieldTalkRoute,
   getGreenfieldMeRoute,
@@ -1052,6 +1053,17 @@ describe('greenfield jobs compatibility routes', () => {
       on conflict (workspace_id, user_id) do update set
         role = excluded.role
     `;
+
+    const directDeniedCancel = await cancelGreenfieldTalkRuns({
+      workspaceId,
+      talkId,
+      userId: OTHER_USER_ID,
+      includeJobRuns: true,
+    });
+    expect(directDeniedCancel).toEqual({
+      cancelledRuns: 0,
+      cancelledRunIds: [],
+    });
 
     const deniedCancel = await cancelGreenfieldChatRoute({
       auth: auth(OTHER_USER_ID),

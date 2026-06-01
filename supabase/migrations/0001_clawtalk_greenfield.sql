@@ -987,7 +987,14 @@ create table public.jobs (
   foreign key (workspace_id, talk_id)  references public.talks(workspace_id, id) on delete cascade,
   foreign key (workspace_id, agent_id) references public.agents(workspace_id, id) on delete set null (agent_id)
 );
-create index on public.jobs (status, next_due_at) where status = 'active' and archived_at is null;
+create index jobs_due_unclaimed_idx
+  on public.jobs (next_due_at, created_at, id)
+  include (workspace_id, talk_id)
+  where status = 'active' and archived_at is null and claimed_at is null;
+create index jobs_due_retry_ready_idx
+  on public.jobs (claimed_at, next_due_at, created_at, id)
+  include (workspace_id, talk_id)
+  where status = 'active' and archived_at is null and claimed_at is not null;
 
 -- Now wire runs.job_id FK (jobs exists)
 alter table public.runs
@@ -1816,14 +1823,14 @@ do $$
 declare
   tbl text;
   member_write_tables text[] := array[
-    'folders','talks','talk_agents','talk_tools','talk_reads','messages','runs',
-    'talk_agent_snapshots','run_prompt_snapshots','context_sources','context_source_pages','agents','agent_feedback_events',
+    'folders','talks','talk_agents','talk_tools','talk_reads','messages',
+    'context_sources','context_source_pages','agents','agent_feedback_events',
     'team_compositions','team_composition_agents','documents','doc_tabs','doc_blocks',
     'document_edits','doc_tab_coeditors','jobs','improvement_runs','document_versions',
     'improvement_run_held_out_personas','forge_audiences','forge_audience_personas',
     'forge_personas','forge_reference_sets','forge_questions','home_inbox_items','home_recommendations',
     'home_recommendation_candidates','home_recommendation_events','home_news_topics','home_news_matches',
-    'home_interaction_events','home_activation_state','activity_events','audit_events'
+    'home_interaction_events','home_activation_state','activity_events'
   ];
 begin
   foreach tbl in array member_write_tables loop
@@ -1834,6 +1841,26 @@ begin
       tbl, tbl);
   end loop;
 end $$;
+
+-- Runtime/snapshot tables are trusted execution inputs. Members can read them.
+-- Runtime row materialization and cancellation are service/trusted-app only so
+-- direct authenticated clients cannot forge prompts, snapshots, tools, audit
+-- rows, or cancellation side effects.
+alter table public.runs enable row level security;
+create policy runs_read on public.runs
+  for select using (public.is_workspace_member(workspace_id));
+
+alter table public.talk_agent_snapshots enable row level security;
+create policy talk_agent_snapshots_read on public.talk_agent_snapshots
+  for select using (public.is_workspace_member(workspace_id));
+
+alter table public.run_prompt_snapshots enable row level security;
+create policy run_prompt_snapshots_read on public.run_prompt_snapshots
+  for select using (public.is_workspace_member(workspace_id));
+
+alter table public.audit_events enable row level security;
+create policy audit_events_read on public.audit_events
+  for select using (public.is_workspace_member(workspace_id));
 
 -- Admin-write exception tables (member-read, admin-write)
 do $$
@@ -1970,6 +1997,10 @@ revoke insert, update, delete on public.llm_provider_models from authenticated;
 revoke insert, update, delete on public.home_news_items from authenticated;
 revoke insert, update, delete on public.agent_role_templates from authenticated;
 revoke insert, update, delete on public.home_algorithm_versions from authenticated;
+revoke insert, update, delete on public.runs from authenticated;
+revoke insert, update, delete on public.talk_agent_snapshots from authenticated;
+revoke insert, update, delete on public.run_prompt_snapshots from authenticated;
+revoke insert, update, delete on public.audit_events from authenticated;
 revoke update on public.users from authenticated;
 grant update (name, avatar_color, initials, updated_at) on public.users to authenticated;
 

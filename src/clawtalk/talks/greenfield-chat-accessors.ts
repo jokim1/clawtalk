@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
-import { getDbPg, type Sql } from '../../db.js';
+import { getDbPg, type Sql, withTrustedDbWrites } from '../../db.js';
 import {
   buildEffectiveToolsFromTalkToolRows,
   listUserToolPermissionsForUser,
@@ -255,8 +255,10 @@ export async function enqueueGreenfieldChatTurn(input: {
     const message = insertedMessages[0]!;
     const runs: GreenfieldChatRunRecord[] = [];
 
-    for (const [index, agent] of selectedAgents.entries()) {
-      const snapshots = await txSql<{ id: string; model_id: string }[]>`
+    await withTrustedDbWrites(async () => {
+      for (const [index, agent] of selectedAgents.entries()) {
+        const promptSnapshotId = randomUUID();
+        const snapshots = await txSql<{ id: string; model_id: string }[]>`
         insert into public.talk_agent_snapshots (
           workspace_id,
           talk_id,
@@ -297,12 +299,15 @@ export async function enqueueGreenfieldChatTurn(input: {
         )
         returning id, model_id
       `;
-      const snapshot = snapshots[0]!;
-      const insertedRuns = await txSql<
-        Array<
-          Omit<GreenfieldChatRunRecord, 'target_agent_id' | 'target_agent_name'>
-        >
-      >`
+        const snapshot = snapshots[0]!;
+        const insertedRuns = await txSql<
+          Array<
+            Omit<
+              GreenfieldChatRunRecord,
+              'target_agent_id' | 'target_agent_name'
+            >
+          >
+        >`
         insert into public.runs (
           workspace_id,
           talk_id,
@@ -311,9 +316,11 @@ export async function enqueueGreenfieldChatTurn(input: {
           agent_snapshot_id,
           model_id,
           requested_by,
+          trigger,
           trigger_message_id,
           response_group_id,
           sequence_index,
+          prompt_snapshot_id,
           status
         )
         values (
@@ -324,9 +331,11 @@ export async function enqueueGreenfieldChatTurn(input: {
           ${snapshot.id}::uuid,
           ${snapshot.model_id},
           ${input.userId}::uuid,
+          'user',
           ${message.id}::uuid,
           ${responseGroupId},
           ${index},
+          ${promptSnapshotId}::uuid,
           'queued'
         )
         returning
@@ -342,9 +351,10 @@ export async function enqueueGreenfieldChatTurn(input: {
           model_id,
           error_json
       `;
-      const run = insertedRuns[0]!;
-      const promptSnapshots = await txSql<{ id: string }[]>`
+        const run = insertedRuns[0]!;
+        await txSql`
         insert into public.run_prompt_snapshots (
+          id,
           workspace_id,
           run_id,
           talk_id,
@@ -356,6 +366,7 @@ export async function enqueueGreenfieldChatTurn(input: {
           tool_manifest_json
         )
         values (
+          ${promptSnapshotId}::uuid,
           ${input.workspaceId}::uuid,
           ${run.id}::uuid,
           ${input.talkId}::uuid,
@@ -366,20 +377,14 @@ export async function enqueueGreenfieldChatTurn(input: {
           1,
           ${txSql.json(toolManifest as never)}
         )
-        returning id
       `;
-      await txSql`
-        update public.runs
-        set prompt_snapshot_id = ${promptSnapshots[0]!.id}::uuid
-        where workspace_id = ${input.workspaceId}::uuid
-          and id = ${run.id}::uuid
-      `;
-      runs.push({
-        ...run,
-        target_agent_id: agent.id,
-        target_agent_name: agent.name,
-      });
-    }
+        runs.push({
+          ...run,
+          target_agent_id: agent.id,
+          target_agent_name: agent.name,
+        });
+      }
+    });
 
     await txSql`
       update public.talks
@@ -458,7 +463,31 @@ export async function cancelGreenfieldTalkRuns(input: {
   const db = getDbPg();
   let pendingNotify: PendingOutboxNotify | null = null;
   const updated = await withExistingOrNewTransaction(db, async (txSql) => {
-    const rows = await txSql<{ id: string; job_id: string | null }[]>`
+    const authorization = await txSql<
+      Array<{
+        created_by: string;
+        role: 'owner' | 'admin' | 'member' | 'guest';
+      }>
+    >`
+      select t.created_by, wm.role
+      from public.talks t
+      join public.workspace_members wm
+        on wm.workspace_id = t.workspace_id
+       and wm.user_id = ${input.userId}::uuid
+      where t.workspace_id = ${input.workspaceId}::uuid
+        and t.id = ${input.talkId}::uuid
+      limit 1
+    `;
+    const auth = authorization[0];
+    if (!auth) return [];
+    const canCancelJobRuns =
+      input.includeJobRuns === true &&
+      (auth.role === 'owner' ||
+        auth.role === 'admin' ||
+        auth.created_by === input.userId);
+
+    return withTrustedDbWrites(async () => {
+      const rows = await txSql<{ id: string; job_id: string | null }[]>`
       update public.runs
       set
         status = 'cancelled',
@@ -470,41 +499,43 @@ export async function cancelGreenfieldTalkRuns(input: {
       where workspace_id = ${input.workspaceId}::uuid
         and talk_id = ${input.talkId}::uuid
         and status in ('queued', 'running', 'awaiting')
-        and (${input.includeJobRuns === true}::boolean or job_id is null)
+        and (${canCancelJobRuns}::boolean or job_id is null)
       returning id, job_id
     `;
-    const runIds = rows.map((row) => row.id);
-    for (const run of rows) {
-      if (!run.job_id) continue;
-      await txSql`
+      const runIds = rows.map((row) => row.id);
+      for (const run of rows) {
+        if (!run.job_id) continue;
+        await txSql`
         update public.jobs
         set last_run_at = now(),
             last_run_status = 'cancelled',
             run_count = run_count + 1,
+            claimed_at = null,
             updated_at = now()
         where workspace_id = ${input.workspaceId}::uuid
           and id = ${run.job_id}::uuid
       `;
-    }
-    if (runIds.length > 0) {
-      const eventId = await emitOutboxEventOnSql(txSql, {
-        topic: `talk:${input.talkId}`,
-        eventType: 'talk_run_cancelled',
-        payload: {
-          talkId: input.talkId,
-          cancelledBy: input.userId,
-          runIds,
-          threadIds: [input.talkId],
-        },
-        ownerIds: [input.userId],
-      });
-      pendingNotify = {
-        topic: `talk:${input.talkId}`,
-        eventId,
-        ownerIds: [input.userId],
-      };
-    }
-    return rows;
+      }
+      if (runIds.length > 0) {
+        const eventId = await emitOutboxEventOnSql(txSql, {
+          topic: `talk:${input.talkId}`,
+          eventType: 'talk_run_cancelled',
+          payload: {
+            talkId: input.talkId,
+            cancelledBy: input.userId,
+            runIds,
+            threadIds: [input.talkId],
+          },
+          ownerIds: [input.userId],
+        });
+        pendingNotify = {
+          topic: `talk:${input.talkId}`,
+          eventId,
+          ownerIds: [input.userId],
+        };
+      }
+      return rows;
+    });
   });
   if (pendingNotify) {
     enqueueOutboxNotify(pendingNotify);

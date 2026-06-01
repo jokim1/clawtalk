@@ -72,6 +72,7 @@ async function updateJobTerminalBookkeepingOnSql(
     set last_run_at = now(),
         last_run_status = ${status},
         run_count = run_count + 1,
+        claimed_at = null,
         updated_at = now()
     where workspace_id = ${run.workspace_id}::uuid
       and id = ${run.job_id}::uuid

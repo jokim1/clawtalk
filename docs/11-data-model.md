@@ -223,7 +223,7 @@ Design notes:
 - **Rounds are derived** — `round int` on messages/runs; a round = the runs sharing `(talk_id, round)`. No `rounds` table.
 - **Run model is clean (D7).** Dropped `thread_id` (threads eliminated), channel/source/transport columns, and the `instruction_review` kind; added `content_improvement`. Kept `response_group_id` + `sequence_index` + `requested_by` + `trigger_message_id` because the ordered/parallel orchestration genuinely uses them.
 - **Single-flight per job.** Partial unique on `runs(job_id)` for `status in ('queued','running','awaiting')` prevents two scheduler/manual races from creating concurrent nonterminal runs for the same job (`12-jobs.md` §5).
-- **Slot identity per job-trigger run.** `scheduled_for timestamptz` is the immutable slot timestamp the scheduler computes per fire. The partial unique on `(job_id, scheduled_for)` makes "never fire the same slot twice" a Postgres invariant — covering scheduler-tick races, queue at-least-once retries, and dropped-claim recovery without app-side coordination (`12-jobs.md` §5). Manual `run-now` writes `scheduled_for=null` (no slot consumed).
+- **Slot identity per job-trigger run.** `scheduled_for timestamptz` is the immutable slot timestamp the scheduler computes per fire. The partial unique on `(job_id, scheduled_for)` makes "never fire the same slot twice" a Postgres invariant — covering scheduler-tick races and queue at-least-once retries without app-side coordination (`12-jobs.md` §5). Short `claimed_at` backoff only controls retry pacing for busy/failure rows; it is not slot identity. Manual `run-now` writes `scheduled_for=null` (no slot consumed).
 - **Job-trigger invariant.** The CHECK in the runs body encodes `12-jobs.md` §2: scheduler/manual runs never carry a `trigger_message_id` (no `messages` row is written for the trigger), and they must point at a `run_prompt_snapshots` row (`prompt_snapshot_id is not null`) — so the executor reads an immutable snapshot of `jobs.prompt`, not the live row.
 - **Scheduler authorization vs. attribution.** Scheduler-triggered runs are claimed and inserted under service-role auth (no `auth.uid()` — the scheduler isn't a user). `requested_by = jobs.created_by` for attribution only (so "who set this up" stays answerable in run-list UI and audit queries), not for authorization — accessors scope by `workspace_id` explicitly. The `requested_by` user may leave the workspace later; that doesn't break the run.
 - **`runs.job_id` is `RESTRICT`.** History for a job is `runs filtered by job_id` (no separate `job_runs` ledger), so the FK must survive job-delete attempts. Hard delete is only allowed via an admin path when `run_count = 0`; the UI "Delete" action archives instead (`jobs.archived_at` in §8).
@@ -369,7 +369,7 @@ Design notes:
 - **Temperature** lives on the template (default) → `agents.temperature` (editable) → snapshot. Resolves the audit gap.
 - **System agents (`is_system`)** carry Forge's rewriter + critic (D3); filtered from `GET /agents` and the roster at the query layer.
 - **Index cost on snapshots.** `talk_agent_snapshots` carries 6 indexes per row (PK + 3 composite-FK targets + uniqueness on `(snapshot_group_id, source_agent_id)` + the `snapshot_group_id` lookup index). One row per agent per run = 3–6 rows per Talk turn at a typical roster size. Acceptable for the personal-only target; if write rate ever blows past ~10 turns/sec sustained, consider partitioning by month or relaxing the workspace-id-redundant targets.
-- **`run_prompt_snapshots` is shared with jobs (`12-jobs.md` §2 / §5).** Scheduler-triggered runs and manual `run-now` runs reuse this table — no new table, no new column. The scheduler writes the snapshot in the same transaction as the `runs` INSERT (`12-jobs.md` §5 Path A): `prompt_text_redacted = jobs.prompt` (the immutable copy the executor reads), `model_id = <from the targeted agent's `talk_agent_snapshots` row>`, `provider = (SELECT provider FROM llm_models WHERE id = model_id)` (the snapshot row has no provider column; provider lives on `llm_models`). Optional provenance fields (`global_policy_version`, `role_template_version`, `context_manifest_json`, `tool_manifest_json`, `prompt_hash`) are left NULL by the scheduler; the executor or a follow-up backfill can populate them. The `runs.prompt_snapshot_id` FK is deferrable so the scheduler can insert `runs` first (referencing the future snapshot id) and `run_prompt_snapshots` second within the same txn.
+- **`run_prompt_snapshots` is shared with jobs (`12-jobs.md` §2 / §5).** Scheduler-triggered runs and manual `run-now` runs reuse this table — no new table, no new column. The scheduler writes the snapshot in the same transaction as the `runs` INSERT (`12-jobs.md` §5 Path A): `prompt_text_redacted = jobs.prompt` (the immutable copy the executor reads), `model_id = <from the targeted agent's `talk_agent_snapshots` row>`, `provider = <provider selected for that model>`, `role_template_version = <target agent template version>`, `prompt_assembly_version = 1`, and `tool_manifest_json = <frozen source-scoped effective tool manifest>`. The tool manifest is populated because the greenfield executor reads it to enforce the job's read-only `source_scope_json`; without it, execution would fall back to live Talk tools. Optional provenance fields (`global_policy_version`, `context_manifest_json`, `prompt_hash`) are left NULL by the scheduler; the executor or a follow-up backfill can populate them. The `runs.prompt_snapshot_id` FK is deferrable so the scheduler can insert `runs` first (referencing the future snapshot id) and `run_prompt_snapshots` second within the same txn.
 - `06` §14.6 loop tables (`agent_audit_results`, `prompt_improvement_proposals`, `prompt_versions`) are deferred until that loop is built.
 
 ---
@@ -873,7 +873,7 @@ jobs (
   block_reason text                                            -- known values: 'agent_missing' | 'model_disabled' | 'no_primary_document' | 'tool_not_enabled' | 'connector_not_authorized' (`12-jobs.md` §7)
     check (block_reason is null or block_reason in ('agent_missing','model_disabled','no_primary_document','tool_not_enabled','connector_not_authorized')),
   catch_up text not null default 'skip' check (catch_up in ('skip','run_once')),
-  next_due_at timestamptz, claimed_at timestamptz,             -- lease for FOR UPDATE SKIP LOCKED claiming (`12-jobs.md` §5)
+  next_due_at timestamptz, claimed_at timestamptz,             -- short busy/failure backoff for FOR UPDATE SKIP LOCKED claiming (`12-jobs.md` §5)
   archived_at timestamptz,                                     -- "Delete" in UI sets this; row stays for history (`12-jobs.md` §6 archive flow)
   last_run_at timestamptz,
   last_run_status text check (last_run_status is null or last_run_status in ('completed','failed','cancelled')),  -- terminal-only per `12-jobs.md` §6 (no 'queued'/'running')
@@ -942,11 +942,11 @@ create view jobs_active with (security_invoker = true) as
     for each row execute function jobs_require_agent_in_roster();
   ```
 - **Single-flight per job** is enforced in §3 by `runs_one_active_per_job` (partial unique on `runs(job_id) where status in ('queued','running','awaiting')`) — schema-guaranteed, not prose-only.
-- **Scheduler robustness** (`12` §5): single-txn claim path (`for update skip locked` → fire-time dependency check → roster freeze → INSERT `runs` + `run_prompt_snapshots` → advance `next_due_at` → clear `claimed_at` → COMMIT, then dispatch outside the txn). Slot identity is enforced by `runs_one_active_per_job` + `runs_one_per_job_slot` in §3 — both partial unique. Stuck sweep transitions `queued` (5min threshold) AND `running` (1h) → `failed` with `error_json={"code":"stuck_*_swept"}` and `finished_at = now`; `awaiting` is not swept. Reuses the cron `scheduler.ts` + Queues mechanism; the executor data-access is reworked with the new runs table.
+- **Scheduler robustness** (`12` §5): bounded due-candidate pages with a 10x scan budget and a short `claimed_at` backoff for non-advancing busy jobs and unexpected claim failures. Candidate selection uses separate hot-path indexes for unclaimed rows and retry-ready claimed rows so fresh backoff prefixes are skipped by index shape, then a single-txn claim path (`jobs for update skip locked` → non-blocking `talks for update skip locked` → fire-time dependency check → roster freeze → INSERT `runs` + `run_prompt_snapshots` → advance `next_due_at` → clear `claimed_at` → COMMIT, then dispatch outside the txn). Slot identity is enforced by `runs_one_active_per_job` + `runs_one_per_job_slot` in §3 — both partial unique. Stuck sweep re-dispatches stale `queued` rows (5min threshold) and transitions stale `running` rows (1h) → `failed` with `error_json={"code":"stuck_running_swept"}` and `finished_at = now`; `awaiting` is not swept. Reuses the cron `scheduler.ts` + Queues mechanism; the executor data-access is reworked with the new runs table.
 - **Archive vs lifecycle (`12-jobs.md` §6).** `archived_at` is orthogonal to `status` — an archived row exits the active-job hot path (the `jobs_active` view filters it) but its run history (`runs filtered by job_id`) stays queryable forever. The UI "Delete" action sets `archived_at` + `next_due_at = null`; hard delete is restricted (an admin path requires `run_count = 0` and goes through `runs.job_id` `ON DELETE RESTRICT` — see §3).
 - **Bookkeeping is terminal-only (`12-jobs.md` §6).** `last_run_at`, `last_run_status`, and `run_count` are written exclusively when a run reaches a terminal status (`completed`, `failed` — including stuck-swept runs, which ARE terminal `failed`, or `cancelled`). The scheduler does NOT touch them at run-insert time; in-flight state is observable via the `runs` table directly. Manual run-now follows the same rule.
 - **Talk/workspace hard-delete interaction.** Postgres processes the cascade fan-out per parent row but does not guarantee a strict order between sibling cascade paths. `jobs.talk_id` cascades from `talks` and `runs.job_id` is `RESTRICT` to `jobs`; if a Talk delete reaches `jobs` before `runs.talk_id` (also cascade from `talks`) clears the dependent run rows, the RESTRICT will block the cascade. The intended product semantic is that Talks and Workspaces with surviving jobs are archived (`talks.archived_at`), not hard-deleted; the `RESTRICT` is the schema's pressure toward archive. Hard delete with surviving jobs requires the admin path to archive or hard-delete the jobs first (jobs with `run_count = 0` can be hard-deleted directly; jobs with history cannot).
-- Indexes: `jobs(status, next_due_at) where status='active' and archived_at is null` (archive-aware claim hot path); `runs(job_id, created_at)`.
+- Indexes: `jobs_due_unclaimed_idx` on `jobs(next_due_at, created_at, id) include (workspace_id, talk_id) where status='active' and archived_at is null and claimed_at is null`; `jobs_due_retry_ready_idx` on `jobs(claimed_at, next_due_at, created_at, id) include (workspace_id, talk_id) where status='active' and archived_at is null and claimed_at is not null`; `runs(job_id, created_at)`.
 
 ---
 
@@ -1206,7 +1206,7 @@ create policy talks_write on public.talks
   with check  ( is_workspace_member(workspace_id) );
 ```
 
-Member-write applies to: `folders`, `talks`, `talk_agents`, `talk_tools`, `talk_reads`, `messages`, `runs`, `talk_agent_snapshots`, `run_prompt_snapshots`, `context_sources`, `context_source_pages`, `agents` (non-system), `agent_feedback_events`, `team_compositions`, `team_composition_agents`, `documents`, `doc_tabs`, `doc_blocks`, `document_edits`, `doc_tab_coeditors`, `jobs`, `improvement_runs`, `document_versions`, `improvement_run_held_out_personas`, `forge_audiences`, `forge_audience_personas`, `home_inbox_items`, `home_recommendations`, `home_recommendation_candidates`, `home_recommendation_events`, `home_news_topics`, `home_news_matches`, `home_interaction_events`, `home_activation_state`, `activity_events`.
+Member-write applies to: `folders`, `talks`, `talk_agents`, `talk_tools`, `talk_reads`, `messages`, `context_sources`, `context_source_pages`, `agents` (non-system), `agent_feedback_events`, `team_compositions`, `team_composition_agents`, `documents`, `doc_tabs`, `doc_blocks`, `document_edits`, `doc_tab_coeditors`, `jobs`, `improvement_runs`, `document_versions`, `improvement_run_held_out_personas`, `forge_audiences`, `forge_audience_personas`, `home_inbox_items`, `home_recommendations`, `home_recommendation_candidates`, `home_recommendation_events`, `home_news_topics`, `home_news_matches`, `home_interaction_events`, `home_activation_state`, `activity_events`.
 
 ### 12.2 Admin-only write exceptions
 
@@ -1223,6 +1223,15 @@ create policy workspace_members_write on public.workspace_members
 
 Apply to: `workspace_members`, `connectors`, `connector_bindings`, `connector_secrets`, `home_optimization_proposals`, `home_algorithm_versions`, `home_algorithm_assignments`, `home_ranking_profiles` (writes only — reads remain member).
 
+### 12.3 Runtime/snapshot trust-boundary policies
+
+`runs`, `talk_agent_snapshots`, `run_prompt_snapshots`, and `audit_events` do **not** use the generic member-write policy. These rows are trusted runtime inputs/provenance:
+
+- `runs`: members can read; all inserts and updates, including cancellation, run through trusted app/service-role writes after route-level authorization. Direct authenticated clients cannot mutate run state because cancellation must also clear job claims/bookkeeping and emit outbox events atomically.
+- `talk_agent_snapshots`: members can read; inserts/updates/deletes are trusted app/service-role only so direct clients cannot forge frozen model/persona/tool provenance.
+- `run_prompt_snapshots`: members can read; inserts/updates/deletes are trusted app/service-role only. This protects `prompt_text_redacted` and `tool_manifest_json` from direct client forgery or post-queue tampering.
+- `audit_events`: members can read; writes are service-role only.
+
 The `workspace_members` read policy is the one exception to the standard read pattern (it can't recurse on itself):
 
 ```sql
@@ -1230,11 +1239,11 @@ create policy workspace_members_read on public.workspace_members
   for select using ( user_id = auth.uid() );
 ```
 
-### 12.3 System-agent visibility on `agents`
+### 12.4 System-agent visibility on `agents`
 
 `agents.is_system = true` rows (Forge rewriter/critic — D3) are filtered at the query layer (accessor / `GET /agents` handler), not in RLS. The RLS policy on `agents` is the standard member-read/member-write pattern; the runtime simply doesn't expose system rows to user surfaces.
 
-### 12.4 Shared pool: `home_news_items`
+### 12.5 Shared pool: `home_news_items`
 
 `home_news_items` has no `workspace_id` (the global news pool — `07` §8.4 privacy). Two policies cover the shape: read open to any authenticated user (`using (true)`); writes restricted to service role (the news ingest worker). Standard member-read pattern does not apply.
 
@@ -1245,7 +1254,7 @@ create policy home_news_items_read on public.home_news_items
 -- No write policy → only service role (which bypasses RLS) can insert/update.
 ```
 
-### 12.5 Service-role bypass
+### 12.6 Service-role bypass
 
 Scheduler (`scheduler.ts`), queue consumer (`queue-consumer.ts`), outbox writers, Forge improvement-run executor, and news ingest all need to write across workspaces without a user identity. The mechanism: these paths connect to Postgres **without** the `set local role authenticated` swap that user-scoped requests perform via `withUserContext`. They run as the connection-owning role (configured with `bypassrls` in Supabase), so policies are skipped.
 
@@ -1257,7 +1266,7 @@ Scheduler (`scheduler.ts`), queue consumer (`queue-consumer.ts`), outbox writers
 
 The application contract: any code path that needs to mutate cross-workspace state MUST run inside the service-role connection (Cloudflare Workers + Hyperdrive: the `DB` binding points at the service role; `withUserContext` is the per-request opt-IN to RLS-enforced identity). Code paths that handle user input MUST call `withUserContext(authUserId)` so RLS engages. Missing `withUserContext` on a user-input path is the bug to grep for.
 
-### 12.6 Verification
+### 12.7 Verification
 
 §14 tests #1, #10, #11 cover the policy contract: cross-workspace insert/select rejection, membership predicate hides other workspaces, `workspace_members` non-recursive policy.
 
@@ -1314,4 +1323,4 @@ The spec asserts runtime invariants throughout. The migration is "done" only whe
 
 The test suite lives alongside the migrations (Vitest + `pg-tap` style assertions, or raw SQL test files run against `supabase db reset`). Each migration commit that touches a constraint adds or updates the corresponding row above.
 
-Two test types not in the table because they're integration-level rather than schema-level: **(a)** end-to-end Talk turn → run → message → outbox → DO stream (the queue/DO/Worker contract, not a schema invariant); **(b)** the `12-jobs.md` scheduler stale-lease sweep (claim crash recovery). Both live in `src/clawtalk/talks/*.test.ts` once the executor is reworked.
+Two test types not in the table because they're integration-level rather than schema-level: **(a)** end-to-end Talk turn → run → message → outbox → DO stream (the queue/DO/Worker contract, not a schema invariant); **(b)** the `12-jobs.md` scheduler short-backoff/claim-retry path for busy rows, poison rows, and dispatch-orphaned queued runs. Both live in `src/clawtalk/talks/*.test.ts` once the executor is reworked.

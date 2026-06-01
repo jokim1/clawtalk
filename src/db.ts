@@ -201,6 +201,37 @@ export function getCurrentUserId(): string | null {
 }
 
 /**
+ * Temporarily restores the connection's session role inside the current
+ * user-scoped transaction. Use only for trusted runtime provenance writes
+ * after the surrounding route/accessor has already enforced user intent and
+ * workspace access under normal RLS.
+ */
+export async function withTrustedDbWrites<T>(fn: () => Promise<T>): Promise<T> {
+  const existing = userContextStorage.getStore();
+  if (!existing) return fn();
+
+  await existing.tx`set local role none`;
+  let fnError: unknown;
+  try {
+    return await fn();
+  } catch (err) {
+    fnError = err;
+    throw err;
+  } finally {
+    try {
+      const claims = JSON.stringify({
+        sub: existing.userId,
+        role: 'authenticated',
+      });
+      await existing.tx`set local role authenticated`;
+      await existing.tx`select set_config('request.jwt.claims', ${claims}, true)`;
+    } catch (restoreErr) {
+      if (fnError === undefined) throw restoreErr;
+    }
+  }
+}
+
+/**
  * Snapshot the current request scope's env + ctx. Used by the streaming
  * notify coalescer to schedule flushes via the same ctx.waitUntil()
  * the request handler will await on. Returns `{ env: null, ctx: null }`

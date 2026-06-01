@@ -448,6 +448,7 @@ export async function setGreenfieldTalkTools(input: {
       from public.talks
       where workspace_id = ${input.workspaceId}::uuid
         and id = ${input.talkId}::uuid
+      for update
     ),
     requested_tools as (
       select unnest(${input.toolIds}::text[]) as tool_id
