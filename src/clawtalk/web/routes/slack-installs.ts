@@ -21,6 +21,8 @@ import {
   listWorkspaceSlackInstalls,
   type WorkspaceSlackInstallRecord,
 } from '../../db/slack-installs-accessors.js';
+import { resolveWorkspaceForUser } from '../../workspaces/accessors.js';
+import { ensureWorkspaceBootstrapForUser } from '../../workspaces/bootstrap.js';
 import { ApiEnvelope, AuthContext } from '../types.js';
 
 interface JsonRouteResult<T> {
@@ -44,12 +46,50 @@ function isAdminLike(role: string): boolean {
   return role === 'owner' || role === 'admin';
 }
 
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 function forbiddenAdminResponse(): JsonRouteResult<never> {
   return errorResult(
     403,
     'forbidden',
     'Only workspace admins can manage Slack installs.',
   );
+}
+
+async function withSlackWorkspace<T>(
+  auth: AuthContext,
+  requestedWorkspaceId: string | null | undefined,
+  options: { requireAdmin: boolean },
+  fn: (workspaceId: string) => Promise<JsonRouteResult<T>>,
+): Promise<JsonRouteResult<T>> {
+  if (requestedWorkspaceId && !UUID_RE.test(requestedWorkspaceId)) {
+    return errorResult(
+      400,
+      'invalid_workspace_id',
+      'workspaceId must be a valid UUID.',
+    );
+  }
+  await ensureWorkspaceBootstrapForUser(auth.userId);
+  return withUserContext(auth.userId, async () => {
+    const workspace = await resolveWorkspaceForUser({
+      userId: auth.userId,
+      requestedWorkspaceId,
+    });
+    if (!workspace) {
+      return errorResult(
+        requestedWorkspaceId ? 403 : 404,
+        requestedWorkspaceId ? 'workspace_forbidden' : 'workspace_not_found',
+        requestedWorkspaceId
+          ? 'Workspace is not available for this user.'
+          : 'No workspace exists.',
+      );
+    }
+    if (options.requireAdmin && !isAdminLike(workspace.role)) {
+      return forbiddenAdminResponse();
+    }
+    return fn(workspace.id);
+  });
 }
 
 export interface ApiWorkspaceSlackInstall {
@@ -86,14 +126,20 @@ function toApiInstall(
 
 export async function listWorkspaceSlackInstallsRoute(
   auth: AuthContext,
+  requestedWorkspaceId?: string | null,
 ): Promise<JsonRouteResult<{ installs: ApiWorkspaceSlackInstall[] }>> {
-  return withUserContext(auth.userId, async () => {
-    const rows = await listWorkspaceSlackInstalls();
-    return {
-      statusCode: 200,
-      body: { ok: true, data: { installs: rows.map(toApiInstall) } },
-    };
-  });
+  return withSlackWorkspace(
+    auth,
+    requestedWorkspaceId,
+    { requireAdmin: false },
+    async (workspaceId) => {
+      const rows = await listWorkspaceSlackInstalls({ workspaceId });
+      return {
+        statusCode: 200,
+        body: { ok: true, data: { installs: rows.map(toApiInstall) } },
+      };
+    },
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -103,25 +149,30 @@ export async function listWorkspaceSlackInstallsRoute(
 export async function startSlackInstallRoute(
   auth: AuthContext,
   body: { returnTo?: unknown },
+  requestedWorkspaceId?: string | null,
 ): Promise<
   JsonRouteResult<{ authorizationUrl: string; expiresInSec: number }>
 > {
-  if (!isAdminLike(auth.role)) return forbiddenAdminResponse();
-
   const returnTo =
     typeof body.returnTo === 'string' && body.returnTo.length > 0
       ? body.returnTo
       : null;
 
   try {
-    const result = await withUserContext(auth.userId, () =>
-      startSlackInstall({
-        userId: auth.userId,
-        redirectUri: SLACK_OAUTH_REDIRECT_URI,
-        returnTo,
-      }),
+    return await withSlackWorkspace(
+      auth,
+      requestedWorkspaceId,
+      { requireAdmin: true },
+      async (workspaceId) => {
+        const result = await startSlackInstall({
+          workspaceId,
+          userId: auth.userId,
+          redirectUri: SLACK_OAUTH_REDIRECT_URI,
+          returnTo,
+        });
+        return { statusCode: 200, body: { ok: true, data: result } };
+      },
     );
-    return { statusCode: 200, body: { ok: true, data: result } };
   } catch (err) {
     if (err instanceof SlackOAuthError) return fromOAuthError(err);
     throw err;
@@ -135,15 +186,22 @@ export async function startSlackInstallRoute(
 export async function deleteWorkspaceSlackInstallRoute(input: {
   auth: AuthContext;
   teamId: string;
+  requestedWorkspaceId?: string | null;
 }): Promise<JsonRouteResult<{ deleted: boolean }>> {
-  if (!isAdminLike(input.auth.role)) return forbiddenAdminResponse();
-  return withUserContext(input.auth.userId, async () => {
-    const deleted = await deleteWorkspaceSlackInstall(input.teamId);
-    if (!deleted) {
-      return errorResult(404, 'not_found', 'Slack install not found.');
-    }
-    return { statusCode: 200, body: { ok: true, data: { deleted: true } } };
-  });
+  return withSlackWorkspace(
+    input.auth,
+    input.requestedWorkspaceId,
+    { requireAdmin: true },
+    async (workspaceId) => {
+      const deleted = await deleteWorkspaceSlackInstall(input.teamId, {
+        workspaceId,
+      });
+      if (!deleted) {
+        return errorResult(404, 'not_found', 'Slack install not found.');
+      }
+      return { statusCode: 200, body: { ok: true, data: { deleted: true } } };
+    },
+  );
 }
 
 // ---------------------------------------------------------------------------

@@ -1,16 +1,21 @@
-import { getDbPg } from '../../db.js';
+import { getDbPg, withUserContext } from '../../db.js';
 import { logger } from '../../logger.js';
 import {
   executeWithResolvedAgent,
   type ExecutionContext,
   type ExecutionEvent,
 } from '../agents/agent-router.js';
-import type { LlmContentBlock, LlmMessage } from '../agents/llm-client.js';
+import type {
+  LlmContentBlock,
+  LlmMessage,
+  LlmToolDefinition,
+} from '../agents/llm-client.js';
 import {
   buildEffectiveToolsFromTalkToolRows,
   listUserToolPermissionsForUser,
   type EffectiveToolAccess,
   type RegisteredAgentRecord,
+  type RegisteredAgentCredentialMode,
 } from '../db/agent-accessors.js';
 import { resolveModelCapabilities } from '../llm/capabilities.js';
 import {
@@ -25,12 +30,29 @@ import {
   type TalkExecutor,
   type TalkExecutorInput,
   type TalkExecutorOutput,
+  type TalkJobExecutionPolicy,
 } from './executor.js';
+import { buildGoogleDriveContextTools } from './google-drive-tools.js';
+import { isContentEditIntent } from './content-edit-intent.js';
+import {
+  buildAllowedRuntimeToolSet,
+  filterRuntimeToolDefinitions,
+  isRuntimeToolAllowed,
+} from './runtime-tool-filter.js';
+import {
+  executeGreenfieldApplyContentEdit,
+  GREENFIELD_APPLY_CONTENT_EDIT_TOOL,
+  GREENFIELD_DOCUMENT_EDIT_RUNTIME_TOOL,
+  loadGreenfieldDocumentContext,
+} from './greenfield-document-tools.js';
+import { buildToolExecutor } from './new-executor.js';
+import { emitOutboxEvent } from './outbox-emit.js';
 
 type GreenfieldExecutorRunRow = {
   id: string;
   workspace_id: string;
   talk_id: string;
+  job_id: string | null;
   talk_title: string;
   talk_mode: 'ordered' | 'parallel';
   round: number;
@@ -51,6 +73,8 @@ type GreenfieldExecutorRunRow = {
   method: string[] | null;
   tool_manifest_json: unknown | null;
 };
+
+type GreenfieldToolManifestRecord = Record<string, unknown>;
 
 type GreenfieldHistoryMessageRow = {
   id: string;
@@ -79,6 +103,10 @@ type GreenfieldContextSourceView = GreenfieldContextSourceRow & {
   displayRef: string | null;
   displayLabel: string;
 };
+
+type GreenfieldDocumentContext = Awaited<
+  ReturnType<typeof loadGreenfieldDocumentContext>
+>;
 
 type GreenfieldPdfPageSource = {
   sourceId: string;
@@ -111,6 +139,79 @@ const ESTIMATED_IMAGE_BLOCK_TOKENS = 3_000;
 const ESTIMATED_DOCUMENT_BLOCK_TOKENS = 8_000;
 const OMITTED_CONTEXT_MARKER = '[omitted due to context window]';
 const TRUNCATED_CONTEXT_SUFFIX = '\n\n[truncated for context window]';
+
+const WEB_TOOL_DEFINITIONS: LlmToolDefinition[] = [
+  {
+    name: 'web_search',
+    description: [
+      'Search the live web for current information. Returns result objects with title, url, and a short snippet.',
+      '',
+      'Use this for anything that may have changed recently: current events, news, prices, schedules, rosters, and "latest" or "current" facts.',
+      'Keep queries short and include a timeframe when freshness matters.',
+    ].join('\n'),
+    inputSchema: {
+      type: 'object',
+      properties: {
+        query: {
+          type: 'string',
+          description: 'Short natural-language search query.',
+        },
+        max_results: {
+          type: 'number',
+          description: 'Optional result cap. Defaults to 5.',
+        },
+      },
+      required: ['query'],
+    },
+  },
+];
+
+const GREENFIELD_CONTEXT_TOOL_DEFINITIONS: LlmToolDefinition[] = [
+  {
+    name: 'read_source',
+    description:
+      'Read the full extracted text of a saved Talk source by its stable ref (for example S1, S2) or source id.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        sourceRef: {
+          type: 'string',
+          description: 'Stable source ref like S1, or the source id.',
+        },
+      },
+      required: ['sourceRef'],
+    },
+  },
+  {
+    name: 'list_state',
+    description:
+      'List Talk state entries. Greenfield Talks do not have mutable state yet, so this currently returns an empty list.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        prefix: {
+          type: 'string',
+          description: 'Optional key prefix filter.',
+        },
+      },
+    },
+  },
+  {
+    name: 'read_state',
+    description:
+      'Read a single Talk state entry by key. Greenfield Talks do not have mutable state yet, so missing keys return an error.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        key: {
+          type: 'string',
+          description: 'State entry key to read.',
+        },
+      },
+      required: ['key'],
+    },
+  },
+];
 
 function estimateTokens(text: string): number {
   return Math.ceil(text.length * CHARS_TO_TOKENS);
@@ -147,9 +248,26 @@ function buildSnapshotSystemPrompt(run: GreenfieldExecutorRunRow): string {
   return sections.join('\n\n');
 }
 
+function parseToolManifestRecord(
+  value: unknown,
+): GreenfieldToolManifestRecord | null {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? (value as GreenfieldToolManifestRecord)
+    : null;
+}
+
+function parseCredentialKindSnapshot(
+  value: unknown,
+): RegisteredAgentCredentialMode | null {
+  const record = parseToolManifestRecord(value);
+  const mode = record?.agentCredentialMode;
+  return mode === 'api_key' || mode === 'subscription' ? mode : null;
+}
+
 function toRegisteredAgentRecord(
   run: GreenfieldExecutorRunRow,
 ): RegisteredAgentRecord {
+  const credentialMode = parseCredentialKindSnapshot(run.tool_manifest_json);
   return {
     id: run.source_agent_id ?? run.agent_snapshot_id,
     owner_id: run.requested_by,
@@ -160,7 +278,7 @@ function toRegisteredAgentRecord(
     system_prompt: buildSnapshotSystemPrompt(run),
     description: run.focus,
     enabled: true,
-    credential_mode: null,
+    credential_mode: credentialMode,
     model_auto_upgraded_from: null,
     model_auto_upgraded_at: null,
     created_at: new Date(0).toISOString(),
@@ -177,6 +295,7 @@ async function getGreenfieldExecutorRun(
       r.id,
       r.workspace_id,
       r.talk_id,
+      r.job_id,
       t.title as talk_title,
       t.mode as talk_mode,
       r.round,
@@ -218,8 +337,9 @@ async function getGreenfieldExecutorRun(
 function parseToolManifestEffectiveTools(
   value: unknown,
 ): EffectiveToolAccess[] | null {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
-  const effectiveTools = (value as Record<string, unknown>).effectiveTools;
+  const record = parseToolManifestRecord(value);
+  if (!record) return null;
+  const effectiveTools = record.effectiveTools;
   if (!Array.isArray(effectiveTools)) return null;
 
   const parsed: EffectiveToolAccess[] = [];
@@ -254,6 +374,7 @@ async function loadGreenfieldEffectiveTools(
     run.tool_manifest_json,
   );
   if (frozenEffectiveTools) return frozenEffectiveTools;
+  if (run.job_id) return [];
 
   const userPermissions = await listUserToolPermissionsForUser(
     run.requested_by,
@@ -577,6 +698,207 @@ function formatPriorGaps(priorGaps: PriorOrderedGap[]): string {
     .join('\n');
 }
 
+function parseGreenfieldJobPolicy(
+  run: GreenfieldExecutorRunRow,
+): TalkJobExecutionPolicy | null {
+  if (!run.job_id) return null;
+  const manifest = parseToolManifestRecord(run.tool_manifest_json);
+  const scope = parseToolManifestRecord(manifest?.jobSourceScope);
+  const allowWeb = scope?.allow_web === true || scope?.allowWeb === true;
+  return {
+    jobId: run.job_id,
+    allowedConnectorIds: [],
+    allowWeb,
+    allowStateMutation: false,
+    allowExternalMutation: false,
+  };
+}
+
+function buildGreenfieldContextTools(input: {
+  effectiveTools: EffectiveToolAccess[];
+  jobPolicy: TalkJobExecutionPolicy | null;
+  hasAttachedDocument: boolean;
+}): LlmToolDefinition[] {
+  const enabledToolFamilies = new Set(
+    input.effectiveTools
+      .filter((tool) => tool.enabled)
+      .map((tool) => tool.toolFamily),
+  );
+  const allowedRuntimeTools = buildAllowedRuntimeToolSet(input.effectiveTools);
+  const tools: LlmToolDefinition[] = [...GREENFIELD_CONTEXT_TOOL_DEFINITIONS];
+
+  if (
+    (!input.jobPolicy || input.jobPolicy.allowWeb) &&
+    enabledToolFamilies.has('web')
+  ) {
+    tools.push(
+      ...filterRuntimeToolDefinitions(
+        WEB_TOOL_DEFINITIONS,
+        allowedRuntimeTools,
+      ),
+    );
+  }
+
+  const googleReadEnabled = enabledToolFamilies.has('google_read');
+  const googleWriteEnabled = enabledToolFamilies.has('google_write');
+  if (googleReadEnabled || googleWriteEnabled) {
+    const googleTools = buildGoogleDriveContextTools({
+      readEnabled: googleReadEnabled,
+      writeEnabled: googleWriteEnabled,
+      hasAttachedContent: input.hasAttachedDocument && !input.jobPolicy,
+    });
+    tools.push(
+      ...filterRuntimeToolDefinitions(googleTools, allowedRuntimeTools),
+    );
+  }
+
+  if (
+    input.hasAttachedDocument &&
+    !input.jobPolicy &&
+    isRuntimeToolAllowed(
+      allowedRuntimeTools,
+      GREENFIELD_DOCUMENT_EDIT_RUNTIME_TOOL,
+    )
+  ) {
+    tools.push(GREENFIELD_APPLY_CONTENT_EDIT_TOOL);
+  }
+
+  return tools;
+}
+
+async function readGreenfieldSourceTool(input: {
+  run: GreenfieldExecutorRunRow;
+  args: Record<string, unknown>;
+}): Promise<{ result: string; isError?: boolean }> {
+  const rawRef = input.args.sourceRef;
+  if (typeof rawRef !== 'string' || !rawRef.trim()) {
+    return { result: 'Error: sourceRef parameter required', isError: true };
+  }
+  const ref = rawRef.trim();
+  const sources = await loadGreenfieldContextSources(input.run);
+  const source = sources.find(
+    (candidate) =>
+      candidate.id === ref ||
+      candidate.displayRef?.toLowerCase() === ref.toLowerCase(),
+  );
+  if (!source) return { result: `Source ${ref} not found`, isError: true };
+  return {
+    result:
+      source.extracted_text?.trim() ||
+      source.summary?.trim() ||
+      'No extracted text is available for this source.',
+  };
+}
+
+function hasGreenfieldDocumentEditIds(result: string): boolean {
+  try {
+    const parsed = JSON.parse(result) as { editIds?: unknown };
+    return (
+      Array.isArray(parsed.editIds) &&
+      parsed.editIds.some((editId) => typeof editId === 'string')
+    );
+  } catch {
+    return false;
+  }
+}
+
+function buildGreenfieldToolExecutor(input: {
+  run: GreenfieldExecutorRunRow;
+  signal: AbortSignal;
+  jobPolicy: TalkJobExecutionPolicy | null;
+  effectiveTools: EffectiveToolAccess[];
+  advertisedToolNames: Set<string>;
+  agentId: string;
+  agentNickname: string | null;
+  triggerMessageId?: string | null;
+  onApplyContentEdit?: () => void;
+}): (
+  toolName: string,
+  args: Record<string, unknown>,
+) => Promise<{ result: string; isError?: boolean }> {
+  const baseExecutor = buildToolExecutor(
+    input.run.talk_id,
+    input.run.requested_by,
+    input.run.id,
+    input.signal,
+    input.jobPolicy,
+    input.effectiveTools,
+    input.agentId,
+    input.agentNickname,
+    input.triggerMessageId,
+  );
+  const allowedRuntimeTools = buildAllowedRuntimeToolSet(input.effectiveTools);
+  return async (toolName, args) => {
+    if (toolName === 'read_source') {
+      return readGreenfieldSourceTool({ run: input.run, args });
+    }
+    if (toolName === 'list_state') {
+      return { result: JSON.stringify({ entries: [] }) };
+    }
+    if (toolName === 'read_state') {
+      const key = typeof args.key === 'string' ? args.key.trim() : '';
+      return {
+        result: key
+          ? `State entry "${key}" does not exist.`
+          : 'Error: key parameter required',
+        isError: true,
+      };
+    }
+    if (toolName === 'apply_content_edit') {
+      if (input.jobPolicy) {
+        return {
+          result:
+            'Error: apply_content_edit is not available for scheduled job runs',
+          isError: true,
+        };
+      }
+      if (
+        !isRuntimeToolAllowed(
+          allowedRuntimeTools,
+          GREENFIELD_DOCUMENT_EDIT_RUNTIME_TOOL,
+        )
+      ) {
+        return {
+          result: 'Error: apply_content_edit is not enabled for this agent',
+          isError: true,
+        };
+      }
+      const result = await executeGreenfieldApplyContentEdit({
+        workspaceId: input.run.workspace_id,
+        talkId: input.run.talk_id,
+        runId: input.run.id,
+        agentId: input.run.source_agent_id,
+        agentNickname: input.agentNickname,
+        messageId: input.triggerMessageId ?? null,
+        args,
+      });
+      if (!result.isError && hasGreenfieldDocumentEditIds(result.result)) {
+        input.onApplyContentEdit?.();
+      }
+      return result;
+    }
+    if (toolName === 'read_attachment') {
+      return {
+        result:
+          'Error: attachments_not_available: Message attachments are not available on the greenfield chat route yet.',
+        isError: true,
+      };
+    }
+    if (!input.advertisedToolNames.has(toolName)) {
+      return {
+        result: `Tool '${toolName}' is not available in greenfield execution`,
+        isError: true,
+      };
+    }
+    if (toolName === 'web_search') {
+      return withUserContext(input.run.requested_by, () =>
+        baseExecutor(toolName, args),
+      );
+    }
+    return baseExecutor(toolName, args);
+  };
+}
+
 export async function buildGreenfieldStepUserMessageText(input: {
   workspaceId: string;
   triggerContent: string;
@@ -680,14 +1002,20 @@ function buildContext(input: {
   run: GreenfieldExecutorRunRow;
   history: LlmMessage[];
   sourceSection: string | null;
+  documentSection: string | null;
+  contextTools: LlmToolDefinition[];
 }): ExecutionContext {
-  const systemPrompt = [`Talk: ${input.run.talk_title}`, input.sourceSection]
+  const systemPrompt = [
+    `Talk: ${input.run.talk_title}`,
+    input.documentSection,
+    input.sourceSection,
+  ]
     .filter(Boolean)
     .join('\n\n');
 
   return {
     systemPrompt,
-    contextTools: [],
+    contextTools: input.contextTools,
     connectorTools: [],
     history: input.history,
   };
@@ -801,21 +1129,38 @@ export class GreenfieldTalkExecutor implements TalkExecutor {
       );
     }
 
-    const [history, sourceContext, stepUserMessage] = await Promise.all([
-      loadGreenfieldHistory(run),
-      loadGreenfieldSourceSection(run),
-      buildGreenfieldStepUserMessageText({
+    const jobPolicy = parseGreenfieldJobPolicy(run);
+    const [history, sourceContext, stepUserMessage, effectiveTools] =
+      await Promise.all([
+        loadGreenfieldHistory(run),
+        loadGreenfieldSourceSection(run),
+        buildGreenfieldStepUserMessageText({
+          workspaceId: run.workspace_id,
+          triggerContent: input.triggerContent,
+          talkMode: run.talk_mode,
+          responseGroupId: input.responseGroupId,
+          sequenceIndex: input.sequenceIndex,
+        }),
+        loadGreenfieldEffectiveTools(run),
+      ]);
+    const documentContext: GreenfieldDocumentContext =
+      await loadGreenfieldDocumentContext({
         workspaceId: run.workspace_id,
-        triggerContent: input.triggerContent,
-        talkMode: run.talk_mode,
-        responseGroupId: input.responseGroupId,
-        sequenceIndex: input.sequenceIndex,
-      }),
-    ]);
+        talkId: run.talk_id,
+        allowEdits: !jobPolicy,
+      });
+    const agent = toRegisteredAgentRecord(run);
+    const contextTools = buildGreenfieldContextTools({
+      effectiveTools,
+      jobPolicy,
+      hasAttachedDocument: Boolean(documentContext.document),
+    });
     const context = buildContext({
       run,
       history,
       sourceSection: sourceContext.sourceSection,
+      documentSection: documentContext.promptSection,
+      contextTools,
     });
     const userMessageContent = await prependGreenfieldPdfPageImages({
       talkId: run.talk_id,
@@ -829,30 +1174,84 @@ export class GreenfieldTalkExecutor implements TalkExecutor {
         0,
       ) +
       estimateContentTokens(userMessageContent);
-    const [agent, effectiveTools] = await Promise.all([
-      Promise.resolve(toRegisteredAgentRecord(run)),
-      loadGreenfieldEffectiveTools(run),
-    ]);
-
-    const result = await executeWithResolvedAgent(
-      agent,
-      context,
-      userMessageContent,
-      {
-        runId: input.runId,
-        userId: input.requestedBy,
-        signal,
-        emit: (event) => {
-          const mapped = mapExecutionEvent(event, input, run);
-          if (mapped) emit?.(mapped);
-        },
-        credentialScope: {
-          principalUserId: input.requestedBy,
-          workspaceId: run.workspace_id,
-        },
-        effectiveTools,
-      },
+    const canApplyContentEdit = contextTools.some(
+      (tool) => tool.name === GREENFIELD_DOCUMENT_EDIT_RUNTIME_TOOL,
     );
+    const editIntentDetected =
+      !jobPolicy &&
+      Boolean(documentContext.document) &&
+      canApplyContentEdit &&
+      isContentEditIntent(stepUserMessage.userMessageText);
+    let applyContentEditCalled = false;
+    const executeToolCall = buildGreenfieldToolExecutor({
+      run,
+      signal,
+      jobPolicy,
+      effectiveTools,
+      advertisedToolNames: new Set(contextTools.map((tool) => tool.name)),
+      agentId: agent.id,
+      agentNickname: agent.name,
+      triggerMessageId: input.triggerMessageId,
+      onApplyContentEdit: () => {
+        applyContentEditCalled = true;
+      },
+    });
+    if (editIntentDetected && documentContext.document?.owner_id) {
+      await emitOutboxEvent({
+        topic: `talk:${run.talk_id}`,
+        eventType: 'content_edit_run_started',
+        payload: {
+          contentId: documentContext.document.id,
+          runId: input.runId,
+          agentId: agent.id,
+          agentNickname: agent.name,
+        },
+        ownerIds: [documentContext.document.owner_id],
+      });
+    }
+
+    let result: Awaited<ReturnType<typeof executeWithResolvedAgent>>;
+    try {
+      result = await executeWithResolvedAgent(
+        agent,
+        context,
+        userMessageContent,
+        {
+          runId: input.runId,
+          userId: run.requested_by,
+          signal,
+          emit: (event) => {
+            const mapped = mapExecutionEvent(event, input, run);
+            if (mapped) emit?.(mapped);
+          },
+          executeToolCall,
+          forceToolUseOnFirstIteration: editIntentDetected,
+          credentialKindSnapshot: agent.credential_mode,
+          credentialScope: {
+            principalUserId: run.requested_by,
+            workspaceId: run.workspace_id,
+          },
+          effectiveTools,
+        },
+      );
+    } finally {
+      if (
+        editIntentDetected &&
+        documentContext.document?.owner_id &&
+        !applyContentEditCalled
+      ) {
+        await emitOutboxEvent({
+          topic: `talk:${run.talk_id}`,
+          eventType: 'content_edit_run_aborted',
+          payload: {
+            contentId: documentContext.document.id,
+            runId: input.runId,
+            reason: 'no_apply_call',
+          },
+          ownerIds: [documentContext.document.owner_id],
+        });
+      }
+    }
 
     const output: TalkExecutorOutput = {
       content: result.content,

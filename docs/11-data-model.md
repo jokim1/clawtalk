@@ -30,6 +30,7 @@ It is **greenfield** (D0): names and shapes are designed for the new model, not 
   - `connectors.secret_ref → connector_secrets` (`connector_secrets` declared after `connectors` in §6).
 
   Multi-row inserts that need to write across a cycle wrap in a transaction with `SET CONSTRAINTS ALL DEFERRED`. The scheduler's claim path (`12-jobs.md` §5) and Forge's improvement-run-bootstrap path both rely on this.
+
 - **Timestamps:** `created_at`, `updated_at`, UTC `timestamptz`. `updated_at` is maintained by a single shared trigger function applied to every table that has an `updated_at` column:
 
   ```sql
@@ -47,6 +48,7 @@ It is **greenfield** (D0): names and shapes are designed for the new model, not 
   -- The migration writes one such trigger per table; the per-table CREATE TRIGGER
   -- is omitted from §1–§10 for brevity.
   ```
+
 - **Soft-delete:** only where recovery is a product feature (Talks: `archived_at`). Else hard-delete via cascade (D0 — no "just in case" tombstones).
 - **Enums:** `text` + `CHECK` universally (closed and evolving sets alike). Postgres `enum` types are avoided so adding a new value is a plain migration, not `ALTER TYPE`. The trade-off is a slightly larger on-disk row and lookups that aren't ordinal; both are negligible at our target scale.
 - **Flexible payloads:** `jsonb` for genuinely open shapes (objective/search config, manifests, event payloads) — not as an escape hatch for known columns.
@@ -55,7 +57,7 @@ It is **greenfield** (D0): names and shapes are designed for the new model, not 
 
 **Reuse vs. rewrite (global), corrected by D7.** _Keep_ the Cloudflare platform (Workers / Queues / Durable Objects / Hyperdrive), the `event_outbox` → `UserEventHub` DO stream, and the LLM provider/model/secret tables (`llm_providers`, `llm_provider_models`, `llm_provider_secrets`, `workspace_provider_secrets` — these are **shared LLM keys**, not OAuth). _Rework_ the run model + executor (the legacy `talk_runs` is thread/channel-entangled). _Do not reuse_ `idempotency_cache` for Forge retries (it's an HTTP-response cache keyed `idempotency_key,user_id,method,path`) and _do not_ route connector/SSR OAuth secrets through `workspace_provider_secrets` (LLM-key store) — both get their own stores below.
 
-**Migration approach (per D0).** Implementation uses a **fresh Supabase baseline from an empty/reset database**, not a stack of compatibility migrations. The active migration path starts at `supabase/migrations/0001_clawtalk_greenfield.sql`; old data and old migration history are disposable. There is **no shadow-table, dual-write, backfill, or legacy `DROP`/`ALTER` sequence in the active baseline.** Reused infrastructure tables such as `event_outbox` and the LLM provider tables are recreated directly in their final shapes. After reset: Joseph re-OAuths Google/Anthropic providers and first signin creates a fresh `workspace` + `owner` `workspace_members` row.
+**Migration approach (per D0).** Implementation uses a **fresh Supabase baseline from an empty/reset database**, not a stack of compatibility migrations. The active migration path starts at `supabase/migrations/0001_clawtalk_greenfield.sql`; old data and old migration history are disposable. There is **no shadow-table, dual-write, backfill, or legacy `DROP`/`ALTER` sequence in the active baseline.** This is reset-only: final cutover resets/recreates the target Supabase database and applies the baseline from zero. Do not run it as `db push` against a database that has recorded the old `0001`-`0038` migrations. Reused infrastructure tables such as `event_outbox` and the LLM provider tables are recreated directly in their final shapes. After reset: Joseph re-OAuths Google/Anthropic providers and first signin creates a fresh `workspace` + `owner` `workspace_members` row.
 
 ---
 
@@ -147,7 +149,7 @@ messages (
   author_user_id    uuid references users(id) on delete restrict,   -- when user
   agent_snapshot_id uuid,                                            -- when agent: immutable attribution (P1-5)
   run_id            uuid,                                            -- composite FK below (back-edge, deferrable)
-  body text, attachments_json jsonb not null default '[]',
+  body text,
   created_at,
   unique (workspace_id, id),                                         -- composite-FK target (agent_feedback_events)
   unique (workspace_id, talk_id, id),                                -- composite-FK target including talk_id (runs.trigger_message_id)
@@ -225,7 +227,7 @@ Design notes:
 - **Single-flight per job.** Partial unique on `runs(job_id)` for `status in ('queued','running','awaiting')` prevents two scheduler/manual races from creating concurrent nonterminal runs for the same job (`12-jobs.md` §5).
 - **Slot identity per job-trigger run.** `scheduled_for timestamptz` is the immutable slot timestamp the scheduler computes per fire. The partial unique on `(job_id, scheduled_for)` makes "never fire the same slot twice" a Postgres invariant — covering scheduler-tick races and queue at-least-once retries without app-side coordination (`12-jobs.md` §5). Short `claimed_at` backoff only controls retry pacing for busy/failure rows; it is not slot identity. Manual `run-now` writes `scheduled_for=null` (no slot consumed).
 - **Job-trigger invariant.** The CHECK in the runs body encodes `12-jobs.md` §2: scheduler/manual runs never carry a `trigger_message_id` (no `messages` row is written for the trigger), and they must point at a `run_prompt_snapshots` row (`prompt_snapshot_id is not null`) — so the executor reads an immutable snapshot of `jobs.prompt`, not the live row.
-- **Scheduler authorization vs. attribution.** Scheduler-triggered runs are claimed and inserted under service-role auth (no `auth.uid()` — the scheduler isn't a user). `requested_by = jobs.created_by` for attribution only (so "who set this up" stays answerable in run-list UI and audit queries), not for authorization — accessors scope by `workspace_id` explicitly. The `requested_by` user may leave the workspace later; that doesn't break the run.
+- **Job execution principal.** Scheduler-triggered runs are claimed and inserted under service-role auth (no `auth.uid()` — the scheduler isn't a user). Scheduler and manual run-now both write `requested_by = jobs.created_by` so job execution consistently uses the creator's frozen tool permissions and Google tool credential checks. Create/edit/pause/resume/archive require Talk job-edit access (workspace owner/admin or Talk creator) so owners/admins can manage orphaned schedules, but manual run-now requires `auth.uid() = jobs.created_by` because it fires under that creator's credential principal. Accessors still scope by `workspace_id` explicitly; the `requested_by` user may leave the workspace later without breaking historical runs.
 - **`runs.job_id` is `RESTRICT`.** History for a job is `runs filtered by job_id` (no separate `job_runs` ledger), so the FK must survive job-delete attempts. Hard delete is only allowed via an admin path when `run_count = 0`; the UI "Delete" action archives instead (`jobs.archived_at` in §8).
 - **Index cost.** The composite-FK pattern adds 7–8 indexes per `runs` insert and 4 per `messages` insert (each `unique` = a B-tree index). Tenant integrity beats write cost at the foreseeable target (personal-only, one workspace), but revisit if write throughput becomes the binding constraint — relaxing the `(workspace_id, talk_id, id)` targets would lose the cross-Talk integrity codex flagged on 2026-05-29.
 - **Unread (P0-2):** derived = messages in a talk newer than the caller's `talk_reads.last_read_at`; workspace badge = sum across the workspace's talks.
@@ -305,7 +307,9 @@ agents (
   capabilities text[] not null default '{}',
   is_default boolean not null default false, is_custom boolean not null default false,
   is_system boolean not null default false,    -- Forge rewriter/critic — hidden from roster (D3)
-  enabled boolean not null default true, created_from_template_version int,
+  enabled boolean not null default true,
+  credential_mode text check (credential_mode in ('api_key','subscription')),
+  created_from_template_version int,
   created_at, updated_at,
   unique (workspace_id, id)                     -- composite-FK target for talk_agents / snapshots / coeditors
 )
@@ -362,6 +366,11 @@ agent_feedback_events (
 )
 ```
 
+Message attachments are intentionally absent from the active greenfield
+baseline. The legacy attachment endpoints are guarded by a structured
+`attachments_not_available` response until a future R2-backed attachment slice
+adds storage, DB rows, API contracts, and executor/tool consumption together.
+
 Design notes:
 
 - **Model catalog (D7):** `llm_models` is the single source of truth (one `id`); seeded from `llm_provider_models(provider_id, model_id)`, which **keeps its composite key** as the provider-capability table. Agents/runs/templates FK to `llm_models.id`. Kills the model-ID drift.
@@ -369,7 +378,7 @@ Design notes:
 - **Temperature** lives on the template (default) → `agents.temperature` (editable) → snapshot. Resolves the audit gap.
 - **System agents (`is_system`)** carry Forge's rewriter + critic (D3); filtered from `GET /agents` and the roster at the query layer.
 - **Index cost on snapshots.** `talk_agent_snapshots` carries 6 indexes per row (PK + 3 composite-FK targets + uniqueness on `(snapshot_group_id, source_agent_id)` + the `snapshot_group_id` lookup index). One row per agent per run = 3–6 rows per Talk turn at a typical roster size. Acceptable for the personal-only target; if write rate ever blows past ~10 turns/sec sustained, consider partitioning by month or relaxing the workspace-id-redundant targets.
-- **`run_prompt_snapshots` is shared with jobs (`12-jobs.md` §2 / §5).** Scheduler-triggered runs and manual `run-now` runs reuse this table — no new table, no new column. The scheduler writes the snapshot in the same transaction as the `runs` INSERT (`12-jobs.md` §5 Path A): `prompt_text_redacted = jobs.prompt` (the immutable copy the executor reads), `model_id = <from the targeted agent's `talk_agent_snapshots` row>`, `provider = <provider selected for that model>`, `role_template_version = <target agent template version>`, `prompt_assembly_version = 1`, and `tool_manifest_json = <frozen source-scoped effective tool manifest>`. The tool manifest is populated because the greenfield executor reads it to enforce the job's read-only `source_scope_json`; without it, execution would fall back to live Talk tools. Optional provenance fields (`global_policy_version`, `context_manifest_json`, `prompt_hash`) are left NULL by the scheduler; the executor or a follow-up backfill can populate them. The `runs.prompt_snapshot_id` FK is deferrable so the scheduler can insert `runs` first (referencing the future snapshot id) and `run_prompt_snapshots` second within the same txn.
+- **`run_prompt_snapshots` is shared with jobs (`12-jobs.md` §2 / §5).** Scheduler-triggered runs and manual `run-now` runs reuse this table — no new table, no new column. The scheduler writes the snapshot in the same transaction as the `runs` INSERT (`12-jobs.md` §5 Path A): `prompt_text_redacted = jobs.prompt` (the immutable copy the executor reads), `model_id = <from the targeted agent's `talk_agent_snapshots` row>`, `provider = <provider selected for that model>`, `role_template_version = <target agent template version>`, `prompt_assembly_version = 1`, and `tool_manifest_json = <frozen source-scoped effective tool manifest>`. The manifest includes `agentCredentialMode` (`api_key`, `subscription`, or null) so a queued run cannot flip credential paths if the live agent is edited before execution. The tool manifest is populated because the greenfield executor reads it to enforce the job's read-only `source_scope_json`; without it, execution would fall back to live Talk tools. Optional provenance fields (`global_policy_version`, `context_manifest_json`, `prompt_hash`) are left NULL by the scheduler; the executor or a follow-up backfill can populate them. The `runs.prompt_snapshot_id` FK is deferrable so the scheduler can insert `runs` first (referencing the future snapshot id) and `run_prompt_snapshots` second within the same txn.
 - `06` §14.6 loop tables (`agent_audit_results`, `prompt_improvement_proposals`, `prompt_versions`) are deferred until that loop is built.
 
 ---
@@ -470,6 +479,7 @@ Design notes:
     before delete on public.doc_tabs
     for each row execute function doc_tabs_block_last_delete();
   ```
+
 - **Edit concurrency (P1-7) — CAS covers both shape changes.** Replace/delete check `base_block_version` against `doc_blocks.version`; inserts check `base_list_version` against `doc_tabs.list_version` (so a concurrent insert/reorder that already changed the placement bumps the tab's `list_version` and the late edit is marked `superseded`). On accept, the relevant version column bumps via the trigger below. Inline rendering of a pending edit interleaves `document_edits` rows (status `pending`) against `doc_blocks` by `after_block_id`/`block_id`.
 
   ```sql
@@ -493,6 +503,10 @@ Design notes:
             and status = 'pending'
             and (new.after_block_id is null and after_block_id is null
                  or after_block_id = new.after_block_id)
+            and not (
+              new.proposed_by_run_id is not null
+              and proposed_by_run_id = new.proposed_by_run_id
+            )
             and id <> new.id;
       elsif new.op in ('replace','delete') then
         update public.doc_blocks
@@ -515,6 +529,7 @@ Design notes:
     before update on public.document_edits
     for each row execute function document_edits_bump_versions_on_accept();
   ```
+
 - **`document_edits` unifies** today's `content_edits` + `content_proposals`; `source='forge'` lets a Forge winner land and `source='job'` lets a §8 job append land through the same accept path (no second write path).
 - **Job-emitted edit shape (`12-jobs.md` §3).** When a job with `emit_document_append=true` runs successfully, the executor INSERTs one `document_edits` row keyed to the Talk's primary Document (`SELECT * FROM documents WHERE primary_talk_id = job.talk_id`) and the primary tab of that document (lowest `doc_tabs.sort_order` for the document). Payload: `op='insert'`, `block_id=null`, `after_block_id=<last block of that tab by sort_order, or NULL if the tab is empty>`, `base_list_version=<that tab's current list_version at insert time>`, `new_kind='p'`, `new_text=<agent's reply content>`, `new_attrs_json=null`, `source='job'`, `proposed_by_run_id=<the run.id>`, `proposed_by_agent_id` set from the targeted snapshot's `source_agent_id` with a single retry-as-NULL on FK violation (the live agent may have been deleted between snapshot and edit insert). Satisfies the op-shape check at line 328. The edit is always pending; the Forge accept path (or a user) applies it — there is no `auto_accept` mode.
 - **Primary Document per Talk is the existing `documents.primary_talk_id`** reverse FK plus the unique partial index above (0/1 primary doc per talk). `12-jobs.md` does NOT add a `talks.primary_document_id` column — the existing reverse FK is the single source of truth. Jobs with `emit_document_append=true` block (`status='blocked', block_reason='no_primary_document'`) when the SELECT returns zero rows.
@@ -569,6 +584,11 @@ connectors (                                  -- workspace-global OAuth wiring (
   secret_ref uuid,                             -- NOT workspace_provider_secrets (those are LLM keys); composite FK below
   config_json jsonb not null default '{}', created_at, updated_at,
   unique (workspace_id, id),
+  unique index (workspace_id, service) where config_json->>'compatSurface' = 'talk_resource',
+  unique index (workspace_id, service, coalesce(config_json->>'authorizedByUserId', '')) where config_json->>'compatSurface' = 'google_tools',
+  unique index (workspace_id, service, coalesce(config_json->>'teamId', config_json->>'workspace_id')) where service = 'slack' and config_json->>'compatSurface' = 'slack_install',
+  unique index (workspace_id, service, coalesce(config_json->>'teamId', config_json->>'workspace_id'), config_json->>'channel_id') where service = 'slack' and config_json->>'compatSurface' = 'channel',
+  unique index (workspace_id, service) where config_json->>'compatSurface' is null,
   foreign key (workspace_id, secret_ref) references connector_secrets(workspace_id, id) on delete set null (secret_ref)
 )
 
@@ -576,18 +596,22 @@ connector_secrets (
   id uuid pk, workspace_id uuid not null references workspaces(id) on delete cascade,
   enc_key_version int not null default 1, ciphertext text not null, created_at, updated_at,
   unique (workspace_id, id)                    -- composite-FK target (connectors.secret_ref, ssr_connections.secret_ref)
-)      -- new OAuth-token store, encrypted at rest (JIT decrypt)
+)      -- new OAuth-token store, encrypted at rest (no direct RLS reads; app-trusted JIT decrypt only)
 
 connector_bindings (
   id uuid pk, workspace_id uuid not null, connector_id uuid not null, talk_id uuid not null,
   target text, scope text[] not null default '{}', enabled boolean not null default true,
-  unique (connector_id, talk_id),
+  display_name text, meta_json jsonb not null default '{}',
+  created_by_user_id uuid not null references users(id) on delete restrict, created_at, updated_at,
+  unique index (connector_id, talk_id) where target is null,
+  unique index (connector_id, talk_id, target, created_by_user_id, coalesce(meta_json->>'resourceKind', '')) where target is not null,
   foreign key (workspace_id, connector_id) references connectors(workspace_id, id) on delete cascade,
   foreign key (workspace_id, talk_id)      references talks(workspace_id, id) on delete cascade
 )
 ```
 
-- **Tool ↔ connector dependency (P1-11):** a tool (e.g. `gdrive-read`) requires its service connector (`gdrive`) authorized. This mapping is a **static code catalog** (`tool_id → required service`), not a table; the runtime gates a tool if its connector isn't authorized.
+- **Tool ↔ connector dependency (P1-11):** a tool (e.g. `gdrive-read`) requires its service connector (`gdrive`) authorized. This mapping is a **static code catalog** (`tool_id → required service`), not a table; the runtime gates a tool if its connector isn't authorized. The compatibility Google tool credential is per-user and per-workspace under `connectors.config_json->>'compatSurface'='google_tools'`, is unique by `(workspace_id, service, authorizedByUserId)`, is readable only by that `authorizedByUserId`, and is excluded from direct authenticated insert/update/delete RLS paths; only the trusted credential writer/service role may create, rotate, or delete those rows. The credential materializes one row per covered Google service (`gdrive` for Drive/Docs/Sheets scopes, `gmail` for Gmail scopes) while sharing the same encrypted `connector_secrets` token. Scheduled jobs must find the matching `google_tools` row for `jobs.created_by`, so one user's OAuth cannot unblock another user's job. Slack installs are workspace OAuth connectors under `compatSurface='slack_install'` with bot tokens in `connector_secrets`, unique per `(workspace_id, teamId)`; imported Slack channel connectors are unique per `(workspace_id, teamId, channelId)` and delegate credential health to that install. The compatibility JSON key `workspace_id` is accepted as a Slack team-id alias, but indexes and lookups normalize it with `coalesce(teamId, workspace_id)` so install and channel identity stay aligned. Compatibility Google Docs/Sheets data-source rows are config-only workspace sources: Talk linking does not require a connector secret, and execution still uses the acting user's `google_tools` credential where a Google tool call needs OAuth. Talk Drive resource bindings use a separate unauthorized singleton resource-catalog connector (`compatSurface='talk_resource'`) so bound targets never masquerade as OAuth credentials; target bindings are idempotent per Talk, target, creator, and resource kind. Resource lists are intentionally Talk-shared and can surface one row per editor when two editors bind the same external target. The binding creator FK is `on delete restrict` so hard user deletion cannot silently remove a Talk-shared resource. Direct RLS writes to `connector_bindings` remain admin-only; non-admin Talk editor binding routes perform trusted server writes only after route-level Talk edit authorization.
+- **Connector partial unique indexes are API contract.** Default Talk channel/data-source links use `ON CONFLICT (connector_id, talk_id) WHERE target IS NULL`; target-scoped Drive resource bindings use the full `(connector_id, talk_id, target, created_by_user_id, coalesce(meta_json->>'resourceKind','')) WHERE target IS NOT NULL` target. Native OAuth rows with `compatSurface IS NULL` are unique per `(workspace_id, service)`, while compatibility rows (`data_connector`, `google_tools`, `talk_resource`, `slack_install`, `channel`) use their own partial indexes and must not collide with the native OAuth singleton.
 - **Jobs' `source_scope_json.tool_ids` (`12-jobs.md` §3 / §7) validates against `talk_tools` at fire time.** The `tool_id text` shape is the contract: `source_scope_json` is `{ allow_web: bool, tool_ids: text[] }`. The scheduler's fire-time dependency check (`12-jobs.md` §5 Path A step 2) verifies every `tool_ids` entry has a matching row in `talk_tools(workspace_id, talk_id, tool_id)` with `enabled = true`, and `allow_web=true` requires the Talk web tool family to have an enabled row; any missing/disabled tool → `jobs.status='blocked', block_reason='tool_not_enabled'`. Validation is at fire time (not create time) because the Talk's tool roster can change after the job is created.
 - **Connector/SSR secrets get their own store** (`connector_secrets`) — D7 corrected the false reuse of `workspace_provider_secrets` (which is LLM provider keys). Same encrypt-at-rest + JIT-decrypt pattern (engineering-notes §1).
 - Primary document is projected into Context from `documents.primary_talk_id`, not stored as a `context_sources` row (`08` §3.9).
@@ -941,6 +965,7 @@ create view jobs_active with (security_invoker = true) as
     before insert or update of talk_id, agent_id on public.jobs
     for each row execute function jobs_require_agent_in_roster();
   ```
+
 - **Single-flight per job** is enforced in §3 by `runs_one_active_per_job` (partial unique on `runs(job_id) where status in ('queued','running','awaiting')`) — schema-guaranteed, not prose-only.
 - **Scheduler robustness** (`12` §5): bounded due-candidate pages with a 10x scan budget and a short `claimed_at` backoff for non-advancing busy jobs and unexpected claim failures. Candidate selection uses separate hot-path indexes for unclaimed rows and retry-ready claimed rows so fresh backoff prefixes are skipped by index shape, then a single-txn claim path (`jobs for update skip locked` → non-blocking `talks for update skip locked` → fire-time dependency check → roster freeze → INSERT `runs` + `run_prompt_snapshots` → advance `next_due_at` → clear `claimed_at` → COMMIT, then dispatch outside the txn). Slot identity is enforced by `runs_one_active_per_job` + `runs_one_per_job_slot` in §3 — both partial unique. Stuck sweep re-dispatches stale `queued` rows (5min threshold) and transitions stale `running` rows (1h) → `failed` with `error_json={"code":"stuck_running_swept"}` and `finished_at = now`; `awaiting` is not swept. Reuses the cron `scheduler.ts` + Queues mechanism; the executor data-access is reworked with the new runs table.
 - **Archive vs lifecycle (`12-jobs.md` §6).** `archived_at` is orthogonal to `status` — an archived row exits the active-job hot path (the `jobs_active` view filters it) but its run history (`runs filtered by job_id`) stays queryable forever. The UI "Delete" action sets `archived_at` + `next_due_at = null`; hard delete is restricted (an admin path requires `run_count = 0` and goes through `runs.job_id` `ON DELETE RESTRICT` — see §3).
@@ -1082,6 +1107,7 @@ Append-only; every state mutation (`04` §16). Distinct from `activity_events` (
 - **Cloudflare platform:** Workers, Queues (run dispatch), Durable Objects (`UserEventHub`), Hyperdrive, `scheduler.ts` cron.
 - **Event delivery:** `event_outbox` → `UserEventHub` DO (WebSocket Hibernation). All streaming rides this.
 - **LLM provider layer:** `llm_providers`, `llm_provider_models` (composite PK, seeds `llm_models`), `llm_provider_secrets`, `workspace_provider_secrets` — **shared LLM keys**, encrypted at rest, JIT decrypt. Greenfield `workspace_provider_*` rows are tenant-scoped by `workspace_id`.
+- **Shared LLM secret read boundary:** `workspace_provider_secrets.ciphertext` is never directly selectable by authenticated browser sessions, including workspace owners/admins; admins can create/update/delete through server routes, and execution/settings code must read/decrypt via trusted server-side DB scopes.
 
 **Explicitly NOT reused (D7 corrections):**
 
@@ -1140,7 +1166,7 @@ cascade;
 
 The list reflects the historical migration snapshot at `0036_agent_model_auto_upgrade.sql`; it is not a substitute for a fresh baseline.
 
-**Runtime tables recreated in the baseline** (do NOT drop if manually clearing an existing DB): `users`, `event_outbox`, `idempotency_cache`, `settings_kv`, `provider_oauth_states`, `llm_providers`, `llm_provider_models`, `llm_provider_secrets`, `llm_provider_verifications`, `llm_ttft_stats`, `workspace_provider_secrets`, `workspace_provider_verifications`.
+**Runtime tables recreated in the baseline** (do NOT drop if manually clearing an existing DB): `users`, `oauth_state`, `event_outbox`, `idempotency_cache`, `settings_kv`, `provider_oauth_states`, `llm_providers`, `llm_provider_models`, `llm_provider_secrets`, `llm_provider_verifications`, `llm_ttft_stats`, `workspace_provider_secrets`, `workspace_provider_verifications`, `web_search_providers`, `web_search_provider_secrets`.
 
 In the active baseline, `users` is defined directly with the §1 target columns (`avatar_color`, `initials`, etc.). Do not preserve existing rows or carry an `ALTER TABLE users` compatibility step unless you are doing a one-off manual cleanup outside the baseline plan.
 
@@ -1153,25 +1179,35 @@ In the active baseline, `users` is defined directly with the §1 target columns 
 
   ```sql
   create function is_workspace_member(ws uuid) returns boolean
-    language sql stable security definer set search_path = public as $$
-      select exists (
-        select 1 from workspace_members
-        where workspace_id = ws and user_id = auth.uid()
-      )
-    $$;
+    language plpgsql stable security definer set search_path = public as $$
+  declare
+    found_row boolean;
+  begin
+    select exists (
+      select 1 from workspace_members
+      where workspace_id = ws and user_id = auth.uid()
+    ) into found_row;
+    return found_row;
+  end;
+  $$;
 
   create function is_workspace_admin(ws uuid) returns boolean
-    language sql stable security definer set search_path = public as $$
-      select exists (
-        select 1 from workspace_members
-        where workspace_id = ws
-          and user_id = auth.uid()
-          and role in ('owner','admin')
-      )
-    $$;
+    language plpgsql stable security definer set search_path = public as $$
+  declare
+    found_row boolean;
+  begin
+    select exists (
+      select 1 from workspace_members
+      where workspace_id = ws
+        and user_id = auth.uid()
+        and role in ('owner','admin')
+    ) into found_row;
+    return found_row;
+  end;
+  $$;
   ```
 
-  Both functions are `security definer` to bypass RLS recursion on `workspace_members` (a policy on table T can't safely subselect from T). The membership lookup runs once, plan-cached. `is_workspace_admin` returns true iff the caller is `owner` or `admin`; `member` and `guest` get false.
+  The active reset-only migration defines these helpers plus `is_workspace_writer` as PL/pgSQL because they are created before all product tables exist; referenced tables bind when the helper first executes, not while the empty-DB baseline is still being created. They are `security definer` to bypass RLS recursion on `workspace_members` (a policy on table T can't safely subselect from T). The membership lookup runs once, plan-cached. `is_workspace_admin` returns true iff the caller is `owner` or `admin`; `member` and `guest` get false.
 
 - Every workspace-owned table: `enable row level security`. Canonical visibility predicate:
 
@@ -1179,7 +1215,7 @@ In the active baseline, `users` is defined directly with the §1 target columns 
   using ( is_workspace_member(workspace_id) )
   ```
 
-- **Write-policy roles.** Most workspace writes (creating Talks/Documents/Agents/Jobs/messages, editing prompts, toggling tools, accepting `document_edits`) gate on `is_workspace_member`. Admin-only writes gate on `is_workspace_admin`: invite/remove members, update member roles, manage connectors (authorize/revoke), delete the workspace, transfer ownership, approve `home_optimization_proposals`, manage `home_algorithm_versions`/`home_algorithm_assignments`. The full policy text for each table is generated mechanically from this rule + the table's column set; the convention is documented in [the build plan](./05-build-plan.md).
+- **Write-policy roles.** Lightweight workspace configuration writes (creating/moving Talks/folders, editing Talk prompts/rosters/tools, read markers, feedback, team/Forge/home interaction rows) gate on `is_workspace_writer`, which allows `owner`/`admin`/`member` and keeps `guest` read-only. Server-authored workflow tables are stricter: `messages`, `context_sources`, `context_source_pages`, `documents`, `doc_tabs`, `doc_blocks`, `doc_tab_coeditors`, `document_versions`, `document_edits`, `jobs`, runtime snapshots, and audit rows are member-read only, with direct authenticated `INSERT`/`UPDATE`/`DELETE` revoked so clients cannot bypass chat validation, source-ingestion state transitions, document edit review/CAS, job dependency validation, source-scope validation, or job execution-principal checks. Their route/accessor writes validate the user workflow first, then mutate inside trusted server writes. Admin-only writes gate on `is_workspace_admin`: invite/remove members, update member roles, manage the shared workspace agent catalog, manage connectors (authorize/revoke), delete the workspace, transfer ownership, approve `home_optimization_proposals`, manage `home_algorithm_versions`/`home_algorithm_assignments`. The full policy text for each table is generated mechanically from this rule + the table's column set; the convention is documented in [the build plan](./05-build-plan.md).
 - **`workspace_members` itself** uses non-recursive policies: `using (user_id = auth.uid())` for reads (a member sees their own memberships); `using (is_workspace_admin(workspace_id))` for writes.
 - **`user_tool_permissions` is user-scoped, not workspace-scoped.** Policy is `using/with check (user_id = auth.uid())`, matching the tool-settings route and the effective-tool resolver.
 - **Join tables carry `workspace_id`** (`talk_agents`, `talk_tools`, `team_composition_agents`, `doc_tab_coeditors`, `connector_bindings`, `talk_reads`, `forge_audience_personas`, `improvement_run_held_out_personas`) so the predicate applies directly — no fragile parent joins.
@@ -1198,30 +1234,32 @@ alter table public.talks enable row level security;
 create policy talks_read on public.talks
   for select using ( is_workspace_member(workspace_id) );
 
--- Write: any workspace member can insert/update/delete content rows.
+-- Write: workspace writers can insert/update/delete content rows.
+-- Guests are intentionally read-only even though they are workspace members.
 -- `with check` on insert/update prevents writing rows into workspaces the caller doesn't belong to.
 create policy talks_write on public.talks
   for all
-  using       ( is_workspace_member(workspace_id) )
-  with check  ( is_workspace_member(workspace_id) );
+  using       ( is_workspace_writer(workspace_id) )
+  with check  ( is_workspace_writer(workspace_id) );
 ```
 
-Member-write applies to: `folders`, `talks`, `talk_agents`, `talk_tools`, `talk_reads`, `messages`, `context_sources`, `context_source_pages`, `agents` (non-system), `agent_feedback_events`, `team_compositions`, `team_composition_agents`, `documents`, `doc_tabs`, `doc_blocks`, `document_edits`, `doc_tab_coeditors`, `jobs`, `improvement_runs`, `document_versions`, `improvement_run_held_out_personas`, `forge_audiences`, `forge_audience_personas`, `home_inbox_items`, `home_recommendations`, `home_recommendation_candidates`, `home_recommendation_events`, `home_news_topics`, `home_news_matches`, `home_interaction_events`, `home_activation_state`, `activity_events`.
+Member-write applies to: `folders`, `talks`, `talk_agents`, `talk_tools`, `talk_reads`, `agent_feedback_events`, `team_compositions`, `team_composition_agents`, `improvement_runs`, `improvement_run_held_out_personas`, `forge_audiences`, `forge_audience_personas`, `home_inbox_items`, `home_recommendations`, `home_recommendation_candidates`, `home_recommendation_events`, `home_news_topics`, `home_news_matches`, `home_interaction_events`, `home_activation_state`, `activity_events`.
+
+`messages`, `context_sources`, `context_source_pages`, `documents`, `doc_tabs`, `doc_blocks`, `doc_tab_coeditors`, `document_versions`, `document_edits`, and `jobs` are intentionally outside the generic member-write loop. Authenticated clients can read workspace rows, but direct authenticated `INSERT`/`UPDATE`/`DELETE` is revoked after the broad table grant. Chat/message mutations go through the app's enqueue/delete paths; context-source mutations go through validated source/rule/extraction routes; document mutations go through the app's primary-document and trusted proposal/accept/reject paths after Talk/document authorization, preserving agent/job/Forge provenance and keeping CAS losers controlled by `document_edits_bump_versions_on_accept`. Job mutations go through the API's current workspace membership, Talk job-edit access, creator ownership, source-scope/tool dependency, and document-output validation before using a trusted write scope. `workspace_id`, `talk_id`, and `created_by` are trigger-immutable after insert.
 
 ### 12.2 Admin-only write exceptions
 
-Eight tables replace the member-write policy with an admin-write policy. The read policy stays `is_workspace_member`.
+Seven tables use the generic member-read/admin-write policy loop. `workspace_members`, `connectors`, `connector_secrets`, and `oauth_state` have bespoke policies because they are RLS keystones or credential/OAuth trust-boundary tables.
 
 ```sql
--- Replaces talks_write style for the six admin-managed tables.
--- (Example: workspace_members; the pattern is identical for the others.)
-create policy workspace_members_write on public.workspace_members
+-- Replaces talks_write style for generic admin-managed tables.
+create policy connector_bindings_write on public.connector_bindings
   for all
   using       ( is_workspace_admin(workspace_id) )
   with check  ( is_workspace_admin(workspace_id) );
 ```
 
-Apply to: `workspace_members`, `connectors`, `connector_bindings`, `connector_secrets`, `home_optimization_proposals`, `home_algorithm_versions`, `home_algorithm_assignments`, `home_ranking_profiles` (writes only — reads remain member).
+Apply the generic loop to: `agents`, `connector_bindings`, `ssr_connections`, `home_optimization_proposals`, `home_algorithm_versions`, `home_algorithm_assignments`, `home_ranking_profiles` (writes only). `workspace_members` remains self-read/admin-write to avoid recursive policy lookup. `connectors` read policy is member-read except `compatSurface='google_tools'`, which is visible only to the matching `authorizedByUserId`; direct authenticated connector writes are admin-only except `google_tools` rows, which are service-role/trusted-writer only. `connector_secrets` remains no-direct-read/no-direct-write through RLS. `oauth_state` is owner-scoped, with Slack app install state additionally requiring workspace admin rights.
 
 ### 12.3 Runtime/snapshot trust-boundary policies
 
@@ -1294,32 +1332,32 @@ Remaining (deferred to dedicated reviews — these block parts of the schema):
 
 The spec asserts runtime invariants throughout. The migration is "done" only when every invariant below has a passing test. Each row is one negative test (the failure case the constraint is supposed to catch); a positive test for normal usage is implied.
 
-| #   | Invariant                                                         | Section                | Negative test (must fail or be rejected)                                                                                                                                                         |
-| --- | ----------------------------------------------------------------- | ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| 1   | Composite FK blocks cross-workspace references                    | §0, §12                | Insert a child row with `workspace_id = A` referencing a parent row in workspace B → FK violation                                                                                                |
-| 2   | Composite FK blocks cross-Talk references on runs/messages        | §3                     | Run in Talk A with `trigger_message_id` from a message in Talk B → FK violation                                                                                                                  |
-| 3   | Composite FK blocks cross-Talk references on snapshot attribution | §3                     | Run in Talk A with `agent_snapshot_id` from a snapshot in Talk B → FK violation                                                                                                                  |
-| 4   | Acting agent snapshot is inside the run's roster group            | §3                     | Run with `snapshot_group_id = G1` and `agent_snapshot_id` from a snapshot in `snapshot_group_id = G2` → FK violation                                                                             |
-| 5   | Composite FK blocks cross-tab block references                    | §5                     | Pending edit with `tab_id = T1` and `block_id` from a block in `tab_id = T2` (same document) → FK violation                                                                                      |
-| 6   | `base_block_version` CAS marks late edits superseded              | §5                     | Two concurrent replace edits for the same block; the second to commit is marked `superseded` rather than overwriting                                                                             |
-| 7   | `base_list_version` CAS for inserts at `after_block_id`           | §5                     | Two concurrent insert edits at the same anchor; one wins, one is `superseded`; tab's `list_version` bumps once                                                                                   |
-| 8   | Single-flight per job                                             | §3 partial unique + §8 | Two scheduler/manual races for the same job → exactly one queued run; second insert violates `runs_one_active_per_job`                                                                           |
-| 9   | Job `agent-delete` flips status atomically                        | §8 trigger             | Delete an agent referenced by an active job → in the same transaction, the job's `status` is `blocked` and `block_reason = 'agent_missing'`                                                      |
-| 10  | RLS membership predicate hides other workspaces                   | §12                    | Caller with `auth.uid()` in workspace A queries workspace B's rows → zero rows returned (not an error)                                                                                           |
-| 11  | `workspace_members` policy avoids recursion                       | §1, §12                | A `workspace_members` read with no infinite-loop / no plan-error; verify with `EXPLAIN` that the policy uses `auth.uid()` directly, not the helper                                               |
-| 12  | Snapshot group reconstruction                                     | §3, §4                 | Given a `runs.snapshot_group_id`, `SELECT * FROM talk_agent_snapshots WHERE snapshot_group_id = ?` returns the historical roster (count matches the live roster at the time the run was created) |
-| 13  | `ON DELETE SET NULL (col)` syntax behaves correctly               | §0, §2, §5, §8, §9     | Delete a folder with linked Talks → talks' `folder_id` nulled, `workspace_id` unchanged (i.e., the per-column SET NULL works, not the default nulling of all FK columns)                         |
-| 14  | Deferrable FK cycles permit multi-row insert                      | §0, §3                 | Within a transaction `SET CONSTRAINTS ALL DEFERRED`, insert a run + a triggering message that reference each other → both succeed; without `DEFERRED`, the second insert violates                |
-| 15  | `doc_tabs` last-tab-can't-delete trigger                          | §5                     | Delete the only remaining tab of a document → trigger raises `CT001`; document with 2+ tabs allows tab delete (any non-last)                                                                       |
-| 16  | `jobs` agent-must-be-in-roster trigger                            | §8                     | INSERT a `jobs` row with `agent_id` not present in `talk_agents` for the same `(workspace_id, talk_id)` → trigger raises `CT002`; INSERT with a matching roster row succeeds                       |
-| 17  | `jobs` lifecycle CHECK invariant                                  | §8                     | Set `archived_at = null AND status = 'active' AND next_due_at = null` → CHECK rejects; (`archived_at not null`) variants always pass regardless of status/next_due_at                              |
-| 18  | `runs.job_id` ON DELETE RESTRICT                                  | §3, §8                 | `DELETE FROM jobs WHERE id = J` where any `runs.job_id = J` exists → FK violation; archive path (`UPDATE jobs SET archived_at = now()`) succeeds in the same state                                  |
-| 19  | `runs.trigger='user'` rejects job_id/scheduled_for                | §3                     | INSERT a run with `trigger='user'` and (`job_id` not null OR `scheduled_for` not null) → CHECK violation                                                                                           |
+| #   | Invariant                                                         | Section                | Negative test (must fail or be rejected)                                                                                                                                                                                          |
+| --- | ----------------------------------------------------------------- | ---------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | Composite FK blocks cross-workspace references                    | §0, §12                | Insert a child row with `workspace_id = A` referencing a parent row in workspace B → FK violation                                                                                                                                 |
+| 2   | Composite FK blocks cross-Talk references on runs/messages        | §3                     | Run in Talk A with `trigger_message_id` from a message in Talk B → FK violation                                                                                                                                                   |
+| 3   | Composite FK blocks cross-Talk references on snapshot attribution | §3                     | Run in Talk A with `agent_snapshot_id` from a snapshot in Talk B → FK violation                                                                                                                                                   |
+| 4   | Acting agent snapshot is inside the run's roster group            | §3                     | Run with `snapshot_group_id = G1` and `agent_snapshot_id` from a snapshot in `snapshot_group_id = G2` → FK violation                                                                                                              |
+| 5   | Composite FK blocks cross-tab block references                    | §5                     | Pending edit with `tab_id = T1` and `block_id` from a block in `tab_id = T2` (same document) → FK violation                                                                                                                       |
+| 6   | `base_block_version` CAS marks late edits superseded              | §5                     | Two concurrent replace edits for the same block; the second to commit is marked `superseded` rather than overwriting                                                                                                              |
+| 7   | `base_list_version` CAS for inserts at `after_block_id`           | §5                     | Two concurrent insert edits at the same anchor; one wins, one is `superseded`; tab's `list_version` bumps once                                                                                                                    |
+| 8   | Single-flight per job                                             | §3 partial unique + §8 | Two scheduler/manual races for the same job → exactly one queued run; second insert violates `runs_one_active_per_job`                                                                                                            |
+| 9   | Job `agent-delete` flips status atomically                        | §8 trigger             | Delete an agent referenced by an active job → in the same transaction, the job's `status` is `blocked` and `block_reason = 'agent_missing'`                                                                                       |
+| 10  | RLS membership predicate hides other workspaces                   | §12                    | Caller with `auth.uid()` in workspace A queries workspace B's rows → zero rows returned (not an error)                                                                                                                            |
+| 11  | `workspace_members` policy avoids recursion                       | §1, §12                | A `workspace_members` read with no infinite-loop / no plan-error; verify with `EXPLAIN` that the policy uses `auth.uid()` directly, not the helper                                                                                |
+| 12  | Snapshot group reconstruction                                     | §3, §4                 | Given a `runs.snapshot_group_id`, `SELECT * FROM talk_agent_snapshots WHERE snapshot_group_id = ?` returns the historical roster (count matches the live roster at the time the run was created)                                  |
+| 13  | `ON DELETE SET NULL (col)` syntax behaves correctly               | §0, §2, §5, §8, §9     | Delete a folder with linked Talks → talks' `folder_id` nulled, `workspace_id` unchanged (i.e., the per-column SET NULL works, not the default nulling of all FK columns)                                                          |
+| 14  | Deferrable FK cycles permit multi-row insert                      | §0, §3                 | Within a transaction `SET CONSTRAINTS ALL DEFERRED`, insert a run + a triggering message that reference each other → both succeed; without `DEFERRED`, the second insert violates                                                 |
+| 15  | `doc_tabs` last-tab-can't-delete trigger                          | §5                     | Delete the only remaining tab of a document → trigger raises `CT001`; document with 2+ tabs allows tab delete (any non-last)                                                                                                      |
+| 16  | `jobs` agent-must-be-in-roster trigger                            | §8                     | INSERT a `jobs` row with `agent_id` not present in `talk_agents` for the same `(workspace_id, talk_id)` → trigger raises `CT002`; INSERT with a matching roster row succeeds                                                      |
+| 17  | `jobs` lifecycle CHECK invariant                                  | §8                     | Set `archived_at = null AND status = 'active' AND next_due_at = null` → CHECK rejects; (`archived_at not null`) variants always pass regardless of status/next_due_at                                                             |
+| 18  | `runs.job_id` ON DELETE RESTRICT                                  | §3, §8                 | `DELETE FROM jobs WHERE id = J` where any `runs.job_id = J` exists → FK violation; archive path (`UPDATE jobs SET archived_at = now()`) succeeds in the same state                                                                |
+| 19  | `runs.trigger='user'` rejects job_id/scheduled_for                | §3                     | INSERT a run with `trigger='user'` and (`job_id` not null OR `scheduled_for` not null) → CHECK violation                                                                                                                          |
 | 20  | `document_edits` accept bumps version                             | §5 trigger             | UPDATE a pending `document_edits` row to `status='accepted'` → trigger bumps `doc_blocks.version` (op='replace'/'delete') or `doc_tabs.list_version` (op='insert'); peer pending edits on the same target are marked `superseded` |
-| 21  | `connectors.secret_ref` SET NULL on `connector_secrets` delete    | §6                     | Delete a `connector_secrets` row → the referencing `connectors.secret_ref` is nulled; `workspace_id` on `connectors` is unchanged (per-column SET NULL syntax)                                     |
-| 22  | `improvement_runs ↔ document_versions` deferred-FK cycle          | §9                     | Within a transaction, INSERT `improvement_runs` (referencing a future `best_version_id`) + `document_versions` (referencing the new run) → both succeed; outside the transaction, the second insert violates |
-| 23  | `home_inbox_items_dedup` partial unique                           | §7                     | Two INSERTs with the same `(workspace_id, type, ref_id)` and `ref_id IS NOT NULL` → second rejects; the same pair with `ref_id IS NULL` does NOT conflict (`job_blocked` writes distinct rows)        |
-| 24  | `agents.is_system` query-layer filter                             | §4                     | `GET /agents` (without `?includeSystem=true`) returns only non-system rows; with the query param, system rows surface; PATCH/DELETE on a system row returns 403                                     |
+| 21  | `connectors.secret_ref` SET NULL on `connector_secrets` delete    | §6                     | Delete a `connector_secrets` row → the referencing `connectors.secret_ref` is nulled; `workspace_id` on `connectors` is unchanged (per-column SET NULL syntax)                                                                    |
+| 22  | `improvement_runs ↔ document_versions` deferred-FK cycle          | §9                     | Within a transaction, INSERT `improvement_runs` (referencing a future `best_version_id`) + `document_versions` (referencing the new run) → both succeed; outside the transaction, the second insert violates                      |
+| 23  | `home_inbox_items_dedup` partial unique                           | §7                     | Two INSERTs with the same `(workspace_id, type, ref_id)` and `ref_id IS NOT NULL` → second rejects; the same pair with `ref_id IS NULL` does NOT conflict (`job_blocked` writes distinct rows)                                    |
+| 24  | `agents.is_system` query-layer filter                             | §4                     | `GET /agents` (without `?includeSystem=true`) returns only non-system rows; with the query param, system rows surface; PATCH/DELETE on a system row returns 403                                                                   |
 
 The test suite lives alongside the migrations (Vitest + `pg-tap` style assertions, or raw SQL test files run against `supabase db reset`). Each migration commit that touches a constraint adds or updates the corresponding row above.
 

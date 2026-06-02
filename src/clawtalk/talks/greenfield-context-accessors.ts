@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
-import { getDbPg } from '../../db.js';
+import { getDbPg, withTrustedDbWrites, type Sql } from '../../db.js';
 
 export type GreenfieldContextSourceKind =
   | 'document'
@@ -94,6 +94,22 @@ export interface GreenfieldContextSourceRow {
 const MAX_CONTEXT_SOURCES_PER_TALK = 50;
 const MAX_ACTIVE_RULES_PER_TALK = 8;
 const MAX_SOURCE_TEXT_CHARS = 50_000;
+
+async function withExistingOrNewTransaction<T>(
+  db: Sql,
+  fn: (txSql: Sql) => Promise<T>,
+): Promise<T> {
+  const maybeTransaction = db as Sql & { savepoint?: unknown };
+  if (
+    typeof maybeTransaction.savepoint === 'function' ||
+    typeof maybeTransaction.begin !== 'function'
+  ) {
+    return fn(db);
+  }
+  return (await maybeTransaction.begin(async (tx) =>
+    fn(tx as unknown as Sql),
+  )) as T;
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
@@ -279,13 +295,15 @@ function rowSelectSql() {
   `;
 }
 
-async function nextSortOrder(input: {
-  workspaceId: string;
-  talkId: string;
-  kind: 'source' | 'rule';
-}): Promise<number> {
-  const db = getDbPg();
-  const rows = await db<{ max_order: number }[]>`
+async function nextSortOrderOnSql(
+  sql: Sql,
+  input: {
+    workspaceId: string;
+    talkId: string;
+    kind: 'source' | 'rule';
+  },
+): Promise<number> {
+  const rows = await sql<{ max_order: number }[]>`
     select coalesce(max(sort_order), -1)::int as max_order
     from public.context_sources
     where workspace_id = ${input.workspaceId}::uuid
@@ -300,12 +318,23 @@ async function nextSortOrder(input: {
   return (rows[0]?.max_order ?? -1) + 1;
 }
 
-async function nextSourceRef(input: {
+async function nextSortOrder(input: {
   workspaceId: string;
   talkId: string;
-}): Promise<string> {
+  kind: 'source' | 'rule';
+}): Promise<number> {
   const db = getDbPg();
-  const rows = await db<{ max_ref: number }[]>`
+  return nextSortOrderOnSql(db, input);
+}
+
+async function nextSourceRefOnSql(
+  sql: Sql,
+  input: {
+    workspaceId: string;
+    talkId: string;
+  },
+): Promise<string> {
+  const rows = await sql<{ max_ref: number }[]>`
     select greatest(
       coalesce(
         max((substring(meta_json->>'sourceRef' from '^S([0-9]+)$'))::int),
@@ -321,6 +350,23 @@ async function nextSourceRef(input: {
   return `S${(rows[0]?.max_ref ?? 0) + 1}`;
 }
 
+async function lockGreenfieldTalkContextOnSql(
+  sql: Sql,
+  input: {
+    workspaceId: string;
+    talkId: string;
+  },
+): Promise<void> {
+  await sql`
+    select pg_advisory_xact_lock(
+      hashtextextended(
+        ${`greenfield-context:${input.workspaceId}:${input.talkId}`},
+        0
+      )
+    )
+  `;
+}
+
 async function lockGreenfieldTalkContext(input: {
   workspaceId: string;
   talkId: string;
@@ -329,14 +375,7 @@ async function lockGreenfieldTalkContext(input: {
   // Context mutation routes run inside withUserContext's transaction; this
   // keeps per-talk source refs, sort allocation, and active-count checks
   // serialized without taking heavyweight table locks.
-  await db`
-    select pg_advisory_xact_lock(
-      hashtextextended(
-        ${`greenfield-context:${input.workspaceId}:${input.talkId}`},
-        0
-      )
-    )
-  `;
+  await lockGreenfieldTalkContextOnSql(db, input);
 }
 
 export async function listGreenfieldContextRules(input: {
@@ -397,13 +436,15 @@ export async function setGreenfieldContextGoal(input: {
   const db = getDbPg();
   await lockGreenfieldTalkContext(input);
   if (input.goalText.trim().length === 0) {
-    await db`
-      delete from public.context_sources
-      where workspace_id = ${input.workspaceId}::uuid
-        and talk_id = ${input.talkId}::uuid
-        and kind = 'rule'
-        and meta_json->>'compatKind' = 'goal'
-    `;
+    await withTrustedDbWrites(async () => {
+      await db`
+        delete from public.context_sources
+        where workspace_id = ${input.workspaceId}::uuid
+          and talk_id = ${input.talkId}::uuid
+          and kind = 'rule'
+          and meta_json->>'compatKind' = 'goal'
+      `;
+    });
     return null;
   }
 
@@ -411,61 +452,63 @@ export async function setGreenfieldContextGoal(input: {
     compatKind: 'goal',
     updatedBy: input.updatedBy,
   } as never);
-  const rows = await db<GreenfieldContextSourceRow[]>`
-    with existing as (
-      select id
-      from public.context_sources
-      where workspace_id = ${input.workspaceId}::uuid
-        and talk_id = ${input.talkId}::uuid
-        and kind = 'rule'
-        and meta_json->>'compatKind' = 'goal'
-      order by created_at asc, id asc
-      limit 1
-    ),
-    updated as (
-      update public.context_sources
-      set name = 'Goal',
-          extracted_text = ${input.goalText},
-          meta_json = meta_json || ${patch},
-          include_in_prompt = ${input.goalText.trim().length > 0},
-          updated_at = now()
-      where id in (select id from existing)
-      returning *
-    ),
-    inserted as (
-      insert into public.context_sources (
-        workspace_id, talk_id, kind, name, extracted_text, meta_json,
-        include_in_prompt, sort_order, added_by_user_id
+  const rows = await withTrustedDbWrites(
+    () => db<GreenfieldContextSourceRow[]>`
+      with existing as (
+        select id
+        from public.context_sources
+        where workspace_id = ${input.workspaceId}::uuid
+          and talk_id = ${input.talkId}::uuid
+          and kind = 'rule'
+          and meta_json->>'compatKind' = 'goal'
+        order by created_at asc, id asc
+        limit 1
+      ),
+      updated as (
+        update public.context_sources
+        set name = 'Goal',
+            extracted_text = ${input.goalText},
+            meta_json = meta_json || ${patch},
+            include_in_prompt = ${input.goalText.trim().length > 0},
+            updated_at = now()
+        where id in (select id from existing)
+        returning *
+      ),
+      inserted as (
+        insert into public.context_sources (
+          workspace_id, talk_id, kind, name, extracted_text, meta_json,
+          include_in_prompt, sort_order, added_by_user_id
+        )
+        select
+          ${input.workspaceId}::uuid,
+          ${input.talkId}::uuid,
+          'rule',
+          'Goal',
+          ${input.goalText},
+          ${patch},
+          ${input.goalText.trim().length > 0},
+          -2000,
+          ${input.updatedBy}::uuid
+        where not exists (select 1 from existing)
+        returning *
       )
-      select
-        ${input.workspaceId}::uuid,
-        ${input.talkId}::uuid,
-        'rule',
-        'Goal',
-        ${input.goalText},
-        ${patch},
-        ${input.goalText.trim().length > 0},
-        -2000,
-        ${input.updatedBy}::uuid
-      where not exists (select 1 from existing)
-      returning *
-    )
-    select ${db.unsafe(rowSelectSql())}
-    from (
-      select * from updated
-      union all
-      select * from inserted
-    ) cs
-    left join public.context_source_pages csp
-      on csp.workspace_id = cs.workspace_id
-     and csp.source_id = cs.id
-    group by cs.id, cs.workspace_id, cs.talk_id, cs.kind, cs.name,
-      cs.source_document_id, cs.source_talk_id, cs.payload_ref,
-      cs.extracted_text, cs.summary, cs.meta_json, cs.expected_page_count,
-      cs.include_in_prompt, cs.sort_order, cs.added_by_user_id,
-      cs.created_at, cs.updated_at
-    limit 1
-  `;
+      select ${db.unsafe(rowSelectSql())}
+      from (
+        select * from updated
+        union all
+        select * from inserted
+      ) cs
+      left join public.context_source_pages csp
+        on csp.workspace_id = cs.workspace_id
+       and csp.source_id = cs.id
+      group by cs.id, cs.workspace_id, cs.talk_id, cs.kind, cs.name,
+        cs.source_document_id, cs.source_talk_id, cs.payload_ref,
+        cs.extracted_text, cs.summary, cs.meta_json, cs.expected_page_count,
+        cs.include_in_prompt, cs.sort_order, cs.added_by_user_id,
+        cs.created_at, cs.updated_at
+      limit 1
+    `,
+  );
   const row = rows[0];
   return {
     goalText: row?.extracted_text ?? input.goalText,
@@ -481,43 +524,47 @@ export async function createGreenfieldContextRule(input: {
   createdBy: string;
 }): Promise<GreenfieldContextRuleSnapshot> {
   const db = getDbPg();
-  await lockGreenfieldTalkContext(input);
-  const active = await db<{ count: number }[]>`
-    select count(*)::int as count
-    from public.context_sources
-    where workspace_id = ${input.workspaceId}::uuid
-      and talk_id = ${input.talkId}::uuid
-      and kind = 'rule'
-      and coalesce(meta_json->>'compatKind', 'rule') <> 'goal'
-      and include_in_prompt = true
-  `;
-  if ((active[0]?.count ?? 0) >= MAX_ACTIVE_RULES_PER_TALK) {
-    throw new Error('Maximum 8 active rules per talk');
-  }
+  const rows = await withTrustedDbWrites(() =>
+    withExistingOrNewTransaction(db, async (txSql) => {
+      await lockGreenfieldTalkContextOnSql(txSql, input);
+      const active = await txSql<{ count: number }[]>`
+        select count(*)::int as count
+        from public.context_sources
+        where workspace_id = ${input.workspaceId}::uuid
+          and talk_id = ${input.talkId}::uuid
+          and kind = 'rule'
+          and coalesce(meta_json->>'compatKind', 'rule') <> 'goal'
+          and include_in_prompt = true
+      `;
+      if ((active[0]?.count ?? 0) >= MAX_ACTIVE_RULES_PER_TALK) {
+        throw new Error('Maximum 8 active rules per talk');
+      }
 
-  const sortOrder = await nextSortOrder({
-    workspaceId: input.workspaceId,
-    talkId: input.talkId,
-    kind: 'rule',
-  });
-  const rows = await db<GreenfieldContextSourceRow[]>`
-    insert into public.context_sources (
-      workspace_id, talk_id, kind, name, extracted_text, meta_json,
-      include_in_prompt, sort_order, added_by_user_id
-    )
-    values (
-      ${input.workspaceId}::uuid,
-      ${input.talkId}::uuid,
-      'rule',
-      ${titleFromText(input.ruleText)},
-      ${input.ruleText},
-      ${db.json({ compatKind: 'rule' } as never)},
-      true,
-      ${sortOrder},
-      ${input.createdBy}::uuid
-    )
-    returning *
-  `;
+      const sortOrder = await nextSortOrderOnSql(txSql, {
+        workspaceId: input.workspaceId,
+        talkId: input.talkId,
+        kind: 'rule',
+      });
+      return txSql<GreenfieldContextSourceRow[]>`
+        insert into public.context_sources (
+          workspace_id, talk_id, kind, name, extracted_text, meta_json,
+          include_in_prompt, sort_order, added_by_user_id
+        )
+        values (
+          ${input.workspaceId}::uuid,
+          ${input.talkId}::uuid,
+          'rule',
+          ${titleFromText(input.ruleText)},
+          ${input.ruleText},
+          ${txSql.json({ compatKind: 'rule' } as never)},
+          true,
+          ${sortOrder},
+          ${input.createdBy}::uuid
+        )
+        returning *
+      `;
+    }),
+  );
   return toRuleSnapshot(rows[0]!);
 }
 
@@ -530,39 +577,43 @@ export async function patchGreenfieldContextRule(input: {
   sortOrder?: number;
 }): Promise<GreenfieldContextRuleSnapshot | undefined> {
   const db = getDbPg();
-  await lockGreenfieldTalkContext(input);
-  if (input.isActive === true) {
-    const active = await db<{ count: number }[]>`
-      select count(*)::int as count
-      from public.context_sources
-      where workspace_id = ${input.workspaceId}::uuid
-        and talk_id = ${input.talkId}::uuid
-        and kind = 'rule'
-        and coalesce(meta_json->>'compatKind', 'rule') <> 'goal'
-        and include_in_prompt = true
-        and id <> ${input.ruleId}::uuid
-    `;
-    if ((active[0]?.count ?? 0) >= MAX_ACTIVE_RULES_PER_TALK) {
-      throw new Error('Maximum 8 active rules per talk');
-    }
-  }
+  const rows = await withTrustedDbWrites(() =>
+    withExistingOrNewTransaction(db, async (txSql) => {
+      await lockGreenfieldTalkContextOnSql(txSql, input);
+      if (input.isActive === true) {
+        const active = await txSql<{ count: number }[]>`
+          select count(*)::int as count
+          from public.context_sources
+          where workspace_id = ${input.workspaceId}::uuid
+            and talk_id = ${input.talkId}::uuid
+            and kind = 'rule'
+            and coalesce(meta_json->>'compatKind', 'rule') <> 'goal'
+            and include_in_prompt = true
+            and id <> ${input.ruleId}::uuid
+        `;
+        if ((active[0]?.count ?? 0) >= MAX_ACTIVE_RULES_PER_TALK) {
+          throw new Error('Maximum 8 active rules per talk');
+        }
+      }
 
-  const rows = await db<GreenfieldContextSourceRow[]>`
-    update public.context_sources
-    set
-      name = coalesce(${input.ruleText ? titleFromText(input.ruleText) : null}, name),
-      extracted_text = coalesce(${input.ruleText ?? null}, extracted_text),
-      include_in_prompt = coalesce(${input.isActive ?? null}, include_in_prompt),
-      sort_order = coalesce(${input.sortOrder !== undefined ? input.sortOrder : null}, sort_order),
-      meta_json = meta_json || ${db.json({ compatKind: 'rule' } as never)},
-      updated_at = now()
-    where workspace_id = ${input.workspaceId}::uuid
-      and talk_id = ${input.talkId}::uuid
-      and id = ${input.ruleId}::uuid
-      and kind = 'rule'
-      and coalesce(meta_json->>'compatKind', 'rule') <> 'goal'
-    returning *
-  `;
+      return txSql<GreenfieldContextSourceRow[]>`
+        update public.context_sources
+        set
+          name = coalesce(${input.ruleText ? titleFromText(input.ruleText) : null}, name),
+          extracted_text = coalesce(${input.ruleText ?? null}, extracted_text),
+          include_in_prompt = coalesce(${input.isActive ?? null}, include_in_prompt),
+          sort_order = coalesce(${input.sortOrder !== undefined ? input.sortOrder : null}, sort_order),
+          meta_json = meta_json || ${txSql.json({ compatKind: 'rule' } as never)},
+          updated_at = now()
+        where workspace_id = ${input.workspaceId}::uuid
+          and talk_id = ${input.talkId}::uuid
+          and id = ${input.ruleId}::uuid
+          and kind = 'rule'
+          and coalesce(meta_json->>'compatKind', 'rule') <> 'goal'
+        returning *
+      `;
+    }),
+  );
   return rows[0] ? toRuleSnapshot(rows[0]) : undefined;
 }
 
@@ -572,15 +623,17 @@ export async function deleteGreenfieldContextRule(input: {
   ruleId: string;
 }): Promise<boolean> {
   const db = getDbPg();
-  const rows = await db<{ id: string }[]>`
-    delete from public.context_sources
-    where workspace_id = ${input.workspaceId}::uuid
-      and talk_id = ${input.talkId}::uuid
-      and id = ${input.ruleId}::uuid
-      and kind = 'rule'
-      and coalesce(meta_json->>'compatKind', 'rule') <> 'goal'
-    returning id
-  `;
+  const rows = await withTrustedDbWrites(
+    () => db<{ id: string }[]>`
+      delete from public.context_sources
+      where workspace_id = ${input.workspaceId}::uuid
+        and talk_id = ${input.talkId}::uuid
+        and id = ${input.ruleId}::uuid
+        and kind = 'rule'
+        and coalesce(meta_json->>'compatKind', 'rule') <> 'goal'
+      returning id
+    `,
+  );
   return rows.length > 0;
 }
 
@@ -609,7 +662,17 @@ export async function getGreenfieldContextSourceCount(input: {
   talkId: string;
 }): Promise<number> {
   const db = getDbPg();
-  const rows = await db<{ count: number }[]>`
+  return getGreenfieldContextSourceCountOnSql(db, input);
+}
+
+async function getGreenfieldContextSourceCountOnSql(
+  sql: Sql,
+  input: {
+    workspaceId: string;
+    talkId: string;
+  },
+): Promise<number> {
+  const rows = await sql<{ count: number }[]>`
     select count(*)::int as count
     from public.context_sources
     where workspace_id = ${input.workspaceId}::uuid
@@ -675,26 +738,8 @@ export async function createGreenfieldContextSource(input: {
   extractionError?: string | null;
   createdBy: string;
 }): Promise<GreenfieldContextSourceSnapshot> {
-  await lockGreenfieldTalkContext(input);
-  const count = await getGreenfieldContextSourceCount({
-    workspaceId: input.workspaceId,
-    talkId: input.talkId,
-  });
-  if (count >= MAX_CONTEXT_SOURCES_PER_TALK) {
-    throw new Error('Maximum 50 saved sources per talk');
-  }
-
   const title = input.title.trim();
   if (!title) throw new Error('Source title is required');
-  const sortOrder = await nextSortOrder({
-    workspaceId: input.workspaceId,
-    talkId: input.talkId,
-    kind: 'source',
-  });
-  const sourceRef = await nextSourceRef({
-    workspaceId: input.workspaceId,
-    talkId: input.talkId,
-  });
   const now = new Date().toISOString();
   const { text: extractedText, isTruncated } = truncatableText(
     input.extractedText,
@@ -718,23 +763,6 @@ export async function createGreenfieldContextSource(input: {
     extractedAt = hasExtractedText ? now : null;
   }
 
-  const metaJson = {
-    compatKind: 'source',
-    sourceRef,
-    sourceType: input.sourceType,
-    note: input.note?.trim() || null,
-    sourceUrl: input.sourceType === 'url' ? (input.sourceUrl ?? null) : null,
-    fileName: input.fileName ?? null,
-    fileSize: input.fileSize ?? null,
-    mimeType: input.mimeType ?? null,
-    status,
-    extractedAt,
-    extractionError,
-    fetchStrategy: null,
-    lastFetchedAt: null,
-    isTruncated,
-  };
-
   const kind: GreenfieldContextSourceKind =
     input.sourceType === 'url' ? 'url' : 'file';
   const payloadRef =
@@ -743,26 +771,66 @@ export async function createGreenfieldContextSource(input: {
       : (input.storageKey ?? null);
   const sourceId = input.id ?? randomUUID();
   const db = getDbPg();
-  const rows = await db<GreenfieldContextSourceRow[]>`
-    insert into public.context_sources (
-      id, workspace_id, talk_id, kind, name, payload_ref, extracted_text,
-      meta_json, include_in_prompt, sort_order, added_by_user_id
-    )
-    values (
-      ${sourceId}::uuid,
-      ${input.workspaceId}::uuid,
-      ${input.talkId}::uuid,
-      ${kind},
-      ${title},
-      ${payloadRef},
-      ${extractedText},
-      ${db.json(metaJson as never)},
-      true,
-      ${sortOrder},
-      ${input.createdBy}::uuid
-    )
-    returning *
-  `;
+  const rows = await withTrustedDbWrites(() =>
+    withExistingOrNewTransaction(db, async (txSql) => {
+      await lockGreenfieldTalkContextOnSql(txSql, input);
+      const count = await getGreenfieldContextSourceCountOnSql(txSql, {
+        workspaceId: input.workspaceId,
+        talkId: input.talkId,
+      });
+      if (count >= MAX_CONTEXT_SOURCES_PER_TALK) {
+        throw new Error('Maximum 50 saved sources per talk');
+      }
+
+      const sortOrder = await nextSortOrderOnSql(txSql, {
+        workspaceId: input.workspaceId,
+        talkId: input.talkId,
+        kind: 'source',
+      });
+      const sourceRef = await nextSourceRefOnSql(txSql, {
+        workspaceId: input.workspaceId,
+        talkId: input.talkId,
+      });
+      const metaJson = {
+        compatKind: 'source',
+        sourceRef,
+        sourceType: input.sourceType,
+        note: input.note?.trim() || null,
+        sourceUrl:
+          input.sourceType === 'url' ? (input.sourceUrl ?? null) : null,
+        fileName: input.fileName ?? null,
+        fileSize: input.fileSize ?? null,
+        mimeType: input.mimeType ?? null,
+        status,
+        extractedAt,
+        extractionError,
+        fetchStrategy: null,
+        lastFetchedAt: null,
+        isTruncated,
+      };
+
+      return txSql<GreenfieldContextSourceRow[]>`
+        insert into public.context_sources (
+          id, workspace_id, talk_id, kind, name, payload_ref, extracted_text,
+          meta_json, include_in_prompt, sort_order, added_by_user_id
+        )
+        values (
+          ${sourceId}::uuid,
+          ${input.workspaceId}::uuid,
+          ${input.talkId}::uuid,
+          ${kind},
+          ${title},
+          ${payloadRef},
+          ${extractedText},
+          ${txSql.json(metaJson as never)},
+          true,
+          ${sortOrder},
+          ${input.createdBy}::uuid
+        )
+        returning *
+      `;
+    }),
+  );
   return toSourceSnapshot(rows[0]!);
 }
 
@@ -800,23 +868,25 @@ export async function patchGreenfieldContextSource(input: {
     metaPatch.isTruncated = truncated.isTruncated;
   }
 
-  const rows = await db<GreenfieldContextSourceRow[]>`
-    update public.context_sources
-    set
-      name = ${title},
-      sort_order = coalesce(${input.sortOrder !== undefined ? input.sortOrder : null}, sort_order),
-      extracted_text = case
-        when ${shouldUpdateExtractedText}::boolean then ${extractedText}
-        else extracted_text
-      end,
-      meta_json = meta_json || ${db.json(metaPatch as never)},
-      updated_at = now()
-    where workspace_id = ${input.workspaceId}::uuid
-      and talk_id = ${input.talkId}::uuid
-      and id = ${input.sourceId}::uuid
-      and kind <> 'rule'
-    returning *
-  `;
+  const rows = await withTrustedDbWrites(
+    () => db<GreenfieldContextSourceRow[]>`
+      update public.context_sources
+      set
+        name = ${title},
+        sort_order = coalesce(${input.sortOrder !== undefined ? input.sortOrder : null}, sort_order),
+        extracted_text = case
+          when ${shouldUpdateExtractedText}::boolean then ${extractedText}
+          else extracted_text
+        end,
+        meta_json = meta_json || ${db.json(metaPatch as never)},
+        updated_at = now()
+      where workspace_id = ${input.workspaceId}::uuid
+        and talk_id = ${input.talkId}::uuid
+        and id = ${input.sourceId}::uuid
+        and kind <> 'rule'
+      returning *
+    `,
+  );
   return rows[0]
     ? await getGreenfieldContextSourceById({
         workspaceId: input.workspaceId,
@@ -832,20 +902,22 @@ export async function markGreenfieldContextSourcePending(input: {
   sourceId: string;
 }): Promise<GreenfieldContextSourceSnapshot | undefined> {
   const db = getDbPg();
-  const rows = await db<GreenfieldContextSourceRow[]>`
-    update public.context_sources
-    set
-      meta_json = meta_json || ${db.json({
-        status: 'pending',
-        extractionError: null,
-      } as never)},
-      updated_at = now()
-    where workspace_id = ${input.workspaceId}::uuid
-      and talk_id = ${input.talkId}::uuid
-      and id = ${input.sourceId}::uuid
-      and kind = 'url'
-    returning *
-  `;
+  const rows = await withTrustedDbWrites(
+    () => db<GreenfieldContextSourceRow[]>`
+      update public.context_sources
+      set
+        meta_json = meta_json || ${db.json({
+          status: 'pending',
+          extractionError: null,
+        } as never)},
+        updated_at = now()
+      where workspace_id = ${input.workspaceId}::uuid
+        and talk_id = ${input.talkId}::uuid
+        and id = ${input.sourceId}::uuid
+        and kind = 'url'
+      returning *
+    `,
+  );
   return rows[0]
     ? await getGreenfieldContextSourceById({
         workspaceId: input.workspaceId,
@@ -873,16 +945,42 @@ export async function updateGreenfieldContextSourceExtraction(input: {
       ? 'No extracted text returned.'
       : null);
   if (extractionError) {
+    await withTrustedDbWrites(async () => {
+      await db`
+        update public.context_sources
+        set
+          meta_json = meta_json || jsonb_build_object(
+            'status',
+            case when extracted_text is not null then 'ready' else 'failed' end,
+            'extractionError', ${extractionError}::text,
+            'mimeType', coalesce(${input.mimeType ?? null}::text, meta_json->>'mimeType'),
+            'fetchStrategy', coalesce(${input.fetchStrategy ?? null}::text, meta_json->>'fetchStrategy'),
+            'lastFetchedAt', ${fetchedAt}::text
+          ),
+          updated_at = now()
+        where id = ${input.sourceId}::uuid
+          and workspace_id = ${input.workspaceId}::uuid
+          and talk_id = ${input.talkId}::uuid
+          and kind <> 'rule'
+      `;
+    });
+    return;
+  }
+
+  const truncated = truncatableText(input.extractedText);
+  await withTrustedDbWrites(async () => {
     await db`
       update public.context_sources
       set
+        extracted_text = ${truncated.text},
         meta_json = meta_json || jsonb_build_object(
-          'status',
-          case when extracted_text is not null then 'ready' else 'failed' end,
-          'extractionError', ${extractionError}::text,
+          'status', 'ready',
+          'extractionError', null,
           'mimeType', coalesce(${input.mimeType ?? null}::text, meta_json->>'mimeType'),
           'fetchStrategy', coalesce(${input.fetchStrategy ?? null}::text, meta_json->>'fetchStrategy'),
-          'lastFetchedAt', ${fetchedAt}::text
+          'lastFetchedAt', ${fetchedAt}::text,
+          'extractedAt', ${fetchedAt}::text,
+          'isTruncated', ${truncated.isTruncated}
         ),
         updated_at = now()
       where id = ${input.sourceId}::uuid
@@ -890,29 +988,7 @@ export async function updateGreenfieldContextSourceExtraction(input: {
         and talk_id = ${input.talkId}::uuid
         and kind <> 'rule'
     `;
-    return;
-  }
-
-  const truncated = truncatableText(input.extractedText);
-  await db`
-    update public.context_sources
-    set
-      extracted_text = ${truncated.text},
-      meta_json = meta_json || jsonb_build_object(
-        'status', 'ready',
-        'extractionError', null,
-        'mimeType', coalesce(${input.mimeType ?? null}::text, meta_json->>'mimeType'),
-        'fetchStrategy', coalesce(${input.fetchStrategy ?? null}::text, meta_json->>'fetchStrategy'),
-        'lastFetchedAt', ${fetchedAt}::text,
-        'extractedAt', ${fetchedAt}::text,
-        'isTruncated', ${truncated.isTruncated}
-      ),
-      updated_at = now()
-    where id = ${input.sourceId}::uuid
-      and workspace_id = ${input.workspaceId}::uuid
-      and talk_id = ${input.talkId}::uuid
-      and kind <> 'rule'
-  `;
+  });
 }
 
 export async function deleteGreenfieldContextSource(input: {
@@ -921,14 +997,16 @@ export async function deleteGreenfieldContextSource(input: {
   sourceId: string;
 }): Promise<boolean> {
   const db = getDbPg();
-  const rows = await db<{ id: string }[]>`
-    delete from public.context_sources
-    where workspace_id = ${input.workspaceId}::uuid
-      and talk_id = ${input.talkId}::uuid
-      and id = ${input.sourceId}::uuid
-      and kind <> 'rule'
-    returning id
-  `;
+  const rows = await withTrustedDbWrites(
+    () => db<{ id: string }[]>`
+      delete from public.context_sources
+      where workspace_id = ${input.workspaceId}::uuid
+        and talk_id = ${input.talkId}::uuid
+        and id = ${input.sourceId}::uuid
+        and kind <> 'rule'
+      returning id
+    `,
+  );
   return rows.length > 0;
 }
 
@@ -939,18 +1017,20 @@ export async function setGreenfieldSourceExpectedPageCount(input: {
   expectedPageCount: number;
 }): Promise<boolean> {
   const db = getDbPg();
-  const rows = await db<{ id: string }[]>`
-    update public.context_sources
-    set expected_page_count = ${input.expectedPageCount}
-    where workspace_id = ${input.workspaceId}::uuid
-      and talk_id = ${input.talkId}::uuid
-      and id = ${input.sourceId}::uuid
-      and (
-        expected_page_count is null
-        or expected_page_count = ${input.expectedPageCount}
-      )
-    returning id
-  `;
+  const rows = await withTrustedDbWrites(
+    () => db<{ id: string }[]>`
+      update public.context_sources
+      set expected_page_count = ${input.expectedPageCount}
+      where workspace_id = ${input.workspaceId}::uuid
+        and talk_id = ${input.talkId}::uuid
+        and id = ${input.sourceId}::uuid
+        and (
+          expected_page_count is null
+          or expected_page_count = ${input.expectedPageCount}
+        )
+      returning id
+    `,
+  );
   return rows.length > 0;
 }
 
@@ -962,21 +1042,23 @@ export async function insertGreenfieldSourcePageImage(input: {
   payloadRef: string;
 }): Promise<void> {
   const db = getDbPg();
-  await db`
-    insert into public.context_source_pages (
-      workspace_id, source_id, page_index, byte_size, payload_ref
-    )
-    values (
-      ${input.workspaceId}::uuid,
-      ${input.sourceId}::uuid,
-      ${input.pageIndex},
-      ${input.byteSize},
-      ${input.payloadRef}
-    )
-    on conflict (source_id, page_index) do update
-      set byte_size = excluded.byte_size,
-          payload_ref = excluded.payload_ref
-  `;
+  await withTrustedDbWrites(async () => {
+    await db`
+      insert into public.context_source_pages (
+        workspace_id, source_id, page_index, byte_size, payload_ref
+      )
+      values (
+        ${input.workspaceId}::uuid,
+        ${input.sourceId}::uuid,
+        ${input.pageIndex},
+        ${input.byteSize},
+        ${input.payloadRef}
+      )
+      on conflict (source_id, page_index) do update
+        set byte_size = excluded.byte_size,
+            payload_ref = excluded.payload_ref
+    `;
+  });
 }
 
 export async function countGreenfieldSourcePageImages(input: {

@@ -1,3 +1,5 @@
+import { randomUUID } from 'node:crypto';
+
 import {
   afterAll,
   beforeAll,
@@ -23,12 +25,13 @@ vi.mock('../config.js', async () => {
 import {
   closePgDatabase,
   deleteAuthUsers,
+  getDbPg,
   initPgDatabase,
   purgeUserData,
   seedAuthUser,
-  seedTalk,
   withUserContext,
 } from '../db/test-helpers.js';
+import { withTrustedDbWrites } from '../../db.js';
 import {
   createTalkResourceBinding,
   listTalkResourceBindings,
@@ -39,6 +42,7 @@ import {
   type GoogleToolCredentialPayload,
 } from '../identity/google-tools-credential-store.js';
 import { normalizeGoogleScopeAliases } from '../identity/google-scopes.js';
+import { ensureWorkspaceBootstrapForUser } from '../workspaces/bootstrap.js';
 import {
   buildBoundGoogleDrivePromptSection,
   buildGoogleDriveContextTools,
@@ -51,7 +55,10 @@ const DOCUMENTS_URL = 'https://www.googleapis.com/auth/documents';
 const SPREADSHEETS_URL = 'https://www.googleapis.com/auth/spreadsheets';
 const GOOGLE_DOCS_MIME = 'application/vnd.google-apps.document';
 
-async function seedDriveCredential(userId: string): Promise<void> {
+async function seedDriveCredential(
+  userId: string,
+  workspaceId: string,
+): Promise<void> {
   const payload: GoogleToolCredentialPayload = {
     kind: 'google_tools',
     accessToken: 'access-old',
@@ -66,6 +73,7 @@ async function seedDriveCredential(userId: string): Promise<void> {
     tokenType: 'Bearer',
   };
   await upsertUserGoogleCredential({
+    workspaceId,
     userId,
     googleSubject: `sub-${userId.slice(0, 8)}`,
     email: 'tester@example.com',
@@ -74,6 +82,39 @@ async function seedDriveCredential(userId: string): Promise<void> {
     ciphertext: encryptGoogleToolCredential(payload),
     accessExpiresAt: payload.expiryDate ?? null,
   });
+}
+
+async function seedGoogleDriveToolTalk(input: {
+  userId: string;
+  workspaceId: string;
+  title?: string;
+}): Promise<string> {
+  const talkId = randomUUID();
+  const db = getDbPg();
+  await db`
+    with next_order as (
+      select coalesce(max(sort_order) + 1, 0) as sort_order
+      from public.talks
+      where workspace_id = ${input.workspaceId}::uuid
+        and folder_id is null
+        and archived_at is null
+    )
+    insert into public.talks (
+      id, workspace_id, folder_id, sort_order, title, mode, rounds_limit,
+      created_by
+    )
+    select
+      ${talkId}::uuid,
+      ${input.workspaceId}::uuid,
+      null,
+      sort_order,
+      ${input.title ?? 'Google Drive Tool Test Talk'},
+      'ordered',
+      3,
+      ${input.userId}::uuid
+    from next_order
+  `;
+  return talkId;
 }
 
 function mockFetchSequence(
@@ -251,8 +292,9 @@ describe('google-drive-tools — executor', () => {
     const fileId = 'drive-file-xyz';
     const folderId = 'drive-folder-abc';
     await withUserContext(userId, async () => {
-      await seedDriveCredential(userId);
-      talkId = await seedTalk({ ownerId: userId });
+      const workspaceId = await ensureWorkspaceBootstrapForUser(userId);
+      await seedDriveCredential(userId, workspaceId);
+      talkId = await seedGoogleDriveToolTalk({ userId, workspaceId });
       await createTalkResourceBinding({
         ownerId: userId,
         talkId,
@@ -284,8 +326,9 @@ describe('google-drive-tools — executor', () => {
     userIds.push(userId);
     let talkId = '';
     await withUserContext(userId, async () => {
-      await seedDriveCredential(userId);
-      talkId = await seedTalk({ ownerId: userId });
+      const workspaceId = await ensureWorkspaceBootstrapForUser(userId);
+      await seedDriveCredential(userId, workspaceId);
+      talkId = await seedGoogleDriveToolTalk({ userId, workspaceId });
       const result = await executeGoogleDriveTalkTool({
         talkId,
         userId,
@@ -328,6 +371,128 @@ describe('google-drive-tools — executor', () => {
       };
       expect(parsed.folder.bindingRef).toBe(setup.folderRef);
       expect(parsed.children[0].displayName).toBe('Child One');
+    });
+  });
+
+  it('binds requester context for queued Google Drive tool execution', async () => {
+    const setup = await setupTalkWithBindings();
+    mockFetchSequence([
+      {
+        jsonBody: {
+          files: [
+            {
+              id: 'child-1',
+              name: 'Queued Child',
+              mimeType: 'text/plain',
+            },
+          ],
+        },
+      },
+    ]);
+
+    const result = await executeGoogleDriveTalkTool({
+      talkId: setup.talkId,
+      userId: setup.userId,
+      toolName: 'google_drive_list_folder',
+      args: { bindingRef: setup.folderRef },
+      signal,
+    });
+
+    expect(result.isError).toBeUndefined();
+    expect(JSON.parse(result.result)).toMatchObject({
+      folder: { bindingRef: setup.folderRef },
+      children: [{ displayName: 'Queued Child' }],
+    });
+  });
+
+  it('does not resolve queued Google Drive tools for inaccessible Talks', async () => {
+    const ownerId = await seedAuthUser();
+    const outsiderId = await seedAuthUser();
+    userIds.push(ownerId, outsiderId);
+    let talkId = '';
+    await withUserContext(ownerId, async () => {
+      const workspaceId = await ensureWorkspaceBootstrapForUser(ownerId);
+      talkId = await seedGoogleDriveToolTalk({ userId: ownerId, workspaceId });
+      await createTalkResourceBinding({
+        ownerId,
+        talkId,
+        bindingKind: 'google_drive_folder',
+        externalId: 'owner-folder',
+        displayName: 'Owner Folder',
+        createdBy: ownerId,
+      });
+    });
+    await withUserContext(outsiderId, async () => {
+      const workspaceId = await ensureWorkspaceBootstrapForUser(outsiderId);
+      await seedDriveCredential(outsiderId, workspaceId);
+    });
+
+    await expect(
+      executeGoogleDriveTalkTool({
+        talkId,
+        userId: outsiderId,
+        toolName: 'google_drive_search',
+        args: { query: 'anything' },
+        signal,
+      }),
+    ).resolves.toMatchObject({
+      isError: true,
+      result: expect.stringContaining('Talk not found or not available'),
+    });
+  });
+
+  it('does not reuse Google credentials from another workspace', async () => {
+    const userId = await seedAuthUser();
+    userIds.push(userId);
+    let talkId = '';
+
+    await withUserContext(userId, async () => {
+      const primaryWorkspaceId = await ensureWorkspaceBootstrapForUser(userId);
+      await seedDriveCredential(userId, primaryWorkspaceId);
+      const secondaryRows = await withTrustedDbWrites(
+        () =>
+          getDbPg()<Array<{ workspace_id: string }>>`
+          with workspace as (
+            insert into public.workspaces (name, owner_id)
+            values ('Drive Tool Secondary Workspace', ${userId}::uuid)
+            returning id
+          ),
+          member as (
+            insert into public.workspace_members (workspace_id, user_id, role)
+            select id, ${userId}::uuid, 'owner'
+            from workspace
+            returning workspace_id
+          )
+          select workspace_id
+          from member
+        `,
+      );
+      const secondaryWorkspaceId = secondaryRows[0]!.workspace_id;
+      talkId = await seedGoogleDriveToolTalk({
+        userId,
+        workspaceId: secondaryWorkspaceId,
+      });
+      await createTalkResourceBinding({
+        ownerId: userId,
+        talkId,
+        bindingKind: 'google_drive_folder',
+        externalId: 'workspace-b-folder',
+        displayName: 'Workspace B Folder',
+        createdBy: userId,
+      });
+    });
+
+    const result = await executeGoogleDriveTalkTool({
+      talkId,
+      userId,
+      toolName: 'google_drive_search',
+      args: { query: 'anything' },
+      signal,
+    });
+
+    expect(result).toMatchObject({
+      isError: true,
+      result: expect.stringContaining('google_account_not_connected'),
     });
   });
 
@@ -472,8 +637,9 @@ describe('google-drive-tools — executor', () => {
     userIds.push(userId);
     let talkId = '';
     await withUserContext(userId, async () => {
-      await seedDriveCredential(userId);
-      talkId = await seedTalk({ ownerId: userId });
+      const workspaceId = await ensureWorkspaceBootstrapForUser(userId);
+      await seedDriveCredential(userId, workspaceId);
+      talkId = await seedGoogleDriveToolTalk({ userId, workspaceId });
     });
     mockFetchSequence([
       {
@@ -504,13 +670,95 @@ describe('google-drive-tools — executor', () => {
     });
   });
 
+  it('binds docs created by queued execution without an outer user context', async () => {
+    const userId = await seedAuthUser();
+    userIds.push(userId);
+    let talkId = '';
+    await withUserContext(userId, async () => {
+      const workspaceId = await ensureWorkspaceBootstrapForUser(userId);
+      await seedDriveCredential(userId, workspaceId);
+      talkId = await seedGoogleDriveToolTalk({ userId, workspaceId });
+    });
+    mockFetchSequence([
+      {
+        jsonBody: {
+          documentId: 'queued-doc-id',
+          title: 'Queued Create',
+        },
+      },
+    ]);
+
+    const result = await executeGoogleDriveTalkTool({
+      talkId,
+      userId,
+      toolName: 'google_docs_create',
+      args: { title: 'Queued Create' },
+      signal,
+    });
+
+    expect(result.isError).toBeUndefined();
+    expect(result.result).toContain('Created G1');
+    await withUserContext(userId, async () => {
+      const bindings = await listTalkResourceBindings(talkId);
+      expect(bindings).toHaveLength(1);
+      expect(bindings[0]).toMatchObject({
+        externalId: 'queued-doc-id',
+        displayName: 'Queued Create',
+      });
+    });
+  });
+
+  it('does not create an external Doc before proving Talk edit permission', async () => {
+    const ownerId = await seedAuthUser();
+    const memberId = await seedAuthUser();
+    userIds.push(ownerId, memberId);
+    let talkId = '';
+    let workspaceId = '';
+    await withUserContext(ownerId, async () => {
+      workspaceId = await ensureWorkspaceBootstrapForUser(ownerId);
+      talkId = await seedGoogleDriveToolTalk({
+        userId: ownerId,
+        workspaceId,
+        title: 'Owner-only Doc Create',
+      });
+      await getDbPg()`
+        insert into public.workspace_members (workspace_id, user_id, role)
+        values (${workspaceId}::uuid, ${memberId}::uuid, 'member')
+        on conflict (workspace_id, user_id) do update set role = excluded.role
+      `;
+    });
+    await withUserContext(memberId, () =>
+      seedDriveCredential(memberId, workspaceId),
+    );
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockRejectedValue(new Error('fetch should not be called'));
+
+    const result = await executeGoogleDriveTalkTool({
+      talkId,
+      userId: memberId,
+      toolName: 'google_docs_create',
+      args: { title: 'Should Not Exist' },
+      signal,
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.result).toContain('external_mutation_forbidden');
+    expect(fetchSpy).not.toHaveBeenCalled();
+    await withUserContext(ownerId, async () => {
+      const bindings = await listTalkResourceBindings(talkId);
+      expect(bindings).toHaveLength(0);
+    });
+  });
+
   it('google_docs_create is blocked under jobPolicy.allowExternalMutation=false (C6)', async () => {
     const userId = await seedAuthUser();
     userIds.push(userId);
     let talkId = '';
     await withUserContext(userId, async () => {
-      await seedDriveCredential(userId);
-      talkId = await seedTalk({ ownerId: userId });
+      const workspaceId = await ensureWorkspaceBootstrapForUser(userId);
+      await seedDriveCredential(userId, workspaceId);
+      talkId = await seedGoogleDriveToolTalk({ userId, workspaceId });
       const result = await executeGoogleDriveTalkTool({
         talkId,
         userId,
@@ -629,8 +877,9 @@ describe('google-drive-tools — executor', () => {
       let talkId = '';
       let sheetRef = 'G?';
       await withUserContext(userId, async () => {
-        await seedDriveCredential(userId);
-        talkId = await seedTalk({ ownerId: userId });
+        const workspaceId = await ensureWorkspaceBootstrapForUser(userId);
+        await seedDriveCredential(userId, workspaceId);
+        talkId = await seedGoogleDriveToolTalk({ userId, workspaceId });
         await createTalkResourceBinding({
           ownerId: userId,
           talkId,
@@ -822,7 +1071,8 @@ describe('loadGoogleDriveBindings', () => {
     const userId = await seedAuthUser();
     userIds.push(userId);
     await withUserContext(userId, async () => {
-      const talkId = await seedTalk({ ownerId: userId });
+      const workspaceId = await ensureWorkspaceBootstrapForUser(userId);
+      const talkId = await seedGoogleDriveToolTalk({ userId, workspaceId });
       await createTalkResourceBinding({
         ownerId: userId,
         talkId,

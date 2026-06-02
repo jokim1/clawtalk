@@ -18,6 +18,7 @@ import {
   closePgDatabase,
   getDbPg,
   initPgDatabase,
+  withTrustedDbWrites,
   withRequestScopedDb,
   type AttachmentBucketLike,
   type AttachmentBucketObjectBody,
@@ -51,6 +52,7 @@ import {
 const TEST_DB_URL = 'postgresql://postgres:postgres@127.0.0.1:54432/postgres';
 const USER_ID = '0c949494-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
 const OTHER_USER_ID = '0c949494-bbbb-bbbb-bbbb-bbbbbbbbbbbb';
+const GUEST_USER_ID = '0c949494-cccc-cccc-cccc-cccccccccccc';
 const JPEG = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0xff, 0xd9]);
 const JPEG_ALT = Buffer.from([
   0xff, 0xd8, 0xff, 0xe1, 0x00, 0x10, 0x01, 0x02, 0xff, 0xd9,
@@ -130,11 +132,21 @@ async function deleteUsers(): Promise<void> {
   const db = getDbPg();
   await db`
     delete from public.workspaces
-    where owner_id in (${USER_ID}::uuid, ${OTHER_USER_ID}::uuid, ${DEV_USER_ID}::uuid)
+    where owner_id in (
+      ${USER_ID}::uuid,
+      ${OTHER_USER_ID}::uuid,
+      ${GUEST_USER_ID}::uuid,
+      ${DEV_USER_ID}::uuid
+    )
   `;
   await db`
     delete from auth.users
-    where id in (${USER_ID}::uuid, ${OTHER_USER_ID}::uuid, ${DEV_USER_ID}::uuid)
+    where id in (
+      ${USER_ID}::uuid,
+      ${OTHER_USER_ID}::uuid,
+      ${GUEST_USER_ID}::uuid,
+      ${DEV_USER_ID}::uuid
+    )
   `;
 }
 
@@ -192,6 +204,16 @@ async function createAdditionalWorkspaceTalk(): Promise<{
   const row = rows[0];
   if (!row) throw new Error('Expected additional workspace talk to be created');
   return { workspaceId: row.workspace_id, talkId: row.talk_id };
+}
+
+async function addGuestToWorkspace(workspaceId: string): Promise<void> {
+  await seedAuthUser(GUEST_USER_ID, 'greenfield-context-guest@clawtalk.local');
+  const db = getDbPg();
+  await db`
+    insert into public.workspace_members (workspace_id, user_id, role)
+    values (${workspaceId}::uuid, ${GUEST_USER_ID}::uuid, 'guest')
+    on conflict (workspace_id, user_id) do update set role = excluded.role
+  `;
 }
 
 function withBucket<T>(
@@ -657,6 +679,84 @@ describe('greenfield context compatibility routes', () => {
     expect(deniedContent.statusCode).toBe(403);
   });
 
+  it('allows guest context reads and denies context writes with structured errors', async () => {
+    const { workspaceId, talkId } = await createTalkFixture();
+    await addGuestToWorkspace(workspaceId);
+    const guest = auth(GUEST_USER_ID);
+
+    const read = await getGreenfieldTalkContextRoute({
+      auth: guest,
+      workspaceId,
+      talkId,
+    });
+    expect(read.statusCode).toBe(200);
+    expect(read.body.ok && read.body.data.sources).toEqual([]);
+
+    for (const result of [
+      await setGreenfieldTalkGoalRoute({
+        auth: guest,
+        workspaceId,
+        talkId,
+        goalText: 'Guest goal',
+      }),
+      await createGreenfieldTalkContextRuleRoute({
+        auth: guest,
+        workspaceId,
+        talkId,
+        ruleText: 'Guest rule',
+      }),
+      await createGreenfieldTalkContextSourceRoute({
+        auth: guest,
+        workspaceId,
+        talkId,
+        sourceType: 'text',
+        title: 'Guest source',
+        extractedText: 'Guest text',
+      }),
+      await deleteGreenfieldTalkStateEntryRoute({
+        auth: guest,
+        workspaceId,
+        talkId,
+        key: 'guest.key',
+      }),
+    ]) {
+      expect(result.statusCode).toBe(403);
+      expect(result.body).toMatchObject({
+        ok: false,
+        error: { code: 'workspace_writer_required' },
+      });
+    }
+
+    const bucket = makeMockBucket();
+    const deniedUpload = await withBucket(bucket, () =>
+      uploadGreenfieldTalkContextSourceRoute({
+        auth: guest,
+        workspaceId,
+        talkId,
+        file: {
+          name: 'guest.txt',
+          data: Buffer.from('guest upload'),
+          type: 'text/plain',
+        },
+      }),
+    );
+    expect(deniedUpload.statusCode).toBe(403);
+    expect(deniedUpload.body).toMatchObject({
+      ok: false,
+      error: { code: 'workspace_writer_required' },
+    });
+    expect(bucket.store.size).toBe(0);
+
+    const db = getDbPg();
+    const [rows] = await db<Array<{ count: number }>>`
+      select count(*)::int as count
+      from public.context_sources
+      where workspace_id = ${workspaceId}::uuid
+        and talk_id = ${talkId}::uuid
+    `;
+    expect(rows).toEqual({ count: 0 });
+  });
+
   it('schedules URL ingestion from the HTTP mount in a fresh DB scope', async () => {
     vi.stubEnv('CLAWTALK_DEV_STUB_ENABLED', 'true');
     const { workspaceId, talkId } = await createTalkFixture(DEV_USER_ID);
@@ -1002,12 +1102,14 @@ describe('greenfield context compatibility routes', () => {
     bucket.put = vi.fn(async (key, value, options) => {
       const result = await originalPut(key, value, options);
       if (key === pageKey) {
-        await getDbPg()`
-          delete from public.context_sources
-          where workspace_id = ${workspaceId}::uuid
-            and talk_id = ${talkId}::uuid
-            and id = ${sourceId}::uuid
-        `;
+        await withTrustedDbWrites(async () => {
+          await getDbPg()`
+            delete from public.context_sources
+            where workspace_id = ${workspaceId}::uuid
+              and talk_id = ${talkId}::uuid
+              and id = ${sourceId}::uuid
+          `;
+        });
       }
       return result;
     });

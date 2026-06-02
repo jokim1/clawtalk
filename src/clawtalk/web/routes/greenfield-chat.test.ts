@@ -4,6 +4,7 @@ import {
   closePgDatabase,
   getDbPg,
   initPgDatabase,
+  withNotifyQueueScope,
   withUserContext,
 } from '../../../db.js';
 import type { AuthContext } from '../types.js';
@@ -57,14 +58,59 @@ async function deleteUser(): Promise<void> {
   await db`delete from auth.users where id = ${OTHER_USER_ID}::uuid`;
 }
 
-async function createTalkFixture(): Promise<{
+async function seedWorkspaceWithDefaultAgents(name: string): Promise<string> {
+  const db = getDbPg();
+  const rows = await db<Array<{ id: string }>>`
+    insert into public.workspaces (name, owner_id)
+    values (${name}, ${USER_ID}::uuid)
+    returning id
+  `;
+  const workspaceId = rows[0]!.id;
+  await db`
+    insert into public.workspace_members (workspace_id, user_id, role)
+    values (${workspaceId}::uuid, ${USER_ID}::uuid, 'owner')
+    on conflict (workspace_id, user_id) do update set role = excluded.role
+  `;
+  await db`
+    insert into public.agents (
+      workspace_id, role_key, name, handle, initials, accent, accent_dark,
+      model_id, default_model_id, temperature, method, is_default, is_custom,
+      is_system, enabled, created_from_template_version
+    )
+    select
+      ${workspaceId}::uuid,
+      t.role_key,
+      t.default_name,
+      t.default_handle,
+      t.default_initials,
+      t.default_accent,
+      t.default_accent_dark,
+      t.default_model_id,
+      t.default_model_id,
+      t.default_temperature,
+      t.method_default,
+      true,
+      false,
+      false,
+      true,
+      t.version
+    from public.agent_role_templates t
+    where t.role_key in ('strategist', 'critic', 'researcher', 'editor', 'quant')
+  `;
+  return workspaceId;
+}
+
+async function createTalkFixture(input?: { workspaceId?: string }): Promise<{
   workspaceId: string;
   talkId: string;
   agentIds: string[];
 }> {
-  const me = await getGreenfieldMeRoute({ auth: auth() });
-  if (!me.body.ok) throw new Error('Expected session route to succeed');
-  const workspaceId = me.body.data.currentWorkspaceId;
+  let workspaceId = input?.workspaceId;
+  if (!workspaceId) {
+    const me = await getGreenfieldMeRoute({ auth: auth() });
+    if (!me.body.ok) throw new Error('Expected session route to succeed');
+    workspaceId = me.body.data.currentWorkspaceId;
+  }
   const agents = await listGreenfieldAgentsRoute({ auth: auth(), workspaceId });
   if (!agents.body.ok) throw new Error('Expected agents route to succeed');
   const agentIds = agents.body.data.agents.slice(0, 2).map((agent) => agent.id);
@@ -159,6 +205,185 @@ describe('greenfield chat routes', () => {
       snapshot_group_count: 1,
       trigger_message_ids: [result.body.data.message.id],
     });
+  });
+
+  it('rejects malformed chat enqueue payload fields without throwing', async () => {
+    const talkId = '11111111-1111-4111-8111-111111111111';
+    const cases: Array<{
+      body: {
+        content: unknown;
+        targetAgentIds?: unknown;
+        attachmentIds?: unknown;
+      };
+      code: string;
+    }> = [
+      {
+        body: { content: 42, targetAgentIds: [], attachmentIds: [] },
+        code: 'message_required',
+      },
+      {
+        body: { content: 'hello', targetAgentIds: 'bad', attachmentIds: [] },
+        code: 'invalid_target_agent_id',
+      },
+      {
+        body: { content: 'hello', targetAgentIds: [123], attachmentIds: [] },
+        code: 'invalid_target_agent_id',
+      },
+      {
+        body: { content: 'hello', targetAgentIds: [], attachmentIds: 'bad' },
+        code: 'invalid_attachment_id',
+      },
+      {
+        body: { content: 'hello', targetAgentIds: [], attachmentIds: [123] },
+        code: 'invalid_attachment_id',
+      },
+      {
+        body: {
+          content: 'hello',
+          targetAgentIds: [],
+          attachmentIds: ['00000000-0000-4000-8000-000000000abc'],
+        },
+        code: 'attachments_not_available',
+      },
+    ];
+
+    for (const testCase of cases) {
+      const result = await enqueueGreenfieldChatRoute({
+        auth: auth(),
+        talkId,
+        threadId: talkId,
+        ...testCase.body,
+      });
+
+      expect(result.statusCode).toBe(400);
+      expect(result.body).toMatchObject({
+        ok: false,
+        error: { code: testCase.code },
+      });
+    }
+  });
+
+  it('resolves omitted chat workspace from the talk id', async () => {
+    const me = await getGreenfieldMeRoute({ auth: auth() });
+    if (!me.body.ok) throw new Error('Expected session route to succeed');
+    const defaultWorkspaceId = me.body.data.currentWorkspaceId;
+    const selectedWorkspaceId = await seedWorkspaceWithDefaultAgents(
+      'Selected Chat Workspace',
+    );
+    expect(selectedWorkspaceId).not.toBe(defaultWorkspaceId);
+    const { talkId, agentIds } = await createTalkFixture({
+      workspaceId: selectedWorkspaceId,
+    });
+
+    const result = await enqueueGreenfieldChatRoute({
+      auth: auth(),
+      talkId,
+      content: 'Send without an explicit workspace id.',
+      targetAgentIds: agentIds,
+      threadId: talkId,
+    });
+
+    expect(result.statusCode).toBe(202);
+    if (!result.body.ok) throw new Error('Expected chat enqueue to succeed');
+    expect(result.body.data.talkId).toBe(talkId);
+
+    const cancelled = await cancelGreenfieldChatRoute({
+      auth: auth(),
+      talkId,
+    });
+    expect(cancelled.statusCode).toBe(200);
+    expect(cancelled.body).toEqual({
+      ok: true,
+      data: { talkId, threadId: null, cancelledRuns: 2 },
+    });
+  });
+
+  it('fans out queued chat notifications to all workspace members', async () => {
+    await seedAuthUser(OTHER_USER_ID, 'greenfield-chat-other@clawtalk.local');
+    const { workspaceId, talkId, agentIds } = await createTalkFixture();
+    const db = getDbPg();
+    await db`
+      insert into public.workspace_members (workspace_id, user_id, role)
+      values (${workspaceId}::uuid, ${OTHER_USER_ID}::uuid, 'member')
+      on conflict (workspace_id, user_id) do update set role = excluded.role
+    `;
+
+    const notifiedOwners: string[] = [];
+    const env = {
+      USER_EVENT_HUB: {
+        idFromName(ownerId: string) {
+          return { ownerId } as never;
+        },
+        get(id: { ownerId: string }) {
+          return {
+            fetch: async () => {
+              notifiedOwners.push(id.ownerId);
+              return new Response(null, { status: 204 });
+            },
+          };
+        },
+      },
+    };
+
+    await withNotifyQueueScope(env as never, null, async () => {
+      const result = await enqueueGreenfieldChatRoute({
+        auth: auth(),
+        workspaceId,
+        talkId,
+        content: 'Notify everyone watching this talk.',
+        targetAgentIds: agentIds.slice(0, 1),
+        threadId: talkId,
+      });
+      expect(result.statusCode).toBe(202);
+    });
+
+    expect(new Set(notifiedOwners)).toEqual(new Set([USER_ID, OTHER_USER_ID]));
+  });
+
+  it('fans out cancellation notifications to all workspace members', async () => {
+    await seedAuthUser(OTHER_USER_ID, 'greenfield-chat-other@clawtalk.local');
+    const { workspaceId, talkId } = await createTalkFixture();
+    const db = getDbPg();
+    await db`
+      insert into public.workspace_members (workspace_id, user_id, role)
+      values (${workspaceId}::uuid, ${OTHER_USER_ID}::uuid, 'member')
+      on conflict (workspace_id, user_id) do update set role = excluded.role
+    `;
+    const first = await enqueueGreenfieldChatRoute({
+      auth: auth(),
+      workspaceId,
+      talkId,
+      content: 'Cancel this turn for every watcher.',
+    });
+    expect(first.statusCode).toBe(202);
+
+    const notifiedOwners: string[] = [];
+    const env = {
+      USER_EVENT_HUB: {
+        idFromName(ownerId: string) {
+          return { ownerId } as never;
+        },
+        get(id: { ownerId: string }) {
+          return {
+            fetch: async () => {
+              notifiedOwners.push(id.ownerId);
+              return new Response(null, { status: 204 });
+            },
+          };
+        },
+      },
+    };
+
+    await withNotifyQueueScope(env as never, null, async () => {
+      const cancelled = await cancelGreenfieldChatRoute({
+        auth: auth(),
+        workspaceId,
+        talkId,
+      });
+      expect(cancelled.statusCode).toBe(200);
+    });
+
+    expect(new Set(notifiedOwners)).toEqual(new Set([USER_ID, OTHER_USER_ID]));
   });
 
   it('honors selected target agents', async () => {
@@ -257,6 +482,83 @@ describe('greenfield chat routes', () => {
 
     expect(cancelled).toEqual({ cancelledRuns: 0, cancelledRunIds: [] });
     const db = getDbPg();
+    const activeRuns = await db<Array<{ count: number }>>`
+      select count(*)::int as count
+      from public.runs
+      where workspace_id = ${workspaceId}::uuid
+        and talk_id = ${talkId}::uuid
+        and status in ('queued', 'running', 'awaiting')
+    `;
+    expect(activeRuns[0]?.count).toBe(2);
+  });
+
+  it('blocks guest talk creators from cancelling active chat runs', async () => {
+    await seedAuthUser(OTHER_USER_ID, 'greenfield-chat-other@clawtalk.local');
+    const { workspaceId } = await createTalkFixture();
+    const db = getDbPg();
+    await db`
+      insert into public.workspace_members (workspace_id, user_id, role)
+      values (${workspaceId}::uuid, ${OTHER_USER_ID}::uuid, 'member')
+      on conflict (workspace_id, user_id) do update set role = excluded.role
+    `;
+    const agents = await listGreenfieldAgentsRoute({
+      auth: auth(OTHER_USER_ID),
+      workspaceId,
+    });
+    if (!agents.body.ok) throw new Error('Expected member creator agents');
+    const agentIds = agents.body.data.agents
+      .slice(0, 2)
+      .map((agent) => agent.id);
+    const created = await createGreenfieldTalkRoute({
+      auth: auth(OTHER_USER_ID),
+      workspaceId,
+      body: {
+        title: 'Guest creator cancellation talk',
+        team: agentIds,
+        rounds: 3,
+        mode: 'ordered',
+      },
+    });
+    if (!created.body.ok) throw new Error('Expected guest creator talk');
+    const talkId = created.body.data.talk.id;
+    const queued = await enqueueGreenfieldChatRoute({
+      auth: auth(OTHER_USER_ID),
+      workspaceId,
+      talkId,
+      content: 'Keep this active after downgrade.',
+    });
+    expect(queued.statusCode).toBe(202);
+
+    await db`
+      update public.workspace_members
+      set role = 'guest'
+      where workspace_id = ${workspaceId}::uuid
+        and user_id = ${OTHER_USER_ID}::uuid
+    `;
+
+    const directCancelled = await withUserContext(OTHER_USER_ID, () =>
+      cancelGreenfieldTalkRuns({
+        workspaceId,
+        talkId,
+        userId: OTHER_USER_ID,
+        includeJobRuns: true,
+      }),
+    );
+    expect(directCancelled).toEqual({
+      cancelledRuns: 0,
+      cancelledRunIds: [],
+    });
+
+    const routeCancelled = await cancelGreenfieldChatRoute({
+      auth: auth(OTHER_USER_ID),
+      workspaceId,
+      talkId,
+    });
+    expect(routeCancelled.statusCode).toBe(403);
+    expect(routeCancelled.body.ok ? null : routeCancelled.body.error.code).toBe(
+      'workspace_writer_required',
+    );
+
     const activeRuns = await db<Array<{ count: number }>>`
       select count(*)::int as count
       from public.runs

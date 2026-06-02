@@ -4,12 +4,18 @@ import { getDbPg, type Sql, withTrustedDbWrites } from '../../db.js';
 import { logger } from '../../logger.js';
 import {
   buildEffectiveToolsFromTalkToolRows,
-  listUserToolPermissionsForUser,
   normalizeTalkToolFamiliesFromRows,
   TALK_TOOL_IDS_BY_FAMILY,
+  TALK_RUNTIME_TOOLS_BY_TOOL_ID,
+  type RegisteredAgentRecord,
   type UserToolPermission,
   type UserToolPermissionRecord,
 } from '../db/agent-accessors.js';
+import { resolveCredentialKindSnapshot } from '../agents/execution-resolver.js';
+import {
+  expandImpliedScopes,
+  normalizeGoogleScopeAliases,
+} from '../identity/google-scopes.js';
 import { emitOutboxEventOnSql, enqueueOutboxNotify } from './outbox-emit.js';
 
 export type GreenfieldJobStatus = 'active' | 'paused' | 'blocked';
@@ -39,8 +45,6 @@ type StoredGreenfieldJobSchedule =
   | { kind: 'weekly'; weekdays: number[]; hour: number; minute: number };
 
 export interface GreenfieldJobScope {
-  connectorIds: string[];
-  channelBindingIds: string[];
   toolIds: string[];
   allowWeb: boolean;
 }
@@ -50,10 +54,6 @@ type StoredGreenfieldJobScope = {
   allowWeb?: unknown;
   tool_ids?: unknown;
   toolIds?: unknown;
-  connector_ids?: unknown;
-  connectorIds?: unknown;
-  channel_binding_ids?: unknown;
-  channelBindingIds?: unknown;
 };
 
 type TalkToolStateRow = { tool_id: string; enabled: boolean };
@@ -64,22 +64,97 @@ interface PendingOutboxNotify {
   ownerIds: string[];
 }
 
-const REQUIRED_CONNECTOR_SERVICE_BY_TOOL_ID: Record<string, string> = {
+function uniqueOwnerIds(
+  rows: Array<{ user_id: string }>,
+  fallbackUserId: string,
+): string[] {
+  const ids = new Set(rows.map((row) => row.user_id).filter(Boolean));
+  ids.add(fallbackUserId);
+  return Array.from(ids);
+}
+
+async function listWorkspaceNotifyOwnerIdsOnSql(input: {
+  sql: Sql;
+  workspaceId: string;
+  fallbackUserId: string;
+}): Promise<string[]> {
+  const rows = await withTrustedDbWrites(
+    () => input.sql<Array<{ user_id: string }>>`
+      select user_id::text as user_id
+      from public.workspace_members
+      where workspace_id = ${input.workspaceId}::uuid
+      order by created_at asc, user_id asc
+    `,
+  );
+  return uniqueOwnerIds(rows, input.fallbackUserId);
+}
+
+const WORKSPACE_CONNECTOR_SERVICE_BY_TOOL_ID: Record<string, string> = {
   linear: 'linear',
   'github-read': 'github',
   'notion-read': 'notion',
+  messaging: 'slack',
+};
+
+const GOOGLE_TOOL_CONNECTOR_SERVICE_BY_TOOL_ID: Record<string, string> = {
   'gdrive-read': 'gdrive',
   'gdrive-write': 'gdrive',
   'gmail-read': 'gmail',
   'gmail-send': 'gmail',
-  messaging: 'slack',
 };
+
+const REQUIRED_CONNECTOR_SERVICE_BY_TOOL_ID: Record<string, string> = {
+  ...WORKSPACE_CONNECTOR_SERVICE_BY_TOOL_ID,
+  ...GOOGLE_TOOL_CONNECTOR_SERVICE_BY_TOOL_ID,
+};
+
+const GOOGLE_TOOL_CONNECTOR_SERVICES = new Set(
+  Object.values(GOOGLE_TOOL_CONNECTOR_SERVICE_BY_TOOL_ID),
+);
+
+const GOOGLE_TOOL_REQUIRED_SCOPE_ALIASES_BY_TOOL_ID: Record<string, string[]> =
+  {
+    'gdrive-read': [
+      'drive.readonly',
+      'documents.readonly',
+      'spreadsheets.readonly',
+    ],
+    'gdrive-write': ['documents', 'spreadsheets'],
+    'gmail-read': ['gmail.readonly'],
+    'gmail-send': ['gmail.send'],
+  };
 
 const MUTATING_JOB_TOOL_IDS = new Set([
   'gdrive-write',
   'gmail-send',
   'messaging',
 ]);
+
+const UNSUPPORTED_JOB_TOOL_IDS = new Set(['gmail-read', 'gmail-send']);
+const GREENFIELD_WEB_JOB_TOOL_ID = 'web-search';
+
+function readStringArray(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === 'string')
+    : [];
+}
+
+export function googleToolCredentialHasRequiredScopes(input: {
+  scopes: unknown;
+  toolId: string;
+}): boolean {
+  const requiredScopes =
+    GOOGLE_TOOL_REQUIRED_SCOPE_ALIASES_BY_TOOL_ID[input.toolId] ?? [];
+  if (requiredScopes.length === 0) return true;
+  const expandedGrantedScopes = new Set(
+    expandImpliedScopes(
+      normalizeGoogleScopeAliases(readStringArray(input.scopes)),
+    ),
+  );
+  return normalizeGoogleScopeAliases(requiredScopes).every((scope) =>
+    expandedGrantedScopes.has(scope),
+  );
+}
 
 interface GreenfieldJobRow {
   id: string;
@@ -123,6 +198,7 @@ interface GreenfieldJobRosterAgentRecord {
   method: string[];
   sort_order: number;
   created_from_template_version: number | null;
+  credential_mode: 'api_key' | 'subscription' | null;
 }
 
 export interface GreenfieldJob {
@@ -187,6 +263,7 @@ export type GreenfieldJobDependencyIssue = {
 export type CreateGreenfieldJobRunNowResult =
   | { status: 'enqueued'; job: GreenfieldJob; runId: string }
   | { status: 'not_found' }
+  | { status: 'forbidden'; job: GreenfieldJob }
   | { status: 'archived'; job: GreenfieldJob }
   | {
       status: 'blocked';
@@ -384,12 +461,6 @@ function normalizeStoredScope(raw: unknown): {
   const source = isRecord(raw) ? (raw as StoredGreenfieldJobScope) : {};
   const toolIds = normalizeStringList(source.tool_ids ?? source.toolIds);
   const api = {
-    connectorIds: normalizeStringList(
-      source.connector_ids ?? source.connectorIds,
-    ),
-    channelBindingIds: normalizeStringList(
-      source.channel_binding_ids ?? source.channelBindingIds,
-    ),
     toolIds,
     allowWeb: source.allow_web === true || source.allowWeb === true,
   };
@@ -399,21 +470,36 @@ function normalizeStoredScope(raw: unknown): {
   };
 }
 
+function readScopeField(
+  source: StoredGreenfieldJobScope,
+  snakeKey: keyof StoredGreenfieldJobScope,
+  camelKey: keyof StoredGreenfieldJobScope,
+  fallback: unknown,
+): unknown {
+  if (source[snakeKey] !== undefined) return source[snakeKey];
+  if (source[camelKey] !== undefined) return source[camelKey];
+  return fallback;
+}
+
+function mergeScopePatch(current: GreenfieldJobScope, patch: unknown): unknown {
+  if (!isRecord(patch)) return patch;
+  const source = patch as StoredGreenfieldJobScope;
+  return {
+    toolIds: readScopeField(source, 'tool_ids', 'toolIds', current.toolIds),
+    allowWeb: readScopeField(source, 'allow_web', 'allowWeb', current.allowWeb),
+  };
+}
+
 function unsupportedSourceScopeIssue(
   sourceScope: GreenfieldJobScope,
 ): GreenfieldJobDependencyIssue | null {
-  if (sourceScope.connectorIds.length > 0) {
+  const unsupportedToolId = sourceScope.toolIds.find((toolId) =>
+    UNSUPPORTED_JOB_TOOL_IDS.has(toolId),
+  );
+  if (unsupportedToolId) {
     return {
       code: 'tool_not_enabled',
-      message:
-        'Connector-id scoped job sources are not supported by the greenfield jobs runtime yet.',
-    };
-  }
-  if (sourceScope.channelBindingIds.length > 0) {
-    return {
-      code: 'tool_not_enabled',
-      message:
-        'Channel-binding scoped job sources are not supported by the greenfield jobs runtime yet.',
+      message: `Tool ${unsupportedToolId} is not supported by the greenfield jobs runtime yet.`,
     };
   }
   return null;
@@ -430,9 +516,7 @@ function filterTalkToolRowsForJobScope(
 ): TalkToolStateRow[] {
   const allowedToolIds = new Set(sourceScope.tool_ids);
   if (sourceScope.allow_web) {
-    for (const toolId of TALK_TOOL_IDS_BY_FAMILY.web ?? []) {
-      allowedToolIds.add(toolId);
-    }
+    allowedToolIds.add(GREENFIELD_WEB_JOB_TOOL_ID);
   }
   return rows.filter(
     (row) =>
@@ -476,6 +560,54 @@ function assertReadOnlyJobToolScope(sourceScope: { tool_ids: string[] }): void {
   const toolId = getMutatingJobToolId(sourceScope);
   if (!toolId) return;
   throw new Error(`Tool ${toolId} is not available for read-only jobs.`);
+}
+
+async function getJobToolPermissionIssue(input: {
+  sql: Sql;
+  workspaceId: string;
+  talkId: string;
+  createdBy: string;
+  sourceScope: { allow_web: boolean; tool_ids: string[] };
+}): Promise<GreenfieldJobDependencyIssue | null> {
+  const requiredToolIds = new Set(input.sourceScope.tool_ids);
+  if (input.sourceScope.allow_web) {
+    requiredToolIds.add(GREENFIELD_WEB_JOB_TOOL_ID);
+  }
+  if (requiredToolIds.size === 0) return null;
+
+  const toolRows = await input.sql<TalkToolStateRow[]>`
+    select tool_id, enabled
+    from public.talk_tools
+    where workspace_id = ${input.workspaceId}::uuid
+      and talk_id = ${input.talkId}::uuid
+  `;
+  const scopedToolRows = filterTalkToolRowsForJobScope(
+    toolRows,
+    input.sourceScope,
+  );
+  const userToolPermissions = await listUserToolPermissionsForUserOnSql(
+    input.sql,
+    input.createdBy,
+  );
+  const enabledRuntimeTools = new Set(
+    buildEffectiveToolsFromTalkToolRows(scopedToolRows, userToolPermissions)
+      .filter((tool) => tool.enabled)
+      .flatMap((tool) => tool.runtimeTools),
+  );
+
+  for (const toolId of requiredToolIds) {
+    const runtimeTools = TALK_RUNTIME_TOOLS_BY_TOOL_ID[toolId] ?? [];
+    const missingRuntimeTool = runtimeTools.find(
+      (runtimeTool) => !enabledRuntimeTools.has(runtimeTool),
+    );
+    if (missingRuntimeTool) {
+      return {
+        code: 'tool_not_enabled',
+        message: `Tool ${toolId} is disabled by the job creator's tool permissions.`,
+      };
+    }
+  }
+  return null;
 }
 
 async function withExistingOrNewTransaction<T>(
@@ -788,7 +920,8 @@ async function loadRoster(input: {
       a.focus,
       a.method,
       ta.sort_order,
-      a.created_from_template_version
+      a.created_from_template_version,
+      a.credential_mode
     from public.talk_agents ta
     join public.agents a
       on a.workspace_id = ta.workspace_id
@@ -809,9 +942,37 @@ async function loadRoster(input: {
   `;
 }
 
+function toCredentialSnapshotAgent(
+  agent: GreenfieldJobRosterAgentRecord,
+  ownerId: string,
+): RegisteredAgentRecord {
+  if (!agent.provider_id) {
+    throw new Error(
+      'Cannot snapshot credentials for an agent without provider',
+    );
+  }
+  return {
+    id: agent.id,
+    owner_id: ownerId,
+    name: agent.name,
+    provider_id: agent.provider_id,
+    model_id: agent.model_id,
+    persona_role: agent.role_key,
+    system_prompt: null,
+    description: agent.focus,
+    enabled: true,
+    credential_mode: agent.credential_mode,
+    model_auto_upgraded_from: null,
+    model_auto_upgraded_at: null,
+    created_at: new Date(0).toISOString(),
+    updated_at: new Date(0).toISOString(),
+  };
+}
+
 async function getDependencyIssue(input: {
   workspaceId: string;
   talkId: string;
+  createdBy: string;
   agentId: string | null;
   sourceScope: { allow_web: boolean; tool_ids: string[] };
   emitDocumentAppend: boolean;
@@ -847,19 +1008,18 @@ async function getDependencyIssue(input: {
 
   const db = input.sql ?? getDbPg();
   if (input.sourceScope.allow_web) {
-    const webToolIds = TALK_TOOL_IDS_BY_FAMILY.web ?? [];
     const webRows = await db<{ count: number }[]>`
       select count(*)::int as count
       from public.talk_tools
       where workspace_id = ${input.workspaceId}::uuid
         and talk_id = ${input.talkId}::uuid
-        and tool_id in ${db(webToolIds)}
+        and tool_id = ${GREENFIELD_WEB_JOB_TOOL_ID}
         and enabled = true
     `;
     if ((webRows[0]?.count ?? 0) === 0) {
       return {
         code: 'tool_not_enabled',
-        message: 'Web tools are not enabled for this talk.',
+        message: 'Web search is not enabled for this talk.',
       };
     }
   }
@@ -897,14 +1057,36 @@ async function getDependencyIssue(input: {
     }
     const requiredService = REQUIRED_CONNECTOR_SERVICE_BY_TOOL_ID[toolId];
     if (requiredService) {
-      const connectors = await db<{ id: string }[]>`
-        select id
+      const requiresGoogleToolCredential =
+        GOOGLE_TOOL_CONNECTOR_SERVICES.has(requiredService);
+      const connectorQuery = () => db<Array<{ id: string; scopes: unknown }>>`
+        select id,
+               coalesce(config_json->'scopes', '[]'::jsonb) as scopes
         from public.connectors
         where workspace_id = ${input.workspaceId}::uuid
           and service = ${requiredService}
           and authorized = true
-        limit 1
+          and (${requiresGoogleToolCredential}::boolean = false or (
+            secret_ref is not null
+            and config_json->>'compatSurface' = 'google_tools'
+            and config_json->>'authorizedByUserId' = ${input.createdBy}
+          ))
       `;
+      // Google tool credentials are private to the authorizing user under RLS,
+      // but job dependency checks are intentionally keyed to jobs.created_by.
+      // After the route/accessor has established job edit/run access, perform
+      // this existence-only read without the requester user's RLS visibility.
+      const connectorRows = requiresGoogleToolCredential
+        ? await withTrustedDbWrites(connectorQuery)
+        : await connectorQuery();
+      const connectors = requiresGoogleToolCredential
+        ? connectorRows.filter((row) =>
+            googleToolCredentialHasRequiredScopes({
+              scopes: row.scopes,
+              toolId,
+            }),
+          )
+        : connectorRows;
       if (connectors.length === 0) {
         return {
           code: 'connector_not_authorized',
@@ -913,6 +1095,16 @@ async function getDependencyIssue(input: {
       }
     }
   }
+
+  const permissionIssue = await getJobToolPermissionIssue({
+    sql: db,
+    workspaceId: input.workspaceId,
+    talkId: input.talkId,
+    createdBy: input.createdBy,
+    sourceScope: input.sourceScope,
+  });
+  if (permissionIssue) return permissionIssue;
+
   return null;
 }
 
@@ -930,17 +1122,7 @@ async function blockDueGreenfieldJobOnSql(input: {
     talkId: input.talkId,
     jobId: input.jobId,
   };
-  await input.sql`
-    update public.jobs
-    set status = 'blocked',
-        block_reason = ${input.issue.code},
-        next_due_at = null,
-        claimed_at = null,
-        updated_at = now()
-    where workspace_id = ${input.workspaceId}::uuid
-      and talk_id = ${input.talkId}::uuid
-      and id = ${input.jobId}::uuid
-  `;
+  await markGreenfieldJobBlockedOnSql(input);
   await input.sql`
     insert into public.home_inbox_items (
       workspace_id,
@@ -986,16 +1168,18 @@ async function deferBusyGreenfieldJobOnSql(input: {
   jobId: string;
   now: string;
 }): Promise<void> {
-  await input.sql`
-    update public.jobs
-    set claimed_at = ${input.now}::timestamptz,
-        updated_at = now()
-    where workspace_id = ${input.workspaceId}::uuid
-      and talk_id = ${input.talkId}::uuid
-      and id = ${input.jobId}::uuid
-      and status = 'active'
-      and archived_at is null
-  `;
+  await withTrustedDbWrites(async () => {
+    await input.sql`
+      update public.jobs
+      set claimed_at = ${input.now}::timestamptz,
+          updated_at = now()
+      where workspace_id = ${input.workspaceId}::uuid
+        and talk_id = ${input.talkId}::uuid
+        and id = ${input.jobId}::uuid
+        and status = 'active'
+        and archived_at is null
+    `;
+  });
 }
 
 async function deferFailedGreenfieldJobClaim(input: {
@@ -1006,6 +1190,28 @@ async function deferFailedGreenfieldJobClaim(input: {
   now: string;
 }): Promise<void> {
   await deferBusyGreenfieldJobOnSql(input);
+}
+
+async function markGreenfieldJobBlockedOnSql(input: {
+  sql: Sql;
+  workspaceId: string;
+  talkId: string;
+  jobId: string;
+  issue: GreenfieldJobDependencyIssue;
+}): Promise<void> {
+  await withTrustedDbWrites(async () => {
+    await input.sql`
+      update public.jobs
+      set status = 'blocked',
+          block_reason = ${input.issue.code},
+          next_due_at = null,
+          claimed_at = null,
+          updated_at = now()
+      where workspace_id = ${input.workspaceId}::uuid
+        and talk_id = ${input.talkId}::uuid
+        and id = ${input.jobId}::uuid
+    `;
+  });
 }
 
 export async function createGreenfieldJob(input: {
@@ -1044,6 +1250,7 @@ export async function createGreenfieldJob(input: {
   const issue = await getDependencyIssue({
     workspaceId: input.workspaceId,
     talkId: input.talkId,
+    createdBy: input.createdBy,
     agentId,
     sourceScope,
     emitDocumentAppend,
@@ -1057,51 +1264,54 @@ export async function createGreenfieldJob(input: {
     from: now,
   });
   const db = getDbPg();
-  const rows = await db<{ id: string }[]>`
-    insert into public.jobs (
-      workspace_id,
-      talk_id,
-      created_by,
-      title,
-      prompt,
-      agent_id,
-      schedule_json,
-      timezone,
-      emit_talk_message,
-      emit_document_append,
-      source_scope_json,
-      catch_up,
-      status,
-      next_due_at,
-      created_at,
-      updated_at
-    )
-    values (
-      ${input.workspaceId}::uuid,
-      ${input.talkId}::uuid,
-      ${input.createdBy}::uuid,
-      ${title},
-      ${prompt},
-      ${agentId}::uuid,
-      ${db.json(schedule as never)},
-      ${timezone},
-      ${emitTalkMessage},
-      ${emitDocumentAppend},
-      ${db.json(sourceScope as never)},
-      ${normalizeCatchUp(input.catchUp)},
-      'active',
-      ${nextDueAt}::timestamptz,
-      ${now}::timestamptz,
-      ${now}::timestamptz
-    )
-    returning id
-  `;
-  await db`
-    update public.talks
-    set updated_at = now(), last_activity_at = now()
-    where workspace_id = ${input.workspaceId}::uuid
-      and id = ${input.talkId}::uuid
-  `;
+  const rows = await withTrustedDbWrites(async () => {
+    const inserted = await db<{ id: string }[]>`
+      insert into public.jobs (
+        workspace_id,
+        talk_id,
+        created_by,
+        title,
+        prompt,
+        agent_id,
+        schedule_json,
+        timezone,
+        emit_talk_message,
+        emit_document_append,
+        source_scope_json,
+        catch_up,
+        status,
+        next_due_at,
+        created_at,
+        updated_at
+      )
+      values (
+        ${input.workspaceId}::uuid,
+        ${input.talkId}::uuid,
+        ${input.createdBy}::uuid,
+        ${title},
+        ${prompt},
+        ${agentId}::uuid,
+        ${db.json(schedule as never)},
+        ${timezone},
+        ${emitTalkMessage},
+        ${emitDocumentAppend},
+        ${db.json(sourceScope as never)},
+        ${normalizeCatchUp(input.catchUp)},
+        'active',
+        ${nextDueAt}::timestamptz,
+        ${now}::timestamptz,
+        ${now}::timestamptz
+      )
+      returning id
+    `;
+    await db`
+      update public.talks
+      set updated_at = now(), last_activity_at = now()
+      where workspace_id = ${input.workspaceId}::uuid
+        and id = ${input.talkId}::uuid
+    `;
+    return inserted;
+  });
   return (await getGreenfieldJob({
     workspaceId: input.workspaceId,
     talkId: input.talkId,
@@ -1123,91 +1333,121 @@ export async function patchGreenfieldJob(input: {
   emitDocumentAppend?: boolean;
   catchUp?: unknown;
 }): Promise<GreenfieldJob | undefined> {
-  const current = await getGreenfieldJob(input);
-  if (!current) return undefined;
-
-  const title =
-    input.title !== undefined ? normalizeTitle(input.title) : current.title;
-  const prompt =
-    input.prompt !== undefined ? normalizePrompt(input.prompt) : current.prompt;
-  const agentId =
-    input.agentId !== undefined ? input.agentId.trim() : current.targetAgentId;
-  if (!agentId) throw new Error('Job target agent is required');
-  const schedule =
-    input.schedule !== undefined
-      ? normalizeStoredSchedule(input.schedule)
-      : normalizeStoredSchedule(current.schedule);
-  const timezone =
-    input.timezone !== undefined
-      ? validateTimezone(input.timezone)
-      : current.timezone;
-  const sourceScope =
-    input.sourceScope !== undefined
-      ? normalizeStoredScope(input.sourceScope)
-      : normalizeStoredScope(current.sourceScope);
-  assertSupportedJobSourceScope(sourceScope.api);
-  const storedSourceScope = sourceScope.stored;
-  assertReadOnlyJobToolScope(storedSourceScope);
-  const emitTalkMessage =
-    input.emitTalkMessage !== undefined
-      ? input.emitTalkMessage
-      : current.emitTalkMessage;
-  const emitDocumentAppend =
-    input.emitDocumentAppend !== undefined
-      ? input.emitDocumentAppend
-      : current.emitDocumentAppend;
-  if (emitDocumentAppend) {
-    throw new Error('Document append job output is not enabled yet');
-  }
-  if (!emitTalkMessage && !emitDocumentAppend) {
-    throw new Error('A job must emit a Talk message or a Document append');
-  }
-
-  const issue = await getDependencyIssue({
-    workspaceId: input.workspaceId,
-    talkId: input.talkId,
-    agentId,
-    sourceScope: storedSourceScope,
-    emitDocumentAppend,
-  });
-  const nextDueAt =
-    current.status === 'paused' || issue
-      ? null
-      : computeNextGreenfieldJobDueAt({ schedule, timezone });
-  const status = issue
-    ? 'blocked'
-    : current.status === 'blocked'
-      ? 'active'
-      : current.status;
-
   const db = getDbPg();
-  await db`
-    update public.jobs
-    set title = ${title},
-        prompt = ${prompt},
-        agent_id = ${agentId}::uuid,
-        schedule_json = ${db.json(schedule as never)},
-        timezone = ${timezone},
-        source_scope_json = ${db.json(storedSourceScope as never)},
-        emit_talk_message = ${emitTalkMessage},
-        emit_document_append = ${emitDocumentAppend},
-        catch_up = ${normalizeCatchUp(input.catchUp ?? current.catchUp)},
-        status = ${status},
-        block_reason = ${issue?.code ?? null},
-        next_due_at = ${nextDueAt}::timestamptz,
-        claimed_at = null,
-        updated_at = now()
-    where workspace_id = ${input.workspaceId}::uuid
-      and talk_id = ${input.talkId}::uuid
-      and id = ${input.jobId}::uuid
-      and archived_at is null
-  `;
-  await db`
-    update public.talks
-    set updated_at = now(), last_activity_at = now()
-    where workspace_id = ${input.workspaceId}::uuid
-      and id = ${input.talkId}::uuid
-  `;
+  const patched = await withTrustedDbWrites(() =>
+    withExistingOrNewTransaction(db, async (txSql) => {
+      const currentRows = await txSql<GreenfieldJobRow[]>`
+        select ${txSql.unsafe(JOB_SELECT)}
+        from public.jobs j
+        left join public.agents a
+          on a.workspace_id = j.workspace_id
+         and a.id = j.agent_id
+        where j.workspace_id = ${input.workspaceId}::uuid
+          and j.talk_id = ${input.talkId}::uuid
+          and j.id = ${input.jobId}::uuid
+          and j.archived_at is null
+        limit 1
+        for update of j
+      `;
+      const current = currentRows[0] ? toJob(currentRows[0]) : undefined;
+      if (!current) return false;
+
+      const title =
+        input.title !== undefined ? normalizeTitle(input.title) : current.title;
+      const prompt =
+        input.prompt !== undefined
+          ? normalizePrompt(input.prompt)
+          : current.prompt;
+      const agentId =
+        input.agentId !== undefined
+          ? input.agentId.trim()
+          : current.targetAgentId;
+      if (!agentId) throw new Error('Job target agent is required');
+      const schedule =
+        input.schedule !== undefined
+          ? normalizeStoredSchedule(input.schedule)
+          : normalizeStoredSchedule(current.schedule);
+      const timezone =
+        input.timezone !== undefined
+          ? validateTimezone(input.timezone)
+          : current.timezone;
+      const sourceScope =
+        input.sourceScope !== undefined
+          ? normalizeStoredScope(
+              mergeScopePatch(current.sourceScope, input.sourceScope),
+            )
+          : normalizeStoredScope(current.sourceScope);
+      assertSupportedJobSourceScope(sourceScope.api);
+      const storedSourceScope = sourceScope.stored;
+      assertReadOnlyJobToolScope(storedSourceScope);
+      const emitTalkMessage =
+        input.emitTalkMessage !== undefined
+          ? input.emitTalkMessage
+          : current.emitTalkMessage;
+      const emitDocumentAppend =
+        input.emitDocumentAppend !== undefined
+          ? input.emitDocumentAppend
+          : current.emitDocumentAppend;
+      if (emitDocumentAppend) {
+        throw new Error('Document append job output is not enabled yet');
+      }
+      if (!emitTalkMessage && !emitDocumentAppend) {
+        throw new Error('A job must emit a Talk message or a Document append');
+      }
+
+      const issue = await getDependencyIssue({
+        workspaceId: input.workspaceId,
+        talkId: input.talkId,
+        createdBy: current.createdBy,
+        agentId,
+        sourceScope: storedSourceScope,
+        emitDocumentAppend,
+        sql: txSql,
+      });
+      const nextDueAt =
+        current.status === 'paused' || issue
+          ? null
+          : computeNextGreenfieldJobDueAt({ schedule, timezone });
+      const status = issue
+        ? 'blocked'
+        : current.status === 'blocked'
+          ? 'active'
+          : current.status;
+
+      const rows = await txSql<{ id: string }[]>`
+        update public.jobs
+        set title = ${title},
+            prompt = ${prompt},
+            agent_id = ${agentId}::uuid,
+            schedule_json = ${txSql.json(schedule as never)},
+            timezone = ${timezone},
+            source_scope_json = ${txSql.json(storedSourceScope as never)},
+            emit_talk_message = ${emitTalkMessage},
+            emit_document_append = ${emitDocumentAppend},
+            catch_up = ${normalizeCatchUp(input.catchUp ?? current.catchUp)},
+            status = ${status},
+            block_reason = ${issue?.code ?? null},
+            next_due_at = ${nextDueAt}::timestamptz,
+            claimed_at = null,
+            updated_at = now()
+        where workspace_id = ${input.workspaceId}::uuid
+          and talk_id = ${input.talkId}::uuid
+          and id = ${input.jobId}::uuid
+          and archived_at is null
+        returning id
+      `;
+      if (rows.length !== 1) return false;
+
+      await txSql`
+        update public.talks
+        set updated_at = now(), last_activity_at = now()
+        where workspace_id = ${input.workspaceId}::uuid
+          and id = ${input.talkId}::uuid
+      `;
+      return true;
+    }),
+  );
+  if (!patched) return undefined;
   return await getGreenfieldJob(input);
 }
 
@@ -1217,18 +1457,20 @@ export async function archiveGreenfieldJob(input: {
   jobId: string;
 }): Promise<boolean> {
   const db = getDbPg();
-  const rows = await db<{ id: string }[]>`
-    update public.jobs
-    set archived_at = now(),
-        next_due_at = null,
-        claimed_at = null,
-        updated_at = now()
-    where workspace_id = ${input.workspaceId}::uuid
-      and talk_id = ${input.talkId}::uuid
-      and id = ${input.jobId}::uuid
-      and archived_at is null
-    returning id
-  `;
+  const rows = await withTrustedDbWrites(
+    () => db<{ id: string }[]>`
+      update public.jobs
+      set archived_at = now(),
+          next_due_at = null,
+          claimed_at = null,
+          updated_at = now()
+      where workspace_id = ${input.workspaceId}::uuid
+        and talk_id = ${input.talkId}::uuid
+        and id = ${input.jobId}::uuid
+        and archived_at is null
+      returning id
+    `,
+  );
   return rows.length === 1;
 }
 
@@ -1240,19 +1482,21 @@ async function updateGreenfieldJobStatus(input: {
   nextDueAt: string | null;
 }): Promise<GreenfieldJob | undefined> {
   const db = getDbPg();
-  const rows = await db<{ id: string }[]>`
-    update public.jobs
-    set status = ${input.status},
-        block_reason = null,
-        next_due_at = ${input.nextDueAt}::timestamptz,
-        claimed_at = null,
-        updated_at = now()
-    where workspace_id = ${input.workspaceId}::uuid
-      and talk_id = ${input.talkId}::uuid
-      and id = ${input.jobId}::uuid
-      and archived_at is null
-    returning id
-  `;
+  const rows = await withTrustedDbWrites(
+    () => db<{ id: string }[]>`
+      update public.jobs
+      set status = ${input.status},
+          block_reason = null,
+          next_due_at = ${input.nextDueAt}::timestamptz,
+          claimed_at = null,
+          updated_at = now()
+      where workspace_id = ${input.workspaceId}::uuid
+        and talk_id = ${input.talkId}::uuid
+        and id = ${input.jobId}::uuid
+        and archived_at is null
+      returning id
+    `,
+  );
   if (rows.length !== 1) return undefined;
   return await getGreenfieldJob(input);
 }
@@ -1264,19 +1508,21 @@ async function blockGreenfieldJobForIssue(input: {
   issue: GreenfieldJobDependencyIssue;
 }): Promise<GreenfieldJob | undefined> {
   const db = getDbPg();
-  const rows = await db<{ id: string }[]>`
-    update public.jobs
-    set status = 'blocked',
-        block_reason = ${input.issue.code},
-        next_due_at = null,
-        claimed_at = null,
-        updated_at = now()
-    where workspace_id = ${input.workspaceId}::uuid
-      and talk_id = ${input.talkId}::uuid
-      and id = ${input.jobId}::uuid
-      and archived_at is null
-    returning id
-  `;
+  const rows = await withTrustedDbWrites(
+    () => db<{ id: string }[]>`
+      update public.jobs
+      set status = 'blocked',
+          block_reason = ${input.issue.code},
+          next_due_at = null,
+          claimed_at = null,
+          updated_at = now()
+      where workspace_id = ${input.workspaceId}::uuid
+        and talk_id = ${input.talkId}::uuid
+        and id = ${input.jobId}::uuid
+        and archived_at is null
+      returning id
+    `,
+  );
   if (rows.length !== 1) return undefined;
   return await getGreenfieldJob(input);
 }
@@ -1317,6 +1563,7 @@ export async function resumeGreenfieldJob(input: {
   const issue = await getDependencyIssue({
     workspaceId: input.workspaceId,
     talkId: input.talkId,
+    createdBy: current.createdBy,
     agentId: current.targetAgentId,
     sourceScope,
     emitDocumentAppend: current.emitDocumentAppend,
@@ -1720,15 +1967,17 @@ async function claimDueGreenfieldJobRun(input: {
     if ((active[0]?.count ?? 0) > 0) {
       if (lockedJob.catchUp === 'skip') {
         const { nextDueAt } = getScheduleTiming();
-        await txSql`
-          update public.jobs
-          set next_due_at = ${nextDueAt}::timestamptz,
-              claimed_at = null,
-              updated_at = now()
-          where workspace_id = ${input.workspaceId}::uuid
-            and talk_id = ${input.talkId}::uuid
-            and id = ${input.jobId}::uuid
-        `;
+        await withTrustedDbWrites(async () => {
+          await txSql`
+            update public.jobs
+            set next_due_at = ${nextDueAt}::timestamptz,
+                claimed_at = null,
+                updated_at = now()
+            where workspace_id = ${input.workspaceId}::uuid
+              and talk_id = ${input.talkId}::uuid
+              and id = ${input.jobId}::uuid
+          `;
+        });
       } else {
         await deferBusyGreenfieldJobOnSql({ ...input, sql: txSql });
       }
@@ -1775,15 +2024,17 @@ async function claimDueGreenfieldJobRun(input: {
     const { scheduledFor, nextDueAt, missedAtLeastOneSlot } =
       getScheduleTiming();
     if (lockedJob.catchUp === 'skip' && missedAtLeastOneSlot) {
-      await txSql`
-        update public.jobs
-        set next_due_at = ${nextDueAt}::timestamptz,
-            claimed_at = null,
-            updated_at = now()
-        where workspace_id = ${input.workspaceId}::uuid
-          and talk_id = ${input.talkId}::uuid
-          and id = ${input.jobId}::uuid
-      `;
+      await withTrustedDbWrites(async () => {
+        await txSql`
+          update public.jobs
+          set next_due_at = ${nextDueAt}::timestamptz,
+              claimed_at = null,
+              updated_at = now()
+          where workspace_id = ${input.workspaceId}::uuid
+            and talk_id = ${input.talkId}::uuid
+            and id = ${input.jobId}::uuid
+        `;
+      });
       return { status: 'skipped', jobId: input.jobId } as const;
     }
 
@@ -1805,6 +2056,7 @@ async function claimDueGreenfieldJobRun(input: {
     const lockedIssue = await getDependencyIssue({
       workspaceId: input.workspaceId,
       talkId: input.talkId,
+      createdBy: lockedJob.createdBy,
       agentId: lockedJob.targetAgentId,
       sourceScope: lockedSourceScope,
       emitDocumentAppend: lockedJob.emitDocumentAppend,
@@ -1881,6 +2133,14 @@ async function claimDueGreenfieldJobRun(input: {
       ),
       jobSourceScope: lockedSourceScope,
     };
+    const credentialKindSnapshot = await resolveCredentialKindSnapshot(
+      toCredentialSnapshotAgent(target, lockedJob.createdBy),
+      {
+        principalUserId: lockedJob.createdBy,
+        workspaceId: input.workspaceId,
+      },
+      txSql,
+    );
 
     await withTrustedDbWrites(async () => {
       const snapshotIds = new Map<string, string>();
@@ -1993,26 +2253,36 @@ async function claimDueGreenfieldJobRun(input: {
         ${target.provider_id},
         ${target.created_from_template_version},
         1,
-        ${txSql.json(toolManifest as never)},
+        ${txSql.json({
+          ...toolManifest,
+          agentCredentialMode: credentialKindSnapshot,
+        } as never)},
         ${lockedJob.prompt}
       )
     `;
     });
-    await txSql`
-      update public.jobs
-      set next_due_at = ${nextDueAt}::timestamptz,
-          claimed_at = null,
-          updated_at = now()
-      where workspace_id = ${input.workspaceId}::uuid
-        and talk_id = ${input.talkId}::uuid
-        and id = ${input.jobId}::uuid
-    `;
+    await withTrustedDbWrites(async () => {
+      await txSql`
+        update public.jobs
+        set next_due_at = ${nextDueAt}::timestamptz,
+            claimed_at = null,
+            updated_at = now()
+        where workspace_id = ${input.workspaceId}::uuid
+          and talk_id = ${input.talkId}::uuid
+          and id = ${input.jobId}::uuid
+      `;
+    });
     await txSql`
       update public.talks
       set last_activity_at = now()
       where workspace_id = ${input.workspaceId}::uuid
         and id = ${input.talkId}::uuid
     `;
+    const ownerIds = await listWorkspaceNotifyOwnerIdsOnSql({
+      sql: txSql,
+      workspaceId: input.workspaceId,
+      fallbackUserId: lockedJob.createdBy,
+    });
     const eventId = await emitOutboxEventOnSql(txSql, {
       topic: `talk:${input.talkId}`,
       eventType: 'talk_run_queued',
@@ -2031,12 +2301,12 @@ async function claimDueGreenfieldJobRun(input: {
         executorModel: target.model_id,
         jobId: input.jobId,
       },
-      ownerIds: [lockedJob.createdBy],
+      ownerIds,
     });
     pendingNotify = {
       topic: `talk:${input.talkId}`,
       eventId,
-      ownerIds: [lockedJob.createdBy],
+      ownerIds,
     };
 
     return { status: 'enqueued', jobId: input.jobId, runId } as const;
@@ -2057,6 +2327,9 @@ export async function createGreenfieldJobRunNow(input: {
     jobId: input.jobId,
   });
   if (!current) return { status: 'not_found' };
+  if (current.createdBy !== input.requestedBy) {
+    return { status: 'forbidden', job: current };
+  }
   if (current.archivedAt) return { status: 'archived', job: current };
   if (current.status === 'blocked') {
     return {
@@ -2076,13 +2349,11 @@ export async function createGreenfieldJobRunNow(input: {
   const promptSnapshotId = randomUUID();
   const snapshotGroupId = randomUUID();
   const responseGroupId = randomUUID();
-  const userToolPermissions = await listUserToolPermissionsForUser(
-    input.requestedBy,
-  );
   let pendingNotify: PendingOutboxNotify | null = null;
 
-  const result = await withExistingOrNewTransaction(db, async (txSql) => {
-    await txSql`
+  const result = await withTrustedDbWrites(() =>
+    withExistingOrNewTransaction(db, async (txSql) => {
+      await txSql`
       select pg_advisory_xact_lock(
         hashtextextended(
           ${`greenfield-job-run-now:${input.workspaceId}:${input.jobId}`},
@@ -2090,7 +2361,7 @@ export async function createGreenfieldJobRunNow(input: {
         )
       )
     `;
-    const jobRows = await txSql<GreenfieldJobRow[]>`
+      const jobRows = await txSql<GreenfieldJobRow[]>`
       select ${txSql.unsafe(JOB_SELECT)}
       from public.jobs j
       left join public.agents a
@@ -2102,83 +2373,78 @@ export async function createGreenfieldJobRunNow(input: {
       limit 1
       for update of j
     `;
-    const lockedJob = jobRows[0] ? toJob(jobRows[0]) : undefined;
-    if (!lockedJob) return { status: 'not_found' } as const;
-    if (lockedJob.archivedAt) {
-      return { status: 'archived', job: lockedJob } as const;
-    }
-    if (lockedJob.status === 'blocked') {
-      return {
-        status: 'blocked',
-        job: lockedJob,
-        issue: {
-          code:
-            (lockedJob.blockReason as GreenfieldJobDependencyIssue['code']) ??
-            'agent_missing',
-          message: 'The job is blocked and must be fixed before it can run.',
-        },
-      } as const;
-    }
-
-    const lockedScope = normalizeStoredScope(lockedJob.sourceScope);
-    const unsupportedScopeIssue = unsupportedSourceScopeIssue(lockedScope.api);
-    if (unsupportedScopeIssue) {
-      await txSql`
-        update public.jobs
-        set status = 'blocked',
-            block_reason = ${unsupportedScopeIssue.code},
-            next_due_at = null,
-            claimed_at = null,
-            updated_at = now()
-        where workspace_id = ${input.workspaceId}::uuid
-          and talk_id = ${input.talkId}::uuid
-          and id = ${input.jobId}::uuid
-      `;
-      return {
-        status: 'blocked',
-        job: {
-          ...lockedJob,
+      const lockedJob = jobRows[0] ? toJob(jobRows[0]) : undefined;
+      if (!lockedJob) return { status: 'not_found' } as const;
+      if (lockedJob.archivedAt) {
+        return { status: 'archived', job: lockedJob } as const;
+      }
+      if (lockedJob.status === 'blocked') {
+        return {
           status: 'blocked',
-          blockReason: unsupportedScopeIssue.code,
-          nextDueAt: null,
-        },
-        issue: unsupportedScopeIssue,
-      } as const;
-    }
-    const lockedSourceScope = lockedScope.stored;
-    const lockedIssue = await getDependencyIssue({
-      workspaceId: input.workspaceId,
-      talkId: input.talkId,
-      agentId: lockedJob.targetAgentId,
-      sourceScope: lockedSourceScope,
-      emitDocumentAppend: lockedJob.emitDocumentAppend,
-      sql: txSql,
-    });
-    if (lockedIssue) {
-      await txSql`
-        update public.jobs
-        set status = 'blocked',
-            block_reason = ${lockedIssue.code},
-            next_due_at = null,
-            claimed_at = null,
-            updated_at = now()
-        where workspace_id = ${input.workspaceId}::uuid
-          and talk_id = ${input.talkId}::uuid
-          and id = ${input.jobId}::uuid
-      `;
-      return {
-        status: 'blocked',
-        job: {
-          ...lockedJob,
-          status: 'blocked',
-          blockReason: lockedIssue.code,
-          nextDueAt: null,
-        },
-        issue: lockedIssue,
-      } as const;
-    }
+          job: lockedJob,
+          issue: {
+            code:
+              (lockedJob.blockReason as GreenfieldJobDependencyIssue['code']) ??
+              'agent_missing',
+            message: 'The job is blocked and must be fixed before it can run.',
+          },
+        } as const;
+      }
 
-    await txSql`
+      const lockedScope = normalizeStoredScope(lockedJob.sourceScope);
+      const unsupportedScopeIssue = unsupportedSourceScopeIssue(
+        lockedScope.api,
+      );
+      if (unsupportedScopeIssue) {
+        await markGreenfieldJobBlockedOnSql({
+          sql: txSql,
+          workspaceId: input.workspaceId,
+          talkId: input.talkId,
+          jobId: input.jobId,
+          issue: unsupportedScopeIssue,
+        });
+        return {
+          status: 'blocked',
+          job: {
+            ...lockedJob,
+            status: 'blocked',
+            blockReason: unsupportedScopeIssue.code,
+            nextDueAt: null,
+          },
+          issue: unsupportedScopeIssue,
+        } as const;
+      }
+      const lockedSourceScope = lockedScope.stored;
+      const lockedIssue = await getDependencyIssue({
+        workspaceId: input.workspaceId,
+        talkId: input.talkId,
+        createdBy: lockedJob.createdBy,
+        agentId: lockedJob.targetAgentId,
+        sourceScope: lockedSourceScope,
+        emitDocumentAppend: lockedJob.emitDocumentAppend,
+        sql: txSql,
+      });
+      if (lockedIssue) {
+        await markGreenfieldJobBlockedOnSql({
+          sql: txSql,
+          workspaceId: input.workspaceId,
+          talkId: input.talkId,
+          jobId: input.jobId,
+          issue: lockedIssue,
+        });
+        return {
+          status: 'blocked',
+          job: {
+            ...lockedJob,
+            status: 'blocked',
+            blockReason: lockedIssue.code,
+            nextDueAt: null,
+          },
+          issue: lockedIssue,
+        } as const;
+      }
+
+      await txSql`
       select 1
       from public.talks
       where workspace_id = ${input.workspaceId}::uuid
@@ -2186,60 +2452,58 @@ export async function createGreenfieldJobRunNow(input: {
       for update
     `;
 
-    const active = await txSql<{ count: number }[]>`
+      const active = await txSql<{ count: number }[]>`
       select count(*)::int as count
       from public.runs
       where workspace_id = ${input.workspaceId}::uuid
         and job_id = ${input.jobId}::uuid
         and status in ('queued', 'running', 'awaiting')
     `;
-    if ((active[0]?.count ?? 0) > 0) {
-      return { status: 'job_busy', job: lockedJob } as const;
-    }
-    const activeTalkRuns = await txSql<{ count: number }[]>`
+      if ((active[0]?.count ?? 0) > 0) {
+        return { status: 'job_busy', job: lockedJob } as const;
+      }
+      const activeTalkRuns = await txSql<{ count: number }[]>`
       select count(*)::int as count
       from public.runs
       where workspace_id = ${input.workspaceId}::uuid
         and talk_id = ${input.talkId}::uuid
         and status in ('queued', 'running', 'awaiting')
     `;
-    if ((activeTalkRuns[0]?.count ?? 0) > 0) {
-      return { status: 'talk_busy', job: lockedJob } as const;
-    }
+      if ((activeTalkRuns[0]?.count ?? 0) > 0) {
+        return { status: 'talk_busy', job: lockedJob } as const;
+      }
 
-    const roster = await loadRoster({ ...input, sql: txSql });
-    const target = roster.find((agent) => agent.id === lockedJob.targetAgentId);
-    if (!target || !target.provider_id) {
-      const targetIssue: GreenfieldJobDependencyIssue = {
-        code: target ? 'model_disabled' : 'agent_missing',
-        message: target
-          ? 'The selected agent model is not available.'
-          : 'The selected Talk agent is no longer available on this talk.',
-      };
-      await txSql`
-        update public.jobs
-        set status = 'blocked',
-            block_reason = ${targetIssue.code},
-            next_due_at = null,
-            claimed_at = null,
-            updated_at = now()
-        where workspace_id = ${input.workspaceId}::uuid
-          and talk_id = ${input.talkId}::uuid
-          and id = ${input.jobId}::uuid
-      `;
-      return {
-        status: 'blocked',
-        job: {
-          ...lockedJob,
+      const roster = await loadRoster({ ...input, sql: txSql });
+      const target = roster.find(
+        (agent) => agent.id === lockedJob.targetAgentId,
+      );
+      if (!target || !target.provider_id) {
+        const targetIssue: GreenfieldJobDependencyIssue = {
+          code: target ? 'model_disabled' : 'agent_missing',
+          message: target
+            ? 'The selected agent model is not available.'
+            : 'The selected Talk agent is no longer available on this talk.',
+        };
+        await markGreenfieldJobBlockedOnSql({
+          sql: txSql,
+          workspaceId: input.workspaceId,
+          talkId: input.talkId,
+          jobId: input.jobId,
+          issue: targetIssue,
+        });
+        return {
           status: 'blocked',
-          blockReason: targetIssue.code,
-          nextDueAt: null,
-        },
-        issue: targetIssue,
-      } as const;
-    }
+          job: {
+            ...lockedJob,
+            status: 'blocked',
+            blockReason: targetIssue.code,
+            nextDueAt: null,
+          },
+          issue: targetIssue,
+        } as const;
+      }
 
-    const rounds = await txSql<{ round: number }[]>`
+      const rounds = await txSql<{ round: number }[]>`
       select greatest(
         coalesce((
           select max(round)
@@ -2255,32 +2519,45 @@ export async function createGreenfieldJobRunNow(input: {
         ), 0)
       ) + 1 as round
     `;
-    const round = rounds[0]?.round ?? 1;
-    const toolRows = await txSql<TalkToolStateRow[]>`
+      const round = rounds[0]?.round ?? 1;
+      const toolRows = await txSql<TalkToolStateRow[]>`
       select tool_id, enabled
       from public.talk_tools
       where workspace_id = ${input.workspaceId}::uuid
         and talk_id = ${input.talkId}::uuid
     `;
-    const scopedToolRows = filterTalkToolRowsForJobScope(
-      toolRows,
-      lockedSourceScope,
-    );
-    const toolManifest = {
-      active: normalizeTalkToolFamiliesFromRows(scopedToolRows),
-      effectiveTools: buildEffectiveToolsFromTalkToolRows(
-        scopedToolRows,
-        userToolPermissions,
-      ),
-      jobSourceScope: lockedSourceScope,
-    };
+      const scopedToolRows = filterTalkToolRowsForJobScope(
+        toolRows,
+        lockedSourceScope,
+      );
+      const executionUserId = lockedJob.createdBy;
+      const userToolPermissions = await listUserToolPermissionsForUserOnSql(
+        txSql,
+        executionUserId,
+      );
+      const toolManifest = {
+        active: normalizeTalkToolFamiliesFromRows(scopedToolRows),
+        effectiveTools: buildEffectiveToolsFromTalkToolRows(
+          scopedToolRows,
+          userToolPermissions,
+        ),
+        jobSourceScope: lockedSourceScope,
+      };
+      const credentialKindSnapshot = await resolveCredentialKindSnapshot(
+        toCredentialSnapshotAgent(target, executionUserId),
+        {
+          principalUserId: executionUserId,
+          workspaceId: input.workspaceId,
+        },
+        txSql,
+      );
 
-    await withTrustedDbWrites(async () => {
-      const snapshotIds = new Map<string, string>();
-      for (const agent of roster) {
-        const snapshotId = randomUUID();
-        snapshotIds.set(agent.id, snapshotId);
-        await txSql`
+      await withTrustedDbWrites(async () => {
+        const snapshotIds = new Map<string, string>();
+        for (const agent of roster) {
+          const snapshotId = randomUUID();
+          snapshotIds.set(agent.id, snapshotId);
+          await txSql`
         insert into public.talk_agent_snapshots (
           id,
           workspace_id,
@@ -2322,9 +2599,9 @@ export async function createGreenfieldJobRunNow(input: {
           ${agent.created_from_template_version}
         )
       `;
-      }
-      const targetSnapshotId = snapshotIds.get(target.id)!;
-      await txSql`
+        }
+        const targetSnapshotId = snapshotIds.get(target.id)!;
+        await txSql`
       insert into public.runs (
         id,
         workspace_id,
@@ -2352,7 +2629,7 @@ export async function createGreenfieldJobRunNow(input: {
         ${targetSnapshotId}::uuid,
         'queued',
         ${target.model_id},
-        ${input.requestedBy}::uuid,
+        ${executionUserId}::uuid,
         null,
         ${input.jobId}::uuid,
         'manual',
@@ -2362,7 +2639,7 @@ export async function createGreenfieldJobRunNow(input: {
         ${promptSnapshotId}::uuid
       )
     `;
-      await txSql`
+        await txSql`
       insert into public.run_prompt_snapshots (
         id,
         workspace_id,
@@ -2386,45 +2663,54 @@ export async function createGreenfieldJobRunNow(input: {
         ${target.provider_id},
         ${target.created_from_template_version},
         1,
-        ${txSql.json(toolManifest as never)},
+        ${txSql.json({
+          ...toolManifest,
+          agentCredentialMode: credentialKindSnapshot,
+        } as never)},
         ${lockedJob.prompt}
       )
     `;
-    });
-    await txSql`
+      });
+      await txSql`
       update public.talks
       set last_activity_at = now()
       where workspace_id = ${input.workspaceId}::uuid
         and id = ${input.talkId}::uuid
     `;
-    const eventId = await emitOutboxEventOnSql(txSql, {
-      topic: `talk:${input.talkId}`,
-      eventType: 'talk_run_queued',
-      payload: {
-        talkId: input.talkId,
-        threadId: input.talkId,
-        runId,
-        runKind: 'conversation',
-        triggerMessageId: null,
-        targetAgentId: target.id,
-        targetAgentNickname: target.name,
-        responseGroupId,
-        sequenceIndex: 0,
-        status: 'queued',
-        executorAlias: target.name,
-        executorModel: target.model_id,
-        jobId: input.jobId,
-      },
-      ownerIds: [input.requestedBy],
-    });
-    pendingNotify = {
-      topic: `talk:${input.talkId}`,
-      eventId,
-      ownerIds: [input.requestedBy],
-    };
+      const ownerIds = await listWorkspaceNotifyOwnerIdsOnSql({
+        sql: txSql,
+        workspaceId: input.workspaceId,
+        fallbackUserId: input.requestedBy,
+      });
+      const eventId = await emitOutboxEventOnSql(txSql, {
+        topic: `talk:${input.talkId}`,
+        eventType: 'talk_run_queued',
+        payload: {
+          talkId: input.talkId,
+          threadId: input.talkId,
+          runId,
+          runKind: 'conversation',
+          triggerMessageId: null,
+          targetAgentId: target.id,
+          targetAgentNickname: target.name,
+          responseGroupId,
+          sequenceIndex: 0,
+          status: 'queued',
+          executorAlias: target.name,
+          executorModel: target.model_id,
+          jobId: input.jobId,
+        },
+        ownerIds,
+      });
+      pendingNotify = {
+        topic: `talk:${input.talkId}`,
+        eventId,
+        ownerIds,
+      };
 
-    return { status: 'enqueued', job: lockedJob, runId } as const;
-  });
+      return { status: 'enqueued', job: lockedJob, runId } as const;
+    }),
+  );
   if (pendingNotify) enqueueOutboxNotify(pendingNotify);
   if (result.status !== 'enqueued') return result;
 

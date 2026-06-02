@@ -14,6 +14,7 @@ The shipped feature established the real requirements; the redesign keeps these 
 - **Recurring single-agent prompt.** On a schedule, send a fixed prompt to one agent in a Talk and capture its answer. One job kind — not a general workflow engine.
 - **Three schedule shapes that cover the need:** every-N-hours (UTC interval), daily (local wall-clock + time), weekly (weekdays + time). **Timezone-aware, DST-safe** for wall-clock schedules. No raw cron in v1.
 - **Unattended + safe.** Job runs are **read-only by default** — no state or external mutation, web/browser tools off unless explicitly allowed. A scheduled run must not take side-effecting actions on its own.
+- **Document edits are a controlled output path, not a tool escape hatch.** The interactive `apply_content_edit` tool is not registered for scheduler/manual job runs. When job document output is enabled, it must go through the explicit `emit_document_append` executor path described in §3 rather than arbitrary agent tool calls.
 - **Reuse the run pipeline.** A fired job is just a row on the existing queue + executor + event stream — not a parallel execution path.
 - **Self-healing lifecycle.** active / paused / blocked; a job that loses its agent goes `blocked` (not a crash loop); a failed _run_ doesn't break the job — it fires again next time.
 - **Single-flight + no double-fire.** Never run two instances of the same job at once; never fire the same slot twice across scheduler ticks or queue replays.
@@ -54,7 +55,7 @@ When the scheduler inserts a run, it sets every required column per the §3 sche
 
 The `runs` CHECK enforces this contract: `(trigger='user') OR (trigger in ('scheduler','manual') AND job_id is not null AND trigger_message_id is null AND prompt_snapshot_id is not null)`.
 
-The `run_prompt_snapshots` insert is required-column-mapped per `11` §4: `workspace_id = job.workspace_id`, `run_id` (the new run's id), `talk_id = job.talk_id`, `agent_snapshot_id` (the targeted snapshot), `model_id` (from snapshot), `provider = <provider selected for the model>`, `role_template_version = <target agent template version>`, `prompt_assembly_version = 1`, and `prompt_text_redacted = jobs.prompt`. The scheduler also writes `tool_manifest_json` with the frozen, source-scoped effective tool manifest; this is the executor-side enforcement point for the job's read-only `source_scope_json`. Optional provenance fields (`global_policy_version`, `context_manifest_json`, `prompt_hash`) are left NULL by the scheduler; the executor or a follow-up backfill can populate them.
+The `run_prompt_snapshots` insert is required-column-mapped per `11` §4: `workspace_id = job.workspace_id`, `run_id` (the new run's id), `talk_id = job.talk_id`, `agent_snapshot_id` (the targeted snapshot), `model_id` (from snapshot), `provider = <provider selected for the model>`, `role_template_version = <target agent template version>`, `prompt_assembly_version = 1`, and `prompt_text_redacted = jobs.prompt`. The scheduler also writes `tool_manifest_json` with the frozen, source-scoped effective tool manifest plus `agentCredentialMode`; this is the executor-side enforcement point for the job's read-only `source_scope_json` and the targeted agent's credential path. Optional provenance fields (`global_policy_version`, `context_manifest_json`, `prompt_hash`) are left NULL by the scheduler; the executor or a follow-up backfill can populate them.
 
 ---
 
@@ -149,7 +150,7 @@ The scheduler pages due candidate jobs where `status='active' AND archived_at is
    - The agent's `model_id` references an enabled `llm_models` row.
    - If `emit_document_append = true`: `SELECT 1 FROM documents WHERE primary_talk_id = job.talk_id` returns a row.
    - `source_scope_json.allow_web=true` has at least one enabled Talk web-tool row, and every entry in `source_scope_json.tool_ids` has a matching enabled `talk_tools(workspace_id, talk_id, tool_id, enabled=true)` row.
-   - For each tool that the static `tool_id → required_service` catalog (`11` §6) says depends on a connector, the corresponding `connectors(workspace_id, service, authorized=true)` row exists. A tool that's toggled on in `talk_tools` but whose service connector is unauthorized would fail at executor time with no actionable signal; checking it here turns the failure into a deterministic block.
+   - For each tool that the static `tool_id → required_service` catalog (`11` §6) says depends on a connector, the corresponding authorized `connectors` row exists in the job workspace. Google-family tool jobs require `config_json->>'compatSurface'='google_tools'`, a non-null `secret_ref`, and `config_json->>'authorizedByUserId' = jobs.created_by`; the Google credential writer materializes `gdrive` rows for Drive/Docs/Sheets scopes and `gmail` rows for Gmail scopes, backed by the same encrypted token when both services are granted. Resource-catalog rows such as `talk_resource` do not satisfy OAuth authorization. A tool that's toggled on in `talk_tools` but whose connector is unauthorized would fail at executor time with no actionable signal; checking it here turns the failure into a deterministic block. Until the greenfield Gmail runtime ships, `gmail-read` and `gmail-send` are rejected as job source-scope tools instead of being accepted and then disappearing at execution time.
 
    ANY failure → `UPDATE jobs SET status='blocked', block_reason=<the specific reason>, next_due_at=NULL, claimed_at=NULL` + `INSERT INTO home_inbox_items (workspace_id, type, ref_id, ...) VALUES (..., 'job_blocked', NULL, ...)` — both in the SAME transaction. COMMIT. No snapshots, no `runs` row, no queue dispatch. Path A ends for this job. The next tick will see `status='blocked'` and skip claim entirely.
 
@@ -157,9 +158,9 @@ The scheduler pages due candidate jobs where `status='active' AND archived_at is
 
 4. **Pre-generate UUIDs.** `run_id`, `snapshot_id` (for `run_prompt_snapshots`), `snapshot_group_id`, and one `agent_snapshot_id` per agent currently in the Talk's roster.
 5. **Freeze roster.** Read current `talk_agents` for the Talk. For each agent, INSERT a `talk_agent_snapshots` row with the shared `snapshot_group_id`, a unique pre-generated `id`, `source_agent_id = <the live agent's id>`, and the snapshot fields per `11` §4 (role_key, model_id, temperature, persona, focus, name, handle, initials, accent — copied from the live agent). Required before the `runs` INSERT because the `runs(workspace_id, talk_id, snapshot_group_id, agent_snapshot_id)` composite FK is non-deferrable.
-6. *(No explicit `SET CONSTRAINTS ALL DEFERRED` needed — `runs.prompt_snapshot_id` is declared `DEFERRABLE INITIALLY DEFERRED` in §11 §3, so the back-edge already defers per-statement. The earlier draft of this step was a no-op and has been dropped.)*
+6. _(No explicit `SET CONSTRAINTS ALL DEFERRED` needed — `runs.prompt_snapshot_id` is declared `DEFERRABLE INITIALLY DEFERRED` in §11 §3, so the back-edge already defers per-statement. The earlier draft of this step was a no-op and has been dropped.)_
 7. **INSERT `runs`** with the full §2 mapping: `id = run_id`, `prompt_snapshot_id = snapshot_id`, `snapshot_group_id`, `agent_snapshot_id = <targeted snapshot's id>`, `trigger='scheduler'`, `scheduled_for = slot`, `requested_by = jobs.created_by`, `round = max(round)+1 over (talk_id) or 1`, `trigger_message_id = NULL`, `job_id = job.id`, `model_id = <from snapshot>`, `response_group_id = <fresh>`, `sequence_index = 0`, `status = 'queued'`.
-8. **INSERT `run_prompt_snapshots`** with the required column mapping from §2 (workspace_id, run_id, talk_id, agent_snapshot_id, model_id, provider, role_template_version, prompt_assembly_version, prompt_text_redacted = `jobs.prompt`) plus `tool_manifest_json` containing the frozen job source-scope manifest. Other optional provenance fields are left NULL.
+8. **INSERT `run_prompt_snapshots`** with the required column mapping from §2 (workspace_id, run_id, talk_id, agent_snapshot_id, model_id, provider, role_template_version, prompt_assembly_version, prompt_text_redacted = `jobs.prompt`) plus `tool_manifest_json` containing the frozen job source-scope manifest and `agentCredentialMode`. Other optional provenance fields are left NULL.
 9. **UPDATE `jobs`** set `next_due_at = <advance(slot)>`, `claimed_at = NULL`. Do NOT touch `last_run_status` here — bookkeeping is terminal-only (see §6).
 10. **COMMIT.** The deferred FK on `runs.prompt_snapshot_id` validates now that the snapshot row exists.
 11. **Dispatch to queue** (`TALK_RUN_QUEUE.send({ runId })`) OUTSIDE the job transaction as soon as that committed run returns from the claim step. This keeps already committed runs from waiting behind later candidate-page failures. If dispatch fails or the worker crashes between commit and dispatch, the existing stuck-`queued` sweep (Path B) re-dispatches the orphan run.
@@ -241,7 +242,7 @@ A dedicated route (`POST /api/v1/talks/{talkId}/jobs/{jobId}/run-now`) creates a
 
 - `trigger = 'manual'`, `scheduled_for = NULL` (manual runs don't claim a slot — the scheduler doesn't fire them).
 - `prompt_snapshot_id` is a fresh snapshot of the current `jobs.prompt` at run-now time (same path as scheduler, different trigger value).
-- `requested_by = <the calling user>` (not `jobs.created_by` — manual runs are real human triggers).
+- `requested_by = jobs.created_by`, same as scheduler runs, because the job creator is the execution principal whose Google tool credentials and frozen tool permissions are evaluated. The calling user must be `jobs.created_by`; workspace admins may create their own jobs in editable Talks but cannot trigger another user's credential principal.
 - `round = max(round)+1 over (talk_id)`.
 - `runs_one_active_per_job` enforces single-flight: if a non-terminal run already exists, the route returns 409 busy without creating a second run.
 - Allowed when `status in ('active','paused')`; rejected (400) when `status = 'blocked'` (fix the dep first).
@@ -254,7 +255,7 @@ A dedicated route (`POST /api/v1/talks/{talkId}/jobs/{jobId}/run-now`) creates a
 
 ### Permissions
 
-Jobs are managed by workspace members on the Talk: create / edit / pause / archive / manual run-now. RLS scopes by workspace membership like every other workspace-owned resource. The scheduler runs with service-role auth (no `auth.uid()`); accessors scope explicitly by `workspace_id`.
+Jobs are managed by Talk job editors: workspace owners/admins and the Talk creator can create, edit, pause, resume, and archive schedules. Manual run-now is narrower: only `jobs.created_by` can fire it, because the run executes as that creator's credential principal. RLS scopes by workspace membership like every other workspace-owned resource. The scheduler runs with service-role auth (no `auth.uid()`); accessors scope explicitly by `workspace_id`.
 
 ---
 

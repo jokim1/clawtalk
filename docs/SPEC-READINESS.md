@@ -1,7 +1,7 @@
 > **Status:** active · **Generated:** 2026-05-29 · **Last updated:** 2026-05-30 (design-debt resolution pass)
 > Every spec-readiness gap found in the 2026-05-29 audit (8 parallel cross-doc audits + DOC-AUDIT.md closure check). Stable IDs so we can walk through them one-by-one.
 >
-> **Verdict (post-design-debt-pass 2026-05-30): READY — VERIFIED + DESIGN-DEBT RESOLVED + SCHEMA REFERENCE WRITTEN.** All P0 + all P1 + the 10 design-debt items resolved. The greenfield schema SQL is written and locally validated; it lives at [`docs/canonical-greenfield-migration.sql`](./canonical-greenfield-migration.sql) as a docs-side reference. The implementation branch converts it into a fresh active baseline at `supabase/migrations/0001_clawtalk_greenfield.sql`, removes or archives the old active migration stream, and resets/recreates Supabase. PRs #499 + #501 used `0037` + `0038` historically, but implementation does not layer a `0040+` migration over disposable data. See [REFACTOR-OVERVIEW.md §14](./REFACTOR-OVERVIEW.md) for the cutover strategy.
+> **Verdict (post-design-debt-pass 2026-05-30; implementation-note updated 2026-06-01): READY — VERIFIED + DESIGN-DEBT RESOLVED + SCHEMA REFERENCE WRITTEN.** All P0 + all P1 + the 10 design-debt items resolved. The original greenfield schema SQL was parked at [`docs/canonical-greenfield-migration.sql`](./canonical-greenfield-migration.sql) as a docs-side draft; that file is now a non-executable historical pointer. The implementation branch's single executable baseline is `supabase/migrations/0001_clawtalk_greenfield.sql`; it removes or archives the old active migration stream and resets/recreates Supabase. PRs #499 + #501 used `0037` + `0038` historically, but implementation does not layer a `0040+` migration over disposable data. See [REFACTOR-OVERVIEW.md §14](./REFACTOR-OVERVIEW.md) for the cutover strategy.
 >
 > **2026-05-30 note:** this is now a historical gap log, not the current implementation-readiness document. For the live codebase audit, test results, and cutover recommendation, use [IMPLEMENTATION-READINESS.md](./IMPLEMENTATION-READINESS.md). Some older body entries intentionally remain as audit trail even where later passes closed or accepted them.
 >
@@ -37,7 +37,7 @@
 | README / roadmap / SECURITY | 3 | **3** ✅ | 2 | **2** ✅ | 0 |
 | **TOTAL** | **~38** | **~38 closed** | **~72** | **~68 closed (~4 accept-as-design / covered cross-doc)** | **~37 remaining** |
 
-**Verdict:** All P0 + all P1 gaps closed across the spec corpus. Remaining ~37 P2s are cosmetic — ID prefix tables, idempotency-key endpoint annotations, audit-events §08 surface, GLOSSARY collapse cleanups, etc. None block starting the implementation cutover. The implementation branch should create a fresh active baseline at `supabase/migrations/0001_clawtalk_greenfield.sql` from `docs/canonical-greenfield-migration.sql` + `11-data-model.md`, then reset/recreate Supabase instead of applying a chain of compatibility migrations.
+**Verdict:** All P0 + all P1 gaps closed across the spec corpus. Remaining ~37 P2s are cosmetic — ID prefix tables, idempotency-key endpoint annotations, audit-events §08 surface, GLOSSARY collapse cleanups, etc. None block starting the implementation cutover. The implementation branch should keep a fresh active baseline at `supabase/migrations/0001_clawtalk_greenfield.sql` aligned with `11-data-model.md`, then reset/recreate Supabase instead of applying a chain of compatibility migrations.
 
 ---
 

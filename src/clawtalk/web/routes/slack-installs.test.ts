@@ -35,6 +35,14 @@ vi.mock('../../db/slack-installs-accessors.js', () => ({
   listWorkspaceSlackInstalls: vi.fn(),
 }));
 
+vi.mock('../../workspaces/accessors.js', () => ({
+  resolveWorkspaceForUser: vi.fn(),
+}));
+
+vi.mock('../../workspaces/bootstrap.js', () => ({
+  ensureWorkspaceBootstrapForUser: vi.fn(),
+}));
+
 import {
   deleteWorkspaceSlackInstallRoute,
   handleSlackCallback,
@@ -50,6 +58,8 @@ import {
   deleteWorkspaceSlackInstall,
   listWorkspaceSlackInstalls,
 } from '../../db/slack-installs-accessors.js';
+import { resolveWorkspaceForUser } from '../../workspaces/accessors.js';
+import { ensureWorkspaceBootstrapForUser } from '../../workspaces/bootstrap.js';
 import type { AuthContext } from '../types.js';
 
 const ADMIN_AUTH: AuthContext = {
@@ -64,16 +74,36 @@ const MEMBER_AUTH: AuthContext = {
   role: 'member',
 };
 
+const REQUESTED_WORKSPACE_ID = '22222222-2222-4222-8222-222222222222';
+const FOREIGN_WORKSPACE_ID = '33333333-3333-4333-8333-333333333333';
+
 const startMock = vi.mocked(startSlackInstall);
 const completeMock = vi.mocked(completeSlackInstallCallback);
 const listMock = vi.mocked(listWorkspaceSlackInstalls);
 const deleteMock = vi.mocked(deleteWorkspaceSlackInstall);
+const resolveWorkspaceMock = vi.mocked(resolveWorkspaceForUser);
+const bootstrapMock = vi.mocked(ensureWorkspaceBootstrapForUser);
+
+function mockWorkspace(role: 'owner' | 'admin' | 'member' | 'guest' = 'owner') {
+  resolveWorkspaceMock.mockImplementation(async ({ requestedWorkspaceId }) => ({
+    id: requestedWorkspaceId ?? 'workspace-1',
+    name: 'Workspace',
+    role,
+    initials: 'WO',
+    created_at: '2026-05-24T00:00:00Z',
+    updated_at: '2026-05-24T00:00:00Z',
+  }));
+}
 
 beforeEach(() => {
   startMock.mockReset();
   completeMock.mockReset();
   listMock.mockReset();
   deleteMock.mockReset();
+  resolveWorkspaceMock.mockReset();
+  bootstrapMock.mockReset();
+  bootstrapMock.mockResolvedValue('workspace-1');
+  mockWorkspace();
 });
 
 afterEach(() => {
@@ -81,6 +111,8 @@ afterEach(() => {
   completeMock.mockReset();
   listMock.mockReset();
   deleteMock.mockReset();
+  resolveWorkspaceMock.mockReset();
+  bootstrapMock.mockReset();
 });
 
 describe('htmlSafeJson (XSS regression guard)', () => {
@@ -150,6 +182,7 @@ describe('handleSlackCallback', () => {
 
 describe('admin gating', () => {
   it('startSlackInstallRoute returns 403 for non-admins', async () => {
+    mockWorkspace('member');
     const result = await startSlackInstallRoute(MEMBER_AUTH, {});
     expect(result.statusCode).toBe(403);
     expect(result.body.ok).toBe(false);
@@ -157,6 +190,7 @@ describe('admin gating', () => {
   });
 
   it('deleteWorkspaceSlackInstallRoute returns 403 for non-admins', async () => {
+    mockWorkspace('member');
     const result = await deleteWorkspaceSlackInstallRoute({
       auth: MEMBER_AUTH,
       teamId: 'T01',
@@ -168,6 +202,8 @@ describe('admin gating', () => {
   it('listWorkspaceSlackInstallsRoute returns the installs for any authed user', async () => {
     listMock.mockResolvedValueOnce([
       {
+        id: 'install-1',
+        workspace_id: 'workspace-1',
         team_id: 'T01',
         team_name: 'Eng',
         bot_user_id: 'U1',
@@ -189,6 +225,64 @@ describe('admin gating', () => {
       teamName: 'Eng',
       boundChannelCount: 0,
     });
+    expect(listMock).toHaveBeenCalledWith({ workspaceId: 'workspace-1' });
+  });
+
+  it('returns 403 when a requested workspace is not available', async () => {
+    resolveWorkspaceMock.mockResolvedValueOnce(undefined);
+    const result = await listWorkspaceSlackInstallsRoute(
+      MEMBER_AUTH,
+      FOREIGN_WORKSPACE_ID,
+    );
+
+    expect(result.statusCode).toBe(403);
+    if (result.body.ok) throw new Error('expected error');
+    expect(result.body.error.code).toBe('workspace_forbidden');
+    expect(listMock).not.toHaveBeenCalled();
+  });
+
+  it('rejects malformed requested workspace IDs before resolution', async () => {
+    const result = await listWorkspaceSlackInstallsRoute(
+      MEMBER_AUTH,
+      'not-a-uuid',
+    );
+
+    expect(result.statusCode).toBe(400);
+    if (result.body.ok) throw new Error('expected error');
+    expect(result.body.error.code).toBe('invalid_workspace_id');
+    expect(bootstrapMock).not.toHaveBeenCalled();
+    expect(resolveWorkspaceMock).not.toHaveBeenCalled();
+    expect(listMock).not.toHaveBeenCalled();
+  });
+
+  it('returns 404 when the user has no workspace', async () => {
+    resolveWorkspaceMock.mockResolvedValueOnce(undefined);
+    const result = await listWorkspaceSlackInstallsRoute(MEMBER_AUTH);
+
+    expect(result.statusCode).toBe(404);
+    if (result.body.ok) throw new Error('expected error');
+    expect(result.body.error.code).toBe('workspace_not_found');
+    expect(listMock).not.toHaveBeenCalled();
+  });
+
+  it('startSlackInstallRoute uses the requested workspace', async () => {
+    startMock.mockResolvedValueOnce({
+      authorizationUrl: 'https://slack.example/install',
+      expiresInSec: 600,
+    });
+    const result = await startSlackInstallRoute(
+      ADMIN_AUTH,
+      { returnTo: '/settings' },
+      REQUESTED_WORKSPACE_ID,
+    );
+    expect(result.statusCode).toBe(200);
+    expect(startMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        workspaceId: REQUESTED_WORKSPACE_ID,
+        userId: ADMIN_AUTH.userId,
+        returnTo: '/settings',
+      }),
+    );
   });
 });
 
@@ -211,6 +305,8 @@ describe('deleteWorkspaceSlackInstallRoute', () => {
     expect(result.statusCode).toBe(200);
     if (!result.body.ok) throw new Error('expected ok');
     expect(result.body.data.deleted).toBe(true);
-    expect(deleteMock).toHaveBeenCalledWith('T01');
+    expect(deleteMock).toHaveBeenCalledWith('T01', {
+      workspaceId: 'workspace-1',
+    });
   });
 });

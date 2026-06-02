@@ -1,6 +1,18 @@
 import { describe, expect, it } from 'vitest';
 
-import { buildModelSuggestions } from './ai-agents.js';
+import type { AuthContext } from '../types.js';
+import {
+  buildModelSuggestions,
+  putAiProviderCredentialRoute,
+  verifyAiProviderCredentialRoute,
+} from './ai-agents.js';
+
+const AUTH: AuthContext = {
+  sessionId: 'ai-agents-credentials-test-session',
+  userId: '0c949494-dddd-dddd-dddd-dddddddddddd',
+  role: 'owner',
+  authType: 'bearer',
+};
 
 const curatedNvidia = [
   {
@@ -75,5 +87,42 @@ describe('buildModelSuggestions', () => {
       message: 'transient',
     });
     expect(out.map((m) => m.modelId)).toEqual(['moonshotai/kimi-k2.6']);
+  });
+});
+
+describe('AI provider credential route scoping', () => {
+  it('requires an explicit workspace for workspace-scoped API key writes', async () => {
+    const result = await putAiProviderCredentialRoute(
+      AUTH,
+      'provider.anthropic',
+      {
+        scope: 'workspace',
+        apiKey: 'sk-test',
+      },
+      null,
+    );
+
+    expect(result.statusCode).toBe(400);
+    expect(result.body.ok ? null : result.body.error).toMatchObject({
+      code: 'workspace_scope_required',
+      message:
+        'workspaceId is required for workspace-scoped provider credentials.',
+    });
+  });
+
+  it('requires an explicit workspace for workspace-scoped verification', async () => {
+    const result = await verifyAiProviderCredentialRoute(
+      AUTH,
+      'provider.anthropic',
+      'workspace',
+      null,
+    );
+
+    expect(result.statusCode).toBe(400);
+    expect(result.body.ok ? null : result.body.error).toMatchObject({
+      code: 'workspace_scope_required',
+      message:
+        'workspaceId is required for workspace-scoped provider credentials.',
+    });
   });
 });

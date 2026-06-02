@@ -38,7 +38,8 @@
 //                                         compatibility surface
 //   /api/v1/talks/:talkId/jobs[/...]    — greenfield-api.ts compatibility
 //                                         routes over jobs/runs
-//   /api/v1/talks/:talkId/attachments[/...] — talk-attachments.ts
+//   /api/v1/talks/:talkId/attachments[/...] — unavailable until greenfield
+//                                         attachment storage lands
 //   /api/v1/talks/:talkId/threads[/...]     — talk-threads.ts (list +
 //                                         create + PATCH + DELETE)
 //   /api/v1/threads/:threadId/content
@@ -58,8 +59,7 @@
 //                                         polls and bails.
 //
 // NOT mounted (chassis-removed; will not return):
-//   /api/v1/main/*, /api/v1/browser/*, /api/v1/data-connectors/*,
-//   /api/v1/channel-connectors/*, /api/v1/channel-connections/*
+//   legacy main/browser route families and legacy connector route families.
 //
 // The 501 catch-all at the bottom of buildApp() now only fires for
 // routes in the not-yet-mounted bucket (above) plus genuinely
@@ -133,17 +133,14 @@ import {
   pollOpenAiCodexOauthRoute,
 } from './routes/agent-oauth.js';
 import { mountGreenfieldApiRoutes } from './routes/greenfield-api.js';
+import { reorderGreenfieldTalkSidebarRoute } from './routes/greenfield-core.js';
+import { getGreenfieldRunContextRoute } from './routes/greenfield-detail.js';
 import {
   deleteWebSearchCredentialRoute,
   listWebSearchProvidersRoute,
   putWebSearchActiveProviderRoute,
   putWebSearchCredentialRoute,
 } from './routes/web-search.js';
-import {
-  getTalkAttachmentContentRoute,
-  listTalkAttachmentsRoute,
-  uploadTalkAttachmentRoute,
-} from './routes/talk-attachments.js';
 import {
   disconnectGoogleAccountRoute,
   expandScopesRoute,
@@ -167,10 +164,6 @@ import {
   deleteTalkResourceRoute,
   listTalkResourcesRoute,
 } from './routes/talk-resources.js';
-import {
-  getTalkRunContextRoute,
-  reorderTalkSidebarRoute,
-} from './routes/talks.js';
 import {
   getEffectiveToolsRoute,
   listUserToolPermissionsRoute,
@@ -323,7 +316,7 @@ function buildApp(): Hono<{ Variables: Variables }> {
     const auth = c.get('auth');
     const rl = checkRateLimit({ principalId: auth.userId, bucket: 'read' });
     if (!rl.allowed) return rateLimitedResponse(c, rl);
-    const result = await getAiAgentsRoute(auth);
+    const result = await getAiAgentsRoute(auth, requestedWorkspaceId(c));
     return jsonResponse(result);
   });
 
@@ -334,7 +327,11 @@ function buildApp(): Hono<{ Variables: Variables }> {
     const csrfFail = checkCsrf(c, auth);
     if (csrfFail) return csrfFail;
     const body = await c.req.json().catch(() => ({}));
-    const result = await updateDefaultClaudeModelRoute(auth, body);
+    const result = await updateDefaultClaudeModelRoute(
+      auth,
+      body,
+      requestedWorkspaceId(c),
+    );
     return jsonResponse(result);
   });
 
@@ -349,6 +346,7 @@ function buildApp(): Hono<{ Variables: Variables }> {
       auth,
       c.req.param('providerId'),
       body,
+      requestedWorkspaceId(c),
     );
     return jsonResponse(result);
   });
@@ -364,6 +362,7 @@ function buildApp(): Hono<{ Variables: Variables }> {
       auth,
       c.req.param('providerId'),
       scope,
+      requestedWorkspaceId(c),
     );
     return jsonResponse(result);
   });
@@ -373,7 +372,10 @@ function buildApp(): Hono<{ Variables: Variables }> {
     const auth = c.get('auth');
     const rl = checkRateLimit({ principalId: auth.userId, bucket: 'read' });
     if (!rl.allowed) return rateLimitedResponse(c, rl);
-    const result = await listWorkspaceChannelsRoute(auth);
+    const result = await listWorkspaceChannelsRoute(
+      auth,
+      requestedWorkspaceId(c),
+    );
     return jsonResponse(result);
   });
 
@@ -387,6 +389,7 @@ function buildApp(): Hono<{ Variables: Variables }> {
     if (!payload.ok) return invalidJsonResponse(c, payload.error);
     const result = await createWorkspaceChannelRoute({
       auth,
+      requestedWorkspaceId: requestedWorkspaceId(c),
       body: payload.data as any,
     });
     return jsonResponse(result);
@@ -402,6 +405,7 @@ function buildApp(): Hono<{ Variables: Variables }> {
     if (!payload.ok) return invalidJsonResponse(c, payload.error);
     const result = await updateWorkspaceChannelRoute({
       auth,
+      requestedWorkspaceId: requestedWorkspaceId(c),
       channelId: c.req.param('channelId'),
       body: payload.data as any,
     });
@@ -416,6 +420,7 @@ function buildApp(): Hono<{ Variables: Variables }> {
     if (csrfFail) return csrfFail;
     const result = await deleteWorkspaceChannelRoute({
       auth,
+      requestedWorkspaceId: requestedWorkspaceId(c),
       channelId: c.req.param('channelId'),
     });
     return jsonResponse(result);
@@ -431,6 +436,7 @@ function buildApp(): Hono<{ Variables: Variables }> {
     if (!payload.ok) return invalidJsonResponse(c, payload.error);
     const result = await setWorkspaceChannelCredentialRoute({
       auth,
+      requestedWorkspaceId: requestedWorkspaceId(c),
       channelId: c.req.param('channelId'),
       body: payload.data as any,
     });
@@ -442,7 +448,10 @@ function buildApp(): Hono<{ Variables: Variables }> {
     const auth = c.get('auth');
     const rl = checkRateLimit({ principalId: auth.userId, bucket: 'read' });
     if (!rl.allowed) return rateLimitedResponse(c, rl);
-    const result = await listWorkspaceDataConnectorsRoute(auth);
+    const result = await listWorkspaceDataConnectorsRoute(
+      auth,
+      requestedWorkspaceId(c),
+    );
     return jsonResponse(result);
   });
 
@@ -456,6 +465,7 @@ function buildApp(): Hono<{ Variables: Variables }> {
     if (!payload.ok) return invalidJsonResponse(c, payload.error);
     const result = await createWorkspaceDataConnectorRoute({
       auth,
+      requestedWorkspaceId: requestedWorkspaceId(c),
       body: payload.data as any,
     });
     return jsonResponse(result);
@@ -471,6 +481,7 @@ function buildApp(): Hono<{ Variables: Variables }> {
     if (!payload.ok) return invalidJsonResponse(c, payload.error);
     const result = await updateWorkspaceDataConnectorRoute({
       auth,
+      requestedWorkspaceId: requestedWorkspaceId(c),
       connectorId: c.req.param('connectorId'),
       body: payload.data as any,
     });
@@ -485,6 +496,7 @@ function buildApp(): Hono<{ Variables: Variables }> {
     if (csrfFail) return csrfFail;
     const result = await deleteWorkspaceDataConnectorRoute({
       auth,
+      requestedWorkspaceId: requestedWorkspaceId(c),
       connectorId: c.req.param('connectorId'),
     });
     return jsonResponse(result);
@@ -502,6 +514,7 @@ function buildApp(): Hono<{ Variables: Variables }> {
       if (!payload.ok) return invalidJsonResponse(c, payload.error);
       const result = await setWorkspaceDataConnectorCredentialRoute({
         auth,
+        requestedWorkspaceId: requestedWorkspaceId(c),
         connectorId: c.req.param('connectorId'),
         body: payload.data as any,
       });
@@ -521,7 +534,7 @@ function buildApp(): Hono<{ Variables: Variables }> {
     return jsonResponse(result);
   });
 
-  app.put('/api/v1/talks/:talkId/channels/:channelId', async (c) => {
+  app.put('/api/v1/talks/:talkId/connectors/channels/:channelId', async (c) => {
     const auth = c.get('auth');
     const rl = checkRateLimit({ principalId: auth.userId, bucket: 'write' });
     if (!rl.allowed) return rateLimitedResponse(c, rl);
@@ -535,36 +548,42 @@ function buildApp(): Hono<{ Variables: Variables }> {
     return jsonResponse(result);
   });
 
-  app.delete('/api/v1/talks/:talkId/channels/:channelId', async (c) => {
-    const auth = c.get('auth');
-    const rl = checkRateLimit({ principalId: auth.userId, bucket: 'write' });
-    if (!rl.allowed) return rateLimitedResponse(c, rl);
-    const csrfFail = checkCsrf(c, auth);
-    if (csrfFail) return csrfFail;
-    const result = await deleteTalkChannelLinkRoute({
-      auth,
-      talkId: c.req.param('talkId'),
-      channelId: c.req.param('channelId'),
-    });
-    return jsonResponse(result);
-  });
+  app.delete(
+    '/api/v1/talks/:talkId/connectors/channels/:channelId',
+    async (c) => {
+      const auth = c.get('auth');
+      const rl = checkRateLimit({ principalId: auth.userId, bucket: 'write' });
+      if (!rl.allowed) return rateLimitedResponse(c, rl);
+      const csrfFail = checkCsrf(c, auth);
+      if (csrfFail) return csrfFail;
+      const result = await deleteTalkChannelLinkRoute({
+        auth,
+        talkId: c.req.param('talkId'),
+        channelId: c.req.param('channelId'),
+      });
+      return jsonResponse(result);
+    },
+  );
 
-  app.put('/api/v1/talks/:talkId/data-connectors/:connectorId', async (c) => {
-    const auth = c.get('auth');
-    const rl = checkRateLimit({ principalId: auth.userId, bucket: 'write' });
-    if (!rl.allowed) return rateLimitedResponse(c, rl);
-    const csrfFail = checkCsrf(c, auth);
-    if (csrfFail) return csrfFail;
-    const result = await setTalkDataConnectorLinkRoute({
-      auth,
-      talkId: c.req.param('talkId'),
-      connectorId: c.req.param('connectorId'),
-    });
-    return jsonResponse(result);
-  });
+  app.put(
+    '/api/v1/talks/:talkId/connectors/data-connectors/:connectorId',
+    async (c) => {
+      const auth = c.get('auth');
+      const rl = checkRateLimit({ principalId: auth.userId, bucket: 'write' });
+      if (!rl.allowed) return rateLimitedResponse(c, rl);
+      const csrfFail = checkCsrf(c, auth);
+      if (csrfFail) return csrfFail;
+      const result = await setTalkDataConnectorLinkRoute({
+        auth,
+        talkId: c.req.param('talkId'),
+        connectorId: c.req.param('connectorId'),
+      });
+      return jsonResponse(result);
+    },
+  );
 
   app.delete(
-    '/api/v1/talks/:talkId/data-connectors/:connectorId',
+    '/api/v1/talks/:talkId/connectors/data-connectors/:connectorId',
     async (c) => {
       const auth = c.get('auth');
       const rl = checkRateLimit({ principalId: auth.userId, bucket: 'write' });
@@ -633,7 +652,10 @@ function buildApp(): Hono<{ Variables: Variables }> {
     const auth = c.get('auth');
     const rl = checkRateLimit({ principalId: auth.userId, bucket: 'read' });
     if (!rl.allowed) return rateLimitedResponse(c, rl);
-    const result = await getUserGoogleAccountRoute(auth);
+    const result = await getUserGoogleAccountRoute(
+      auth,
+      requestedWorkspaceId(c),
+    );
     return jsonResponse(result);
   });
 
@@ -647,7 +669,7 @@ function buildApp(): Hono<{ Variables: Variables }> {
     const csrfFail = checkCsrf(c, auth);
     if (csrfFail) return csrfFail;
     const body = await c.req.json().catch(() => ({}));
-    const result = await startConnectRoute(auth, body);
+    const result = await startConnectRoute(auth, body, requestedWorkspaceId(c));
     return jsonResponse(result);
   });
 
@@ -661,7 +683,7 @@ function buildApp(): Hono<{ Variables: Variables }> {
     const csrfFail = checkCsrf(c, auth);
     if (csrfFail) return csrfFail;
     const body = await c.req.json().catch(() => ({}));
-    const result = await expandScopesRoute(auth, body);
+    const result = await expandScopesRoute(auth, body, requestedWorkspaceId(c));
     return jsonResponse(result);
   });
 
@@ -671,7 +693,10 @@ function buildApp(): Hono<{ Variables: Variables }> {
     if (!rl.allowed) return rateLimitedResponse(c, rl);
     const csrfFail = checkCsrf(c, auth);
     if (csrfFail) return csrfFail;
-    const result = await disconnectGoogleAccountRoute(auth);
+    const result = await disconnectGoogleAccountRoute(
+      auth,
+      requestedWorkspaceId(c),
+    );
     return jsonResponse(result);
   });
 
@@ -682,7 +707,11 @@ function buildApp(): Hono<{ Variables: Variables }> {
     const auth = c.get('auth');
     const rl = checkRateLimit({ principalId: auth.userId, bucket: 'read' });
     if (!rl.allowed) return rateLimitedResponse(c, rl);
-    const result = await getGooglePickerTokenRoute(auth);
+    const result = await getGooglePickerTokenRoute(
+      auth,
+      requestedWorkspaceId(c),
+      c.req.query('talkId') ?? null,
+    );
     return jsonResponse(result);
   });
 
@@ -691,7 +720,10 @@ function buildApp(): Hono<{ Variables: Variables }> {
     const auth = c.get('auth');
     const rl = checkRateLimit({ principalId: auth.userId, bucket: 'read' });
     if (!rl.allowed) return rateLimitedResponse(c, rl);
-    const result = await listWorkspaceSlackInstallsRoute(auth);
+    const result = await listWorkspaceSlackInstallsRoute(
+      auth,
+      requestedWorkspaceId(c),
+    );
     return jsonResponse(result);
   });
 
@@ -705,7 +737,11 @@ function buildApp(): Hono<{ Variables: Variables }> {
     const csrfFail = checkCsrf(c, auth);
     if (csrfFail) return csrfFail;
     const body = await c.req.json().catch(() => ({}));
-    const result = await startSlackInstallRoute(auth, body);
+    const result = await startSlackInstallRoute(
+      auth,
+      body,
+      requestedWorkspaceId(c),
+    );
     return jsonResponse(result);
   });
 
@@ -720,6 +756,7 @@ function buildApp(): Hono<{ Variables: Variables }> {
       const result = await deleteWorkspaceSlackInstallRoute({
         auth,
         teamId: c.req.param('teamId'),
+        requestedWorkspaceId: requestedWorkspaceId(c),
       });
       return jsonResponse(result);
     },
@@ -735,6 +772,7 @@ function buildApp(): Hono<{ Variables: Variables }> {
       const result = await listSlackInstallChannelsRoute({
         auth,
         teamId: c.req.param('teamId'),
+        requestedWorkspaceId: requestedWorkspaceId(c),
       });
       return jsonResponse(result);
     },
@@ -753,6 +791,7 @@ function buildApp(): Hono<{ Variables: Variables }> {
         auth,
         teamId: c.req.param('teamId'),
         body,
+        requestedWorkspaceId: requestedWorkspaceId(c),
       });
       return jsonResponse(result);
     },
@@ -873,7 +912,10 @@ function buildApp(): Hono<{ Variables: Variables }> {
     const auth = c.get('auth');
     const rl = checkRateLimit({ principalId: auth.userId, bucket: 'read' });
     if (!rl.allowed) return rateLimitedResponse(c, rl);
-    const result = await listRegisteredAgentsRoute(auth);
+    const result = await listRegisteredAgentsRoute(
+      auth,
+      requestedWorkspaceId(c),
+    );
     return jsonResponse(result);
   });
 
@@ -881,7 +923,7 @@ function buildApp(): Hono<{ Variables: Variables }> {
     const auth = c.get('auth');
     const rl = checkRateLimit({ principalId: auth.userId, bucket: 'read' });
     if (!rl.allowed) return rateLimitedResponse(c, rl);
-    const result = await getMainAgentRoute(auth);
+    const result = await getMainAgentRoute(auth, requestedWorkspaceId(c));
     return jsonResponse(result);
   });
 
@@ -892,7 +934,11 @@ function buildApp(): Hono<{ Variables: Variables }> {
     const csrfFail = checkCsrf(c, auth);
     if (csrfFail) return csrfFail;
     const body = await c.req.json().catch(() => null);
-    const result = await updateMainAgentRoute(auth, body);
+    const result = await updateMainAgentRoute(
+      auth,
+      body,
+      requestedWorkspaceId(c),
+    );
     return jsonResponse(result);
   });
 
@@ -900,7 +946,11 @@ function buildApp(): Hono<{ Variables: Variables }> {
     const auth = c.get('auth');
     const rl = checkRateLimit({ principalId: auth.userId, bucket: 'read' });
     if (!rl.allowed) return rateLimitedResponse(c, rl);
-    const result = await getAgentRoute(auth, c.req.param('agentId'));
+    const result = await getAgentRoute(
+      auth,
+      c.req.param('agentId'),
+      requestedWorkspaceId(c),
+    );
     return jsonResponse(result);
   });
 
@@ -912,7 +962,11 @@ function buildApp(): Hono<{ Variables: Variables }> {
     if (csrfFail) return csrfFail;
     const payload = await readJsonBody(c);
     if (!payload.ok) return invalidJsonResponse(c, payload.error);
-    const result = await createAgentRoute(auth, payload.data as any);
+    const result = await createAgentRoute(
+      auth,
+      payload.data as any,
+      requestedWorkspaceId(c),
+    );
     return jsonResponse(result);
   });
 
@@ -928,6 +982,7 @@ function buildApp(): Hono<{ Variables: Variables }> {
       auth,
       c.req.param('agentId'),
       payload.data as any,
+      requestedWorkspaceId(c),
     );
     return jsonResponse(result);
   });
@@ -938,7 +993,11 @@ function buildApp(): Hono<{ Variables: Variables }> {
     if (!rl.allowed) return rateLimitedResponse(c, rl);
     const csrfFail = checkCsrf(c, auth);
     if (csrfFail) return csrfFail;
-    const result = await deleteAgentRoute(auth, c.req.param('agentId'));
+    const result = await deleteAgentRoute(
+      auth,
+      c.req.param('agentId'),
+      requestedWorkspaceId(c),
+    );
     return jsonResponse(result);
   });
 
@@ -953,6 +1012,7 @@ function buildApp(): Hono<{ Variables: Variables }> {
       const result = await dismissAgentModelUpgradeRoute(
         auth,
         c.req.param('agentId'),
+        requestedWorkspaceId(c),
       );
       return jsonResponse(result);
     },
@@ -962,7 +1022,11 @@ function buildApp(): Hono<{ Variables: Variables }> {
     const auth = c.get('auth');
     const rl = checkRateLimit({ principalId: auth.userId, bucket: 'read' });
     if (!rl.allowed) return rateLimitedResponse(c, rl);
-    const result = await getAgentFallbackRoute(auth, c.req.param('agentId'));
+    const result = await getAgentFallbackRoute(
+      auth,
+      c.req.param('agentId'),
+      requestedWorkspaceId(c),
+    );
     return jsonResponse(result);
   });
 
@@ -978,6 +1042,7 @@ function buildApp(): Hono<{ Variables: Variables }> {
       auth,
       c.req.param('agentId'),
       payload.data as any,
+      requestedWorkspaceId(c),
     );
     return jsonResponse(result);
   });
@@ -1014,7 +1079,7 @@ function buildApp(): Hono<{ Variables: Variables }> {
     return jsonResponse(result);
   });
 
-  // ── talks.ts: legacy sidebar reorder ─────────────────────────
+  // ── greenfield-core.ts: sidebar reorder ──────────────────────
   app.post('/api/v1/talks/sidebar/reorder', async (c) => {
     const auth = c.get('auth');
     const rl = checkRateLimit({ userId: auth.userId, bucket: 'write' });
@@ -1028,70 +1093,9 @@ function buildApp(): Hono<{ Variables: Variables }> {
       destinationIndex?: number;
     }>(c);
     if (!payload.ok) return invalidJsonResponse(c, payload.error);
-    if (
-      payload.data.itemType !== 'talk' &&
-      payload.data.itemType !== 'folder'
-    ) {
-      return c.json(
-        {
-          ok: false,
-          error: {
-            code: 'invalid_sidebar_reorder',
-            message: 'Item type must be talk or folder',
-          },
-        },
-        400,
-      );
-    }
-    if (
-      typeof payload.data.itemId !== 'string' ||
-      payload.data.itemId.length === 0
-    ) {
-      return c.json(
-        {
-          ok: false,
-          error: {
-            code: 'invalid_sidebar_reorder',
-            message: 'Item id is required',
-          },
-        },
-        400,
-      );
-    }
-    if (
-      !(
-        typeof payload.data.destinationFolderId === 'string' ||
-        payload.data.destinationFolderId === null
-      )
-    ) {
-      return c.json(
-        {
-          ok: false,
-          error: {
-            code: 'invalid_sidebar_reorder',
-            message: 'Destination folder must be a folder id or null',
-          },
-        },
-        400,
-      );
-    }
-    if (
-      typeof payload.data.destinationIndex !== 'number' ||
-      Number.isNaN(payload.data.destinationIndex)
-    ) {
-      return c.json(
-        {
-          ok: false,
-          error: {
-            code: 'invalid_sidebar_reorder',
-            message: 'Destination index must be a number',
-          },
-        },
-        400,
-      );
-    }
-    const result = await reorderTalkSidebarRoute({
+    const result = await reorderGreenfieldTalkSidebarRoute({
       auth,
+      workspaceId: requestedWorkspaceId(c),
       itemType: payload.data.itemType,
       itemId: payload.data.itemId,
       destinationFolderId: payload.data.destinationFolderId,
@@ -1108,8 +1112,9 @@ function buildApp(): Hono<{ Variables: Variables }> {
     if (!talkId.ok) return talkId.response;
     const runId = decodeIdParam(c, 'runId');
     if (!runId.ok) return runId.response;
-    const result = await getTalkRunContextRoute({
+    const result = await getGreenfieldRunContextRoute({
       auth,
+      workspaceId: requestedWorkspaceId(c),
       talkId: talkId.value,
       runId: runId.value,
     });
@@ -1172,46 +1177,21 @@ function buildApp(): Hono<{ Variables: Variables }> {
   app.get('/api/v1/events', userEventsUpgradeRoute);
   app.get('/api/v1/talks/:talkId/events', talkEventsUpgradeRoute);
 
-  // ── talk-attachments.ts: upload + list + content download ────
+  // ── greenfield attachment compatibility guard ────────────────
   app.post('/api/v1/talks/:talkId/attachments', async (c) => {
     const auth = c.get('auth');
     const rl = checkRateLimit({ principalId: auth.userId, bucket: 'write' });
     if (!rl.allowed) return rateLimitedResponse(c, rl);
     const csrfFail = checkCsrf(c, auth);
     if (csrfFail) return csrfFail;
-    const body = await c.req.parseBody();
-    const file = body['file'];
-    if (!file || !(file instanceof File)) {
-      return c.json(
-        {
-          ok: false,
-          error: { code: 'file_required', message: 'A file field is required' },
-        },
-        400,
-      );
-    }
-    const arrayBuffer = await file.arrayBuffer();
-    const result = await uploadTalkAttachmentRoute({
-      auth,
-      talkId: c.req.param('talkId'),
-      file: {
-        name: file.name || 'unnamed',
-        data: Buffer.from(arrayBuffer),
-        type: file.type || 'application/octet-stream',
-      },
-    });
-    return jsonResponse(result);
+    return attachmentsUnavailableResponse(c);
   });
 
   app.get('/api/v1/talks/:talkId/attachments', async (c) => {
     const auth = c.get('auth');
     const rl = checkRateLimit({ principalId: auth.userId, bucket: 'read' });
     if (!rl.allowed) return rateLimitedResponse(c, rl);
-    const result = await listTalkAttachmentsRoute({
-      auth,
-      talkId: c.req.param('talkId'),
-    });
-    return jsonResponse(result);
+    return attachmentsUnavailableResponse(c);
   });
 
   app.get(
@@ -1220,23 +1200,18 @@ function buildApp(): Hono<{ Variables: Variables }> {
       const auth = c.get('auth');
       const rl = checkRateLimit({ principalId: auth.userId, bucket: 'read' });
       if (!rl.allowed) return rateLimitedResponse(c, rl);
-      const result = await getTalkAttachmentContentRoute({
-        auth,
-        talkId: c.req.param('talkId'),
-        attachmentId: c.req.param('attachmentId'),
-      });
-      if ('headers' in result && result.headers) {
-        return new Response(result.body, {
-          status: result.statusCode,
-          headers: result.headers,
-        });
-      }
-      return new Response(JSON.stringify(result.body), {
-        status: result.statusCode,
-        headers: { 'content-type': 'application/json; charset=utf-8' },
-      });
+      return attachmentsUnavailableResponse(c);
     },
   );
+
+  app.delete('/api/v1/talks/:talkId/attachments/:attachmentId', async (c) => {
+    const auth = c.get('auth');
+    const rl = checkRateLimit({ principalId: auth.userId, bucket: 'write' });
+    if (!rl.allowed) return rateLimitedResponse(c, rl);
+    const csrfFail = checkCsrf(c, auth);
+    if (csrfFail) return csrfFail;
+    return attachmentsUnavailableResponse(c);
+  });
 
   // 501 fallback for any /api/v1/* path that hasn't been mounted.
   // Routes still on sqlite, chassis-removed, or pending Queues
@@ -1320,6 +1295,15 @@ function jsonResponse(result: { statusCode: number; body: unknown }): Response {
   });
 }
 
+function requestedWorkspaceId(c: Context): string | null {
+  return (
+    c.req.header('x-workspace-id') ??
+    c.req.header('x-clawtalk-workspace-id') ??
+    c.req.query('workspaceId') ??
+    null
+  );
+}
+
 function rateLimitedResponse(
   c: Context,
   rateResult: RateLimitResult,
@@ -1375,6 +1359,20 @@ async function readJsonBody<T = Record<string, unknown>>(
 
 function invalidJsonResponse(c: Context, message: string): Response {
   return c.json({ ok: false, error: { code: 'invalid_json', message } }, 400);
+}
+
+function attachmentsUnavailableResponse(c: Context): Response {
+  return c.json(
+    {
+      ok: false,
+      error: {
+        code: 'attachments_not_available',
+        message:
+          'Message attachments are not available on the greenfield chat route yet.',
+      },
+    },
+    501,
+  );
 }
 
 type DecodedIdParam =

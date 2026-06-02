@@ -78,18 +78,16 @@
 // ---------------------------------------------------------------------
 //   seedAuthUser(opts?)  — insert into auth.users; returns the userId.
 //                          From postgres role (BYPASSRLS).
-//   seedTalk(input)      — insert into public.talks with a fixed
-//                          ownerId. Bypasses createTalk's auto-thread
-//                          provisioning — for tests that want a bare
-//                          talk shell or a deterministic talkId, use
-//                          this; for happy-path flows use the
-//                          `createTalk` accessor inside withUserContext.
+//   seedTalk(input)      — insert a bare greenfield talk in the user's
+//                          default workspace. Bypasses route-level agent
+//                          roster setup for specs that only need a talk
+//                          id for FK/access checks.
 //   seedLlmProvider(input) — insert public.llm_providers +
 //                          llm_provider_models stubs so FK constraints
 //                          on agent_fallback_steps.provider_id and
 //                          (provider_id, model_id) are satisfied.
-//   purgeUserData(userIds) — delete owner-scoped rows from the primary
-//                          fact tables. Run in beforeEach.
+//   purgeUserData(userIds) — delete greenfield workspace-scoped rows plus
+//                          direct user-scoped runtime rows. Run in beforeEach.
 //   deleteAuthUsers(userIds) — CASCADE-delete the seeded auth.users
 //                          rows. Run in afterAll.
 //   withFreshUser(fn)    — seedAuthUser(random) + run fn inside
@@ -114,10 +112,30 @@ import {
   initPgDatabase,
   withUserContext,
 } from '../../db.js';
+import { ensureWorkspaceBootstrapForUser } from '../workspaces/bootstrap.js';
 
 export { closePgDatabase, getDbPg, initPgDatabase, withUserContext };
 
 const TEST_USER_EMAIL_SUFFIX = '@clawtalk.local';
+
+async function deletePublicRowsIfTableExists(input: {
+  table: string;
+  column: string;
+  userIds: string[];
+}): Promise<void> {
+  const db = getDbPg();
+  const exists = await db<Array<{ exists: boolean }>>`
+    select to_regclass(${`public.${input.table}`}) is not null as exists
+  `;
+  if (!exists[0]?.exists) return;
+
+  const quotedTable = `"${input.table.replaceAll('"', '""')}"`;
+  const quotedColumn = `"${input.column.replaceAll('"', '""')}"`;
+  await db.unsafe(
+    `delete from public.${quotedTable} where ${quotedColumn} = any($1::uuid[])`,
+    [input.userIds],
+  );
+}
 
 export async function seedAuthUser(opts?: {
   id?: string;
@@ -147,11 +165,30 @@ export async function seedTalk(input: {
   topicTitle?: string;
 }): Promise<string> {
   const talkId = input.talkId ?? randomUUID();
+  const workspaceId = await ensureWorkspaceBootstrapForUser(input.ownerId);
   const db = getDbPg();
   await db`
-    insert into public.talks (id, owner_id, topic_title)
-    values (${talkId}::uuid, ${input.ownerId}::uuid,
-            ${input.topicTitle ?? 'Test Talk'})
+    with next_order as (
+      select coalesce(max(sort_order) + 1, 0) as sort_order
+      from public.talks
+      where workspace_id = ${workspaceId}::uuid
+        and folder_id is null
+        and archived_at is null
+    )
+    insert into public.talks (
+      id, workspace_id, folder_id, sort_order, title, mode, rounds_limit,
+      created_by
+    )
+    select
+      ${talkId}::uuid,
+      ${workspaceId}::uuid,
+      null,
+      sort_order,
+      ${input.topicTitle ?? 'Test Talk'},
+      'ordered',
+      3,
+      ${input.ownerId}::uuid
+    from next_order
     on conflict (id) do nothing
   `;
   return talkId;
@@ -183,31 +220,45 @@ export async function seedLlmProvider(input: {
 export async function purgeUserData(userIds: string[]): Promise<void> {
   if (userIds.length === 0) return;
   const db = getDbPg();
-  // Cascade through talks: deletes folders/threads/messages/runs/jobs/
-  // agents/outputs/context that hang off owner_id. Then sweep the
-  // sibling tables whose owner column isn't owner_id (user_id) or that
-  // don't cascade from talks.
+  // Greenfield data is workspace-scoped. Removing workspaces owned by the
+  // seeded users cascades through talks, messages, runs, jobs, connectors,
+  // documents, agents, home surfaces, and related workspace facts.
   await db`
-    delete from public.talks where owner_id in ${db(userIds)}
+    delete from public.workspaces where owner_id in ${db(userIds)}
   `;
   await db`
-    delete from public.talk_folders where owner_id in ${db(userIds)}
+    delete from public.workspace_members where user_id in ${db(userIds)}
   `;
-  await db`
-    delete from public.registered_agents where owner_id in ${db(userIds)}
-  `;
-  await db`
-    delete from public.user_tool_permissions where user_id in ${db(userIds)}
-  `;
-  await db`
-    delete from public.idempotency_cache where user_id in ${db(userIds)}
-  `;
-  await db`
-    delete from public.user_google_credentials where user_id in ${db(userIds)}
-  `;
-  await db`
-    delete from public.google_oauth_link_requests where user_id in ${db(userIds)}
-  `;
+  await deletePublicRowsIfTableExists({
+    table: 'user_tool_permissions',
+    column: 'user_id',
+    userIds,
+  });
+  await deletePublicRowsIfTableExists({
+    table: 'idempotency_cache',
+    column: 'user_id',
+    userIds,
+  });
+  await deletePublicRowsIfTableExists({
+    table: 'oauth_state',
+    column: 'user_id',
+    userIds,
+  });
+  await deletePublicRowsIfTableExists({
+    table: 'provider_oauth_states',
+    column: 'user_id',
+    userIds,
+  });
+  await deletePublicRowsIfTableExists({
+    table: 'llm_provider_secrets',
+    column: 'owner_id',
+    userIds,
+  });
+  await deletePublicRowsIfTableExists({
+    table: 'llm_provider_verifications',
+    column: 'owner_id',
+    userIds,
+  });
 }
 
 export async function deleteAuthUsers(userIds: string[]): Promise<void> {

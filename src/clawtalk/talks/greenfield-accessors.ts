@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
-import { getDbPg } from '../../db.js';
+import { getDbPg, type Sql } from '../../db.js';
 
 export interface GreenfieldFolderRecord {
   id: string;
@@ -47,6 +47,127 @@ export interface GreenfieldTalkAgentRecord {
 export interface GreenfieldTalkToolRecord {
   tool_id: string;
   enabled: boolean;
+}
+
+type GreenfieldSidebarOrderItem =
+  | { type: 'folder'; id: string; sort_order: number }
+  | {
+      type: 'talk';
+      id: string;
+      folder_id: string | null;
+      sort_order: number;
+    };
+
+type GreenfieldTalkOrderRow = {
+  id: string;
+  folder_id: string | null;
+  sort_order: number;
+};
+
+type GreenfieldFolderOrderRow = {
+  id: string;
+  sort_order: number;
+};
+
+export type ReorderGreenfieldSidebarResult =
+  | { status: 'ok' }
+  | { status: 'item_not_found' }
+  | { status: 'destination_not_found' }
+  | { status: 'invalid_destination' }
+  | { status: 'invalid_destination_index' };
+
+async function withGreenfieldTransaction<T>(
+  db: Sql,
+  fn: (txSql: Sql) => Promise<T>,
+): Promise<T> {
+  const maybeTransaction = db as Sql & { savepoint?: unknown };
+  if (
+    typeof maybeTransaction.savepoint === 'function' ||
+    typeof maybeTransaction.begin !== 'function'
+  ) {
+    return fn(db);
+  }
+  return (await maybeTransaction.begin(async (tx) =>
+    fn(tx as unknown as Sql),
+  )) as T;
+}
+
+function bySidebarOrder<T extends { sort_order: number; id: string }>(
+  left: T,
+  right: T,
+): number {
+  return left.sort_order - right.sort_order || left.id.localeCompare(right.id);
+}
+
+function insertAt<T>(items: T[], item: T, index: number): T[] {
+  const next = [...items];
+  next.splice(index, 0, item);
+  return next;
+}
+
+function canInsertAt<T>(items: T[], index: number): boolean {
+  return Number.isInteger(index) && index >= 0 && index <= items.length;
+}
+
+function rootSidebarItems(input: {
+  folders: GreenfieldFolderOrderRow[];
+  talks: GreenfieldTalkOrderRow[];
+}): GreenfieldSidebarOrderItem[] {
+  return [
+    ...input.talks
+      .filter((talk) => talk.folder_id === null)
+      .map((talk) => ({
+        type: 'talk' as const,
+        id: talk.id,
+        folder_id: talk.folder_id,
+        sort_order: talk.sort_order,
+      })),
+    ...input.folders.map((folder) => ({
+      type: 'folder' as const,
+      id: folder.id,
+      sort_order: folder.sort_order,
+    })),
+  ].sort(bySidebarOrder);
+}
+
+async function persistRootSidebarOrder(input: {
+  txSql: Sql;
+  workspaceId: string;
+  items: GreenfieldSidebarOrderItem[];
+}): Promise<void> {
+  for (const [index, item] of input.items.entries()) {
+    if (item.type === 'folder') {
+      await input.txSql`
+        update public.folders
+        set sort_order = ${index}
+        where workspace_id = ${input.workspaceId}::uuid
+          and id = ${item.id}::uuid
+      `;
+      continue;
+    }
+    await input.txSql`
+      update public.talks
+      set folder_id = null, sort_order = ${index}
+      where workspace_id = ${input.workspaceId}::uuid
+        and id = ${item.id}::uuid
+    `;
+  }
+}
+
+async function persistTalkBucketOrder(input: {
+  txSql: Sql;
+  workspaceId: string;
+  folderId: string | null;
+  talks: GreenfieldTalkOrderRow[];
+}): Promise<void> {
+  for (const [index, talk] of input.talks.entries()) {
+    await input.txSql`
+      update public.talks
+      set folder_id = ${input.folderId ?? null}::uuid, sort_order = ${index}
+      where workspace_id = ${input.workspaceId}::uuid
+        and id = ${talk.id}::uuid
+    `;
+  }
 }
 
 export async function listGreenfieldFolders(input: {
@@ -113,6 +234,172 @@ export async function deleteGreenfieldFolder(input: {
   return rows.length > 0;
 }
 
+export async function reorderGreenfieldSidebarItem(input: {
+  workspaceId: string;
+  itemType: 'talk' | 'folder';
+  itemId: string;
+  destinationFolderId: string | null;
+  destinationIndex: number;
+}): Promise<ReorderGreenfieldSidebarResult> {
+  const db = getDbPg();
+  const destinationIndex = input.destinationIndex;
+  if (!Number.isInteger(destinationIndex) || destinationIndex < 0) {
+    return { status: 'invalid_destination_index' };
+  }
+
+  return withGreenfieldTransaction(db, async (txSql) => {
+    const folders = await txSql<GreenfieldFolderOrderRow[]>`
+      select id, sort_order
+      from public.folders
+      where workspace_id = ${input.workspaceId}::uuid
+      order by sort_order asc, id asc
+      for update
+    `;
+    const talks = await txSql<GreenfieldTalkOrderRow[]>`
+      select id, folder_id, sort_order
+      from public.talks
+      where workspace_id = ${input.workspaceId}::uuid
+        and archived_at is null
+      order by folder_id nulls first, sort_order asc, id asc
+      for update
+    `;
+
+    const destinationFolderExists =
+      input.destinationFolderId === null ||
+      folders.some((folder) => folder.id === input.destinationFolderId);
+    if (!destinationFolderExists) {
+      return { status: 'destination_not_found' };
+    }
+
+    if (input.itemType === 'folder') {
+      if (input.destinationFolderId !== null) {
+        return { status: 'invalid_destination' };
+      }
+      const movingFolder = folders.find((folder) => folder.id === input.itemId);
+      if (!movingFolder) return { status: 'item_not_found' };
+      const rootItems = rootSidebarItems({ folders, talks }).filter(
+        (item) => !(item.type === 'folder' && item.id === input.itemId),
+      );
+      if (!canInsertAt(rootItems, destinationIndex)) {
+        return { status: 'invalid_destination_index' };
+      }
+      await persistRootSidebarOrder({
+        txSql,
+        workspaceId: input.workspaceId,
+        items: insertAt(
+          rootItems,
+          { type: 'folder', ...movingFolder },
+          destinationIndex,
+        ),
+      });
+      return { status: 'ok' };
+    }
+
+    const movingTalk = talks.find((talk) => talk.id === input.itemId);
+    if (!movingTalk) return { status: 'item_not_found' };
+
+    const sourceFolderId = movingTalk.folder_id;
+    const targetFolderId = input.destinationFolderId;
+    const rootItems = rootSidebarItems({ folders, talks }).filter(
+      (item) => !(item.type === 'talk' && item.id === input.itemId),
+    );
+
+    if (sourceFolderId === targetFolderId && targetFolderId !== null) {
+      const bucket = talks
+        .filter(
+          (talk) =>
+            talk.folder_id === targetFolderId && talk.id !== input.itemId,
+        )
+        .sort(bySidebarOrder);
+      if (!canInsertAt(bucket, destinationIndex)) {
+        return { status: 'invalid_destination_index' };
+      }
+      await persistTalkBucketOrder({
+        txSql,
+        workspaceId: input.workspaceId,
+        folderId: targetFolderId,
+        talks: insertAt(bucket, movingTalk, destinationIndex),
+      });
+      return { status: 'ok' };
+    }
+
+    if (targetFolderId === null) {
+      if (!canInsertAt(rootItems, destinationIndex)) {
+        return { status: 'invalid_destination_index' };
+      }
+      if (sourceFolderId !== null) {
+        const sourceBucket = talks
+          .filter(
+            (talk) =>
+              talk.folder_id === sourceFolderId && talk.id !== input.itemId,
+          )
+          .sort(bySidebarOrder);
+        await persistTalkBucketOrder({
+          txSql,
+          workspaceId: input.workspaceId,
+          folderId: sourceFolderId,
+          talks: sourceBucket,
+        });
+      }
+      await persistRootSidebarOrder({
+        txSql,
+        workspaceId: input.workspaceId,
+        items: insertAt(
+          rootItems,
+          {
+            type: 'talk',
+            ...movingTalk,
+            folder_id: null,
+          },
+          destinationIndex,
+        ),
+      });
+      return { status: 'ok' };
+    }
+
+    if (sourceFolderId === null) {
+      await persistRootSidebarOrder({
+        txSql,
+        workspaceId: input.workspaceId,
+        items: rootItems,
+      });
+    } else {
+      const sourceBucket = talks
+        .filter(
+          (talk) =>
+            talk.folder_id === sourceFolderId && talk.id !== input.itemId,
+        )
+        .sort(bySidebarOrder);
+      await persistTalkBucketOrder({
+        txSql,
+        workspaceId: input.workspaceId,
+        folderId: sourceFolderId,
+        talks: sourceBucket,
+      });
+    }
+
+    const destinationBucket = talks
+      .filter(
+        (talk) => talk.folder_id === targetFolderId && talk.id !== input.itemId,
+      )
+      .sort(bySidebarOrder);
+    if (!canInsertAt(destinationBucket, destinationIndex)) {
+      return { status: 'invalid_destination_index' };
+    }
+    await persistTalkBucketOrder({
+      txSql,
+      workspaceId: input.workspaceId,
+      folderId: targetFolderId,
+      talks: insertAt(
+        destinationBucket,
+        { ...movingTalk, folder_id: targetFolderId },
+        destinationIndex,
+      ),
+    });
+    return { status: 'ok' };
+  });
+}
+
 export async function listGreenfieldTalks(input: {
   workspaceId: string;
   folderId?: string | null | 'all' | 'unfiled';
@@ -133,11 +420,12 @@ export async function listGreenfieldTalks(input: {
       t.last_activity_at,
       t.created_at,
       t.updated_at,
-      coalesce(
-        array_agg(ta.agent_id order by ta.sort_order asc)
-          filter (where ta.agent_id is not null),
-        '{}'::uuid[]
-      )::text[] as agent_ids,
+      coalesce((
+        select array_agg(ta.agent_id order by ta.sort_order asc)::text[]
+        from public.talk_agents ta
+        where ta.workspace_id = t.workspace_id
+          and ta.talk_id = t.id
+      ), '{}'::text[]) as agent_ids,
       count(distinct m.id)::int as message_count,
       exists (
         select 1
@@ -154,9 +442,6 @@ export async function listGreenfieldTalks(input: {
         limit 1
       ) as primary_document_id
     from public.talks t
-    left join public.talk_agents ta
-      on ta.workspace_id = t.workspace_id
-     and ta.talk_id = t.id
     left join public.messages m
       on m.workspace_id = t.workspace_id
      and m.talk_id = t.id

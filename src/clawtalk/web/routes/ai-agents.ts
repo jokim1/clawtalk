@@ -1,4 +1,4 @@
-import { getDbPg, withUserContext } from '../../../db.js';
+import { getDbPg, withTrustedDbWrites, withUserContext } from '../../../db.js';
 import {
   BUILTIN_ADDITIONAL_PROVIDER_IDS,
   BUILTIN_ADDITIONAL_PROVIDERS,
@@ -25,6 +25,11 @@ import {
   encryptProviderSecret,
 } from '../../llm/provider-secret-store.js';
 import { resolveModelCapabilities } from '../../llm/capabilities.js';
+import {
+  resolveWorkspaceForUser,
+  type WorkspaceSummaryRecord,
+} from '../../workspaces/accessors.js';
+import { ensureWorkspaceBootstrapForUser } from '../../workspaces/bootstrap.js';
 import type { ApiEnvelope, AuthContext } from '../types.js';
 
 type AdditionalProviderVerificationStatus =
@@ -170,6 +175,73 @@ function isAdminLike(role: string): boolean {
   return role === 'owner' || role === 'admin';
 }
 
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function workspaceError(
+  statusCode: number,
+  code: string,
+  message: string,
+): { statusCode: number; body: ApiEnvelope<never> } {
+  return { statusCode, body: { ok: false, error: { code, message } } };
+}
+
+function requireExplicitWorkspaceForCredentialScope(
+  scope: ProviderCredentialScope,
+  requestedWorkspaceId?: string | null,
+): { statusCode: number; body: ApiEnvelope<never> } | null {
+  if (
+    scope === 'workspace' &&
+    (typeof requestedWorkspaceId !== 'string' || !requestedWorkspaceId.trim())
+  ) {
+    return workspaceError(
+      400,
+      'workspace_scope_required',
+      'workspaceId is required for workspace-scoped provider credentials.',
+    );
+  }
+  return null;
+}
+
+async function resolveActiveWorkspace(
+  auth: AuthContext,
+  requestedWorkspaceId?: string | null,
+): Promise<
+  | { ok: true; workspace: WorkspaceSummaryRecord }
+  | { ok: false; result: { statusCode: number; body: ApiEnvelope<never> } }
+> {
+  if (requestedWorkspaceId && !UUID_RE.test(requestedWorkspaceId)) {
+    return {
+      ok: false,
+      result: workspaceError(
+        400,
+        'invalid_workspace_id',
+        'workspaceId must be a valid UUID.',
+      ),
+    };
+  }
+  await ensureWorkspaceBootstrapForUser(auth.userId);
+  const workspace = await withUserContext(auth.userId, () =>
+    resolveWorkspaceForUser({
+      userId: auth.userId,
+      requestedWorkspaceId,
+    }),
+  );
+  if (!workspace) {
+    return {
+      ok: false,
+      result: workspaceError(
+        requestedWorkspaceId ? 403 : 404,
+        requestedWorkspaceId ? 'workspace_forbidden' : 'workspace_not_found',
+        requestedWorkspaceId
+          ? 'Workspace is not available for this user.'
+          : 'No workspace exists.',
+      ),
+    };
+  }
+  return { ok: true, workspace };
+}
+
 function maskApiKey(apiKey: string): string {
   return `••••${apiKey.slice(-4)}`;
 }
@@ -266,12 +338,15 @@ async function listAdditionalProviderModels(): Promise<
   return byProvider;
 }
 
-async function listProviderSecrets(): Promise<Map<string, LlmSecret | null>> {
+async function listProviderSecrets(
+  ownerId: string,
+): Promise<Map<string, LlmSecret | null>> {
   const db = getDbPg();
   const rows = await db<Array<{ provider_id: string; ciphertext: string }>>`
     select provider_id, ciphertext
     from public.llm_provider_secrets
     where provider_id = any(${BUILTIN_ADDITIONAL_PROVIDER_IDS})
+      and owner_id = ${ownerId}::uuid
       and credential_kind = 'api_key'
   `;
 
@@ -286,9 +361,9 @@ async function listProviderSecrets(): Promise<Map<string, LlmSecret | null>> {
   return new Map(entries);
 }
 
-async function listProviderVerifications(): Promise<
-  Map<string, ProviderVerificationRow>
-> {
+async function listProviderVerifications(
+  ownerId: string,
+): Promise<Map<string, ProviderVerificationRow>> {
   const db = getDbPg();
   const rows = await db<
     Array<{
@@ -301,6 +376,7 @@ async function listProviderVerifications(): Promise<
     select provider_id, status, last_verified_at, last_error
     from public.llm_provider_verifications
     where provider_id = any(${BUILTIN_ADDITIONAL_PROVIDER_IDS})
+      and owner_id = ${ownerId}::uuid
       and credential_kind = 'api_key'
   `;
 
@@ -316,16 +392,19 @@ async function listProviderVerifications(): Promise<
   );
 }
 
-async function listWorkspaceProviderSecrets(): Promise<
-  Map<string, LlmSecret | null>
-> {
+async function listWorkspaceProviderSecrets(
+  workspaceId: string,
+): Promise<Map<string, LlmSecret | null>> {
   const db = getDbPg();
-  const rows = await db<Array<{ provider_id: string; ciphertext: string }>>`
-    select provider_id, ciphertext
-    from public.workspace_provider_secrets
-    where provider_id = any(${BUILTIN_ADDITIONAL_PROVIDER_IDS})
-      and credential_kind = 'api_key'
-  `;
+  const rows = await withTrustedDbWrites(
+    () => db<Array<{ provider_id: string; ciphertext: string }>>`
+      select provider_id, ciphertext
+      from public.workspace_provider_secrets
+      where workspace_id = ${workspaceId}::uuid
+        and provider_id = any(${BUILTIN_ADDITIONAL_PROVIDER_IDS})
+        and credential_kind = 'api_key'
+    `,
+  );
 
   const entries = await Promise.all(
     rows.map(
@@ -338,9 +417,9 @@ async function listWorkspaceProviderSecrets(): Promise<
   return new Map(entries);
 }
 
-async function listPersonalSubscriptionMetadata(): Promise<
-  Map<string, { expiresAt: string | null }>
-> {
+async function listPersonalSubscriptionMetadata(
+  ownerId: string,
+): Promise<Map<string, { expiresAt: string | null }>> {
   const db = getDbPg();
   const rows = await db<
     Array<{ provider_id: string; expires_at: string | null }>
@@ -348,6 +427,7 @@ async function listPersonalSubscriptionMetadata(): Promise<
     select provider_id, expires_at::text as expires_at
     from public.llm_provider_secrets
     where credential_kind = 'subscription'
+      and owner_id = ${ownerId}::uuid
       and provider_id = any(${BUILTIN_ADDITIONAL_PROVIDER_IDS})
   `;
   return new Map(
@@ -355,26 +435,27 @@ async function listPersonalSubscriptionMetadata(): Promise<
   );
 }
 
-async function listWorkspaceSubscriptionMetadata(): Promise<
-  Map<string, { expiresAt: string | null }>
-> {
+async function listWorkspaceSubscriptionMetadata(
+  workspaceId: string,
+): Promise<Map<string, { expiresAt: string | null }>> {
   const db = getDbPg();
-  const rows = await db<
-    Array<{ provider_id: string; expires_at: string | null }>
-  >`
-    select provider_id, expires_at::text as expires_at
-    from public.workspace_provider_secrets
-    where credential_kind = 'subscription'
-      and provider_id = any(${BUILTIN_ADDITIONAL_PROVIDER_IDS})
-  `;
+  const rows = await withTrustedDbWrites(
+    () => db<Array<{ provider_id: string; expires_at: string | null }>>`
+      select provider_id, expires_at::text as expires_at
+      from public.workspace_provider_secrets
+      where workspace_id = ${workspaceId}::uuid
+        and credential_kind = 'subscription'
+        and provider_id = any(${BUILTIN_ADDITIONAL_PROVIDER_IDS})
+    `,
+  );
   return new Map(
     rows.map((row) => [row.provider_id, { expiresAt: row.expires_at }]),
   );
 }
 
-async function listWorkspaceProviderVerifications(): Promise<
-  Map<string, ProviderVerificationRow>
-> {
+async function listWorkspaceProviderVerifications(
+  workspaceId: string,
+): Promise<Map<string, ProviderVerificationRow>> {
   const db = getDbPg();
   const rows = await db<
     Array<{
@@ -386,7 +467,8 @@ async function listWorkspaceProviderVerifications(): Promise<
   >`
     select provider_id, status, last_verified_at, last_error
     from public.workspace_provider_verifications
-    where provider_id = any(${BUILTIN_ADDITIONAL_PROVIDER_IDS})
+    where workspace_id = ${workspaceId}::uuid
+      and provider_id = any(${BUILTIN_ADDITIONAL_PROVIDER_IDS})
       and credential_kind = 'api_key'
   `;
 
@@ -402,18 +484,22 @@ async function listWorkspaceProviderVerifications(): Promise<
   );
 }
 
-async function buildAdditionalProviderCards(): Promise<AgentProviderCard[]> {
+async function buildAdditionalProviderCards(
+  workspaceId: string,
+  ownerId: string,
+): Promise<AgentProviderCard[]> {
   const providerRows = await listAdditionalProviderRows();
   const modelsByProvider = await listAdditionalProviderModels();
-  const secretsByProvider = await listProviderSecrets();
-  const verificationsByProvider = await listProviderVerifications();
-  const workspaceSecretsByProvider = await listWorkspaceProviderSecrets();
+  const secretsByProvider = await listProviderSecrets(ownerId);
+  const verificationsByProvider = await listProviderVerifications(ownerId);
+  const workspaceSecretsByProvider =
+    await listWorkspaceProviderSecrets(workspaceId);
   const workspaceVerificationsByProvider =
-    await listWorkspaceProviderVerifications();
+    await listWorkspaceProviderVerifications(workspaceId);
   const personalSubscriptionsByProvider =
-    await listPersonalSubscriptionMetadata();
+    await listPersonalSubscriptionMetadata(ownerId);
   const workspaceSubscriptionsByProvider =
-    await listWorkspaceSubscriptionMetadata();
+    await listWorkspaceSubscriptionMetadata(workspaceId);
 
   // Live model discovery. Workspace credential wins so the team sees the
   // shared catalog; falls back to the per-user credential if no workspace
@@ -610,14 +696,20 @@ export function buildModelSuggestions(
   return suggestions;
 }
 
-export async function buildAiAgentsPageData(): Promise<AiAgentsPageData> {
+export async function buildAiAgentsPageData(
+  workspaceId: string,
+  ownerId: string,
+): Promise<AiAgentsPageData> {
   const claudeModelSuggestions = await getClaudeModelSuggestions();
   const savedDefault = await getSavedDefaultClaudeModelId();
   return {
     defaultClaudeModelId:
       savedDefault || claudeModelSuggestions[0]?.modelId || 'claude-sonnet-4-6',
     claudeModelSuggestions,
-    additionalProviders: await buildAdditionalProviderCards(),
+    additionalProviders: await buildAdditionalProviderCards(
+      workspaceId,
+      ownerId,
+    ),
   };
 }
 
@@ -676,29 +768,35 @@ async function upsertProviderVerification(
   `;
 }
 
-async function deleteProviderVerification(providerId: string): Promise<void> {
+async function deleteProviderVerification(
+  ownerId: string,
+  providerId: string,
+): Promise<void> {
   const db = getDbPg();
   await db`
     delete from public.llm_provider_verifications
-    where provider_id = ${providerId}
+    where owner_id = ${ownerId}::uuid
+      and provider_id = ${providerId}
       and credential_kind = 'api_key'
   `;
 }
 
 async function upsertWorkspaceProviderVerification(
+  workspaceId: string,
   providerId: string,
   result: ProviderVerificationResult,
 ): Promise<void> {
   const db = getDbPg();
   await db`
     insert into public.workspace_provider_verifications (
-      provider_id, credential_kind, status, last_verified_at, last_error
+      workspace_id, provider_id, credential_kind, status,
+      last_verified_at, last_error
     )
     values (
-      ${providerId}, 'api_key', ${result.status},
+      ${workspaceId}::uuid, ${providerId}, 'api_key', ${result.status},
       ${result.lastVerifiedAt}::timestamptz, ${result.lastError}
     )
-    on conflict (provider_id, credential_kind) do update set
+    on conflict (workspace_id, provider_id, credential_kind) do update set
       status = excluded.status,
       last_verified_at = excluded.last_verified_at,
       last_error = excluded.last_error,
@@ -707,12 +805,14 @@ async function upsertWorkspaceProviderVerification(
 }
 
 async function deleteWorkspaceProviderVerification(
+  workspaceId: string,
   providerId: string,
 ): Promise<void> {
   const db = getDbPg();
   await db`
     delete from public.workspace_provider_verifications
-    where provider_id = ${providerId}
+    where workspace_id = ${workspaceId}::uuid
+      and provider_id = ${providerId}
       and credential_kind = 'api_key'
   `;
 }
@@ -775,6 +875,7 @@ function mapVerificationFailure(error: unknown): ProviderVerificationResult {
 
 async function verifyProviderSecret(
   ownerId: string,
+  workspaceId: string,
   providerId: string,
   scope: ProviderCredentialScope = 'user',
 ): Promise<void> {
@@ -787,7 +888,11 @@ async function verifyProviderSecret(
     result: ProviderVerificationResult,
   ): Promise<void> => {
     if (scope === 'workspace') {
-      await upsertWorkspaceProviderVerification(providerId, result);
+      await upsertWorkspaceProviderVerification(
+        workspaceId,
+        providerId,
+        result,
+      );
     } else {
       await upsertProviderVerification(ownerId, providerId, result);
     }
@@ -795,9 +900,9 @@ async function verifyProviderSecret(
 
   const dropVerification = async (): Promise<void> => {
     if (scope === 'workspace') {
-      await deleteWorkspaceProviderVerification(providerId);
+      await deleteWorkspaceProviderVerification(workspaceId, providerId);
     } else {
-      await deleteProviderVerification(providerId);
+      await deleteProviderVerification(ownerId, providerId);
     }
   };
 
@@ -811,14 +916,18 @@ async function verifyProviderSecret(
   const db = getDbPg();
   const secretRows =
     scope === 'workspace'
-      ? await db<Array<{ ciphertext: string }>>`
-          select ciphertext from public.workspace_provider_secrets
-          where provider_id = ${providerId}
-            and credential_kind = 'api_key'
-        `
+      ? await withTrustedDbWrites(
+          () => db<Array<{ ciphertext: string }>>`
+            select ciphertext from public.workspace_provider_secrets
+            where workspace_id = ${workspaceId}::uuid
+              and provider_id = ${providerId}
+              and credential_kind = 'api_key'
+          `,
+        )
       : await db<Array<{ ciphertext: string }>>`
           select ciphertext from public.llm_provider_secrets
-          where provider_id = ${providerId}
+          where owner_id = ${ownerId}::uuid
+            and provider_id = ${providerId}
             and credential_kind = 'api_key'
         `;
   const secret = secretRows[0]
@@ -868,13 +977,17 @@ async function verifyProviderSecret(
   }
 }
 
-async function getProviderCardOrNotFound(providerId: string): Promise<{
+async function getProviderCardOrNotFound(
+  workspaceId: string,
+  providerId: string,
+  ownerId: string,
+): Promise<{
   statusCode: number;
   body: ApiEnvelope<{ provider: AgentProviderCard }>;
 }> {
-  const provider = (await buildAdditionalProviderCards()).find(
-    (entry) => entry.id === providerId,
-  );
+  const provider = (
+    await buildAdditionalProviderCards(workspaceId, ownerId)
+  ).find((entry) => entry.id === providerId);
   if (!provider) {
     return {
       statusCode: 404,
@@ -896,12 +1009,17 @@ async function getProviderCardOrNotFound(providerId: string): Promise<{
   };
 }
 
-export async function getAiAgentsRoute(auth: AuthContext): Promise<{
+export async function getAiAgentsRoute(
+  auth: AuthContext,
+  requestedWorkspaceId?: string | null,
+): Promise<{
   statusCode: number;
   body: ApiEnvelope<AiAgentsPageData>;
 }> {
+  const workspace = await resolveActiveWorkspace(auth, requestedWorkspaceId);
+  if (!workspace.ok) return workspace.result;
   const data = await withUserContext(auth.userId, () =>
-    buildAiAgentsPageData(),
+    buildAiAgentsPageData(workspace.workspace.id, auth.userId),
   );
   return {
     statusCode: 200,
@@ -915,11 +1033,14 @@ export async function getAiAgentsRoute(auth: AuthContext): Promise<{
 export async function updateDefaultClaudeModelRoute(
   auth: AuthContext,
   body: { modelId?: unknown },
+  requestedWorkspaceId?: string | null,
 ): Promise<{
   statusCode: number;
   body: ApiEnvelope<AiAgentsPageData>;
 }> {
-  if (!isAdminLike(auth.role)) {
+  const workspace = await resolveActiveWorkspace(auth, requestedWorkspaceId);
+  if (!workspace.ok) return workspace.result;
+  if (!isAdminLike(workspace.workspace.role)) {
     return {
       statusCode: 403,
       body: {
@@ -947,17 +1068,19 @@ export async function updateDefaultClaudeModelRoute(
 
   const modelId = body.modelId;
   const data = await withUserContext(auth.userId, async () => {
-    const db = getDbPg();
-    await db`
-      insert into public.settings_kv (key, value, updated_by)
-      values ('executor.defaultClaudeModel', ${modelId},
-              ${auth.userId}::uuid)
-      on conflict (key) do update set
-        value = excluded.value,
-        updated_at = now(),
-        updated_by = excluded.updated_by
-    `;
-    return buildAiAgentsPageData();
+    await withTrustedDbWrites(async () => {
+      const db = getDbPg();
+      await db`
+        insert into public.settings_kv (key, value, updated_by)
+        values ('executor.defaultClaudeModel', ${modelId},
+                ${auth.userId}::uuid)
+        on conflict (key) do update set
+          value = excluded.value,
+          updated_at = now(),
+          updated_by = excluded.updated_by
+      `;
+    });
+    return buildAiAgentsPageData(workspace.workspace.id, auth.userId);
   });
 
   return {
@@ -973,12 +1096,20 @@ export async function putAiProviderCredentialRoute(
   auth: AuthContext,
   providerId: string,
   body: ProviderSecretBody,
+  requestedWorkspaceId?: string | null,
 ): Promise<{
   statusCode: number;
   body: ApiEnvelope<{ provider: AgentProviderCard }>;
 }> {
   const scope = parseScope(body.scope);
-  if (scope === 'workspace' && !isAdminLike(auth.role)) {
+  const scopeError = requireExplicitWorkspaceForCredentialScope(
+    scope,
+    requestedWorkspaceId,
+  );
+  if (scopeError) return scopeError;
+  const workspace = await resolveActiveWorkspace(auth, requestedWorkspaceId);
+  if (!workspace.ok) return workspace.result;
+  if (scope === 'workspace' && !isAdminLike(workspace.workspace.role)) {
     return {
       statusCode: 403,
       body: {
@@ -1043,21 +1174,32 @@ export async function putAiProviderCredentialRoute(
     const db = getDbPg();
     if (!apiKey) {
       if (scope === 'workspace') {
-        await db`
-          delete from public.workspace_provider_secrets
-          where provider_id = ${providerId}
-            and credential_kind = 'api_key'
-        `;
-        await deleteWorkspaceProviderVerification(providerId);
+        await withTrustedDbWrites(async () => {
+          await db`
+            delete from public.workspace_provider_secrets
+            where workspace_id = ${workspace.workspace.id}::uuid
+              and provider_id = ${providerId}
+              and credential_kind = 'api_key'
+          `;
+        });
+        await deleteWorkspaceProviderVerification(
+          workspace.workspace.id,
+          providerId,
+        );
       } else {
         await db`
           delete from public.llm_provider_secrets
-          where provider_id = ${providerId}
+          where owner_id = ${auth.userId}::uuid
+            and provider_id = ${providerId}
             and credential_kind = 'api_key'
         `;
-        await deleteProviderVerification(providerId);
+        await deleteProviderVerification(auth.userId, providerId);
       }
-      return getProviderCardOrNotFound(providerId);
+      return getProviderCardOrNotFound(
+        workspace.workspace.id,
+        providerId,
+        auth.userId,
+      );
     }
 
     const ciphertext = await encryptProviderSecret({
@@ -1065,18 +1207,21 @@ export async function putAiProviderCredentialRoute(
       ...(organizationId ? { organizationId } : {}),
     });
     if (scope === 'workspace') {
-      await db`
-        insert into public.workspace_provider_secrets (
-          provider_id, credential_kind, ciphertext, updated_by
-        )
-        values (
-          ${providerId}, 'api_key', ${ciphertext}, ${auth.userId}::uuid
-        )
-        on conflict (provider_id, credential_kind) do update set
-          ciphertext = excluded.ciphertext,
-          updated_by = excluded.updated_by,
-          updated_at = now()
-      `;
+      await withTrustedDbWrites(async () => {
+        await db`
+          insert into public.workspace_provider_secrets (
+            workspace_id, provider_id, credential_kind, ciphertext, updated_by
+          )
+          values (
+            ${workspace.workspace.id}::uuid, ${providerId}, 'api_key',
+            ${ciphertext}, ${auth.userId}::uuid
+          )
+          on conflict (workspace_id, provider_id, credential_kind) do update set
+            ciphertext = excluded.ciphertext,
+            updated_by = excluded.updated_by,
+            updated_at = now()
+        `;
+      });
     } else {
       await db`
         insert into public.llm_provider_secrets (
@@ -1091,7 +1236,12 @@ export async function putAiProviderCredentialRoute(
       `;
     }
 
-    await verifyProviderSecret(auth.userId, providerId, scope);
+    await verifyProviderSecret(
+      auth.userId,
+      workspace.workspace.id,
+      providerId,
+      scope,
+    );
     if (apiKey) {
       // Drop any cached discovery for this exact key so a freshly saved key
       // is reflected immediately. Handles the edge case where the user
@@ -1104,7 +1254,11 @@ export async function putAiProviderCredentialRoute(
         await invalidateAnthropicDiscovery(apiKey, getDefaultCache());
       }
     }
-    return getProviderCardOrNotFound(providerId);
+    return getProviderCardOrNotFound(
+      workspace.workspace.id,
+      providerId,
+      auth.userId,
+    );
   });
 }
 
@@ -1112,11 +1266,19 @@ export async function verifyAiProviderCredentialRoute(
   auth: AuthContext,
   providerId: string,
   scope: ProviderCredentialScope = 'user',
+  requestedWorkspaceId?: string | null,
 ): Promise<{
   statusCode: number;
   body: ApiEnvelope<{ provider: AgentProviderCard }>;
 }> {
-  if (scope === 'workspace' && !isAdminLike(auth.role)) {
+  const scopeError = requireExplicitWorkspaceForCredentialScope(
+    scope,
+    requestedWorkspaceId,
+  );
+  if (scopeError) return scopeError;
+  const workspace = await resolveActiveWorkspace(auth, requestedWorkspaceId);
+  if (!workspace.ok) return workspace.result;
+  if (scope === 'workspace' && !isAdminLike(workspace.workspace.role)) {
     return {
       statusCode: 403,
       body: {
@@ -1144,7 +1306,16 @@ export async function verifyAiProviderCredentialRoute(
       };
     }
 
-    await verifyProviderSecret(auth.userId, providerId, scope);
-    return getProviderCardOrNotFound(providerId);
+    await verifyProviderSecret(
+      auth.userId,
+      workspace.workspace.id,
+      providerId,
+      scope,
+    );
+    return getProviderCardOrNotFound(
+      workspace.workspace.id,
+      providerId,
+      auth.userId,
+    );
   });
 }

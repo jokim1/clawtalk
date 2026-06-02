@@ -7,7 +7,7 @@ import {
   type RequestExecutionContext,
 } from '../../../db.js';
 import { logger } from '../../../logger.js';
-import { getUserById, updateUserDisplayName } from '../../db/index.js';
+import { updateUserDisplayName } from '../../db/index.js';
 import {
   dispatchRunInProcess,
   type DispatchRunInProcessEnv,
@@ -61,6 +61,7 @@ import {
   createGreenfieldThreadRoute,
   deleteGreenfieldMessagesRoute,
   deleteGreenfieldThreadRoute,
+  getGreenfieldRunContextRoute,
   getGreenfieldSnapshotRoute,
   getGreenfieldTalkContentRoute,
   getGreenfieldThreadContentRoute,
@@ -90,6 +91,7 @@ import {
   listGreenfieldWorkspacesRoute,
   patchGreenfieldFolderRoute,
   patchGreenfieldTalkRoute,
+  reorderGreenfieldTalkSidebarRoute,
   switchGreenfieldWorkspaceRoute,
   updateGreenfieldTalkAgentsRoute,
   updateGreenfieldTalkPolicyRoute,
@@ -242,25 +244,28 @@ export function mountGreenfieldApiRoutes(app: GreenfieldApp): void {
       }
     }
 
-    const updated = await withUserContext(auth.userId, async () => {
-      if (displayName !== null) {
+    const requestedWorkspace = requestedWorkspaceId(c);
+    const currentSession = await getGreenfieldMeRoute({
+      auth,
+      requestedWorkspaceId: requestedWorkspace,
+    });
+    if (!currentSession.body.ok) return jsonResponse(currentSession);
+
+    if (displayName !== null) {
+      await withUserContext(auth.userId, async () => {
         await updateUserDisplayName({
           userId: auth.userId,
           displayName,
         });
-      }
-      return getUserById(auth.userId);
-    });
-    if (!updated || !updated.is_active) {
-      return c.json(
-        {
-          ok: false,
-          error: { code: 'unauthorized', message: 'Session is not active' },
-        },
-        401,
-      );
+      });
+      const updatedSession = await getGreenfieldMeRoute({
+        auth,
+        requestedWorkspaceId: requestedWorkspace,
+      });
+      return jsonResponse(updatedSession);
     }
-    return c.json({ ok: true, data: { user: normalizeUser(updated) } });
+
+    return jsonResponse(currentSession);
   });
 
   // ── Greenfield workspace shell ───────────────────────────────
@@ -403,6 +408,30 @@ export function mountGreenfieldApiRoutes(app: GreenfieldApp): void {
     const result = await listGreenfieldTalkSidebarRoute({
       auth,
       workspaceId: requestedWorkspaceId(c),
+    });
+    return jsonResponse(result);
+  });
+
+  app.post('/api/v1/talks/sidebar/reorder', async (c) => {
+    const auth = c.get('auth');
+    const rl = checkRateLimit({ userId: auth.userId, bucket: 'write' });
+    if (!rl.allowed) return rateLimitedResponse(c, rl);
+    const csrfFail = checkCsrf(c, auth);
+    if (csrfFail) return csrfFail;
+    const payload = await readJsonBody<{
+      itemType?: unknown;
+      itemId?: unknown;
+      destinationFolderId?: unknown;
+      destinationIndex?: unknown;
+    }>(c);
+    if (!payload.ok) return invalidJsonResponse(c, payload.error);
+    const result = await reorderGreenfieldTalkSidebarRoute({
+      auth,
+      workspaceId: requestedWorkspaceId(c),
+      itemType: payload.data.itemType,
+      itemId: payload.data.itemId,
+      destinationFolderId: payload.data.destinationFolderId,
+      destinationIndex: payload.data.destinationIndex,
     });
     return jsonResponse(result);
   });
@@ -587,16 +616,11 @@ export function mountGreenfieldApiRoutes(app: GreenfieldApp): void {
       threadId?: unknown;
     }>(c);
     if (!payload.ok) return invalidJsonResponse(c, payload.error);
-    const messageIds = Array.isArray(payload.data.messageIds)
-      ? payload.data.messageIds.filter(
-          (value): value is string => typeof value === 'string',
-        )
-      : [];
     const result = await deleteGreenfieldMessagesRoute({
       auth,
       workspaceId: requestedWorkspaceId(c),
       talkId: talkId.value,
-      messageIds,
+      messageIds: payload.data.messageIds,
     });
     return jsonResponse(result);
   });
@@ -714,6 +738,23 @@ export function mountGreenfieldApiRoutes(app: GreenfieldApp): void {
       workspaceId: requestedWorkspaceId(c),
       talkId: talkId.value,
       agents: payload.data.agents,
+    });
+    return jsonResponse(result);
+  });
+
+  app.get('/api/v1/talks/:talkId/runs/:runId/context', async (c) => {
+    const auth = c.get('auth');
+    const rl = checkRateLimit({ userId: auth.userId, bucket: 'read' });
+    if (!rl.allowed) return rateLimitedResponse(c, rl);
+    const talkId = decodeIdParam(c, 'talkId');
+    if (!talkId.ok) return talkId.response;
+    const runId = decodeIdParam(c, 'runId');
+    if (!runId.ok) return runId.response;
+    const result = await getGreenfieldRunContextRoute({
+      auth,
+      workspaceId: requestedWorkspaceId(c),
+      talkId: talkId.value,
+      runId: runId.value,
     });
     return jsonResponse(result);
   });
@@ -1525,18 +1566,9 @@ export function mountGreenfieldApiRoutes(app: GreenfieldApp): void {
           ? parsed.data.threadId.trim() || null
           : null,
       auth,
-      content:
-        typeof parsed.data.content === 'string' ? parsed.data.content : '',
-      targetAgentIds: Array.isArray(parsed.data.targetAgentIds)
-        ? parsed.data.targetAgentIds.filter(
-            (entry): entry is string => typeof entry === 'string',
-          )
-        : null,
-      attachmentIds: Array.isArray(parsed.data.attachmentIds)
-        ? parsed.data.attachmentIds.filter(
-            (entry): entry is string => typeof entry === 'string',
-          )
-        : null,
+      content: parsed.data.content,
+      targetAgentIds: parsed.data.targetAgentIds,
+      attachmentIds: parsed.data.attachmentIds,
     });
     if (result.statusCode === 202 && result.body.ok) {
       const runs = result.body.data.runs;
@@ -1586,30 +1618,6 @@ export function mountGreenfieldApiRoutes(app: GreenfieldApp): void {
     });
     return jsonResponse(result);
   });
-}
-
-type NormalizedUser = {
-  id: string;
-  email: string;
-  displayName: string;
-  role: 'owner' | 'admin' | 'member';
-  createdAt: string;
-};
-
-function normalizeUser(user: {
-  id: string;
-  email: string;
-  display_name: string;
-  role: 'owner' | 'admin' | 'member';
-  created_at: string;
-}): NormalizedUser {
-  return {
-    id: user.id,
-    email: user.email,
-    displayName: user.display_name,
-    role: user.role,
-    createdAt: user.created_at,
-  };
 }
 
 function requestedWorkspaceId(c: Context): string | null {

@@ -7,6 +7,7 @@ import {
   closePgDatabase,
   getDbPg,
   initPgDatabase,
+  withTrustedDbWrites,
   withUserContext,
 } from '../../db.js';
 import { ensureWorkspaceBootstrapForUser } from '../workspaces/bootstrap.js';
@@ -37,6 +38,20 @@ async function deleteUser(): Promise<void> {
   `;
 }
 
+function deferred(): {
+  promise: Promise<void>;
+  resolve: () => void;
+  reject: (error: unknown) => void;
+} {
+  let resolve!: () => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<void>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
 describe('greenfield schema invariants', () => {
   beforeAll(async () => {
     await initPgDatabase();
@@ -61,6 +76,115 @@ describe('greenfield schema invariants', () => {
         (select count(*)::int from public.agent_role_templates) as template_count
     `;
     expect(rows[0]).toEqual({ legacy_table: null, template_count: 7 });
+  });
+
+  it('keeps server-authored workflow tables read-only for authenticated clients', async () => {
+    const db = getDbPg();
+    const protectedTables = [
+      'messages',
+      'context_sources',
+      'context_source_pages',
+      'documents',
+      'doc_tabs',
+      'doc_blocks',
+      'doc_tab_coeditors',
+      'document_versions',
+    ];
+    const directDmlGrants = await db<
+      Array<{ table_name: string; privilege_type: string }>
+    >`
+      select table_name, privilege_type
+      from information_schema.role_table_grants
+      where table_schema = 'public'
+        and grantee = 'authenticated'
+        and table_name in ${db(protectedTables)}
+        and privilege_type in ('INSERT', 'UPDATE', 'DELETE')
+      order by table_name asc, privilege_type asc
+    `;
+    expect(directDmlGrants).toEqual([]);
+
+    const writePolicies = await db<Array<{ tablename: string; cmd: string }>>`
+      select tablename, cmd
+      from pg_policies
+      where schemaname = 'public'
+        and tablename in ${db(protectedTables)}
+        and cmd <> 'SELECT'
+      order by tablename asc, cmd asc
+    `;
+    expect(writePolicies).toEqual([]);
+  });
+
+  it('keeps nested trusted writes elevated until the outer scope finishes', async () => {
+    await seedUserAndWorkspace();
+    await withUserContext(USER_ID, async () => {
+      const db = getDbPg();
+      await withTrustedDbWrites(async () => {
+        const roleRows = await db<{ role: string }[]>`
+          select current_role as role
+        `;
+        expect(roleRows[0]?.role).toBe('postgres');
+
+        await withTrustedDbWrites(async () => {
+          const nestedRoleRows = await db<{ role: string }[]>`
+            select current_role as role
+          `;
+          expect(nestedRoleRows[0]?.role).toBe('postgres');
+        });
+
+        const roleAfterNestedRows = await db<{ role: string }[]>`
+          select current_role as role
+        `;
+        expect(roleAfterNestedRows[0]?.role).toBe('postgres');
+      });
+
+      const finalRoleRows = await db<{ role: string }[]>`
+        select current_role as role
+      `;
+      expect(finalRoleRows[0]?.role).toBe('authenticated');
+    });
+  });
+
+  it('rejects overlapping trusted writes and blocks non-trusted queries while elevated', async () => {
+    await seedUserAndWorkspace();
+    await withUserContext(USER_ID, async () => {
+      const db = getDbPg();
+      const firstEntered = deferred();
+      const releaseFirst = deferred();
+
+      const first = withTrustedDbWrites(async () => {
+        const roleRows = await db<{ role: string }[]>`
+          select current_role as role
+        `;
+        expect(roleRows[0]?.role).toBe('postgres');
+        firstEntered.resolve();
+        await releaseFirst.promise;
+      });
+
+      void first.catch(firstEntered.reject);
+      await firstEntered.promise;
+
+      try {
+        expect(() => {
+          void db<{ role: string }[]>`
+            select current_role as role
+          `;
+        }).toThrow(/outside the trusted callback/);
+
+        await expect(
+          withTrustedDbWrites(async () => {
+            await db`select 1`;
+          }),
+        ).rejects.toThrow(/Concurrent trusted DB writes/);
+      } finally {
+        releaseFirst.resolve();
+      }
+      await first;
+
+      const finalRoleRows = await db<{ role: string }[]>`
+        select current_role as role
+      `;
+      expect(finalRoleRows[0]?.role).toBe('authenticated');
+    });
   });
 
   it('blocks deleting the last document tab', async () => {
@@ -327,6 +451,19 @@ describe('greenfield schema invariants', () => {
       withUserContext(USER_ID, async () => {
         const scopedDb = getDbPg();
         await scopedDb`
+          insert into public.event_outbox (topic, event_type, payload)
+          values (
+            ${`talk:${fixture.talk_id}`}, 'forged_event',
+            jsonb_build_object('trusted', false)
+          )
+        `;
+      }),
+    ).rejects.toMatchObject({ code: '42501' });
+
+    await expect(
+      withUserContext(USER_ID, async () => {
+        const scopedDb = getDbPg();
+        await scopedDb`
           insert into public.audit_events (
             workspace_id, actor_user_id, entity_type, entity_id, action,
             payload_json
@@ -336,6 +473,106 @@ describe('greenfield schema invariants', () => {
             ${fixture.run_id}::uuid, 'forged_audit',
             jsonb_build_object('trusted', false)
           )
+        `;
+      }),
+    ).rejects.toMatchObject({ code: '42501' });
+  });
+
+  it('rejects direct authenticated writes into document edit provenance rows', async () => {
+    const { workspaceId } = await seedUserAndWorkspace();
+    const db = getDbPg();
+    const [fixture] = await db<
+      Array<{
+        talk_id: string;
+        document_id: string;
+        tab_id: string;
+        block_id: string;
+        list_version: number;
+      }>
+    >`
+      with talk as (
+        insert into public.talks (workspace_id, sort_order, title, created_by)
+        values (${workspaceId}::uuid, 0, 'Document edit RLS', ${USER_ID}::uuid)
+        returning id
+      ),
+      document as (
+        insert into public.documents (workspace_id, primary_talk_id, title, format)
+        select ${workspaceId}::uuid, talk.id, 'Draft', 'markdown'
+        from talk
+        returning id, primary_talk_id
+      ),
+      tab as (
+        insert into public.doc_tabs (workspace_id, document_id, title, sort_order)
+        select ${workspaceId}::uuid, document.id, 'Main', 0
+        from document
+        returning id, document_id, list_version
+      ),
+      block as (
+        insert into public.doc_blocks (
+          workspace_id, document_id, tab_id, sort_order, kind, text
+        )
+        select ${workspaceId}::uuid, tab.document_id, tab.id, 0, 'p', 'Original'
+        from tab
+        returning id, tab_id, document_id
+      )
+      select
+        document.primary_talk_id as talk_id,
+        document.id as document_id,
+        tab.id as tab_id,
+        block.id as block_id,
+        tab.list_version
+      from document, tab, block
+    `;
+
+    await expect(
+      withUserContext(USER_ID, async () => {
+        const scopedDb = getDbPg();
+        await scopedDb`
+          insert into public.document_edits (
+            workspace_id, document_id, tab_id, after_block_id,
+            base_list_version, op, new_kind, new_text, new_attrs_json
+          )
+          values (
+            ${workspaceId}::uuid, ${fixture.document_id}::uuid,
+            ${fixture.tab_id}::uuid, ${fixture.block_id}::uuid,
+            ${fixture.list_version}, 'insert', 'p', 'Forged edit',
+            '{}'::jsonb
+          )
+        `;
+      }),
+    ).rejects.toMatchObject({ code: '42501' });
+
+    const [edit] = await db<{ id: string }[]>`
+      insert into public.document_edits (
+        workspace_id, document_id, tab_id, after_block_id, base_list_version,
+        op, new_kind, new_text, new_attrs_json
+      )
+      values (
+        ${workspaceId}::uuid, ${fixture.document_id}::uuid,
+        ${fixture.tab_id}::uuid, ${fixture.block_id}::uuid,
+        ${fixture.list_version}, 'insert', 'p', 'Trusted edit',
+        '{}'::jsonb
+      )
+      returning id
+    `;
+
+    await expect(
+      withUserContext(USER_ID, async () => {
+        const scopedDb = getDbPg();
+        await scopedDb`
+          update public.document_edits
+          set status = 'accepted'
+          where id = ${edit.id}::uuid
+        `;
+      }),
+    ).rejects.toMatchObject({ code: '42501' });
+
+    await expect(
+      withUserContext(USER_ID, async () => {
+        const scopedDb = getDbPg();
+        await scopedDb`
+          delete from public.document_edits
+          where id = ${edit.id}::uuid
         `;
       }),
     ).rejects.toMatchObject({ code: '42501' });
@@ -396,15 +633,48 @@ describe('greenfield schema invariants', () => {
       migrationSql.match(
         /member_write_tables text\[] := array\[[\s\S]*?\];/,
       )?.[0] ?? '';
+    const adminWriteBlock =
+      migrationSql.match(
+        /admin_write_tables text\[] := array\[[\s\S]*?\];/,
+      )?.[0] ?? '';
+    expect(migrationSql).toContain(
+      'create or replace function public.is_workspace_writer',
+    );
+    expect(migrationSql).toContain(
+      'create policy %I_write on public.%I for all using (public.is_workspace_writer(workspace_id)) with check (public.is_workspace_writer(workspace_id))',
+    );
+    expect(migrationSql).toContain(
+      'clawtalk greenfield baseline requires an empty/reset Supabase database',
+    );
+    expect(migrationSql).toContain('create policy jobs_read on public.jobs');
+    expect(migrationSql).not.toContain('create policy jobs_insert');
+    expect(migrationSql).not.toContain('create policy jobs_update');
+    expect(migrationSql).toContain(
+      'revoke insert, update, delete on public.jobs from authenticated',
+    );
+    expect(migrationSql).toContain('create trigger jobs_block_identity_change');
 
     for (const tableName of [
+      'jobs',
       'runs',
       'talk_agent_snapshots',
       'run_prompt_snapshots',
       'audit_events',
+      'document_edits',
+      'agents',
     ]) {
       expect(memberWriteBlock).not.toContain(`'${tableName}'`);
     }
+    expect(adminWriteBlock).toContain("'agents'");
+    expect(migrationSql).toContain(
+      'create policy %I_write on public.%I for all using (public.is_workspace_admin(workspace_id)) with check (public.is_workspace_admin(workspace_id))',
+    );
+    expect(migrationSql).toContain(
+      'create policy document_edits_read on public.document_edits',
+    );
+    expect(migrationSql).toContain(
+      'new.proposed_by_run_id is not null\n            and proposed_by_run_id = new.proposed_by_run_id',
+    );
     expect(migrationSql).not.toContain('create policy runs_insert_member');
     expect(migrationSql).not.toContain('create policy runs_cancel_member');
     expect(migrationSql).not.toContain(
@@ -412,6 +682,12 @@ describe('greenfield schema invariants', () => {
     );
     expect(migrationSql).not.toContain(
       'create policy run_prompt_snapshots_insert_member',
+    );
+    expect(migrationSql).toContain(
+      'revoke insert, update, delete on public.jobs from authenticated',
+    );
+    expect(migrationSql).toContain(
+      'revoke insert, update, delete on public.document_edits from authenticated',
     );
     expect(migrationSql).toContain(
       'revoke insert, update, delete on public.runs from authenticated',
@@ -428,6 +704,94 @@ describe('greenfield schema invariants', () => {
     expect(migrationSql).toContain(
       'revoke insert, update, delete on public.audit_events from authenticated',
     );
+    expect(migrationSql).toContain(
+      'grant select on public.settings_kv to authenticated',
+    );
+    expect(migrationSql).toContain('create table public.web_search_providers');
+    expect(migrationSql).toContain(
+      'preferred_web_search_provider_id text references public.web_search_providers(id) on delete set null',
+    );
+    expect(migrationSql).toContain(
+      'create table public.web_search_provider_secrets',
+    );
+    expect(migrationSql).toContain(
+      'create policy web_search_provider_secrets_owner on public.web_search_provider_secrets',
+    );
+    expect(migrationSql).toContain(
+      "('web_search.exa', 'Exa', 'https://api.exa.ai')",
+    );
+    expect(migrationSql).toContain(
+      'grant select, insert, update, delete on public.web_search_provider_secrets to authenticated',
+    );
+    expect(migrationSql).toContain(
+      'revoke insert, update, delete on public.web_search_providers from authenticated',
+    );
+    expect(migrationSql).toContain(
+      'grant update (name, avatar_color, initials, preferred_web_search_provider_id, updated_at) on public.users to authenticated',
+    );
+    expect(migrationSql).toContain(
+      'revoke insert, update, delete on public.settings_kv from authenticated',
+    );
+    expect(migrationSql).toContain(
+      'revoke insert, update, delete on public.llm_ttft_stats from authenticated',
+    );
+    expect(migrationSql).not.toContain(
+      'create policy workspace_provider_secrets_read',
+    );
+    expect(migrationSql).not.toContain(
+      'grant select, insert, update, delete on public.workspace_provider_secrets to authenticated',
+    );
+    expect(migrationSql).not.toContain(
+      'grant insert, update, delete on public.workspace_provider_secrets to authenticated',
+    );
+    expect(migrationSql).toContain(
+      'revoke all on public.workspace_provider_secrets from authenticated',
+    );
+    expect(migrationSql).not.toContain(
+      'create policy workspace_provider_secrets_insert on public.workspace_provider_secrets',
+    );
+    expect(migrationSql).not.toContain(
+      'create policy workspace_provider_secrets_update on public.workspace_provider_secrets',
+    );
+    expect(migrationSql).not.toContain(
+      'create policy workspace_provider_secrets_delete on public.workspace_provider_secrets',
+    );
     expect(migrationSql).toContain('create policy audit_events_read');
+    expect(migrationSql).toContain('create policy connectors_insert');
+    expect(migrationSql).toContain(
+      "and config_json->>'compatSurface' is distinct from 'google_tools'",
+    );
+    expect(migrationSql).toContain('create policy connectors_update');
+    expect(migrationSql).toContain('create policy connectors_delete');
+  });
+
+  it('creates public foreign-key targets before referencing them', () => {
+    const migrationSql = readFileSync(
+      new URL(
+        '../../../supabase/migrations/0001_clawtalk_greenfield.sql',
+        import.meta.url,
+      ),
+      'utf8',
+    );
+    const createdTables = new Set<string>();
+
+    migrationSql.split('\n').forEach((line, index) => {
+      const createMatch = line.match(
+        /^\s*create\s+table\s+public\.([a-z_][a-z0-9_]*)\b/i,
+      );
+      if (createMatch) {
+        createdTables.add(`public.${createMatch[1]}`);
+      }
+
+      for (const referenceMatch of line.matchAll(
+        /\breferences\s+public\.([a-z_][a-z0-9_]*)\b/gi,
+      )) {
+        const referencedTable = `public.${referenceMatch[1]}`;
+        expect(
+          createdTables.has(referencedTable),
+          `line ${index + 1} references ${referencedTable} before it is created`,
+        ).toBe(true);
+      }
+    });
   });
 });

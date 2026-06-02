@@ -5,7 +5,10 @@ import {
   buildEffectiveToolsFromTalkToolRows,
   listUserToolPermissionsForUser,
   normalizeTalkToolFamiliesFromRows,
+  type RegisteredAgentRecord,
 } from '../db/agent-accessors.js';
+import { resolveCredentialKindSnapshot } from '../agents/execution-resolver.js';
+import { withGreenfieldDocumentEditToolAccess } from './greenfield-document-tools.js';
 import { emitOutboxEventOnSql, enqueueOutboxNotify } from './outbox-emit.js';
 import type { GreenfieldMessageRecord } from './greenfield-detail-accessors.js';
 
@@ -49,12 +52,38 @@ interface GreenfieldChatRosterAgentRecord {
   method: string[];
   sort_order: number;
   created_from_template_version: number | null;
+  credential_mode: 'api_key' | 'subscription' | null;
 }
 
 interface PendingOutboxNotify {
   topic: string;
   eventId: number;
   ownerIds: string[];
+}
+
+function uniqueOwnerIds(
+  rows: Array<{ user_id: string }>,
+  fallbackUserId: string,
+): string[] {
+  const ids = new Set(rows.map((row) => row.user_id).filter(Boolean));
+  ids.add(fallbackUserId);
+  return Array.from(ids);
+}
+
+async function listWorkspaceNotifyOwnerIdsOnSql(input: {
+  sql: Sql;
+  workspaceId: string;
+  fallbackUserId: string;
+}): Promise<string[]> {
+  const rows = await withTrustedDbWrites(
+    () => input.sql<Array<{ user_id: string }>>`
+      select user_id::text as user_id
+      from public.workspace_members
+      where workspace_id = ${input.workspaceId}::uuid
+      order by created_at asc, user_id asc
+    `,
+  );
+  return uniqueOwnerIds(rows, input.fallbackUserId);
 }
 
 async function withExistingOrNewTransaction<T>(
@@ -71,6 +100,33 @@ async function withExistingOrNewTransaction<T>(
   return (await maybeTransaction.begin(async (tx) =>
     fn(tx as unknown as Sql),
   )) as T;
+}
+
+function toCredentialSnapshotAgent(
+  agent: GreenfieldChatRosterAgentRecord,
+  ownerId: string,
+): RegisteredAgentRecord {
+  if (!agent.provider_id) {
+    throw new Error(
+      'Cannot snapshot credentials for an agent without provider',
+    );
+  }
+  return {
+    id: agent.id,
+    owner_id: ownerId,
+    name: agent.name,
+    provider_id: agent.provider_id,
+    model_id: agent.model_id,
+    persona_role: agent.role_key,
+    system_prompt: null,
+    description: agent.focus,
+    enabled: true,
+    credential_mode: agent.credential_mode,
+    model_auto_upgraded_from: null,
+    model_auto_upgraded_at: null,
+    created_at: new Date(0).toISOString(),
+    updated_at: new Date(0).toISOString(),
+  };
 }
 
 export type EnqueueGreenfieldChatTurnResult =
@@ -146,7 +202,8 @@ export async function enqueueGreenfieldChatTurn(input: {
         a.focus,
         a.method,
         ta.sort_order,
-        a.created_from_template_version
+        a.created_from_template_version,
+        a.credential_mode
       from public.talk_agents ta
       join public.agents a
         on a.workspace_id = ta.workspace_id
@@ -217,41 +274,68 @@ export async function enqueueGreenfieldChatTurn(input: {
     const userToolPermissions = await listUserToolPermissionsForUser(
       input.userId,
     );
+    const attachedDocuments = await txSql<{ id: string }[]>`
+      select id
+      from public.documents
+      where workspace_id = ${input.workspaceId}::uuid
+        and primary_talk_id = ${input.talkId}::uuid
+      limit 1
+    `;
+    const baseEffectiveTools = buildEffectiveToolsFromTalkToolRows(
+      toolRows,
+      userToolPermissions,
+    );
+    const effectiveTools =
+      attachedDocuments.length > 0
+        ? withGreenfieldDocumentEditToolAccess(baseEffectiveTools)
+        : baseEffectiveTools;
     const toolManifest = {
       active: activeToolFamilies,
-      effectiveTools: buildEffectiveToolsFromTalkToolRows(
-        toolRows,
-        userToolPermissions,
-      ),
+      effectiveTools,
     };
+    const credentialKindSnapshots = new Map<string, string | null>();
+    for (const agent of selectedAgents) {
+      credentialKindSnapshots.set(
+        agent.id,
+        await resolveCredentialKindSnapshot(
+          toCredentialSnapshotAgent(agent, input.userId),
+          {
+            principalUserId: input.userId,
+            workspaceId: input.workspaceId,
+          },
+          txSql,
+        ),
+      );
+    }
 
-    const insertedMessages = await txSql<GreenfieldMessageRecord[]>`
-      insert into public.messages (
-        workspace_id, talk_id, round, author_kind, author_user_id, body
-      )
-      values (
-        ${input.workspaceId}::uuid,
-        ${input.talkId}::uuid,
-        ${round},
-        'user',
-        ${input.userId}::uuid,
-        ${input.content}
-      )
-      returning
-        id,
-        workspace_id,
-        talk_id,
-        round,
-        author_kind,
-        author_user_id,
-        null::uuid as agent_id,
-        null::text as agent_name,
-        null::text as agent_role_key,
-        run_id,
-        body,
-        attachments_json,
-        created_at
-    `;
+    const insertedMessages = await withTrustedDbWrites(
+      () => txSql<GreenfieldMessageRecord[]>`
+        insert into public.messages (
+          workspace_id, talk_id, round, author_kind, author_user_id, body
+        )
+        values (
+          ${input.workspaceId}::uuid,
+          ${input.talkId}::uuid,
+          ${round},
+          'user',
+          ${input.userId}::uuid,
+          ${input.content}
+        )
+        returning
+          id,
+          workspace_id,
+          talk_id,
+          round,
+          author_kind,
+          author_user_id,
+          null::uuid as agent_id,
+          null::text as agent_name,
+          null::text as agent_role_key,
+          run_id,
+          body,
+          created_at
+      `,
+    );
     const message = insertedMessages[0]!;
     const runs: GreenfieldChatRunRecord[] = [];
 
@@ -375,7 +459,10 @@ export async function enqueueGreenfieldChatTurn(input: {
           ${agent.provider_id},
           ${agent.created_from_template_version},
           1,
-          ${txSql.json(toolManifest as never)}
+          ${txSql.json({
+            ...toolManifest,
+            agentCredentialMode: credentialKindSnapshots.get(agent.id) ?? null,
+          } as never)}
         )
       `;
         runs.push({
@@ -386,13 +473,20 @@ export async function enqueueGreenfieldChatTurn(input: {
       }
     });
 
-    await txSql`
-      update public.talks
-      set last_activity_at = now()
-      where workspace_id = ${input.workspaceId}::uuid
-        and id = ${input.talkId}::uuid
-    `;
+    await withTrustedDbWrites(async () => {
+      await txSql`
+        update public.talks
+        set last_activity_at = now()
+        where workspace_id = ${input.workspaceId}::uuid
+          and id = ${input.talkId}::uuid
+      `;
+    });
 
+    const ownerIds = await listWorkspaceNotifyOwnerIdsOnSql({
+      sql: txSql,
+      workspaceId: input.workspaceId,
+      fallbackUserId: input.userId,
+    });
     const localNotifies: PendingOutboxNotify[] = [];
     const messageEventId = await emitOutboxEventOnSql(txSql, {
       topic: `talk:${input.talkId}`,
@@ -407,12 +501,12 @@ export async function enqueueGreenfieldChatTurn(input: {
         content: input.content,
         createdAt: message.created_at,
       },
-      ownerIds: [input.userId],
+      ownerIds,
     });
     localNotifies.push({
       topic: `talk:${input.talkId}`,
       eventId: messageEventId,
-      ownerIds: [input.userId],
+      ownerIds,
     });
 
     for (const run of runs) {
@@ -433,12 +527,12 @@ export async function enqueueGreenfieldChatTurn(input: {
           executorAlias: run.target_agent_name,
           executorModel: run.model_id,
         },
-        ownerIds: [input.userId],
+        ownerIds,
       });
       localNotifies.push({
         topic: `talk:${input.talkId}`,
         eventId,
-        ownerIds: [input.userId],
+        ownerIds,
       });
     }
     pendingNotifies = localNotifies;
@@ -480,15 +574,12 @@ export async function cancelGreenfieldTalkRuns(input: {
     `;
     const auth = authorization[0];
     if (!auth) return [];
-    const canCancelJobRuns =
-      input.includeJobRuns === true &&
-      (auth.role === 'owner' ||
-        auth.role === 'admin' ||
-        auth.created_by === input.userId);
+    if (auth.role === 'guest') return [];
+    const canCancelOwnedJobRuns = input.includeJobRuns === true;
 
     return withTrustedDbWrites(async () => {
       const rows = await txSql<{ id: string; job_id: string | null }[]>`
-      update public.runs
+      update public.runs r
       set
         status = 'cancelled',
         finished_at = coalesce(finished_at, now()),
@@ -496,11 +587,23 @@ export async function cancelGreenfieldTalkRuns(input: {
           'code', 'cancelled_by_user',
           'cancelledBy', ${input.userId}::text
         )
-      where workspace_id = ${input.workspaceId}::uuid
-        and talk_id = ${input.talkId}::uuid
-        and status in ('queued', 'running', 'awaiting')
-        and (${canCancelJobRuns}::boolean or job_id is null)
-      returning id, job_id
+      where r.workspace_id = ${input.workspaceId}::uuid
+        and r.talk_id = ${input.talkId}::uuid
+        and r.status in ('queued', 'running', 'awaiting')
+        and (
+          r.job_id is null
+          or (
+            ${canCancelOwnedJobRuns}::boolean
+            and exists (
+              select 1
+              from public.jobs j
+              where j.workspace_id = r.workspace_id
+                and j.id = r.job_id
+                and j.created_by = ${input.userId}::uuid
+            )
+          )
+        )
+      returning r.id, r.job_id
     `;
       const runIds = rows.map((row) => row.id);
       for (const run of rows) {
@@ -517,6 +620,11 @@ export async function cancelGreenfieldTalkRuns(input: {
       `;
       }
       if (runIds.length > 0) {
+        const ownerIds = await listWorkspaceNotifyOwnerIdsOnSql({
+          sql: txSql,
+          workspaceId: input.workspaceId,
+          fallbackUserId: input.userId,
+        });
         const eventId = await emitOutboxEventOnSql(txSql, {
           topic: `talk:${input.talkId}`,
           eventType: 'talk_run_cancelled',
@@ -526,12 +634,12 @@ export async function cancelGreenfieldTalkRuns(input: {
             runIds,
             threadIds: [input.talkId],
           },
-          ownerIds: [input.userId],
+          ownerIds,
         });
         pendingNotify = {
           topic: `talk:${input.talkId}`,
           eventId,
-          ownerIds: [input.userId],
+          ownerIds,
         };
       }
       return rows;

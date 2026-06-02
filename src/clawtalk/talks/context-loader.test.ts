@@ -171,6 +171,18 @@ describe('buildContentOutline', () => {
     expect(outline).not.toContain('more blocks omitted');
   });
 
+  it('renders read-only document instructions for scheduled job runs', () => {
+    const content = makeContent({
+      bodyMarkdown: '<!-- anchor:jobread11112222 -->\nRead-only prose.',
+    });
+    const outline = buildContentOutline(content, 8192, { allowEdits: false });
+    expect(outline).toContain('[paragraph] Read-only prose.');
+    expect(outline).toContain('scheduled jobs cannot modify the Talk document');
+    expect(outline).not.toContain('apply_content_edit');
+    expect(outline).not.toContain('To change this document, call');
+    expect(outline).not.toContain('HTML payload required');
+  });
+
   it('emits a header + footer even when there are zero blocks', () => {
     const content = makeContent({ title: 'Empty Doc', bodyMarkdown: '' });
     const outline = buildContentOutline(content);

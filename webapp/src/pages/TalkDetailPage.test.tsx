@@ -27,19 +27,15 @@ function buildTestQueryClient(): QueryClient {
 import { openTalkStream } from '../lib/talkStream';
 import type {
   AiAgentsPageData,
-  ChannelConnection,
-  ChannelQueueFailure,
-  ChannelTarget,
   Content,
   ContentSidebarItem,
   ContextRule,
   ContextSource,
   TalkContext,
-  DataConnector,
   Talk,
   TalkAgent,
-  TalkChannelBinding,
-  TalkDataConnector,
+  TalkConnectorChannelRow,
+  TalkConnectorDataConnectorRow,
   TalkMessage,
   TalkMessageAttachment,
   TalkRun,
@@ -48,6 +44,7 @@ import type {
   TalkJobRunSummary,
   TalkStateEntry,
   TalkThread,
+  TalkToolsState,
   RegisteredAgent,
 } from '../lib/api';
 
@@ -259,7 +256,7 @@ describe('TalkDetailPage', () => {
       .closest('.composer-meta-row') as HTMLElement | null;
     expect(composerMeta).toBeTruthy();
     expect(within(composerMeta!).getByText('0/20000')).toBeTruthy();
-    expect(screen.getByRole('button', { name: 'Attach' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Attach' })).toBeDisabled();
 
     const tabs = within(
       screen.getByRole('navigation', { name: 'Talk sections' }),
@@ -2206,9 +2203,8 @@ describe('TalkDetailPage', () => {
     }
   });
 
-  it('attaches dropped files from the talk workspace and sends their attachment ids', async () => {
+  it('keeps message attachments disabled while greenfield attachment storage is unavailable', async () => {
     const user = userEvent.setup();
-    let uploadedFileName: string | null = null;
     let sentBody:
       | {
           content: string;
@@ -2220,19 +2216,8 @@ describe('TalkDetailPage', () => {
     installTalkDetailFetch({
       messages: [],
       runs: [],
-      onUploadAttachment: (formData) => {
-        const file = formData.get('file');
-        if (!(file instanceof File)) {
-          throw new Error('Expected file in attachment upload payload');
-        }
-        uploadedFileName = file.name;
-        return buildMessageAttachment({
-          id: 'att-1',
-          fileName: file.name,
-          fileSize: file.size,
-          mimeType: file.type,
-          extractionStatus: 'ready',
-        });
+      onUploadAttachment: () => {
+        throw new Error('Attachment upload should not be called');
       },
       onSendMessage: (body) => {
         sentBody = body;
@@ -2257,6 +2242,7 @@ describe('TalkDetailPage', () => {
     if (!workspace) {
       throw new Error('Expected talk workspace wrapper');
     }
+    expect(screen.getByRole('button', { name: 'Attach' })).toBeDisabled();
 
     const file = new File(['hello world'], 'notes.txt', { type: 'text/plain' });
     const dataTransfer = createFileDataTransfer([file]);
@@ -2270,14 +2256,13 @@ describe('TalkDetailPage', () => {
     });
     window.dispatchEvent(windowDragOverEvent);
     expect(windowDragOverEvent.defaultPrevented).toBe(true);
+    expect(dataTransfer.dropEffect).toBe('none');
 
     fireEvent.dragEnter(workspace, { dataTransfer });
-    expect(await screen.findByText('Drop files to attach')).toBeTruthy();
+    expect(screen.queryByText('Drop files to attach')).toBeNull();
 
     fireEvent.drop(workspace, { dataTransfer });
-
-    expect(await screen.findByText('notes.txt')).toBeTruthy();
-    expect(uploadedFileName).toBe('notes.txt');
+    expect(screen.queryByText('notes.txt')).toBeNull();
 
     await user.type(composer, 'Please review the attachment.');
     await user.click(screen.getByRole('button', { name: 'Send' }));
@@ -2286,237 +2271,106 @@ describe('TalkDetailPage', () => {
       expect(sentBody).toMatchObject({
         content: 'Please review the attachment.',
         targetAgentIds: ['agent-claude'],
-        attachmentIds: ['att-1'],
+        attachmentIds: [],
       }),
     );
   });
 
-  it('shows an image preview chip for pending image attachments', async () => {
-    installTalkDetailFetch({
-      messages: [],
-      runs: [],
-      onUploadAttachment: (formData) => {
-        const file = formData.get('file');
-        if (!(file instanceof File)) {
-          throw new Error('Expected file in attachment upload payload');
-        }
-        return buildMessageAttachment({
-          id: 'att-image',
-          fileName: file.name,
-          fileSize: file.size,
-          mimeType: file.type,
-          extractionStatus: 'ready',
-        });
-      },
-    });
-
-    renderDetailPage('/app/talks/talk-1');
-    const composer = await screen.findByPlaceholderText(
-      /^Send a message to this thread/,
-    );
-    const workspace = composer.closest('.talk-workspace');
-    if (!workspace) {
-      throw new Error('Expected talk workspace wrapper');
-    }
-
-    const file = new File([Uint8Array.from([1, 2, 3])], 'diagram.png', {
-      type: 'image/png',
-    });
-    fireEvent.drop(workspace, { dataTransfer: createFileDataTransfer([file]) });
-
-    expect(await screen.findByAltText('diagram.png')).toBeTruthy();
-    expect(screen.getByText('diagram.png')).toBeTruthy();
-  });
-
-  it('blocks image sends for non-vision agents before submit', async () => {
+  it('uses the snapshot workspace for talk-scoped catalog and chat actions', async () => {
     const user = userEvent.setup();
-
+    const requestedUrls: string[] = [];
     installTalkDetailFetch({
+      workspaceId: 'workspace-talk',
       messages: [],
       runs: [],
-      aiAgents: {
-        ...buildAiAgentsData(),
-        claudeModelSuggestions: [
-          {
-            modelId: 'claude-sonnet-4-6',
-            displayName: 'Claude Sonnet 4.6',
-            contextWindowTokens: 200000,
-            defaultMaxOutputTokens: 4096,
-            supportsVision: false,
-          },
-        ],
-      },
-      onUploadAttachment: (formData) => {
-        const file = formData.get('file');
-        if (!(file instanceof File)) {
-          throw new Error('Expected file in attachment upload payload');
-        }
-        return buildMessageAttachment({
-          id: 'att-image',
-          fileName: file.name,
-          fileSize: file.size,
-          mimeType: file.type,
-          extractionStatus: 'ready',
-        });
-      },
+      onRequest: (url) => requestedUrls.push(url),
+      onSendMessage: (body) => ({
+        talkId: 'talk-1',
+        message: buildMessage({
+          id: 'msg-posted-workspace-scope',
+          role: 'user',
+          content: body.content,
+          createdAt: '2026-03-06T00:00:05.000Z',
+        }),
+        runs: [],
+      }),
     });
 
     renderDetailPage('/app/talks/talk-1');
     const composer = await screen.findByPlaceholderText(
       /^Send a message to this thread/,
     );
-    const workspace = composer.closest('.talk-workspace');
-    if (!workspace) {
-      throw new Error('Expected talk workspace wrapper');
-    }
 
-    const file = new File([Uint8Array.from([1, 2, 3])], 'diagram.png', {
-      type: 'image/png',
+    await waitFor(() => {
+      expect(
+        requestedUrls.some(
+          (url) =>
+            url === '/api/v1/agents?workspaceId=workspace-talk' ||
+            url.endsWith('/api/v1/agents?workspaceId=workspace-talk'),
+        ),
+      ).toBe(true);
+      expect(
+        requestedUrls.some(
+          (url) =>
+            url === '/api/v1/registered-agents?workspaceId=workspace-talk' ||
+            url.endsWith(
+              '/api/v1/registered-agents?workspaceId=workspace-talk',
+            ),
+        ),
+      ).toBe(true);
     });
-    fireEvent.drop(workspace, { dataTransfer: createFileDataTransfer([file]) });
 
-    const guardrail = await screen.findByText(
-      /Claude Sonnet 4\.6 .*does not support image attachments\. Switch to a vision-capable model or remove the images before sending\./,
+    await user.type(composer, 'Use the talk workspace.');
+    await user.click(screen.getByRole('button', { name: 'Send' }));
+
+    await waitFor(() =>
+      expect(
+        requestedUrls.some(
+          (url) =>
+            url === '/api/v1/talks/talk-1/chat?workspaceId=workspace-talk' ||
+            url.endsWith(
+              '/api/v1/talks/talk-1/chat?workspaceId=workspace-talk',
+            ),
+        ),
+      ).toBe(true),
     );
-    expect(guardrail).toBeTruthy();
-    expect(guardrail.closest('[role="status"]')).toHaveAttribute(
-      'aria-live',
-      'polite',
-    );
-    await user.type(composer, 'Please inspect the image');
-    expect(screen.getByRole('button', { name: 'Send' })).toBeDisabled();
   });
 
-  it('allows image sends for Main when the registered agent reports supportsVision=true (e.g. Codex GPT-5.4) even if its model is absent from additionalProviders', async () => {
-    // PR H reproduces Joseph's prod bug: Main = GPT-5.4 via Codex
-    // Subscription, gpt-5.4 IS seeded in llm_provider_models but the
-    // composer guard was still firing. The frontend had been recomputing
-    // vision capability from additionalProviders.modelSuggestions, which
-    // can miss for any number of reasons. The guard now trusts the
-    // registered agent's supportsVision (backend ground truth from
-    // resolveModelCapabilities). The fixture's additionalProviders has
-    // NO codex entry — proving we no longer need it.
+  it('uses the snapshot workspace when cancelling talk runs', async () => {
+    const user = userEvent.setup();
+    const requestedUrls: string[] = [];
     installTalkDetailFetch({
+      workspaceId: 'workspace-talk',
       messages: [],
-      runs: [],
-      talkAgents: [
-        buildTalkAgent({
-          id: 'agent-main',
-          nickname: 'Agent',
-          sourceKind: 'claude_default',
-          role: 'assistant',
-          isPrimary: true,
-          displayOrder: 0,
-          health: 'ready',
-          providerId: null,
-          modelId: null,
-          modelDisplayName: null,
+      runs: [
+        buildRun({
+          id: 'run-cancellable',
+          status: 'running',
+          createdAt: '2026-03-06T00:00:06.000Z',
+          threadId: DEFAULT_THREAD_ID,
+          targetAgentId: 'agent-claude',
+          targetAgentNickname: 'Claude Sonnet 4.6',
         }),
       ],
-      registeredAgents: [
-        buildRegisteredAgent({
-          id: 'agent-main',
-          name: 'GPT5.4',
-          providerId: 'provider.openai_codex',
-          modelId: 'gpt-5.4',
-          supportsVision: true,
-        }),
-      ],
-      onUploadAttachment: (formData) => {
-        const file = formData.get('file');
-        if (!(file instanceof File)) {
-          throw new Error('Expected file in attachment upload payload');
-        }
-        return buildMessageAttachment({
-          id: 'att-image',
-          fileName: file.name,
-          fileSize: file.size,
-          mimeType: file.type,
-          extractionStatus: 'ready',
-        });
-      },
+      onRequest: (url) => requestedUrls.push(url),
     });
 
     renderDetailPage('/app/talks/talk-1');
-    const composer = await screen.findByPlaceholderText(
-      /^Send a message to this thread/,
+    await screen.findByPlaceholderText(/^Send a message to this thread/);
+    await user.click(screen.getByRole('button', { name: 'Cancel Runs' }));
+
+    await waitFor(() =>
+      expect(
+        requestedUrls.some(
+          (url) =>
+            url ===
+              '/api/v1/talks/talk-1/chat/cancel?workspaceId=workspace-talk' ||
+            url.endsWith(
+              '/api/v1/talks/talk-1/chat/cancel?workspaceId=workspace-talk',
+            ),
+        ),
+      ).toBe(true),
     );
-    const workspace = composer.closest('.talk-workspace');
-    if (!workspace) {
-      throw new Error('Expected talk workspace wrapper');
-    }
-
-    const file = new File([Uint8Array.from([1, 2, 3])], 'diagram.png', {
-      type: 'image/png',
-    });
-    fireEvent.drop(workspace, { dataTransfer: createFileDataTransfer([file]) });
-
-    expect(await screen.findByAltText('diagram.png')).toBeTruthy();
-    expect(screen.queryByText(/does not support image attachments/)).toBeNull();
-  });
-
-  it('blocks image sends for Main when the registered agent reports supportsVision=false', async () => {
-    // Negative case for PR H: registered agent's supportsVision flag is
-    // the authoritative signal for the Main slot. False → banner fires.
-    installTalkDetailFetch({
-      messages: [],
-      runs: [],
-      talkAgents: [
-        buildTalkAgent({
-          id: 'agent-main',
-          nickname: 'Agent',
-          sourceKind: 'claude_default',
-          role: 'assistant',
-          isPrimary: true,
-          displayOrder: 0,
-          health: 'ready',
-          providerId: null,
-          modelId: null,
-          modelDisplayName: null,
-        }),
-      ],
-      registeredAgents: [
-        buildRegisteredAgent({
-          id: 'agent-main',
-          name: 'NonVisionMain',
-          providerId: 'provider.nvidia',
-          modelId: 'moonshotai/kimi-k2.6',
-          supportsVision: false,
-        }),
-      ],
-      onUploadAttachment: (formData) => {
-        const file = formData.get('file');
-        if (!(file instanceof File)) {
-          throw new Error('Expected file in attachment upload payload');
-        }
-        return buildMessageAttachment({
-          id: 'att-image',
-          fileName: file.name,
-          fileSize: file.size,
-          mimeType: file.type,
-          extractionStatus: 'ready',
-        });
-      },
-    });
-
-    renderDetailPage('/app/talks/talk-1');
-    const composer = await screen.findByPlaceholderText(
-      /^Send a message to this thread/,
-    );
-    const workspace = composer.closest('.talk-workspace');
-    if (!workspace) {
-      throw new Error('Expected talk workspace wrapper');
-    }
-
-    const file = new File([Uint8Array.from([1, 2, 3])], 'diagram.png', {
-      type: 'image/png',
-    });
-    fireEvent.drop(workspace, { dataTransfer: createFileDataTransfer([file]) });
-
-    const guardrail = await screen.findByText(
-      /does not support image attachments/,
-    );
-    expect(guardrail).toBeTruthy();
   });
 
   it('renders concurrent live responses as separate streaming bubbles', async () => {
@@ -4290,6 +4144,59 @@ describe('TalkDetailPage', () => {
       expect(screen.queryByLabelText('Talk document')).not.toBeInTheDocument(),
     );
   });
+
+  it.each(['/app/talks/talk-1/channels', '/app/talks/talk-1/data-connectors'])(
+    'opens the Connectors tab for legacy connector path %s',
+    async (path) => {
+      installTalkDetailFetch();
+
+      renderDetailPage(path);
+
+      await screen.findByRole('heading', { name: 'Connectors for this talk' });
+      expect(screen.getByText('Cal Football Chat')).toBeTruthy();
+      expect(screen.getByText('FTUE PostHog')).toBeTruthy();
+    },
+  );
+
+  it('opens the Jobs tab and saves greenfield job tool scope', async () => {
+    const user = userEvent.setup();
+    const patchBodies: Array<{ sourceScope?: TalkJob['sourceScope'] }> = [];
+    installTalkDetailFetch({
+      jobs: [
+        buildTalkJob({
+          sourceScope: {
+            toolIds: [],
+            allowWeb: false,
+          },
+        }),
+      ],
+      onRequest: (url, init) => {
+        const parsed = new URL(url, 'http://localhost');
+        if (
+          parsed.pathname === '/api/v1/talks/talk-1/jobs/job-1' &&
+          init?.method === 'PATCH'
+        ) {
+          patchBodies.push(JSON.parse(String(init.body || '{}')));
+        }
+      },
+    });
+
+    renderDetailPage('/app/talks/talk-1/jobs');
+
+    await screen.findByRole('heading', { name: 'Jobs' });
+    expect(screen.getAllByText('Daily FTUE Brief')).toHaveLength(2);
+
+    await user.click(screen.getByLabelText('Allow web search'));
+    await user.click(screen.getByLabelText('Google Drive read'));
+    await user.click(screen.getByRole('button', { name: 'Save Job' }));
+
+    await waitFor(() => expect(patchBodies).toHaveLength(1));
+    expect(patchBodies[0]?.sourceScope).toEqual({
+      toolIds: ['gdrive-read'],
+      allowWeb: true,
+    });
+    expect(await screen.findByText('Job saved.')).toBeTruthy();
+  });
 });
 
 function renderDetailPage(
@@ -4553,24 +4460,16 @@ function createFileDataTransfer(files: File[]): DataTransfer {
   } as unknown as DataTransfer;
 }
 
-function buildDataConnector(input: Partial<DataConnector> = {}): DataConnector {
+function buildTalkConnectorDataConnectorRow(
+  input: Partial<TalkConnectorDataConnectorRow> = {},
+): TalkConnectorDataConnectorRow {
   return {
     id: input.id ?? 'connector-1',
-    name: input.name ?? 'FTUE PostHog',
-    connectorKind: input.connectorKind ?? 'posthog',
-    config: input.config ?? {
-      hostUrl: 'https://us.posthog.com',
-      projectId: '12345',
-    },
-    discovered: input.discovered ?? null,
+    kind: input.kind ?? 'google_docs',
+    displayName: input.displayName ?? 'FTUE PostHog',
     enabled: input.enabled ?? true,
     hasCredential: input.hasCredential ?? false,
-    verificationStatus: input.verificationStatus ?? 'missing',
-    lastVerifiedAt: input.lastVerifiedAt ?? null,
-    lastVerificationError: input.lastVerificationError ?? null,
-    attachedTalkCount: input.attachedTalkCount ?? 0,
-    createdAt: input.createdAt ?? '2026-03-06T00:00:00.000Z',
-    updatedAt: input.updatedAt ?? '2026-03-06T00:00:00.000Z',
+    linked: input.linked ?? false,
   };
 }
 
@@ -4588,173 +4487,16 @@ function toThreadApiRecord(thread: TalkThread) {
   };
 }
 
-function buildTalkDataConnector(
-  input: Partial<TalkDataConnector> = {},
-): TalkDataConnector {
-  const base = buildDataConnector(input);
+function buildTalkConnectorChannelRow(
+  input: Partial<TalkConnectorChannelRow> = {},
+): TalkConnectorChannelRow {
   return {
-    ...base,
-    attachedAt: input.attachedAt ?? '2026-03-06T00:00:10.000Z',
-    attachedBy: input.attachedBy ?? 'owner-1',
-  };
-}
-
-function buildChannelConnection(
-  input: Partial<ChannelConnection> = {},
-): ChannelConnection {
-  return {
-    id: input.id ?? 'channel-conn:telegram:system',
-    platform: input.platform ?? 'telegram',
-    connectionMode: input.connectionMode ?? 'system_managed',
-    accountKey: input.accountKey ?? 'telegram:system',
-    displayName: input.displayName ?? 'Telegram (System Managed)',
+    id: input.id ?? 'channel-cal-football',
+    kind: input.kind ?? 'slack',
+    displayName: input.displayName ?? 'Cal Football Chat',
     enabled: input.enabled ?? true,
-    healthStatus: input.healthStatus ?? 'healthy',
-    lastHealthCheckAt: input.lastHealthCheckAt ?? null,
-    lastHealthError: input.lastHealthError ?? null,
-    config: input.config ?? { managedBy: 'runtime' },
-    tokenSource: input.tokenSource ?? 'db',
-    envTokenAvailable: input.envTokenAvailable ?? false,
-    hasStoredSecret: input.hasStoredSecret ?? true,
-    createdAt: input.createdAt ?? '2026-03-06T00:00:00.000Z',
-    updatedAt: input.updatedAt ?? '2026-03-06T00:00:00.000Z',
-  };
-}
-
-function buildChannelTarget(input: Partial<ChannelTarget> = {}): ChannelTarget {
-  return {
-    connectionId: input.connectionId ?? 'channel-conn:telegram:system',
-    targetKind: input.targetKind ?? 'chat',
-    targetId: input.targetId ?? 'tg:group:123',
-    displayName: input.displayName ?? 'Cal Football Chat',
-    metadata: input.metadata ?? null,
-    approved: input.approved ?? true,
-    registeredAt: input.registeredAt ?? '2026-03-06T00:00:00.000Z',
-    registeredBy: input.registeredBy ?? 'owner-1',
-    lastSeenAt: input.lastSeenAt ?? '2026-03-06T00:00:00.000Z',
-    createdAt: input.createdAt ?? '2026-03-06T00:00:00.000Z',
-    updatedAt: input.updatedAt ?? '2026-03-06T00:00:00.000Z',
-    activeBindingId: input.activeBindingId ?? null,
-    activeBindingTalkId: input.activeBindingTalkId ?? null,
-    activeBindingTalkTitle: input.activeBindingTalkTitle ?? null,
-    activeBindingTalkAccessible: input.activeBindingTalkAccessible ?? false,
-  };
-}
-
-function buildChannelConnectionApiRecord(connection: ChannelConnection) {
-  return {
-    id: connection.id,
-    platform: connection.platform,
-    connection_mode: connection.connectionMode,
-    account_key: connection.accountKey,
-    display_name: connection.displayName,
-    enabled: connection.enabled ? 1 : 0,
-    health_status: connection.healthStatus,
-    last_health_check_at: connection.lastHealthCheckAt,
-    last_health_error: connection.lastHealthError,
-    config_json: connection.config ? JSON.stringify(connection.config) : null,
-    token_source: connection.tokenSource,
-    env_token_available: connection.envTokenAvailable ? 1 : 0,
-    has_stored_secret: connection.hasStoredSecret ? 1 : 0,
-    created_at: connection.createdAt,
-    updated_at: connection.updatedAt,
-  };
-}
-
-function buildChannelTargetApiRecord(target: ChannelTarget) {
-  return {
-    connection_id: target.connectionId,
-    target_kind: target.targetKind,
-    target_id: target.targetId,
-    display_name: target.displayName,
-    metadata_json: target.metadata ? JSON.stringify(target.metadata) : null,
-    approved: target.approved ? 1 : 0,
-    registered_at: target.registeredAt,
-    registered_by: target.registeredBy,
-    last_seen_at: target.lastSeenAt,
-    created_at: target.createdAt,
-    updated_at: target.updatedAt,
-    active_binding_id: target.activeBindingId ?? null,
-    active_binding_talk_id: target.activeBindingTalkId ?? null,
-    active_binding_talk_title: target.activeBindingTalkTitle ?? null,
-    active_binding_talk_accessible: target.activeBindingTalkAccessible ? 1 : 0,
-  };
-}
-
-function buildTalkChannelBinding(
-  input: Partial<TalkChannelBinding> = {},
-): TalkChannelBinding {
-  return {
-    id: input.id ?? 'binding-1',
-    talkId: input.talkId ?? 'talk-1',
-    connectionId: input.connectionId ?? 'channel-conn:telegram:system',
-    platform: input.platform ?? 'telegram',
-    connectionDisplayName:
-      input.connectionDisplayName ?? 'Telegram (System Managed)',
-    connectionHealthStatus: input.connectionHealthStatus ?? 'healthy',
-    targetKind: input.targetKind ?? 'chat',
-    targetId: input.targetId ?? 'tg:group:123',
-    displayName: input.displayName ?? 'Cal Football Chat',
-    active: input.active ?? true,
-    responseMode: input.responseMode ?? 'mentions',
-    responderMode: input.responderMode ?? 'primary',
-    responderAgentId: input.responderAgentId ?? null,
-    deliveryMode: input.deliveryMode ?? 'reply',
-    timezone: input.timezone ?? 'America/Los_Angeles',
-    instructions: input.instructions ?? null,
-    stateNamespace:
-      input.stateNamespace ?? `channel.${input.id ?? 'binding-1'}.`,
-    inboundRateLimitPerMinute: input.inboundRateLimitPerMinute ?? 10,
-    maxPendingEvents: input.maxPendingEvents ?? 20,
-    overflowPolicy: input.overflowPolicy ?? 'drop_oldest',
-    maxDeferredAgeMinutes: input.maxDeferredAgeMinutes ?? 10,
-    pendingIngressCount: input.pendingIngressCount ?? 1,
-    deferredIngressCount: input.deferredIngressCount ?? 0,
-    deadLetterCount: input.deadLetterCount ?? 0,
-    unresolvedIngressCount: input.unresolvedIngressCount ?? 0,
-    suppressedReplyCount: input.suppressedReplyCount ?? 0,
-    lastSuppressedAt: input.lastSuppressedAt ?? null,
-    lastSuppressionReason: input.lastSuppressionReason ?? null,
-    lastIngressAt: input.lastIngressAt ?? null,
-    lastDeliveryAt: input.lastDeliveryAt ?? null,
-    lastIngressReasonCode: input.lastIngressReasonCode ?? null,
-    lastDeliveryReasonCode: input.lastDeliveryReasonCode ?? null,
-    healthQuarantined: input.healthQuarantined ?? false,
-    healthQuarantineCode: input.healthQuarantineCode ?? null,
-    diagnosis: input.diagnosis ?? {
-      status: 'ok',
-      headline: 'Working normally',
-      detail: null,
-      action: null,
-    },
-  };
-}
-
-function buildChannelQueueFailure(
-  input: Partial<ChannelQueueFailure> = {},
-): ChannelQueueFailure {
-  return {
-    id: input.id ?? 'failure-1',
-    bindingId: input.bindingId ?? 'binding-1',
-    talkId: input.talkId ?? 'talk-1',
-    connectionId: input.connectionId ?? 'channel-conn:telegram:system',
-    targetKind: input.targetKind ?? 'chat',
-    targetId: input.targetId ?? 'tg:group:123',
-    platformEventId: input.platformEventId ?? 'event-1',
-    externalMessageId: input.externalMessageId ?? null,
-    senderId: input.senderId ?? 'sender-1',
-    senderName: input.senderName ?? 'Joe',
-    runId: input.runId ?? null,
-    talkMessageId: input.talkMessageId ?? null,
-    payload: input.payload ?? { text: 'hello' },
-    status: input.status ?? 'dead_letter',
-    reasonCode: input.reasonCode ?? 'expired_while_busy',
-    reasonDetail: input.reasonDetail ?? 'Talk stayed busy too long.',
-    dedupeKey: input.dedupeKey ?? 'dedupe-1',
-    availableAt: input.availableAt ?? '2026-03-06T00:00:00.000Z',
-    createdAt: input.createdAt ?? '2026-03-06T00:00:00.000Z',
-    updatedAt: input.updatedAt ?? '2026-03-06T00:00:00.000Z',
-    attemptCount: input.attemptCount ?? 1,
+    hasCredential: input.hasCredential ?? true,
+    linked: input.linked ?? true,
   };
 }
 
@@ -4858,8 +4600,7 @@ function buildTalkJob(input?: Partial<TalkJob>): TalkJob {
     },
     timezone: input?.timezone ?? 'America/Los_Angeles',
     sourceScope: input?.sourceScope ?? {
-      connectorIds: [],
-      channelBindingIds: [],
+      toolIds: [],
       allowWeb: false,
     },
     threadId: input?.threadId ?? 'thread-job-1',
@@ -4951,6 +4692,7 @@ function buildAiAgentsData(): AiAgentsPageData {
 }
 
 function installTalkDetailFetch(input?: {
+  workspaceId?: string;
   talk?: Talk;
   threads?: TalkThread[];
   messages?: TalkMessage[];
@@ -4962,6 +4704,7 @@ function installTalkDetailFetch(input?: {
   stateEntries?: TalkStateEntry[];
   jobs?: TalkJob[];
   jobRunsByJobId?: Record<string, TalkJobRunSummary[]>;
+  talkTools?: TalkToolsState;
   rulePatchError?: {
     status: number;
     code?: string;
@@ -4972,13 +4715,8 @@ function installTalkDetailFetch(input?: {
     code?: string;
     message: string;
   };
-  dataConnectors?: DataConnector[];
-  talkDataConnectors?: TalkDataConnector[];
-  channelConnections?: ChannelConnection[];
-  channelTargets?: ChannelTarget[];
-  talkChannels?: TalkChannelBinding[];
-  ingressFailures?: ChannelQueueFailure[];
-  deliveryFailures?: ChannelQueueFailure[];
+  dataConnectors?: TalkConnectorDataConnectorRow[];
+  connectorChannels?: TalkConnectorChannelRow[];
   aiAgents?: AiAgentsPageData;
   // Doc-pane integration: pre-existing content keyed by threadId, plus
   // optional spies so tests can assert on POST and PATCH bodies.
@@ -5012,26 +4750,14 @@ function installTalkDetailFetch(input?: {
     attachmentIds?: string[];
     threadId?: string | null;
   }) => { talkId: string; message: TalkMessage; runs: TalkRun[] };
-  onTestChannel?: (
-    bindingId: string,
-  ) => { status: number; code?: string; message: string } | void;
-  onSyncSlackWorkspace?: (input: {
-    connectionId: string;
-    channelConnections: ChannelConnection[];
-    channelTargets: ChannelTarget[];
-  }) => {
-    channelConnections?: ChannelConnection[];
-    channelTargets?: ChannelTarget[];
-    syncedCount?: number;
-    publicCount?: number;
-    privateCount?: number;
-  } | void;
   onListMessages?: (input: {
     threadId: string | null;
     visibleMessages: TalkMessage[];
   }) => Promise<TalkMessage[]> | TalkMessage[];
+  onRequest?: (url: string, init?: RequestInit) => void;
 }) {
   const talk = input?.talk ?? buildTalk();
+  const workspaceId = input?.workspaceId ?? 'workspace-1';
   let messages = input?.messages ?? [
     buildMessage({
       id: 'msg-1',
@@ -5115,26 +4841,19 @@ function installTalkDetailFetch(input?: {
     }),
   ];
   const dataConnectors = input?.dataConnectors ?? [
-    buildDataConnector({
+    buildTalkConnectorDataConnectorRow({
       id: 'connector-posthog',
-      name: 'FTUE PostHog',
-      connectorKind: 'posthog',
+      displayName: 'FTUE PostHog',
+      kind: 'google_docs',
       hasCredential: true,
-      verificationStatus: 'not_verified',
-      attachedTalkCount: 1,
+      linked: true,
     }),
-    buildDataConnector({
+    buildTalkConnectorDataConnectorRow({
       id: 'connector-sheet',
-      name: 'Economy Sheet',
-      connectorKind: 'google_sheets',
+      displayName: 'Economy Sheet',
+      kind: 'google_sheets',
       hasCredential: true,
-      verificationStatus: 'verified',
-    }),
-  ];
-  let talkDataConnectors = input?.talkDataConnectors ?? [
-    buildTalkDataConnector({
-      ...dataConnectors[0],
-      attachedAt: '2026-03-06T00:00:10.000Z',
+      linked: false,
     }),
   ];
   let context = input?.context ?? buildTalkContext();
@@ -5143,18 +4862,29 @@ function installTalkDetailFetch(input?: {
   let jobRunsByJobId = input?.jobRunsByJobId ?? {
     'job-1': [buildTalkJobRunSummary()],
   };
-  let channelConnections = input?.channelConnections ?? [
-    buildChannelConnection(),
-  ];
-  let channelTargets = input?.channelTargets ?? [buildChannelTarget()];
-  let talkChannels = input?.talkChannels ?? [buildTalkChannelBinding()];
-  let ingressFailures = input?.ingressFailures ?? [buildChannelQueueFailure()];
-  let deliveryFailures = input?.deliveryFailures ?? [
-    buildChannelQueueFailure({
-      id: 'failure-delivery-1',
-      reasonCode: 'delivery_retries_exhausted',
-      reasonDetail: 'Telegram delivery exhausted retries.',
-    }),
+  const talkTools = input?.talkTools ?? {
+    talkId: 'talk-1',
+    active: {
+      web: true,
+      connectors: false,
+      google_read: true,
+      google_write: false,
+      gmail_read: false,
+      gmail_send: false,
+      messaging: false,
+    },
+    available: [
+      'web',
+      'connectors',
+      'google_read',
+      'google_write',
+      'gmail_read',
+      'gmail_send',
+      'messaging',
+    ],
+  };
+  const connectorChannels = input?.connectorChannels ?? [
+    buildTalkConnectorChannelRow(),
   ];
   const aiAgents = input?.aiAgents ?? buildAiAgentsData();
   const contentByThreadId: Record<string, Content> = {
@@ -5175,6 +4905,7 @@ function installTalkDetailFetch(input?: {
       const method = init?.method || 'GET';
       const parsedUrl = new URL(url, 'http://localhost');
       const path = parsedUrl.pathname;
+      input?.onRequest?.(url, init);
 
       if (path === '/api/v1/talks/talk-1/snapshot' && method === 'GET') {
         const requestedThreadId = parsedUrl.searchParams.get('threadId');
@@ -5201,6 +4932,7 @@ function installTalkDetailFetch(input?: {
           data: {
             talk: {
               id: talk.id,
+              workspaceId,
               ownerId: talk.ownerId,
               folderId: talk.folderId,
               sortOrder: talk.sortOrder,
@@ -5722,6 +5454,13 @@ function installTalkDetailFetch(input?: {
         });
       }
 
+      if (path === '/api/v1/talks/talk-1/tools' && method === 'GET') {
+        return jsonResponse(200, {
+          ok: true,
+          data: talkTools,
+        });
+      }
+
       if (
         /\/api\/v1\/talks\/talk-1\/state\/[^/]+$/.test(path) &&
         method === 'DELETE'
@@ -5769,8 +5508,7 @@ function installTalkDetailFetch(input?: {
           },
           timezone: body.timezone ?? 'America/Los_Angeles',
           sourceScope: body.sourceScope ?? {
-            connectorIds: [],
-            channelBindingIds: [],
+            toolIds: [],
             allowWeb: false,
           },
           threadId: `thread-job-${jobs.length + 1}`,
@@ -5966,587 +5704,17 @@ function installTalkDetailFetch(input?: {
         });
       }
 
-      if (url.endsWith('/api/v1/channel-connections') && method === 'GET') {
+      if (path === '/api/v1/talks/talk-1/connectors' && method === 'GET') {
         return jsonResponse(200, {
           ok: true,
           data: {
-            connections: channelConnections.map(
-              buildChannelConnectionApiRecord,
-            ),
+            channels: connectorChannels,
+            dataConnectors,
           },
         });
       }
 
-      if (
-        /\/api\/v1\/channel-connectors\/slack\/workspaces\/[^/]+\/sync$/.test(
-          path,
-        ) &&
-        method === 'POST'
-      ) {
-        const connectionId = decodeURIComponent(
-          path
-            .split('/api/v1/channel-connectors/slack/workspaces/')[1]
-            .split('/sync')[0],
-        );
-        const syncResult = input?.onSyncSlackWorkspace?.({
-          connectionId,
-          channelConnections,
-          channelTargets,
-        });
-        if (syncResult?.channelConnections) {
-          channelConnections = syncResult.channelConnections;
-        }
-        if (syncResult?.channelTargets) {
-          channelTargets = syncResult.channelTargets;
-        }
-        const syncedTargets = channelTargets.filter(
-          (target) => target.connectionId === connectionId,
-        );
-        const publicCount = syncedTargets.filter(
-          (target) => target.metadata?.isPrivate !== true,
-        ).length;
-        const privateCount = syncedTargets.length - publicCount;
-        const syncedCount = syncedTargets.length;
-        channelConnections = channelConnections.map((connection) =>
-          connection.id === connectionId
-            ? {
-                ...connection,
-                config: {
-                  ...(connection.config ?? {}),
-                  lastSyncedAt: '2026-03-21T23:45:00.000Z',
-                  lastSyncTotalCount: syncResult?.syncedCount ?? syncedCount,
-                  lastSyncPublicCount: syncResult?.publicCount ?? publicCount,
-                  lastSyncPrivateCount:
-                    syncResult?.privateCount ?? privateCount,
-                },
-              }
-            : connection,
-        );
-        return jsonResponse(200, {
-          ok: true,
-          data: {
-            syncedCount: syncResult?.syncedCount ?? syncedCount,
-            publicCount: syncResult?.publicCount ?? publicCount,
-            privateCount: syncResult?.privateCount ?? privateCount,
-          },
-        });
-      }
-
-      if (
-        url.includes('/api/v1/channel-connections/') &&
-        url.includes('/targets') &&
-        method === 'GET'
-      ) {
-        const parsed = new URL(url, 'http://localhost');
-        const connectionId = decodeURIComponent(
-          url.split('/api/v1/channel-connections/')[1].split('/targets')[0],
-        );
-        const approval = parsed.searchParams.get('approval');
-        const query = (parsed.searchParams.get('query') || '')
-          .trim()
-          .toLowerCase();
-        const limit = Number(parsed.searchParams.get('limit') || '100');
-        const offset = Number(parsed.searchParams.get('offset') || '0');
-        let filtered = channelTargets.filter(
-          (target) => target.connectionId === connectionId,
-        );
-        if (approval === 'approved') {
-          filtered = filtered.filter((target) => target.approved);
-        } else if (approval === 'discovered') {
-          filtered = filtered.filter((target) => !target.approved);
-        }
-        if (query) {
-          filtered = filtered.filter((target) => {
-            const haystack = [
-              target.displayName,
-              target.targetId,
-              target.connectionId,
-            ]
-              .join(' ')
-              .toLowerCase();
-            return haystack.includes(query);
-          });
-        }
-        const pageTargets = filtered.slice(offset, offset + limit);
-        return jsonResponse(200, {
-          ok: true,
-          data: {
-            targets: pageTargets.map(buildChannelTargetApiRecord),
-            totalCount: filtered.length,
-            hasMore: offset + pageTargets.length < filtered.length,
-            nextOffset:
-              offset + pageTargets.length < filtered.length
-                ? offset + pageTargets.length
-                : null,
-          },
-        });
-      }
-
-      if (path === '/api/v1/talks/talk-1/channels' && method === 'GET') {
-        return jsonResponse(200, {
-          ok: true,
-          data: {
-            talkId: 'talk-1',
-            bindings: talkChannels.filter(
-              (binding) => binding.talkId === 'talk-1',
-            ),
-          },
-        });
-      }
-
-      if (path === '/api/v1/talks/talk-1/channels' && method === 'POST') {
-        const body = JSON.parse(String(init?.body || '{}')) as Record<
-          string,
-          unknown
-        >;
-        const connectionId = String(
-          body.connectionId || 'channel-conn:telegram:system',
-        );
-        const targetKind = String(body.targetKind || 'chat');
-        const targetId = String(
-          body.targetId || `tg:group:${talkChannels.length + 100}`,
-        );
-        const existingBinding = talkChannels.find(
-          (binding) =>
-            binding.connectionId === connectionId &&
-            binding.targetKind === targetKind &&
-            binding.targetId === targetId &&
-            binding.active,
-        );
-        if (existingBinding) {
-          return jsonResponse(409, {
-            ok: false,
-            error: {
-              code: 'target_already_bound',
-              message: `${existingBinding.displayName} is already bound.`,
-            },
-          });
-        }
-        const matchingConnection = channelConnections.find(
-          (connection) => connection.id === connectionId,
-        );
-        const created = buildTalkChannelBinding({
-          id: `binding-${talkChannels.length + 1}`,
-          talkId: 'talk-1',
-          connectionId,
-          platform: matchingConnection?.platform ?? 'telegram',
-          connectionDisplayName:
-            matchingConnection?.displayName ?? 'Telegram (System Managed)',
-          targetKind,
-          targetId,
-          displayName: String(
-            body.displayName ||
-              channelTargets.find(
-                (target) =>
-                  target.connectionId === connectionId &&
-                  target.targetKind === targetKind &&
-                  target.targetId === targetId,
-              )?.displayName ||
-              'New Channel Binding',
-          ),
-          responseMode:
-            (body.responseMode as TalkChannelBinding['responseMode']) ??
-            'mentions',
-          responderMode:
-            (body.responderMode as TalkChannelBinding['responderMode']) ??
-            'primary',
-          responderAgentId:
-            body.responderAgentId == null
-              ? null
-              : String(body.responderAgentId),
-          deliveryMode:
-            (body.deliveryMode as TalkChannelBinding['deliveryMode']) ??
-            'reply',
-          timezone:
-            body.timezone == null
-              ? 'America/Los_Angeles'
-              : String(body.timezone),
-          instructions:
-            body.instructions == null ? null : String(body.instructions),
-          stateNamespace: `channel.binding-${talkChannels.length + 1}.`,
-          inboundRateLimitPerMinute: Number(
-            body.inboundRateLimitPerMinute || 10,
-          ),
-          maxPendingEvents: Number(body.maxPendingEvents || 20),
-          overflowPolicy:
-            (body.overflowPolicy as TalkChannelBinding['overflowPolicy']) ??
-            'drop_oldest',
-          maxDeferredAgeMinutes: Number(body.maxDeferredAgeMinutes || 10),
-        });
-        talkChannels = [...talkChannels, created];
-        return jsonResponse(201, {
-          ok: true,
-          data: { binding: created },
-        });
-      }
-
-      if (
-        /\/api\/v1\/talks\/talk-1\/channels\/[^/]+$/.test(url) &&
-        method === 'PATCH'
-      ) {
-        const bindingId = url.split('/api/v1/talks/talk-1/channels/')[1];
-        const patch = JSON.parse(
-          String(init?.body || '{}'),
-        ) as Partial<TalkChannelBinding>;
-        talkChannels = talkChannels.map((binding) =>
-          binding.id === bindingId
-            ? {
-                ...binding,
-                ...patch,
-                responseMode: patch.responseMode ?? binding.responseMode,
-                timezone:
-                  patch.timezone === undefined
-                    ? binding.timezone
-                    : patch.timezone == null
-                      ? 'America/Los_Angeles'
-                      : String(patch.timezone),
-                instructions:
-                  patch.instructions === undefined
-                    ? binding.instructions
-                    : patch.instructions,
-              }
-            : binding,
-        );
-        return jsonResponse(200, {
-          ok: true,
-          data: {
-            binding: talkChannels.find((binding) => binding.id === bindingId),
-          },
-        });
-      }
-
-      if (
-        /\/api\/v1\/talks\/talk-1\/channels\/[^/]+$/.test(url) &&
-        method === 'DELETE'
-      ) {
-        const bindingId = url.split('/api/v1/talks/talk-1/channels/')[1];
-        talkChannels = talkChannels.filter(
-          (binding) => binding.id !== bindingId,
-        );
-        ingressFailures = ingressFailures.filter(
-          (failure) => failure.bindingId !== bindingId,
-        );
-        deliveryFailures = deliveryFailures.filter(
-          (failure) => failure.bindingId !== bindingId,
-        );
-        return jsonResponse(200, {
-          ok: true,
-          data: { deleted: true },
-        });
-      }
-
-      if (
-        /\/api\/v1\/talks\/talk-1\/channels\/[^/]+\/test$/.test(url) &&
-        method === 'POST'
-      ) {
-        const bindingId = url
-          .split('/api/v1/talks/talk-1/channels/')[1]
-          .split('/')[0];
-        const testResult = input?.onTestChannel?.(bindingId);
-        if (testResult) {
-          return jsonResponse(testResult.status, {
-            ok: false,
-            error: {
-              code: testResult.code ?? 'channel_test_failed',
-              message: testResult.message,
-            },
-          });
-        }
-        return jsonResponse(200, {
-          ok: true,
-          data: { sent: true },
-        });
-      }
-
-      if (
-        /\/api\/v1\/talks\/talk-1\/channels\/[^/]+\/state$/.test(url) &&
-        method === 'GET'
-      ) {
-        const bindingId = url
-          .split('/api/v1/talks/talk-1/channels/')[1]
-          .split('/state')[0];
-        const binding = talkChannels.find(
-          (candidate) => candidate.id === bindingId,
-        );
-        const stateNamespace =
-          binding?.stateNamespace ?? `channel.${bindingId}.`;
-        return jsonResponse(200, {
-          ok: true,
-          data: {
-            stateNamespace,
-            entries: stateEntries
-              .filter((entry) => entry.key.startsWith(stateNamespace))
-              .map((entry) => ({
-                id: entry.id,
-                key: entry.key,
-                keySuffix: entry.key.slice(stateNamespace.length),
-                value: entry.value,
-                version: entry.version,
-                updatedAt: entry.updatedAt,
-                updatedByUserId: entry.updatedByUserId,
-                updatedByRunId: entry.updatedByRunId,
-              })),
-          },
-        });
-      }
-
-      if (
-        /\/api\/v1\/talks\/talk-1\/channels\/[^/]+\/state$/.test(url) &&
-        method === 'POST'
-      ) {
-        const bindingId = url
-          .split('/api/v1/talks/talk-1/channels/')[1]
-          .split('/state')[0];
-        const binding = talkChannels.find(
-          (candidate) => candidate.id === bindingId,
-        );
-        const stateNamespace =
-          binding?.stateNamespace ?? `channel.${bindingId}.`;
-        const body = JSON.parse(String(init?.body || '{}')) as {
-          keySuffix?: string;
-          value?: unknown;
-        };
-        const keySuffix = String(body.keySuffix || '');
-        const key = `${stateNamespace}${keySuffix}`;
-        const existing = stateEntries.find((entry) => entry.key === key);
-        const updated = buildTalkStateEntry({
-          id: existing?.id ?? `state-${stateEntries.length + 1}`,
-          key,
-          value: body.value ?? null,
-          version: (existing?.version ?? 0) + 1,
-        });
-        stateEntries = [
-          ...stateEntries.filter((entry) => entry.key !== key),
-          updated,
-        ];
-        return jsonResponse(200, {
-          ok: true,
-          data: {
-            entry: {
-              id: updated.id,
-              key: updated.key,
-              keySuffix,
-              value: updated.value,
-              version: updated.version,
-              updatedAt: updated.updatedAt,
-              updatedByUserId: updated.updatedByUserId,
-              updatedByRunId: updated.updatedByRunId,
-            },
-          },
-        });
-      }
-
-      if (
-        /\/api\/v1\/talks\/talk-1\/channels\/[^/]+\/state$/.test(url) &&
-        method === 'DELETE'
-      ) {
-        const bindingId = url
-          .split('/api/v1/talks/talk-1/channels/')[1]
-          .split('/state')[0];
-        const binding = talkChannels.find(
-          (candidate) => candidate.id === bindingId,
-        );
-        const stateNamespace =
-          binding?.stateNamespace ?? `channel.${bindingId}.`;
-        const body = JSON.parse(String(init?.body || '{}')) as {
-          keySuffix?: string;
-        };
-        const keySuffix = String(body.keySuffix || '');
-        stateEntries = stateEntries.filter(
-          (entry) => entry.key !== `${stateNamespace}${keySuffix}`,
-        );
-        return jsonResponse(200, {
-          ok: true,
-          data: { deleted: true },
-        });
-      }
-
-      if (
-        path === '/api/v1/talks/talk-1/channel-instruction-review' &&
-        method === 'POST'
-      ) {
-        const body = JSON.parse(String(init?.body || '{}')) as {
-          instructions?: string;
-          timezone?: string | null;
-        };
-        return jsonResponse(200, {
-          ok: true,
-          data: {
-            review: {
-              strengths: ['Clear scope and reply policy.'],
-              missing:
-                body.instructions?.includes('timezone') || body.timezone
-                  ? []
-                  : ['Add an explicit timezone or reset rule.'],
-              removeOrSimplify: [],
-              rewrittenInstructions: body.instructions
-                ? `${String(body.instructions).trim()}\n\nUse list_state before creating new state keys.`
-                : null,
-            },
-          },
-        });
-      }
-
-      if (
-        /\/api\/v1\/talks\/talk-1\/channels\/[^/]+\/ingress-failures$/.test(
-          url,
-        ) &&
-        method === 'GET'
-      ) {
-        const bindingId = url
-          .split('/api/v1/talks/talk-1/channels/')[1]
-          .split('/')[0];
-        return jsonResponse(200, {
-          ok: true,
-          data: {
-            failures: ingressFailures.filter(
-              (failure) => failure.bindingId === bindingId,
-            ),
-          },
-        });
-      }
-
-      if (
-        /\/api\/v1\/talks\/talk-1\/channels\/[^/]+\/delivery-failures$/.test(
-          url,
-        ) &&
-        method === 'GET'
-      ) {
-        const bindingId = url
-          .split('/api/v1/talks/talk-1/channels/')[1]
-          .split('/')[0];
-        return jsonResponse(200, {
-          ok: true,
-          data: {
-            failures: deliveryFailures.filter(
-              (failure) => failure.bindingId === bindingId,
-            ),
-          },
-        });
-      }
-
-      if (
-        /\/api\/v1\/talks\/talk-1\/channels\/[^/]+\/ingress-failures\/[^/]+\/retry$/.test(
-          url,
-        ) &&
-        method === 'POST'
-      ) {
-        const rowId = url.split('/ingress-failures/')[1].split('/')[0];
-        ingressFailures = ingressFailures.filter(
-          (failure) => failure.id !== rowId,
-        );
-        return jsonResponse(200, {
-          ok: true,
-          data: { retried: true },
-        });
-      }
-
-      if (
-        /\/api\/v1\/talks\/talk-1\/channels\/[^/]+\/delivery-failures\/[^/]+\/retry$/.test(
-          url,
-        ) &&
-        method === 'POST'
-      ) {
-        const rowId = url.split('/delivery-failures/')[1].split('/')[0];
-        deliveryFailures = deliveryFailures.filter(
-          (failure) => failure.id !== rowId,
-        );
-        return jsonResponse(200, {
-          ok: true,
-          data: { retried: true },
-        });
-      }
-
-      if (
-        /\/api\/v1\/talks\/talk-1\/channels\/[^/]+\/ingress-failures\/[^/]+$/.test(
-          url,
-        ) &&
-        method === 'DELETE'
-      ) {
-        const rowId = url.split('/ingress-failures/')[1];
-        ingressFailures = ingressFailures.filter(
-          (failure) => failure.id !== rowId,
-        );
-        return jsonResponse(200, {
-          ok: true,
-          data: { deleted: true },
-        });
-      }
-
-      if (
-        /\/api\/v1\/talks\/talk-1\/channels\/[^/]+\/delivery-failures\/[^/]+$/.test(
-          url,
-        ) &&
-        method === 'DELETE'
-      ) {
-        const rowId = url.split('/delivery-failures/')[1];
-        deliveryFailures = deliveryFailures.filter(
-          (failure) => failure.id !== rowId,
-        );
-        return jsonResponse(200, {
-          ok: true,
-          data: { deleted: true },
-        });
-      }
-
-      if (path === '/api/v1/talks/talk-1/data-connectors' && method === 'GET') {
-        return jsonResponse(200, {
-          ok: true,
-          data: { talkId: 'talk-1', connectors: talkDataConnectors },
-        });
-      }
-
-      if (
-        path === '/api/v1/talks/talk-1/data-connectors' &&
-        method === 'POST'
-      ) {
-        const body = JSON.parse(String(init?.body || '{}')) as {
-          connectorId: string;
-        };
-        const source = dataConnectors.find(
-          (connector) => connector.id === body.connectorId,
-        );
-        if (!source) {
-          return jsonResponse(404, {
-            ok: false,
-            error: { code: 'not_found', message: 'Data connector not found.' },
-          });
-        }
-        const attached = buildTalkDataConnector({
-          ...source,
-          attachedAt: '2026-03-06T00:00:12.000Z',
-        });
-        talkDataConnectors = [...talkDataConnectors, attached];
-        return jsonResponse(200, {
-          ok: true,
-          data: { connector: attached },
-        });
-      }
-
-      if (
-        url.includes('/api/v1/talks/talk-1/data-connectors/') &&
-        method === 'DELETE'
-      ) {
-        const connectorId = url.split(
-          '/api/v1/talks/talk-1/data-connectors/',
-        )[1];
-        talkDataConnectors = talkDataConnectors.filter(
-          (connector) => connector.id !== connectorId,
-        );
-        return jsonResponse(200, {
-          ok: true,
-          data: { deleted: true },
-        });
-      }
-
-      if (url.endsWith('/api/v1/data-connectors') && method === 'GET') {
-        return jsonResponse(200, {
-          ok: true,
-          data: { connectors: dataConnectors },
-        });
-      }
-
-      if (url.endsWith('/api/v1/agents') && method === 'GET') {
+      if (path === '/api/v1/agents' && method === 'GET') {
         return jsonResponse(200, { ok: true, data: aiAgents });
       }
 

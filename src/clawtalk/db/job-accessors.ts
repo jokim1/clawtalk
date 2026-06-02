@@ -5,10 +5,8 @@
 //     dropped (chassis removal). `validateScopedConnectorIds` +
 //     `validateScopedChannelBindingIds` gone. `getTalkJobDependencyIssue`
 //     no longer returns `connector_scope_invalid` /
-//     `channel_scope_invalid` codes. `sourceScope.connectorIds` and
-//     `sourceScope.channelBindingIds` continue to round-trip on the row
-//     for forward-compatibility but no longer validate against
-//     attachment tables.
+//     `channel_scope_invalid` codes. Legacy connector/channel arrays are
+//     not part of the persisted source scope.
 //   - IDs use bare uuid (no `job_`/`msg_`/`run_` string prefixes).
 //   - `schedule_json` + `source_scope_json` are jsonb columns; they
 //     round-trip as parsed objects rather than strings — no JSON.parse /
@@ -26,7 +24,10 @@ import {
 } from './accessors.js';
 import { getDbPg } from '../../db.js';
 import { resolveCredentialKindSnapshot } from '../agents/execution-resolver.js';
-import { getRegisteredAgent } from './agent-accessors.js';
+import {
+  getRegisteredAgent,
+  normalizeTalkToolFamiliesFromRows,
+} from './agent-accessors.js';
 import { emitOutboxEvent } from '../talks/outbox-emit.js';
 
 export type TalkJobStatus = 'active' | 'paused' | 'blocked';
@@ -49,8 +50,6 @@ export type TalkJobSchedule =
     };
 
 export interface TalkJobScope {
-  connectorIds: string[];
-  channelBindingIds: string[];
   allowWeb: boolean;
 }
 
@@ -233,25 +232,12 @@ export function normalizeTalkJobSchedule(raw: unknown): TalkJobSchedule {
   throw new Error('Schedule kind must be hourly_interval or weekly');
 }
 
-function normalizeStringIdList(values: unknown): string[] {
-  if (!Array.isArray(values)) return [];
-  return Array.from(
-    new Set(
-      values
-        .map((value) => (typeof value === 'string' ? value.trim() : ''))
-        .filter(Boolean),
-    ),
-  );
-}
-
 export function normalizeTalkJobScope(raw: unknown): TalkJobScope {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
-    return { connectorIds: [], channelBindingIds: [], allowWeb: false };
+    return { allowWeb: false };
   }
   const candidate = raw as Record<string, unknown>;
   return {
-    connectorIds: normalizeStringIdList(candidate.connectorIds),
-    channelBindingIds: normalizeStringIdList(candidate.channelBindingIds),
     allowWeb: candidate.allowWeb === true,
   };
 }
@@ -344,6 +330,17 @@ function toTalkJob(row: TalkJobRow): TalkJob {
     updatedAt: row.updated_at,
     createdBy: row.created_by,
   };
+}
+
+async function getWorkspaceIdForTalk(talkId: string): Promise<string | null> {
+  const db = getDbPg();
+  const rows = await db<Array<{ workspace_id: string | null }>>`
+    select workspace_id::text as workspace_id
+    from public.talks
+    where id = ${talkId}::uuid
+    limit 1
+  `;
+  return rows[0]?.workspace_id ?? null;
 }
 
 const TALK_JOB_SELECT = `
@@ -1011,29 +1008,31 @@ export async function createJobTriggerRun(input: {
     createdAt: currentNow,
   });
 
-  // Snapshot the active tool families at run creation (migration 0031)
+  // Snapshot the active tool families at run creation
   // so the consumer reads from a frozen set even if the user toggles a
   // chip mid-flight.
-  const activeToolFamiliesRows = await getDbPg()<
-    {
-      active_tool_families_json: Record<string, boolean> | null;
-    }[]
+  const activeToolRows = await getDbPg()<
+    Array<{ tool_id: string; enabled: boolean }>
   >`
-    select active_tool_families_json
-    from public.talks
-    where id = ${job.talkId}::uuid
-    limit 1
+    select tool_id, enabled
+    from public.talk_tools
+    where talk_id = ${job.talkId}::uuid
+    order by tool_id asc
   `;
   const activeToolFamiliesSnapshot =
-    activeToolFamiliesRows[0]?.active_tool_families_json ?? {};
+    normalizeTalkToolFamiliesFromRows(activeToolRows);
 
   // Credential-kind snapshot (migration 0032 / PR B). See accessors.ts
   // enqueueTalkTurnAtomic comment for rationale.
   const agentRecord = job.targetAgentId
     ? await getRegisteredAgent(job.targetAgentId)
     : undefined;
+  const workspaceId = await getWorkspaceIdForTalk(job.talkId);
   const credentialKindSnapshot = agentRecord
-    ? await resolveCredentialKindSnapshot(agentRecord)
+    ? await resolveCredentialKindSnapshot(agentRecord, {
+        principalUserId: job.createdBy,
+        workspaceId,
+      })
     : null;
 
   const run = await createTalkRun({

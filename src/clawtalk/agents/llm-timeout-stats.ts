@@ -15,7 +15,7 @@
  * observations in memory and compute exact percentiles.
  */
 
-import { getDbPg } from '../../db.js';
+import { getDbPg, withTrustedDbWrites } from '../../db.js';
 import { logger } from '../../logger.js';
 
 // ---------------------------------------------------------------------------
@@ -98,14 +98,17 @@ export async function recordTtftObservation(
 
     if (!existing) {
       // First observation for this (provider, model)
-      await db`
-        insert into public.llm_ttft_stats
-          (provider_id, model_id, sample_count,
-           p50_ms, p95_ms, p99_ms, max_ms, last_updated_at)
-        values
-          (${providerId}, ${modelId}, 1,
-           ${ttftMs}, ${ttftMs}, ${ttftMs}, ${ttftMs}, now())
-      `;
+      await withTrustedDbWrites(async () => {
+        const trustedDb = getDbPg();
+        await trustedDb`
+          insert into public.llm_ttft_stats
+            (provider_id, model_id, sample_count,
+             p50_ms, p95_ms, p99_ms, max_ms, last_updated_at)
+          values
+            (${providerId}, ${modelId}, 1,
+             ${ttftMs}, ${ttftMs}, ${ttftMs}, ${ttftMs}, now())
+        `;
+      });
       return;
     }
 
@@ -124,16 +127,19 @@ export async function recordTtftObservation(
     const p99 = updatePercentile(existing.p99_ms, ttftMs, 0.99, alpha);
     const max = Math.max(existing.max_ms, ttftMs);
 
-    await db`
-      update public.llm_ttft_stats
-      set sample_count = ${n},
-          p50_ms = ${p50},
-          p95_ms = ${p95},
-          p99_ms = ${p99},
-          max_ms = ${max},
-          last_updated_at = now()
-      where provider_id = ${providerId} and model_id = ${modelId}
-    `;
+    await withTrustedDbWrites(async () => {
+      const trustedDb = getDbPg();
+      await trustedDb`
+        update public.llm_ttft_stats
+        set sample_count = ${n},
+            p50_ms = ${p50},
+            p95_ms = ${p95},
+            p99_ms = ${p99},
+            max_ms = ${max},
+            last_updated_at = now()
+        where provider_id = ${providerId} and model_id = ${modelId}
+      `;
+    });
   } catch (err) {
     // Recording failures must never break the streaming pipeline
     logger.warn(

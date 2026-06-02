@@ -1,4 +1,4 @@
-import { getDbPg } from '../../db.js';
+import { getDbPg, withTrustedDbWrites } from '../../db.js';
 import {
   getEffectiveToolsForAgent,
   type EffectiveToolAccess,
@@ -74,6 +74,14 @@ export interface MainExecutionPlan {
   containerPlan: ContainerExecutionPlan | null;
 }
 
+type ProviderVerificationStatus =
+  | 'missing'
+  | 'not_verified'
+  | 'verifying'
+  | 'verified'
+  | 'invalid'
+  | 'unavailable';
+
 export class ExecutionPlannerError extends Error {
   constructor(
     message: string,
@@ -86,6 +94,28 @@ export class ExecutionPlannerError extends Error {
     super(message);
     this.name = 'ExecutionPlannerError';
   }
+}
+
+export function isAnthropicMissingDirectCredentialCode(code: unknown): boolean {
+  return (
+    code === 'ANTHROPIC_REQUIRES_API_KEY' ||
+    code === 'ANTHROPIC_REQUIRES_CREDENTIAL'
+  );
+}
+
+export function requiresAnthropicSubscriptionContainer(input: {
+  providerId: string;
+  configuredAuthMode:
+    | 'subscription'
+    | 'api_key'
+    | 'advanced_bearer'
+    | 'none'
+    | null;
+}): boolean {
+  return (
+    input.providerId === 'provider.anthropic' &&
+    input.configuredAuthMode === 'subscription'
+  );
 }
 
 const BASE_CONTAINER_ALLOWED_TOOLS = [
@@ -110,46 +140,102 @@ async function getProviderRecord(
   return rows[0];
 }
 
+async function resolvePlanningWorkspaceId(opts?: {
+  workspaceId?: string | null;
+  talkId?: string;
+}): Promise<string | null> {
+  if (opts?.workspaceId) return opts.workspaceId;
+  if (!opts?.talkId) return null;
+  const db = getDbPg();
+  const rows = await db<Array<{ workspace_id: string | null }>>`
+    select workspace_id::text as workspace_id
+    from public.talks
+    where id = ${opts.talkId}::uuid
+    limit 1
+  `;
+  return rows[0]?.workspace_id ?? null;
+}
+
 export async function getProviderVerificationStatus(
   providerId: string,
-): Promise<
-  | 'missing'
-  | 'not_verified'
-  | 'verifying'
-  | 'verified'
-  | 'invalid'
-  | 'unavailable'
-  | null
-> {
+  input: { principalUserId: string | null; workspaceId: string | null },
+): Promise<ProviderVerificationStatus | null> {
   const db = getDbPg();
-  const rows = await db<{ status: string }[]>`
-    select status from public.llm_provider_verifications
-    where provider_id = ${providerId} limit 1
+
+  const normalizeStatus = (
+    status: string | null | undefined,
+  ): ProviderVerificationStatus | null => {
+    if (
+      status === 'missing' ||
+      status === 'not_verified' ||
+      status === 'verifying' ||
+      status === 'verified' ||
+      status === 'invalid' ||
+      status === 'unavailable'
+    ) {
+      return status;
+    }
+    return null;
+  };
+
+  const personalRows = await db<{ status: string | null }[]>`
+    select v.status
+    from public.llm_provider_secrets s
+    left join public.llm_provider_verifications v
+      on v.owner_id = s.owner_id
+      and v.provider_id = s.provider_id
+      and v.credential_kind = s.credential_kind
+    where s.provider_id = ${providerId}
+      and s.credential_kind = 'api_key'
+      and ${input.principalUserId}::uuid is not null
+      and s.owner_id = ${input.principalUserId}::uuid
+    limit 1
   `;
-  const row = rows[0];
-  if (!row?.status) return null;
-  if (
-    row.status === 'missing' ||
-    row.status === 'not_verified' ||
-    row.status === 'verifying' ||
-    row.status === 'verified' ||
-    row.status === 'invalid' ||
-    row.status === 'unavailable'
-  ) {
-    return row.status;
+  if (personalRows[0]) {
+    return normalizeStatus(personalRows[0].status);
   }
+
+  const workspaceRows = await withTrustedDbWrites(
+    () => db<{ status: string | null }[]>`
+      select v.status
+      from public.workspace_provider_secrets s
+      left join public.workspace_provider_verifications v
+        on v.workspace_id = s.workspace_id
+        and v.provider_id = s.provider_id
+        and v.credential_kind = s.credential_kind
+      where s.provider_id = ${providerId}
+        and s.credential_kind = 'api_key'
+        and ${input.workspaceId}::uuid is not null
+        and s.workspace_id = ${input.workspaceId}::uuid
+      limit 1
+    `,
+  );
+  if (workspaceRows[0]) {
+    return normalizeStatus(workspaceRows[0].status);
+  }
+
+  if (providerId === 'provider.anthropic' && TALK_EXECUTOR_ANTHROPIC_API_KEY) {
+    return 'verified';
+  }
+
   return null;
 }
 
-export async function getAnthropicApiKeyFromDb(): Promise<string | null> {
+export async function getAnthropicApiKeyFromDb(input: {
+  principalUserId: string | null;
+  workspaceId: string | null;
+}): Promise<string | null> {
   const db = getDbPg();
-  // Precedence: caller's personal key first, then the workspace-shared
-  // key set by an admin. Inside `withUserContext` the first query is
-  // RLS-scoped to the caller's row; the second hits the workspace table
-  // whose RLS allows any authenticated reader.
+  // Precedence: the explicit execution principal's personal key first, then
+  // the workspace-shared key set by an admin. Queue/service-role paths bypass
+  // user RLS, so the personal lookup must carry an owner predicate.
   const personalRows = await db<{ ciphertext: string }[]>`
     select ciphertext from public.llm_provider_secrets
-    where provider_id = 'provider.anthropic' limit 1
+    where provider_id = 'provider.anthropic'
+      and credential_kind = 'api_key'
+      and ${input.principalUserId}::uuid is not null
+      and owner_id = ${input.principalUserId}::uuid
+    limit 1
   `;
   const personalCiphertext = personalRows[0]?.ciphertext ?? null;
   if (personalCiphertext) {
@@ -160,10 +246,16 @@ export async function getAnthropicApiKeyFromDb(): Promise<string | null> {
     }
   }
 
-  const workspaceRows = await db<{ ciphertext: string }[]>`
-    select ciphertext from public.workspace_provider_secrets
-    where provider_id = 'provider.anthropic' limit 1
-  `;
+  const workspaceRows = await withTrustedDbWrites(
+    () => db<{ ciphertext: string }[]>`
+      select ciphertext from public.workspace_provider_secrets
+      where ${input.workspaceId}::uuid is not null
+        and workspace_id = ${input.workspaceId}::uuid
+        and provider_id = 'provider.anthropic'
+        and credential_kind = 'api_key'
+      limit 1
+    `,
+  );
   const workspaceCiphertext = workspaceRows[0]?.ciphertext ?? null;
   if (!workspaceCiphertext) {
     return null;
@@ -193,6 +285,8 @@ export async function getConfiguredExecutorAuthMode(): Promise<
 
 export async function resolveContainerCredential(input?: {
   preferredAuthMode?: 'api_key' | 'subscription';
+  principalUserId?: string | null;
+  workspaceId?: string | null;
 }): Promise<ContainerCredentialConfig> {
   const configuredAuthMode =
     (await getConfiguredExecutorAuthMode()) || undefined;
@@ -202,7 +296,10 @@ export async function resolveContainerCredential(input?: {
     (await getSettingValue('executor.anthropicAuthToken'))?.trim() || null;
   const envOauth = TALK_EXECUTOR_CLAUDE_OAUTH_TOKEN.trim() || null;
   const envAuth = TALK_EXECUTOR_ANTHROPIC_AUTH_TOKEN.trim() || null;
-  const dbApiKey = await getAnthropicApiKeyFromDb();
+  const dbApiKey = await getAnthropicApiKeyFromDb({
+    principalUserId: input?.principalUserId ?? null,
+    workspaceId: input?.workspaceId ?? null,
+  });
   const apiKey = dbApiKey || TALK_EXECUTOR_ANTHROPIC_API_KEY;
   const normalizedApiKey = apiKey?.trim() || null;
 
@@ -325,6 +422,8 @@ export function getContainerAllowedTools(input: {
 
 async function tryResolveDirectExecutionPlan(input: {
   agent: RegisteredAgentRecord;
+  userId: string;
+  workspaceId?: string | null;
   effectiveTools: EffectiveToolAccess[];
   provider: LlmProviderRecord | undefined;
   configuredAuthMode: Awaited<ReturnType<typeof getConfiguredExecutorAuthMode>>;
@@ -345,6 +444,10 @@ async function tryResolveDirectExecutionPlan(input: {
   ) {
     const verificationStatus = await getProviderVerificationStatus(
       input.agent.provider_id,
+      {
+        principalUserId: input.userId,
+        workspaceId: input.workspaceId ?? null,
+      },
     );
     if (verificationStatus !== 'verified') {
       return null;
@@ -352,10 +455,21 @@ async function tryResolveDirectExecutionPlan(input: {
   }
 
   try {
-    const binding = await resolveExecution(input.agent);
+    const binding = await resolveExecution(input.agent, {
+      credentialScope: {
+        principalUserId: input.userId,
+        workspaceId: input.workspaceId ?? null,
+      },
+    });
+    if (binding.secret.credentialKind === 'subscription') {
+      return null;
+    }
     const dbApiKey =
       input.agent.provider_id === 'provider.anthropic'
-        ? await getAnthropicApiKeyFromDb()
+        ? await getAnthropicApiKeyFromDb({
+            principalUserId: input.userId,
+            workspaceId: input.workspaceId ?? null,
+          })
         : null;
     return {
       backend: 'direct_http',
@@ -377,7 +491,7 @@ async function tryResolveDirectExecutionPlan(input: {
   } catch (error) {
     const resolverError = error as ExecutionResolverError;
     if (
-      resolverError?.code === 'ANTHROPIC_REQUIRES_API_KEY' &&
+      isAnthropicMissingDirectCredentialCode(resolverError?.code) &&
       isContainerCompatibleProvider(input.provider) &&
       input.configuredAuthMode !== 'api_key'
     ) {
@@ -398,6 +512,8 @@ async function tryResolveDirectExecutionPlan(input: {
 
 async function tryResolveContainerExecutionPlan(input: {
   agent: RegisteredAgentRecord;
+  userId: string;
+  workspaceId?: string | null;
   effectiveTools: EffectiveToolAccess[];
   heavyToolFamilies: string[];
   provider: LlmProviderRecord | undefined;
@@ -418,9 +534,11 @@ async function tryResolveContainerExecutionPlan(input: {
       : undefined;
 
   try {
-    const containerCredential = await resolveContainerCredential(
-      preferredAuthMode ? { preferredAuthMode } : undefined,
-    );
+    const containerCredential = await resolveContainerCredential({
+      ...(preferredAuthMode ? { preferredAuthMode } : {}),
+      principalUserId: input.userId,
+      workspaceId: input.workspaceId ?? null,
+    });
     return {
       backend: 'container',
       routeReason:
@@ -446,9 +564,10 @@ async function tryResolveContainerExecutionPlan(input: {
 
 export async function planExecution(
   agent: RegisteredAgentRecord,
-  _userId: string,
+  userId: string,
   opts?: {
     talkId?: string;
+    workspaceId?: string | null;
     activeFamilies?: Record<string, boolean>;
   },
 ): Promise<ExecutionPlan> {
@@ -459,23 +578,30 @@ export async function planExecution(
   const heavyToolFamilies = resolveHeavyToolFamilies(effectiveTools);
   const provider = await getProviderRecord(agent.provider_id);
   const configuredAuthMode = await getConfiguredExecutorAuthMode();
+  const workspaceId = await resolvePlanningWorkspaceId(opts);
 
   if (browserEnabled) {
     const directPlan = await tryResolveDirectExecutionPlan({
       agent,
+      userId,
+      workspaceId,
       effectiveTools,
       provider,
       configuredAuthMode,
     });
     const shouldPreferSubscriptionContainer =
-      agent.provider_id === 'provider.anthropic' &&
-      configuredAuthMode === 'subscription';
+      requiresAnthropicSubscriptionContainer({
+        providerId: agent.provider_id,
+        configuredAuthMode,
+      });
     const containerPlan = await tryResolveContainerExecutionPlan({
       agent,
+      userId,
       effectiveTools,
       heavyToolFamilies,
       provider,
       configuredAuthMode,
+      workspaceId,
     });
 
     if (heavyToolFamilies.length > 0) {
@@ -518,10 +644,12 @@ export async function planExecution(
   ) {
     const containerPlan = await tryResolveContainerExecutionPlan({
       agent,
+      userId,
       effectiveTools,
       heavyToolFamilies: [],
       provider,
       configuredAuthMode,
+      workspaceId,
     });
     if (containerPlan) {
       return {
@@ -529,11 +657,17 @@ export async function planExecution(
         routeReason: 'normal',
       };
     }
+    throw new ExecutionPlannerError(
+      'Container execution is not configured for this agent.',
+      'CONTAINER_CREDENTIAL_MISSING',
+    );
   }
 
   if (heavyToolFamilies.length === 0) {
     const directPlan = await tryResolveDirectExecutionPlan({
       agent,
+      userId,
+      workspaceId,
       effectiveTools,
       provider,
       configuredAuthMode,
@@ -542,10 +676,12 @@ export async function planExecution(
 
     const containerPlan = await tryResolveContainerExecutionPlan({
       agent,
+      userId,
       effectiveTools,
       heavyToolFamilies: [],
       provider,
       configuredAuthMode,
+      workspaceId,
     });
     if (containerPlan) return containerPlan;
 
@@ -557,10 +693,12 @@ export async function planExecution(
 
   const containerPlan = await tryResolveContainerExecutionPlan({
     agent,
+    userId,
     effectiveTools,
     heavyToolFamilies,
     provider,
     configuredAuthMode,
+    workspaceId,
   });
   if (!containerPlan) {
     throw new ExecutionPlannerError(
@@ -573,9 +711,10 @@ export async function planExecution(
 
 export async function planMainExecution(
   agent: RegisteredAgentRecord,
-  _userId: string,
+  userId: string,
   opts?: {
     talkId?: string;
+    workspaceId?: string | null;
     activeFamilies?: Record<string, boolean>;
   },
 ): Promise<MainExecutionPlan> {
@@ -586,11 +725,14 @@ export async function planMainExecution(
   const heavyToolFamilies = resolveHeavyToolFamilies(effectiveTools);
   const provider = await getProviderRecord(agent.provider_id);
   const configuredAuthMode = await getConfiguredExecutorAuthMode();
+  const workspaceId = await resolvePlanningWorkspaceId(opts);
 
   let directPlan: DirectHttpExecutionPlan | null = null;
   try {
     directPlan = await tryResolveDirectExecutionPlan({
       agent,
+      userId,
+      workspaceId,
       effectiveTools,
       provider,
       configuredAuthMode,
@@ -606,11 +748,18 @@ export async function planMainExecution(
   }
   const containerPlan = await tryResolveContainerExecutionPlan({
     agent,
+    userId,
     effectiveTools,
     heavyToolFamilies,
     provider,
     configuredAuthMode,
+    workspaceId,
   });
+  const shouldRequireSubscriptionContainer =
+    requiresAnthropicSubscriptionContainer({
+      providerId: agent.provider_id,
+      configuredAuthMode,
+    });
 
   if (browserEnabled && heavyToolFamilies.length === 0) {
     if (directPlan) {
@@ -630,6 +779,12 @@ export async function planMainExecution(
         directPlan: null,
         containerPlan,
       };
+    }
+    if (shouldRequireSubscriptionContainer) {
+      throw new ExecutionPlannerError(
+        'Container execution is not configured for this agent.',
+        'CONTAINER_CREDENTIAL_MISSING',
+      );
     }
     throw new ExecutionPlannerError(
       'No valid Main execution path is currently configured for this agent.',
@@ -655,6 +810,12 @@ export async function planMainExecution(
         directPlan: null,
         containerPlan,
       };
+    }
+    if (shouldRequireSubscriptionContainer) {
+      throw new ExecutionPlannerError(
+        'Container execution is not configured for this agent.',
+        'CONTAINER_CREDENTIAL_MISSING',
+      );
     }
     throw new ExecutionPlannerError(
       'No valid Main execution path is currently configured for this agent.',

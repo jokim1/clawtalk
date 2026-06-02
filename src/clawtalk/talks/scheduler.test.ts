@@ -23,6 +23,7 @@ import {
   claimDueGreenfieldJobRuns,
   createGreenfieldJob,
   createGreenfieldJobRunNow,
+  googleToolCredentialHasRequiredScopes,
   patchGreenfieldJob,
 } from './greenfield-job-accessors.js';
 import {
@@ -33,6 +34,12 @@ import { runScheduledTick, type ScheduledTickEnv } from './scheduler.js';
 
 const TEST_DB_URL = 'postgresql://postgres:postgres@127.0.0.1:54432/postgres';
 const USER_ID = '0c898989-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
+const OTHER_USER_ID = '0c898989-bbbb-bbbb-bbbb-bbbbbbbbbbbb';
+const GDRIVE_READ_SCOPE_ALIASES = [
+  'drive.readonly',
+  'documents',
+  'spreadsheets',
+];
 
 interface FakeQueue {
   attempts: number;
@@ -119,6 +126,61 @@ function makeMockCtx(): {
   };
 }
 
+async function authorizeGoogleToolsConnector(
+  workspaceId: string,
+  userId = USER_ID,
+  scopes: string[] = GDRIVE_READ_SCOPE_ALIASES,
+): Promise<void> {
+  const db = getDbPg();
+  await db`
+    with secret as (
+      insert into public.connector_secrets (workspace_id, ciphertext)
+      values (${workspaceId}::uuid, 'scheduler-test-google-ciphertext')
+      returning id
+    )
+    insert into public.connectors (
+      workspace_id,
+      service,
+      authorized,
+      authorized_at,
+      secret_ref,
+      config_json
+    )
+    select
+      ${workspaceId}::uuid,
+      'gdrive',
+      true,
+      now(),
+      secret.id,
+      jsonb_build_object(
+        'compatSurface', 'google_tools',
+        'authorizedByUserId', ${userId}::text,
+        'scopes', ${db.json(scopes as never)}
+      )
+    from secret
+  `;
+}
+
+async function seedWorkspaceProviderSecret(
+  workspaceId: string,
+  credentialKind: 'api_key' | 'subscription' = 'api_key',
+): Promise<void> {
+  const db = getDbPg();
+  await db`
+    insert into public.workspace_provider_secrets (
+      workspace_id, provider_id, credential_kind, ciphertext, updated_by
+    )
+    values (
+      ${workspaceId}::uuid, 'provider.anthropic', ${credentialKind},
+      'scheduler-test-provider-secret', ${USER_ID}::uuid
+    )
+    on conflict (workspace_id, provider_id, credential_kind) do update set
+      ciphertext = excluded.ciphertext,
+      updated_by = excluded.updated_by,
+      updated_at = now()
+  `;
+}
+
 async function seedAuthUser(): Promise<void> {
   const db = getDbPg();
   await db`
@@ -137,8 +199,14 @@ async function seedAuthUser(): Promise<void> {
 async function deleteUser(): Promise<void> {
   const db = getDbPg();
   await db`delete from public.event_outbox where topic like 'talk:%'`;
-  await db`delete from public.workspaces where owner_id = ${USER_ID}::uuid`;
-  await db`delete from auth.users where id = ${USER_ID}::uuid`;
+  await db`
+    delete from public.workspaces
+    where owner_id in (${USER_ID}::uuid, ${OTHER_USER_ID}::uuid)
+  `;
+  await db`
+    delete from auth.users
+    where id in (${USER_ID}::uuid, ${OTHER_USER_ID}::uuid)
+  `;
 }
 
 async function createTalkFixture(options?: {
@@ -283,10 +351,7 @@ describe('greenfield scheduled tick safety sweeps', () => {
       on conflict (talk_id, tool_id) do update set
         enabled = excluded.enabled
     `;
-    await db`
-      insert into public.connectors (workspace_id, service, authorized, authorized_at)
-      values (${workspaceId}::uuid, 'gdrive', true, now())
-    `;
+    await authorizeGoogleToolsConnector(workspaceId);
     const job = await withUserContext(USER_ID, () =>
       createGreenfieldJob({
         workspaceId,
@@ -393,6 +458,54 @@ describe('greenfield scheduled tick safety sweeps', () => {
       next_due_is_future: true,
       claimed_at: null,
     });
+  });
+
+  it('freezes the resolved workspace credential kind for scheduled job runs', async () => {
+    const { workspaceId, talkId, agentIds } = await createIdleTalkFixture();
+    const db = getDbPg();
+    await seedWorkspaceProviderSecret(workspaceId, 'api_key');
+    await db`
+      update public.agents
+      set credential_mode = null
+      where workspace_id = ${workspaceId}::uuid
+        and id = ${agentIds[0]}::uuid
+    `;
+    const job = await withUserContext(USER_ID, () =>
+      createGreenfieldJob({
+        workspaceId,
+        talkId,
+        title: 'Scheduled Credential Snapshot',
+        prompt: 'Use the workspace credential path.',
+        agentId: agentIds[0]!,
+        schedule: { kind: 'interval', everyHours: 1 },
+        timezone: 'UTC',
+        sourceScope: { allowWeb: false, toolIds: [] },
+        createdBy: USER_ID,
+      }),
+    );
+    await db`
+      update public.jobs
+      set next_due_at = now() - interval '30 seconds'
+      where id = ${job.id}::uuid
+    `;
+
+    const claim = await claimDueGreenfieldJobRuns({ limit: 1 });
+
+    expect(claim.enqueuedRunIds).toHaveLength(1);
+    const runId = claim.enqueuedRunIds[0]!;
+    await db`
+      update public.agents
+      set credential_mode = 'subscription'
+      where workspace_id = ${workspaceId}::uuid
+        and id = ${agentIds[0]}::uuid
+    `;
+    const snapshots = await db<Array<{ agent_credential_mode: string | null }>>`
+      select rps.tool_manifest_json->>'agentCredentialMode' as agent_credential_mode
+      from public.run_prompt_snapshots rps
+      where rps.workspace_id = ${workspaceId}::uuid
+        and rps.run_id = ${runId}::uuid
+    `;
+    expect(snapshots[0]?.agent_credential_mode).toBe('api_key');
   });
 
   it('leaves due jobs untouched while the talk has an active run', async () => {
@@ -1109,10 +1222,7 @@ describe('greenfield scheduled tick safety sweeps', () => {
       on conflict (talk_id, tool_id) do update set
         enabled = excluded.enabled
     `;
-    await db`
-      insert into public.connectors (workspace_id, service, authorized, authorized_at)
-      values (${workspaceId}::uuid, 'gdrive', true, now())
-    `;
+    await authorizeGoogleToolsConnector(workspaceId);
     const job = await withUserContext(USER_ID, () =>
       createGreenfieldJob({
         workspaceId,
@@ -1186,6 +1296,202 @@ describe('greenfield scheduled tick safety sweeps', () => {
     });
   });
 
+  it('blocks due gdrive-read jobs when the credential lacks Docs and Sheets scopes', async () => {
+    const { workspaceId, talkId, agentIds } = await createIdleTalkFixture();
+    const db = getDbPg();
+    await db`
+      insert into public.talk_tools (workspace_id, talk_id, tool_id, enabled)
+      values (${workspaceId}::uuid, ${talkId}::uuid, 'gdrive-read', true)
+      on conflict (talk_id, tool_id) do update set
+        enabled = excluded.enabled
+    `;
+    await authorizeGoogleToolsConnector(workspaceId);
+    const job = await withUserContext(USER_ID, () =>
+      createGreenfieldJob({
+        workspaceId,
+        talkId,
+        title: 'Drive Scope Regression Job',
+        prompt: 'Read Drive, Docs, and Sheets sources.',
+        agentId: agentIds[0]!,
+        schedule: { kind: 'interval', everyHours: 1 },
+        timezone: 'UTC',
+        sourceScope: { toolIds: ['gdrive-read'] },
+        createdBy: USER_ID,
+      }),
+    );
+    await db`
+      update public.connectors
+      set config_json = jsonb_set(
+        config_json,
+        '{scopes}',
+        ${db.json(['drive.readonly'] as never)}::jsonb,
+        true
+      )
+      where workspace_id = ${workspaceId}::uuid
+        and service = 'gdrive'
+        and config_json->>'compatSurface' = 'google_tools'
+        and config_json->>'authorizedByUserId' = ${USER_ID}
+    `;
+    await db`
+      update public.jobs
+      set next_due_at = now() - interval '30 seconds'
+      where id = ${job.id}::uuid
+    `;
+
+    const queue = await runTick();
+
+    expect(queue.sends).toHaveLength(0);
+    const rows = await db<Array<{ status: string; block_reason: string }>>`
+      select status, block_reason
+      from public.jobs
+      where id = ${job.id}::uuid
+    `;
+    expect(rows[0]).toMatchObject({
+      status: 'blocked',
+      block_reason: 'connector_not_authorized',
+    });
+  });
+
+  it('requires the full runtime Google scope set for gdrive-read and gdrive-write credentials', () => {
+    expect(
+      googleToolCredentialHasRequiredScopes({
+        scopes: ['drive.readonly'],
+        toolId: 'gdrive-read',
+      }),
+    ).toBe(false);
+    expect(
+      googleToolCredentialHasRequiredScopes({
+        scopes: ['drive.readonly', 'documents', 'spreadsheets'],
+        toolId: 'gdrive-read',
+      }),
+    ).toBe(true);
+    expect(
+      googleToolCredentialHasRequiredScopes({
+        scopes: ['drive.readonly'],
+        toolId: 'gdrive-write',
+      }),
+    ).toBe(false);
+    expect(
+      googleToolCredentialHasRequiredScopes({
+        scopes: ['documents', 'spreadsheets'],
+        toolId: 'gdrive-write',
+      }),
+    ).toBe(true);
+  });
+
+  it('blocks due jobs when only another user has the Google tools credential', async () => {
+    const { workspaceId, talkId, agentIds } = await createIdleTalkFixture();
+    const db = getDbPg();
+    await db`
+      insert into public.talk_tools (workspace_id, talk_id, tool_id, enabled)
+      values (${workspaceId}::uuid, ${talkId}::uuid, 'gdrive-read', true)
+      on conflict (talk_id, tool_id) do update set
+        enabled = excluded.enabled
+    `;
+    await authorizeGoogleToolsConnector(workspaceId);
+    const job = await withUserContext(USER_ID, () =>
+      createGreenfieldJob({
+        workspaceId,
+        talkId,
+        title: 'Wrong User Drive Job',
+        prompt: 'Summarize Drive changes.',
+        agentId: agentIds[0]!,
+        schedule: { kind: 'interval', everyHours: 1 },
+        timezone: 'UTC',
+        sourceScope: { toolIds: ['gdrive-read'] },
+        createdBy: USER_ID,
+      }),
+    );
+    await db`
+      delete from public.connectors
+      where workspace_id = ${workspaceId}::uuid
+        and service = 'gdrive'
+        and config_json->>'compatSurface' = 'google_tools'
+        and config_json->>'authorizedByUserId' = ${USER_ID}
+    `;
+    await authorizeGoogleToolsConnector(workspaceId, OTHER_USER_ID);
+    await db`
+      update public.jobs
+      set next_due_at = now() - interval '30 seconds'
+      where id = ${job.id}::uuid
+    `;
+
+    const queue = await runTick();
+
+    expect(queue.sends).toHaveLength(0);
+    const rows = await db<Array<{ status: string; block_reason: string }>>`
+      select status, block_reason
+      from public.jobs
+      where id = ${job.id}::uuid
+    `;
+    expect(rows[0]).toMatchObject({
+      status: 'blocked',
+      block_reason: 'connector_not_authorized',
+    });
+  });
+
+  it('does not let admins manually run jobs under another creator credential', async () => {
+    const { workspaceId, talkId, agentIds } = await createIdleTalkFixture();
+    const db = getDbPg();
+    await db`
+      insert into auth.users (id, email, raw_user_meta_data)
+      values (
+        ${OTHER_USER_ID}::uuid,
+        'scheduler-admin@clawtalk.local',
+        jsonb_build_object('full_name', 'Scheduler Admin')
+      )
+      on conflict (id) do update set
+        email = excluded.email,
+        raw_user_meta_data = excluded.raw_user_meta_data
+    `;
+    await db`
+      insert into public.workspace_members (workspace_id, user_id, role)
+      values (${workspaceId}::uuid, ${OTHER_USER_ID}::uuid, 'admin')
+      on conflict (workspace_id, user_id) do update set
+        role = excluded.role
+    `;
+    await db`
+      insert into public.talk_tools (workspace_id, talk_id, tool_id, enabled)
+      values (${workspaceId}::uuid, ${talkId}::uuid, 'gdrive-read', true)
+      on conflict (talk_id, tool_id) do update set
+        enabled = excluded.enabled
+    `;
+    await authorizeGoogleToolsConnector(workspaceId, USER_ID);
+    const job = await withUserContext(USER_ID, () =>
+      createGreenfieldJob({
+        workspaceId,
+        talkId,
+        title: 'Admin Run Now Drive Job',
+        prompt: 'Summarize Drive changes.',
+        agentId: agentIds[0]!,
+        schedule: { kind: 'interval', everyHours: 1 },
+        timezone: 'UTC',
+        sourceScope: { toolIds: ['gdrive-read'] },
+        createdBy: USER_ID,
+      }),
+    );
+
+    const result = await withUserContext(OTHER_USER_ID, () =>
+      createGreenfieldJobRunNow({
+        workspaceId,
+        talkId,
+        jobId: job.id,
+        requestedBy: OTHER_USER_ID,
+      }),
+    );
+
+    expect(result).toMatchObject({
+      status: 'forbidden',
+      job: expect.objectContaining({ id: job.id, createdBy: USER_ID }),
+    });
+    const runRows = await db<Array<{ count: number }>>`
+      select count(*)::int as count
+      from public.runs
+      where job_id = ${job.id}::uuid
+    `;
+    expect(runRows[0]?.count).toBe(0);
+  });
+
   it('records a distinct inbox item when a healed job blocks again', async () => {
     const { workspaceId, talkId, agentIds } = await createIdleTalkFixture();
     const db = getDbPg();
@@ -1195,10 +1501,7 @@ describe('greenfield scheduled tick safety sweeps', () => {
       on conflict (talk_id, tool_id) do update set
         enabled = excluded.enabled
     `;
-    await db`
-      insert into public.connectors (workspace_id, service, authorized, authorized_at)
-      values (${workspaceId}::uuid, 'gdrive', true, now())
-    `;
+    await authorizeGoogleToolsConnector(workspaceId);
     const job = await withUserContext(USER_ID, () =>
       createGreenfieldJob({
         workspaceId,
@@ -1298,10 +1601,7 @@ describe('greenfield scheduled tick safety sweeps', () => {
       on conflict (talk_id, tool_id) do update set
         enabled = excluded.enabled
     `;
-    await db`
-      insert into public.connectors (workspace_id, service, authorized, authorized_at)
-      values (${workspaceId}::uuid, 'gdrive', true, now())
-    `;
+    await authorizeGoogleToolsConnector(workspaceId);
     const job = await withUserContext(USER_ID, () =>
       createGreenfieldJob({
         workspaceId,

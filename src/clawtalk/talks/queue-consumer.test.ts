@@ -357,6 +357,33 @@ describe('markGreenfieldRunRunning', () => {
 });
 
 describe('processTalkRunMessage', () => {
+  it('emits retry visibility with the run thread id on queue redelivery', async () => {
+    const { runIds, talkId } = await setupRun();
+    const { ctx, drain } = makeMockCtx();
+    const env: DbScopeEnvBindings = {};
+
+    await withRequestScopedDb(TEST_DB_URL, ctx, env, async () => {
+      await processTalkRunMessage({
+        runId: runIds[0]!,
+        attempts: 3,
+        maxRetries: 5,
+        executor: makeMockExecutor({ output: { content: 'retried response' } }),
+        cancelPollIntervalMs: 50_000,
+      });
+    });
+    await drain();
+
+    const events = await getOutboxEventsForTopics([`talk:${talkId}`], 0);
+    const retrying = events.find((e) => e.event_type === 'talk_run_retrying');
+    expect(retrying?.payload).toMatchObject({
+      talkId,
+      threadId: talkId,
+      runId: runIds[0]!,
+      retryAttempt: 2,
+      maxRetries: 5,
+    });
+  });
+
   it('runs the executor to completion and flips status to completed', async () => {
     const { runIds, talkId } = await setupRun();
     const { ctx, drain } = makeMockCtx();
@@ -683,6 +710,77 @@ describe('processDlqMessage', () => {
     expect((failed?.payload as { errorCode?: string }).errorCode).toBe(
       'dlq_exhausted',
     );
+  });
+
+  it('throws and preserves the run when DLQ outbox finalization fails', async () => {
+    const { runIds, talkId } = await setupRun({ status: 'queued' });
+    const db = getDbPg();
+    const topic = `talk:${talkId}`;
+
+    await db`
+      create table if not exists public.queue_consumer_test_outbox_fail_topics (
+        topic text primary key
+      )
+    `;
+    await db`
+      create or replace function public.queue_consumer_test_fail_marked_outbox()
+      returns trigger
+      language plpgsql
+      as $$
+      begin
+        if exists (
+          select 1
+          from public.queue_consumer_test_outbox_fail_topics
+          where topic = new.topic
+        ) then
+          raise exception 'forced event_outbox failure for test topic %', new.topic;
+        end if;
+        return new;
+      end;
+      $$
+    `;
+    await db`
+      drop trigger if exists queue_consumer_test_fail_marked_outbox
+      on public.event_outbox
+    `;
+    await db`
+      create trigger queue_consumer_test_fail_marked_outbox
+      before insert on public.event_outbox
+      for each row
+      execute function public.queue_consumer_test_fail_marked_outbox()
+    `;
+    await db`
+      insert into public.queue_consumer_test_outbox_fail_topics (topic)
+      values (${topic})
+      on conflict (topic) do nothing
+    `;
+
+    try {
+      await expect(processDlqMessage({ runId: runIds[0]! })).rejects.toThrow(
+        /forced event_outbox failure/,
+      );
+
+      const run = await getGreenfieldQueueRunById(runIds[0]!);
+      expect(run?.status).toBe('queued');
+
+      const events = await getOutboxEventsForTopics([topic], 0);
+      expect(events.some((e) => e.event_type === 'talk_run_failed')).toBe(
+        false,
+      );
+    } finally {
+      await db`
+        delete from public.queue_consumer_test_outbox_fail_topics
+        where topic = ${topic}
+      `;
+      await db`
+        drop trigger if exists queue_consumer_test_fail_marked_outbox
+        on public.event_outbox
+      `;
+      await db`
+        drop function if exists public.queue_consumer_test_fail_marked_outbox()
+      `;
+      await db`drop table if exists public.queue_consumer_test_outbox_fail_topics`;
+    }
   });
 
   it('flips a running run to failed', async () => {

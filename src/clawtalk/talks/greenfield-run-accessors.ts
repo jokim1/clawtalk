@@ -1,4 +1,4 @@
-import { getDbPg, type Sql } from '../../db.js';
+import { getDbPg, type Sql, withTrustedDbWrites } from '../../db.js';
 import { logger } from '../../logger.js';
 import { emitOutboxEventOnSql, enqueueOutboxNotify } from './outbox-emit.js';
 import type { TalkExecutionUsage } from './executor.js';
@@ -15,6 +15,7 @@ export interface GreenfieldQueueRunRecord {
   id: string;
   workspace_id: string;
   talk_id: string;
+  thread_id: string;
   round: number;
   run_kind: 'conversation' | 'content_improvement';
   snapshot_group_id: string;
@@ -102,6 +103,7 @@ export async function getGreenfieldQueueRunById(
       r.id,
       r.workspace_id,
       r.talk_id,
+      r.talk_id as thread_id,
       r.round,
       r.run_kind,
       r.snapshot_group_id,
@@ -195,46 +197,48 @@ export async function markGreenfieldRunRunning(
     if (blocking.length > 0) return { status: 'blocked_by_sibling' };
   }
 
-  const pendingNotify = await db.begin(async (tx) => {
-    const txSql = tx as unknown as Sql;
-    const claimedRows = await txSql<{ id: string }[]>`
-      update public.runs
-      set
-        status = 'running',
-        started_at = now(),
-        finished_at = null,
-        error_json = null
-      where id = ${runId}::uuid
-        and status = 'queued'
-      returning id
-    `;
-    if (claimedRows.length !== 1) return null;
+  const pendingNotify = await withTrustedDbWrites(() =>
+    db.begin(async (tx) => {
+      const txSql = tx as unknown as Sql;
+      const claimedRows = await txSql<{ id: string }[]>`
+        update public.runs
+        set
+          status = 'running',
+          started_at = now(),
+          finished_at = null,
+          error_json = null
+        where id = ${runId}::uuid
+          and status = 'queued'
+        returning id
+      `;
+      if (claimedRows.length !== 1) return null;
 
-    const eventId = await emitOutboxEventOnSql(txSql, {
-      topic: `talk:${existing.talk_id}`,
-      eventType: 'talk_run_started',
-      payload: {
-        talkId: existing.talk_id,
-        threadId: existing.talk_id,
-        runId: existing.id,
-        runKind: existing.run_kind,
-        triggerMessageId: existing.trigger_message_id,
-        targetAgentId: existing.target_agent_id,
-        targetAgentNickname: existing.target_agent_name,
-        responseGroupId: existing.response_group_id,
-        sequenceIndex: existing.sequence_index,
-        status: 'running',
-        executorAlias: existing.target_agent_name,
-        executorModel: existing.model_id,
-      },
-      ownerIds: existing.owner_ids,
-    });
-    return {
-      topic: `talk:${existing.talk_id}`,
-      eventId,
-      ownerIds: existing.owner_ids,
-    } satisfies PendingOutboxNotify;
-  });
+      const eventId = await emitOutboxEventOnSql(txSql, {
+        topic: `talk:${existing.talk_id}`,
+        eventType: 'talk_run_started',
+        payload: {
+          talkId: existing.talk_id,
+          threadId: existing.thread_id,
+          runId: existing.id,
+          runKind: existing.run_kind,
+          triggerMessageId: existing.trigger_message_id,
+          targetAgentId: existing.target_agent_id,
+          targetAgentNickname: existing.target_agent_name,
+          responseGroupId: existing.response_group_id,
+          sequenceIndex: existing.sequence_index,
+          status: 'running',
+          executorAlias: existing.target_agent_name,
+          executorModel: existing.model_id,
+        },
+        ownerIds: existing.owner_ids,
+      });
+      return {
+        topic: `talk:${existing.talk_id}`,
+        eventId,
+        ownerIds: existing.owner_ids,
+      } satisfies PendingOutboxNotify;
+    }),
+  );
   if (!pendingNotify) return { status: 'already_running' };
 
   const claimed = await getGreenfieldQueueRunById(runId);
@@ -262,9 +266,10 @@ export async function completeGreenfieldRun(input: {
     return { applied: false, talkId: run?.talk_id ?? null };
   }
 
-  const pendingNotifies = await db.begin(async (tx) => {
-    const txSql = tx as unknown as Sql;
-    const updated = await txSql<{ id: string }[]>`
+  const pendingNotifies = await withTrustedDbWrites(() =>
+    db.begin(async (tx) => {
+      const txSql = tx as unknown as Sql;
+      const updated = await txSql<{ id: string }[]>`
       update public.runs
       set
         status = 'completed',
@@ -276,9 +281,9 @@ export async function completeGreenfieldRun(input: {
         and status = 'running'
       returning id
     `;
-    if (updated.length !== 1) return null;
+      if (updated.length !== 1) return null;
 
-    const messages = await txSql<Array<{ id: string; created_at: string }>>`
+      const messages = await txSql<Array<{ id: string; created_at: string }>>`
       insert into public.messages (
         id,
         workspace_id,
@@ -301,65 +306,66 @@ export async function completeGreenfieldRun(input: {
       )
       returning id, created_at
     `;
-    const responseMessage = messages[0]!;
+      const responseMessage = messages[0]!;
 
-    await txSql`
+      await txSql`
       update public.talks
       set last_activity_at = now()
       where workspace_id = ${run.workspace_id}::uuid
         and id = ${run.talk_id}::uuid
     `;
-    await updateJobTerminalBookkeepingOnSql(txSql, run, 'completed');
+      await updateJobTerminalBookkeepingOnSql(txSql, run, 'completed');
 
-    const messageAppendedEventId = await emitOutboxEventOnSql(txSql, {
-      topic: `talk:${run.talk_id}`,
-      eventType: 'message_appended',
-      payload: {
-        talkId: run.talk_id,
-        threadId: run.talk_id,
-        messageId: responseMessage.id,
-        runId: run.id,
-        role: 'assistant',
-        agentId: input.agentId ?? run.target_agent_id,
-        agentNickname: input.agentNickname ?? run.target_agent_name,
-        content: input.responseContent,
-        createdAt: responseMessage.created_at,
-        metadata: input.responseMetadata ?? null,
-      },
-      ownerIds: run.owner_ids,
-    });
+      const messageAppendedEventId = await emitOutboxEventOnSql(txSql, {
+        topic: `talk:${run.talk_id}`,
+        eventType: 'message_appended',
+        payload: {
+          talkId: run.talk_id,
+          threadId: run.thread_id,
+          messageId: responseMessage.id,
+          runId: run.id,
+          role: 'assistant',
+          agentId: input.agentId ?? run.target_agent_id,
+          agentNickname: input.agentNickname ?? run.target_agent_name,
+          content: input.responseContent,
+          createdAt: responseMessage.created_at,
+          metadata: input.responseMetadata ?? null,
+        },
+        ownerIds: run.owner_ids,
+      });
 
-    const runCompletedEventId = await emitOutboxEventOnSql(txSql, {
-      topic: `talk:${run.talk_id}`,
-      eventType: 'talk_run_completed',
-      payload: {
-        talkId: run.talk_id,
-        threadId: run.talk_id,
-        runId: run.id,
-        runKind: run.run_kind,
-        triggerMessageId: run.trigger_message_id,
-        responseMessageId: responseMessage.id,
-        responseGroupId: run.response_group_id,
-        sequenceIndex: run.sequence_index,
-        executorAlias: input.agentNickname ?? run.target_agent_name,
-        executorModel: input.modelId ?? run.model_id,
-        providerId: input.providerId ?? null,
-      },
-      ownerIds: run.owner_ids,
-    });
-    return [
-      {
+      const runCompletedEventId = await emitOutboxEventOnSql(txSql, {
         topic: `talk:${run.talk_id}`,
-        eventId: messageAppendedEventId,
+        eventType: 'talk_run_completed',
+        payload: {
+          talkId: run.talk_id,
+          threadId: run.thread_id,
+          runId: run.id,
+          runKind: run.run_kind,
+          triggerMessageId: run.trigger_message_id,
+          responseMessageId: responseMessage.id,
+          responseGroupId: run.response_group_id,
+          sequenceIndex: run.sequence_index,
+          executorAlias: input.agentNickname ?? run.target_agent_name,
+          executorModel: input.modelId ?? run.model_id,
+          providerId: input.providerId ?? null,
+        },
         ownerIds: run.owner_ids,
-      },
-      {
-        topic: `talk:${run.talk_id}`,
-        eventId: runCompletedEventId,
-        ownerIds: run.owner_ids,
-      },
-    ] satisfies PendingOutboxNotify[];
-  });
+      });
+      return [
+        {
+          topic: `talk:${run.talk_id}`,
+          eventId: messageAppendedEventId,
+          ownerIds: run.owner_ids,
+        },
+        {
+          topic: `talk:${run.talk_id}`,
+          eventId: runCompletedEventId,
+          ownerIds: run.owner_ids,
+        },
+      ] satisfies PendingOutboxNotify[];
+    }),
+  );
   if (pendingNotifies) {
     for (const notify of pendingNotifies) {
       enqueueOutboxNotify(notify);
@@ -381,72 +387,76 @@ export async function failGreenfieldRun(input: {
   }
   let pendingNotify: PendingOutboxNotify | null;
   try {
-    pendingNotify = await db.begin(async (tx) => {
-      const txSql = tx as unknown as Sql;
-      const failed = await txSql<{ id: string }[]>`
+    pendingNotify = await withTrustedDbWrites(() =>
+      db.begin(async (tx) => {
+        const txSql = tx as unknown as Sql;
+        const failed = await txSql<{ id: string }[]>`
+          update public.runs
+          set
+            status = 'failed',
+            finished_at = now(),
+            error_json = ${txSql.json(
+              errorJson({
+                code: input.errorCode,
+                message: input.errorMessage,
+                metadata: input.metadataPatch,
+              }) as never,
+            )}
+          where id = ${input.runId}::uuid
+            and status = 'running'
+          returning id
+        `;
+        if (failed.length !== 1) return null;
+        await updateJobTerminalBookkeepingOnSql(txSql, run, 'failed');
+
+        const eventId = await emitOutboxEventOnSql(txSql, {
+          topic: `talk:${run.talk_id}`,
+          eventType: 'talk_run_failed',
+          payload: {
+            talkId: run.talk_id,
+            threadId: run.thread_id,
+            runId: run.id,
+            runKind: run.run_kind,
+            triggerMessageId: run.trigger_message_id,
+            responseGroupId: run.response_group_id,
+            sequenceIndex: run.sequence_index,
+            errorCode: input.errorCode,
+            errorMessage: input.errorMessage,
+            executorAlias: run.target_agent_name,
+            executorModel: run.model_id,
+          },
+          ownerIds: run.owner_ids,
+        });
+        return {
+          topic: `talk:${run.talk_id}`,
+          eventId,
+          ownerIds: run.owner_ids,
+        } satisfies PendingOutboxNotify;
+      }),
+    );
+  } catch (err) {
+    const reset = await withTrustedDbWrites(
+      () => db<{ id: string }[]>`
         update public.runs
         set
-          status = 'failed',
-          finished_at = now(),
-          error_json = ${txSql.json(
+          status = 'queued',
+          started_at = null,
+          finished_at = null,
+          error_json = ${db.json(
             errorJson({
-              code: input.errorCode,
-              message: input.errorMessage,
-              metadata: input.metadataPatch,
+              code: 'failure_finalization_retry',
+              message:
+                'Run failure finalization failed before outbox commit; queue retry required.',
+              metadata: {
+                originalErrorCode: input.errorCode,
+              },
             }) as never,
           )}
         where id = ${input.runId}::uuid
           and status = 'running'
         returning id
-      `;
-      if (failed.length !== 1) return null;
-      await updateJobTerminalBookkeepingOnSql(txSql, run, 'failed');
-
-      const eventId = await emitOutboxEventOnSql(txSql, {
-        topic: `talk:${run.talk_id}`,
-        eventType: 'talk_run_failed',
-        payload: {
-          talkId: run.talk_id,
-          threadId: run.talk_id,
-          runId: run.id,
-          runKind: run.run_kind,
-          triggerMessageId: run.trigger_message_id,
-          responseGroupId: run.response_group_id,
-          sequenceIndex: run.sequence_index,
-          errorCode: input.errorCode,
-          errorMessage: input.errorMessage,
-          executorAlias: run.target_agent_name,
-          executorModel: run.model_id,
-        },
-        ownerIds: run.owner_ids,
-      });
-      return {
-        topic: `talk:${run.talk_id}`,
-        eventId,
-        ownerIds: run.owner_ids,
-      } satisfies PendingOutboxNotify;
-    });
-  } catch (err) {
-    const reset = await db<{ id: string }[]>`
-      update public.runs
-      set
-        status = 'queued',
-        started_at = null,
-        finished_at = null,
-        error_json = ${db.json(
-          errorJson({
-            code: 'failure_finalization_retry',
-            message:
-              'Run failure finalization failed before outbox commit; queue retry required.',
-            metadata: {
-              originalErrorCode: input.errorCode,
-            },
-          }) as never,
-        )}
-      where id = ${input.runId}::uuid
-        and status = 'running'
-      returning id
-    `;
+      `,
+    );
     logger.warn(
       { err, runId: run.id, resetForRetry: reset.length === 1 },
       'failGreenfieldRun: failed to finalize run failure atomically; re-queued for retry if possible',
@@ -495,8 +505,8 @@ export async function failGreenfieldDlqRun(input: {
   if (run.status !== 'queued' && run.status !== 'running') return 'terminal';
 
   let pendingNotify: PendingOutboxNotify | null;
-  try {
-    pendingNotify = await db.begin(async (tx) => {
+  pendingNotify = await withTrustedDbWrites(() =>
+    db.begin(async (tx) => {
       const txSql = tx as unknown as Sql;
       const updated = await txSql<{ id: string }[]>`
         update public.runs
@@ -521,7 +531,7 @@ export async function failGreenfieldDlqRun(input: {
         eventType: 'talk_run_failed',
         payload: {
           talkId: run.talk_id,
-          threadId: run.talk_id,
+          threadId: run.thread_id,
           runId: run.id,
           runKind: run.run_kind,
           triggerMessageId: run.trigger_message_id,
@@ -537,35 +547,8 @@ export async function failGreenfieldDlqRun(input: {
         eventId,
         ownerIds: run.owner_ids,
       } satisfies PendingOutboxNotify;
-    });
-  } catch (err) {
-    const fallback = await db<{ id: string }[]>`
-      update public.runs
-      set
-        status = 'failed',
-        finished_at = now(),
-        error_json = ${db.json(
-          errorJson({
-            code: 'dlq_exhausted',
-            message:
-              'Queue retries exhausted; run failed. Outbox event could not be recorded.',
-            metadata: { outboxEventMissing: true },
-          }) as never,
-        )}
-      where id = ${input.runId}::uuid
-        and status in ('queued', 'running')
-      returning id
-    `;
-    if (fallback.length === 1) {
-      await updateJobTerminalBookkeepingOnSql(db, run, 'failed');
-      logger.error(
-        { err, runId: run.id },
-        'failGreenfieldDlqRun: marked run failed without outbox event after atomic finalization failed',
-      );
-      return 'failed';
-    }
-    throw err;
-  }
+    }),
+  );
   if (!pendingNotify) return 'terminal';
   enqueueOutboxNotify(pendingNotify);
   return 'failed';

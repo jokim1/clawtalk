@@ -21,6 +21,7 @@ type Props = {
   onUnauthorized: () => void;
   canManage: boolean;
   mainAgentId?: string | null;
+  workspaceId?: string | null;
   /** Called after any CRUD operation so parent can refresh its own agent list. */
   onAgentsChanged?: (agents: RegisteredAgent[]) => void;
 };
@@ -123,8 +124,7 @@ function findProviderOption(
 ): ProviderOption | undefined {
   return (
     options.find(
-      (o) =>
-        o.providerId === providerId && o.credentialMode === credentialMode,
+      (o) => o.providerId === providerId && o.credentialMode === credentialMode,
     ) ?? options.find((o) => o.providerId === providerId)
   );
 }
@@ -242,6 +242,7 @@ export function RegisteredAgentsPanel(props: Props): JSX.Element {
     onUnauthorized,
     canManage,
     mainAgentId,
+    workspaceId,
     onAgentsChanged,
   } = props;
 
@@ -256,13 +257,13 @@ export function RegisteredAgentsPanel(props: Props): JSX.Element {
   // Load agents
   useEffect(() => {
     loadAgents();
-  }, []);
+  }, [workspaceId]);
 
   async function loadAgents() {
     try {
       setIsLoading(true);
       setError(null);
-      const result = await listRegisteredAgents();
+      const result = await listRegisteredAgents({ workspaceId });
       setAgents(result);
     } catch (err) {
       if (err instanceof UnauthorizedError) {
@@ -305,11 +306,7 @@ export function RegisteredAgentsPanel(props: Props): JSX.Element {
     const options = buildProviderOptions(providers);
     const defaultProviderId =
       readyProviders()[0]?.id || availableProviders()[0]?.id || '';
-    const defaultOption = findProviderOption(
-      options,
-      defaultProviderId,
-      null,
-    );
+    const defaultOption = findProviderOption(options, defaultProviderId, null);
     const defaultModelId =
       getProviderModels(defaultProviderId)[0]?.modelId || '';
     setCreateDraft({
@@ -346,6 +343,7 @@ export function RegisteredAgentsPanel(props: Props): JSX.Element {
         description: createDraft.description || undefined,
         systemPrompt: createDraft.systemPrompt || undefined,
         credentialMode: createDraft.credentialMode,
+        workspaceId,
       };
       const newAgent = await createRegisteredAgent(input);
       const nextAgents = [...agents, newAgent];
@@ -402,6 +400,7 @@ export function RegisteredAgentsPanel(props: Props): JSX.Element {
         systemPrompt: editDraft.systemPrompt || null,
         enabled: editDraft.enabled,
         credentialMode: editDraft.credentialMode,
+        workspaceId,
       };
       const updated = await updateRegisteredAgent(input);
       const nextAgents = agents.map((a) =>
@@ -429,7 +428,7 @@ export function RegisteredAgentsPanel(props: Props): JSX.Element {
 
     try {
       setError(null);
-      await deleteRegisteredAgent(agentId);
+      await deleteRegisteredAgent(agentId, { workspaceId });
       const nextAgents = agents.filter((a) => a.id !== agentId);
       setAgents(nextAgents);
       onAgentsChanged?.(nextAgents);
@@ -465,7 +464,9 @@ export function RegisteredAgentsPanel(props: Props): JSX.Element {
   async function handleDismissModelUpgrade(agentId: string) {
     try {
       setError(null);
-      applyAgentUpdate(await dismissAgentModelUpgrade(agentId));
+      applyAgentUpdate(
+        await dismissAgentModelUpgrade(agentId, { workspaceId }),
+      );
     } catch (err) {
       handleAgentMutationError(err, 'Failed to dismiss the model notice');
     }
@@ -476,7 +477,9 @@ export function RegisteredAgentsPanel(props: Props): JSX.Element {
   async function handleApplyModelUpdate(agentId: string, modelId: string) {
     try {
       setError(null);
-      applyAgentUpdate(await updateRegisteredAgent({ agentId, modelId }));
+      applyAgentUpdate(
+        await updateRegisteredAgent({ agentId, modelId, workspaceId }),
+      );
     } catch (err) {
       handleAgentMutationError(err, 'Failed to update the model');
     }
@@ -626,7 +629,9 @@ function AgentForm({
         <select
           value={providerOptionValue(draft.providerId, draft.credentialMode)}
           onChange={(e) => {
-            const next = providerOptions.find((o) => o.value === e.target.value);
+            const next = providerOptions.find(
+              (o) => o.value === e.target.value,
+            );
             if (!next) return;
             const newModelId =
               getProviderModels(next.providerId)[0]?.modelId || '';
@@ -859,7 +864,8 @@ function AgentCardView({
         {updateAvailable && (
           <div className="registered-agent-model-notice registered-agent-model-notice-update">
             <span>
-              {updateAvailable.displayName ?? updateAvailable.modelId} available.
+              {updateAvailable.displayName ?? updateAvailable.modelId}{' '}
+              available.
             </span>
             {canManage && (
               <button
@@ -871,7 +877,6 @@ function AgentCardView({
             )}
           </div>
         )}
-
       </div>
     </>
   );

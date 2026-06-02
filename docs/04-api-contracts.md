@@ -23,16 +23,16 @@ Framework-agnostic backend contracts derived from the prototype's behavior. Tran
 
 ### Sign-in flows
 
-| Endpoint | Purpose |
-|---|---|
-| `POST /auth/magic-link` | `{ email }` → sends magic link |
+| Endpoint                       | Purpose                                   |
+| ------------------------------ | ----------------------------------------- |
+| `POST /auth/magic-link`        | `{ email }` → sends magic link            |
 | `GET /auth/callback?token=...` | Magic-link callback. Sets session cookie. |
-| `GET /auth/google` | OAuth start |
-| `GET /auth/google/callback` | OAuth callback |
-| `GET /auth/github` | OAuth start |
-| `GET /auth/github/callback` | OAuth callback |
-| `POST /auth/sign-out` | Invalidate session |
-| `GET /me` | Returns current user + workspaces list |
+| `GET /auth/google`             | OAuth start                               |
+| `GET /auth/google/callback`    | OAuth callback                            |
+| `GET /auth/github`             | OAuth start                               |
+| `GET /auth/github/callback`    | OAuth callback                            |
+| `POST /auth/sign-out`          | Invalidate session                        |
+| `GET /me`                      | Returns current user + workspaces list    |
 
 ### `GET /me`
 
@@ -48,19 +48,19 @@ Framework-agnostic backend contracts derived from the prototype's behavior. Tran
 
 ## §2 · Workspaces
 
-| Endpoint | Purpose |
-|---|---|
-| `GET /workspaces` | List workspaces user belongs to |
-| `POST /workspaces` | Create new workspace |
-| `GET /workspaces/:id` | Full workspace info |
-| `PATCH /workspaces/:id` | Update name/settings |
-| `DELETE /workspaces/:id` | Hard-delete workspace (owner-only; rejects with 409 `WORKSPACE_HAS_JOBS_WITH_HISTORY` if any job has `run_count > 0` per §11 §8). |
-| `POST /workspaces/switch` | `{ workspaceId }` → set the calling session's active workspace. Rejects with 403 if the user is not a member. |
-| `POST /workspaces/:id/invite` | Invite member by email |
-| `GET /workspaces/:id/members` | List members |
-| `PATCH /workspaces/:id/members/:userId` | `{ role: 'owner' \| 'admin' \| 'member' }` — role update (admin-only; cannot demote the last owner). |
-| `DELETE /workspaces/:id/members/:userId` | Remove member (admin-only; cannot remove the owner). |
-| `POST /workspaces/:id/transfer-ownership` | `{ newOwnerUserId }` — single atomic txn that flips the prior owner to `admin` and promotes the target to `owner`. Owner-only. |
+| Endpoint                                  | Purpose                                                                                                                           |
+| ----------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| `GET /workspaces`                         | List workspaces user belongs to                                                                                                   |
+| `POST /workspaces`                        | Create new workspace                                                                                                              |
+| `GET /workspaces/:id`                     | Full workspace info                                                                                                               |
+| `PATCH /workspaces/:id`                   | Update name/settings                                                                                                              |
+| `DELETE /workspaces/:id`                  | Hard-delete workspace (owner-only; rejects with 409 `WORKSPACE_HAS_JOBS_WITH_HISTORY` if any job has `run_count > 0` per §11 §8). |
+| `POST /workspaces/switch`                 | `{ workspaceId }` → set the calling session's active workspace. Rejects with 403 if the user is not a member.                     |
+| `POST /workspaces/:id/invite`             | Invite member by email                                                                                                            |
+| `GET /workspaces/:id/members`             | List members                                                                                                                      |
+| `PATCH /workspaces/:id/members/:userId`   | `{ role: 'owner' \| 'admin' \| 'member' }` — role update (admin-only; cannot demote the last owner).                              |
+| `DELETE /workspaces/:id/members/:userId`  | Remove member (admin-only; cannot remove the owner).                                                                              |
+| `POST /workspaces/:id/transfer-ownership` | `{ newOwnerUserId }` — single atomic txn that flips the prior owner to `admin` and promotes the target to `owner`. Owner-only.    |
 
 **On workspace creation:** seed the 5 default agents and 3 default team compositions (see `03-agents.md`).
 
@@ -68,13 +68,13 @@ Framework-agnostic backend contracts derived from the prototype's behavior. Tran
 
 ## §3 · Folders
 
-| Endpoint | Purpose |
-|---|---|
-| `GET /folders` | All folders in workspace |
-| `POST /folders` | `{ title }` → new folder |
-| `PATCH /folders/:id` | Rename single folder (or change `sortOrder`) |
-| `PATCH /folders/order` | `{ folders: [{ id, sortOrder }] }` — batch reorder in a single txn |
-| `DELETE /folders/:id?with_talks=true|false` | Delete; optional cascade |
+| Endpoint                                     | Purpose                                                            |
+| -------------------------------------------- | ------------------------------------------------------------------ |
+| `GET /folders`                               | All folders in workspace                                           |
+| `POST /folders`                              | `{ title }` → new folder                                           |
+| `PATCH /folders/:id`                         | Rename single folder (or change `sortOrder`)                       |
+| `PATCH /folders/order`                       | `{ folders: [{ id, sortOrder }] }` — batch reorder in a single txn |
+| `DELETE /folders/:id?with_talks=true\|false` | Delete; optional cascade                                           |
 
 ---
 
@@ -131,16 +131,18 @@ Partial update — `title`, `folderId`, `mode`, `rounds`, `tools`, `team`, `sort
 
 ### Talk roster endpoints (per §11 §3 `talk_agents`)
 
-| Endpoint | Purpose |
-|---|---|
-| `POST /talks/:id/agents` | `{ agentId }` → append agent to roster (next `sort_order`). 409 `ROSTER_DUPLICATE` if already present, 409 `ROSTER_FULL` at 5 agents. |
+| Endpoint                            | Purpose                                                                                                                                     |
+| ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| `POST /talks/:id/agents`            | `{ agentId }` → append agent to roster (next `sort_order`). 409 `ROSTER_DUPLICATE` if already present, 409 `ROSTER_FULL` at 5 agents.       |
 | `DELETE /talks/:id/agents/:agentId` | Remove agent from roster. Existing scheduled jobs targeting this agent will flip to `status='blocked'` at next fire (per §12 §5 dep check). |
-| `PATCH /talks/:id/agents/order` | `{ agents: [{ agentId, sortOrder }] }` — batch reorder in a single txn. Rejects unknown agentIds. |
+| `PATCH /talks/:id/agents/order`     | `{ agents: [{ agentId, sortOrder }] }` — batch reorder in a single txn. Rejects unknown agentIds.                                           |
 
 ### `POST /talks/:id/archive`
 
 ```ts
-{ alsoArchiveDoc: boolean }
+{
+  alsoArchiveDoc: boolean;
+}
 // Returns 204
 ```
 
@@ -154,7 +156,7 @@ User sends a message. Triggers a run for each agent in the team (Ordered → seq
 
 ```ts
 // Request
-{ text: string, attachments?: [Attachment] }
+{ content: string, targetAgentIds?: string[], threadId?: string | null }
 
 // Response (202)
 {
@@ -164,6 +166,11 @@ User sends a message. Triggers a run for each agent in the team (Ordered → seq
 ```
 
 Subscribe to the WebSocket stream (§9) to receive `run.update` events.
+
+Message attachments are not part of the active greenfield cutover contract.
+The legacy `/talks/:id/attachments` compatibility routes return
+`attachments_not_available` until a future R2-backed attachment slice lands;
+use context file uploads for source material.
 
 ### `POST /talks/:id/cancel-runs`
 
@@ -181,26 +188,31 @@ type UserMessage = {
   role: 'user';
   authorUserId: string;
   text: string;
-  attachments: Attachment[];
   createdAt: string;
   round: number;
-}
+};
 
 type AgentMessage = {
   id: string;
   role: 'agent';
   agentId: string;
   runId: string;
-  runStatus: 'queued' | 'running' | 'awaiting' | 'completed' | 'failed' | 'cancelled';
-  queuePosition?: number;       // when queued
-  text?: string;                 // when completed
-  streamingText?: string;        // when running (partial)
-  progress?: string;             // when running ("Reading 3 comps · synthesizing")
+  runStatus:
+    | 'queued'
+    | 'running'
+    | 'awaiting'
+    | 'completed'
+    | 'failed'
+    | 'cancelled';
+  queuePosition?: number; // when queued
+  text?: string; // when completed
+  streamingText?: string; // when running (partial)
+  progress?: string; // when running ("Reading 3 comps · synthesizing")
   tokens?: { in: number; out: number };
-  toolCalls?: ToolCall[];        // tools the agent invoked during this run
+  toolCalls?: ToolCall[]; // tools the agent invoked during this run
   createdAt: string;
   round: number;
-}
+};
 
 type ToolCall = {
   id: string;
@@ -208,7 +220,7 @@ type ToolCall = {
   args: object;
   result?: object;
   durationMs: number;
-}
+};
 ```
 
 ### `GET /talks/:id/messages?after=<msgId>&limit=50`
@@ -219,27 +231,33 @@ Paginated. Most recent first by default.
 
 ## §6 · Agents
 
-| Endpoint | Purpose |
-|---|---|
-| `GET /agents` | All agents in workspace |
-| `GET /agents/:id` | Single agent |
-| `PATCH /agents/:id` | Update name / model / persona / focus / method / enabled |
-| `POST /agents/:id/reset` | Reset to defaults |
-| `GET /agents/:id/stats` | Recent contributions across Talks |
+| Endpoint                 | Purpose                                                  |
+| ------------------------ | -------------------------------------------------------- |
+| `GET /agents`            | All agents in workspace                                  |
+| `GET /agents/:id`        | Single agent                                             |
+| `PATCH /agents/:id`      | Update name / model / persona / focus / method / enabled |
+| `POST /agents/:id/reset` | Reset to defaults                                        |
+| `GET /agents/:id/stats`  | Recent contributions across Talks                        |
 
 ```ts
 type Agent = {
-  id, workspaceId, roleKey, name, handle, initials, accent,
-  model: string,
-  defaultModel: string,
-  job: string,            // read-only role description
-  persona: string,        // editable tone/voice
-  focus: string,          // editable domain/topic emphasis
-  method: string[],       // editable visible reasoning moves
-  capabilities: string[],
-  isCustom: boolean,
-  enabled: boolean,
-}
+  id;
+  workspaceId;
+  roleKey;
+  name;
+  handle;
+  initials;
+  accent;
+  model: string;
+  defaultModel: string;
+  job: string; // read-only role description
+  persona: string; // editable tone/voice
+  focus: string; // editable domain/topic emphasis
+  method: string[]; // editable visible reasoning moves
+  capabilities: string[];
+  isCustom: boolean;
+  enabled: boolean;
+};
 ```
 
 Raw system prompt editing and custom-agent creation are out of scope for v1.
@@ -250,33 +268,33 @@ and evals.
 
 ## §7 · Team compositions
 
-| Endpoint | Purpose |
-|---|---|
-| `GET /teams` | All teams in workspace |
-| `POST /teams` | Create from agentIds + name |
-| `PATCH /teams/:id` | Update |
-| `DELETE /teams/:id` | Delete |
+| Endpoint                       | Purpose                                 |
+| ------------------------------ | --------------------------------------- |
+| `GET /teams`                   | All teams in workspace                  |
+| `POST /teams`                  | Create from agentIds + name             |
+| `PATCH /teams/:id`             | Update                                  |
+| `DELETE /teams/:id`            | Delete                                  |
 | `POST /talks/:id/save-as-team` | `{ name }` → snapshot current Talk team |
 
 ---
 
 ## §8 · Documents
 
-| Endpoint | Purpose |
-|---|---|
-| `GET /documents?include_unlinked=true` | All docs in workspace |
-| `POST /documents` | `{ title, format, primaryTalkId?, folderId?, tabs? }` → new |
-| `GET /documents/:id` | Full doc with blocks |
-| `PATCH /documents/:id` | Update title / format / primary Talk / folder |
-| `DELETE /documents/:id` | Hard delete (no archive for docs in v1) |
-| `POST /documents/:id/tabs` | `{ title }` → new document tab |
-| `PATCH /documents/:id/tabs/:tabId` | Rename / reorder tab |
-| `DELETE /documents/:id/tabs/:tabId?cascadePending=false` | Delete tab (see cascade rules below) |
-| `PATCH /documents/:id/blocks/:blockId/move` | Move block across tabs / reorder within a tab |
-| `POST /documents/:id/blocks/:blockId/accept` | Accept a pending edit |
-| `POST /documents/:id/blocks/:blockId/reject` | Reject a pending edit |
-| `POST /documents/:id/accept-all` | Bulk accept |
-| `POST /documents/:id/reject-all` | Bulk reject |
+| Endpoint                                                 | Purpose                                                     |
+| -------------------------------------------------------- | ----------------------------------------------------------- |
+| `GET /documents?include_unlinked=true`                   | All docs in workspace                                       |
+| `POST /documents`                                        | `{ title, format, primaryTalkId?, folderId?, tabs? }` → new |
+| `GET /documents/:id`                                     | Full doc with blocks                                        |
+| `PATCH /documents/:id`                                   | Update title / format / primary Talk / folder               |
+| `DELETE /documents/:id`                                  | Hard delete (no archive for docs in v1)                     |
+| `POST /documents/:id/tabs`                               | `{ title }` → new document tab                              |
+| `PATCH /documents/:id/tabs/:tabId`                       | Rename / reorder tab                                        |
+| `DELETE /documents/:id/tabs/:tabId?cascadePending=false` | Delete tab (see cascade rules below)                        |
+| `PATCH /documents/:id/blocks/:blockId/move`              | Move block across tabs / reorder within a tab               |
+| `POST /documents/:id/blocks/:blockId/accept`             | Accept a pending edit                                       |
+| `POST /documents/:id/blocks/:blockId/reject`             | Reject a pending edit                                       |
+| `POST /documents/:id/accept-all`                         | Bulk accept                                                 |
+| `POST /documents/:id/reject-all`                         | Bulk reject                                                 |
 
 ### `DELETE /documents/:id/tabs/:tabId`
 
@@ -314,6 +332,7 @@ Move a block to another tab or reorder it within its current tab.
 Updates `doc_blocks.tab_id` and `sort_order`, then bumps **both** the source tab's and target tab's `list_version` (per §11 §5 CAS rules). Same-tab reorder bumps `list_version` once.
 
 Errors:
+
 - **409 `LIST_VERSION_CONFLICT`** — either base version is stale; client refetches and retries.
 - **404 `BLOCK_NOT_FOUND`** — block was deleted or moved by another writer.
 - **400 `TAB_MISMATCH`** — `afterBlockId` doesn't belong to `targetTabId`.
@@ -325,15 +344,15 @@ type DocTab = {
   title: string;
   order: number;
   blocks: DocBlock[];
-}
+};
 type DocBlock = {
   id: string;
   tabId: string;
   kind: 'h1' | 'h2' | 'p' | 'li' | 'meta' | 'code';
   text: string;
   pending: boolean;
-  pendingBy?: AgentId;     // who proposed this edit
-}
+  pendingBy?: AgentId; // who proposed this edit
+};
 ```
 
 Document creation creates one default tab named `Main` when `tabs` is omitted.
@@ -473,13 +492,19 @@ Server pushes events; client may send a few control messages.
 
 ```ts
 // Subscribe to a talk's stream
-{ type: 'subscribe', talkId }
+{
+  type: ('subscribe', talkId);
+}
 
 // Unsubscribe
-{ type: 'unsubscribe', talkId }
+{
+  type: ('unsubscribe', talkId);
+}
 
 // Heartbeat
-{ type: 'ping' }
+{
+  type: 'ping';
+}
 ```
 
 ---
@@ -506,16 +531,18 @@ Catalog of available tools with current connection status.
 
 ## §11 · Connectors
 
-Connectors are **workspace-global** (one OAuth per service per workspace; row in `connectors`). Per-Talk scope lives in `connector_bindings` (workspace_id, connector_id, talk_id) — a separate, per-Talk binding so the same Slack/GDrive/etc. connection can be scoped differently per Talk (target channel, allowed scopes, enabled flag). See §11 §6 of `11-data-model.md`.
+Connectors are **workspace-global**, but not strictly one row per service: `connectors.service` is paired with an explicit compatibility surface in `config_json->>'compatSurface'`. OAuth-bearing runtime credentials use authorized rows such as `google_tools` (per user and per workspace for Google tool execution; it materializes the covered service rows, e.g. `gdrive` for Drive/Docs/Sheets scopes and `gmail` for Gmail scopes, backed by the same encrypted secret) and `slack_install` (per workspace Slack team, token in `connector_secrets`); Talk Drive resource catalogs use a separate unauthorized `talk_resource` singleton for the same `gdrive` service. Per-Talk scope lives in `connector_bindings` (workspace_id, connector_id, talk_id) — a separate, per-Talk binding so the same Slack/GDrive/etc. connection can be scoped differently per Talk (target channel, allowed scopes, enabled flag). See §11 §6 of `11-data-model.md`.
+
+Cutover compatibility routes keep the current webapp API while writing final tables: `/api/v1/workspace/channels` accepts Slack only, `/api/v1/workspace/data-connectors` accepts Google Docs/Sheets only, `GET /api/v1/talks/:talkId/connectors` lists linkable Talk connectors, `PUT|DELETE /api/v1/talks/:talkId/connectors/channels/:channelId` and `PUT|DELETE /api/v1/talks/:talkId/connectors/data-connectors/:connectorId` toggle per-Talk connector links, and `/api/v1/talks/:talkId/resources` writes Talk Drive resource bindings. Google account credential routes (`/api/v1/me/google-account*`) require explicit workspace scope via `workspaceId`; picker-token may instead use `talkId` so the server resolves the credential workspace from the Talk before minting a Google Picker session. Google Docs/Sheets compatibility data connectors are config-only workspace sources: they can be linked to a Talk without a connector secret; actual Google API execution still uses the acting user's `google_tools` OAuth credential.
 
 ### Workspace-global authorize
 
-| Endpoint | Purpose |
-|---|---|
-| `GET /workspace/connectors` | List workspace connectors + their bindings |
-| `POST /workspace/connectors/:service/oauth-start` | Start OAuth, returns `{ redirectUrl, state }` |
-| `GET /workspace/connectors/:service/oauth-callback?code=&state=` | OAuth callback. Persists token in `connector_secrets`, sets `connectors.authorized=true`. Returns 302 to the SPA. |
-| `POST /workspace/connectors/:service/revoke` | Revoke token. Sets `connectors.authorized=false`, clears `secret_ref`. Bindings remain (re-authorize to re-enable). |
+| Endpoint                                                         | Purpose                                                                                                             |
+| ---------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| `GET /workspace/connectors`                                      | List workspace connectors + their bindings                                                                          |
+| `POST /workspace/connectors/:service/oauth-start`                | Start OAuth, returns `{ redirectUrl, state }`                                                                       |
+| `GET /workspace/connectors/:service/oauth-callback?code=&state=` | OAuth callback. Persists token in `connector_secrets`, sets `connectors.authorized=true`. Returns 302 to the SPA.   |
+| `POST /workspace/connectors/:service/revoke`                     | Revoke token. Sets `connectors.authorized=false`, clears `secret_ref`. Bindings remain (re-authorize to re-enable). |
 
 ```ts
 // GET /workspace/connectors response
@@ -523,35 +550,60 @@ Connectors are **workspace-global** (one OAuth per service per workspace; row in
   id, service: 'slack' | 'gdrive' | 'gmail' | 'linear' | 'github' | 'notion',
   authorized: boolean,
   authorizedAt: string | null,
-  bindings: [{ id, talkId, target: string | null, scope: string[], enabled: boolean }]
+  bindings: [{
+    id,
+    talkId,
+    target: string | null,
+    scope: string[],
+    enabled: boolean,
+    displayName: string | null,
+    meta: Record<string, unknown>
+  }]
 }]
 ```
 
 ### Per-Talk binding
 
-| Endpoint | Purpose |
-|---|---|
-| `GET /talks/:id/connectors` | Bindings for this Talk only |
-| `POST /talks/:id/connectors/:service/bind` | `{ target?, scope?: string[] }` → create or upsert a `connector_bindings` row for this Talk. Requires workspace connector to be authorized; 409 `CONNECTOR_NOT_AUTHORIZED` otherwise. |
-| `PATCH /talks/:id/connectors/:bindingId` | Update `target` / `scope` / `enabled`. |
-| `DELETE /talks/:id/connectors/:bindingId` | Remove the binding (does not revoke the workspace connector). |
+| Endpoint                                   | Purpose                                                                                                                                                                                                                                                                                                 |
+| ------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `GET /talks/:id/connectors`                | Bindings for this Talk only                                                                                                                                                                                                                                                                             |
+| `POST /talks/:id/connectors/:service/bind` | `{ target?, scope?: string[] }` → create or upsert a `connector_bindings` row for this Talk. Requires workspace connector to be authorized; 409 `CONNECTOR_NOT_AUTHORIZED` otherwise. Config-only Google Docs/Sheets compatibility sources are considered linkable once a workspace admin creates them. |
+| `PATCH /talks/:id/connectors/:bindingId`   | Update `target` / `scope` / `enabled`.                                                                                                                                                                                                                                                                  |
+| `DELETE /talks/:id/connectors/:bindingId`  | Remove the binding (does not revoke the workspace connector).                                                                                                                                                                                                                                           |
 
 ---
 
 ## §12 · Context sources
 
-Per-Talk context (supporting documents, URLs, files, past Talks, house rules, News items) lives separately from messages — it's what agents read *from*, not what they say. A Talk's primary document is projected into this API for display, but the source of truth is `documents.primary_talk_id`.
+Per-Talk context (supporting documents, URLs, files, past Talks, house rules, News items) lives separately from messages — it's what agents read _from_, not what they say. A Talk's primary document is projected into this API for display, but the source of truth is `documents.primary_talk_id`.
 
 ### `GET /talks/:id/context`
 
 ```ts
-[{ id, kind: 'primary_document' | 'document' | 'url' | 'file' | 'past_talk' | 'rule' | 'news', name, meta, addedAt }]
+[
+  {
+    id,
+    kind:
+      'primary_document' |
+      'document' |
+      'url' |
+      'file' |
+      'past_talk' |
+      'rule' |
+      'news',
+    name,
+    meta,
+    addedAt,
+  },
+];
 ```
 
 ### `POST /talks/:id/context`
 
 ```ts
-{ kind, name, meta, payload }  // payload depends on kind
+{
+  (kind, name, meta, payload);
+} // payload depends on kind
 // Supporting document context:
 // { kind: 'document', payload: { documentId, includeInPrompt: true } }
 ```
@@ -573,21 +625,23 @@ Returns curator headline, stats, active Talk summary, and Inbox counts.
 ### `GET /home/recommendations`
 
 ```ts
-[{
-  id,
-  kind,
-  title,
-  why,
-  priority: 'decide' | 'improve' | 'tidy',
-  score: number,
-  confidence: number,
-  provenance: object,
-  action: { type: string, payload: object },
-  status: 'active' | 'dismissed' | 'completed' | 'expired' | 'snoozed',
-  algorithmVersion: string,
-  createdAt: string,
-  expiresAt: string
-}]
+[
+  {
+    id,
+    kind,
+    title,
+    why,
+    priority: 'decide' | 'improve' | 'tidy',
+    score: number,
+    confidence: number,
+    provenance: object,
+    action: { type: string, payload: object },
+    status: 'active' | 'dismissed' | 'completed' | 'expired' | 'snoozed',
+    algorithmVersion: string,
+    createdAt: string,
+    expiresAt: string,
+  },
+];
 ```
 
 Recommendations are generated from deterministic candidates and ranked from
@@ -713,11 +767,13 @@ Each agent's `model` field selects provider + model variant.
 ## §15 · Rate limiting & quotas
 
 Per-workspace, per-day:
+
 - Token budget by plan tier (configurable; defaults: Team = 200k/day, Enterprise = unmetered).
 - Concurrent runs cap (default 5).
 - Concurrent Talks streaming (default 3).
 
 Per-user, per-minute:
+
 - Messages sent (default 60/min).
 - Talks created (default 20/min).
 
@@ -747,15 +803,15 @@ Forge is the autonomous content-improvement loop (§09 / §11 §9). Runs reuse t
 
 ### Improvement runs
 
-| Endpoint | Purpose |
-|---|---|
-| `POST /improvement-runs` | Create a new improvement run |
-| `GET /improvement-runs?documentId=&tabId=&status=&limit=&cursor=` | List (paginated) |
-| `GET /improvement-runs/:id` | Detail |
-| `GET /improvement-runs/:id/versions?limit=&cursor=` | Gallery — scored `document_versions` for the run |
-| `POST /improvement-runs/:id/cancel` | Cancel an in-flight run |
-| `GET /document-versions/:id` | Single version detail |
-| `POST /document-versions/:id/promote` | Promote winner via the standard accept path |
+| Endpoint                                                          | Purpose                                          |
+| ----------------------------------------------------------------- | ------------------------------------------------ |
+| `POST /improvement-runs`                                          | Create a new improvement run                     |
+| `GET /improvement-runs?documentId=&tabId=&status=&limit=&cursor=` | List (paginated)                                 |
+| `GET /improvement-runs/:id`                                       | Detail                                           |
+| `GET /improvement-runs/:id/versions?limit=&cursor=`               | Gallery — scored `document_versions` for the run |
+| `POST /improvement-runs/:id/cancel`                               | Cancel an in-flight run                          |
+| `GET /document-versions/:id`                                      | Single version detail                            |
+| `POST /document-versions/:id/promote`                             | Promote winner via the standard accept path      |
 
 #### `POST /improvement-runs`
 
@@ -816,6 +872,7 @@ Land the chosen version's body as a pending `document_edits` row through the uni
 ```
 
 Errors:
+
 - **409 `RUN_NOT_TERMINAL`** — the parent improvement_run hasn't reached a terminal status yet.
 - **404 `DOCUMENT_VERSION_NOT_FOUND`**.
 
@@ -825,28 +882,28 @@ Cancels an in-flight run. Returns 200 with the updated row, or 409 `RUN_ALREADY_
 
 ### Audiences (workspace-scoped, first-class — §11 §9)
 
-| Endpoint | Purpose |
-|---|---|
-| `GET /forge/audiences` | List `forge_audiences` rows for the workspace |
-| `POST /forge/audiences` | `{ name, note?, referenceSetId?, questionId?, personaIds: string[] }` → create |
-| `PATCH /forge/audiences/:id` | Update any of the above fields |
+| Endpoint                      | Purpose                                                                              |
+| ----------------------------- | ------------------------------------------------------------------------------------ |
+| `GET /forge/audiences`        | List `forge_audiences` rows for the workspace                                        |
+| `POST /forge/audiences`       | `{ name, note?, referenceSetId?, questionId?, personaIds: string[] }` → create       |
+| `PATCH /forge/audiences/:id`  | Update any of the above fields                                                       |
 | `DELETE /forge/audiences/:id` | Delete (cascades `forge_audience_personas`; `improvement_runs.audience_id` SET NULL) |
 
 ### Synced SSR assets (read-only cache; refresh via SSR sync job)
 
-| Endpoint | Purpose |
-|---|---|
-| `GET /forge/personas` | `forge_personas` rows for the workspace |
+| Endpoint                    | Purpose                                       |
+| --------------------------- | --------------------------------------------- |
+| `GET /forge/personas`       | `forge_personas` rows for the workspace       |
 | `GET /forge/reference-sets` | `forge_reference_sets` rows for the workspace |
-| `GET /forge/questions` | `forge_questions` rows for the workspace |
+| `GET /forge/questions`      | `forge_questions` rows for the workspace      |
 
 ### SSR OAuth (per workspace; admin-only — §11 §9 / D7)
 
-| Endpoint | Purpose |
-|---|---|
-| `POST /forge/ssr/oauth-start` | Begin OAuth, returns `{ redirectUrl, state }` |
+| Endpoint                         | Purpose                                                                               |
+| -------------------------------- | ------------------------------------------------------------------------------------- |
+| `POST /forge/ssr/oauth-start`    | Begin OAuth, returns `{ redirectUrl, state }`                                         |
 | `POST /forge/ssr/oauth-callback` | `{ code, state }` → persist token in `connector_secrets`, write `ssr_connections` row |
-| `POST /forge/ssr/revoke` | Revoke the token; sets `ssr_connections.secret_ref = null` |
+| `POST /forge/ssr/revoke`         | Revoke the token; sets `ssr_connections.secret_ref = null`                            |
 
 ---
 
@@ -856,17 +913,19 @@ A **Job** is a saved, scheduled run (§12). It fires a normal `conversation` run
 
 ### Jobs
 
-| Endpoint | Purpose |
-|---|---|
-| `POST /talks/:talkId/jobs` | Create job on a Talk |
-| `GET /talks/:talkId/jobs?status=&archived=false` | List jobs on a Talk |
-| `GET /jobs/:id` | Detail (includes `nextDueAt`, `lastRunStatus`, `runCount`, `blockReason`) |
-| `PATCH /jobs/:id` | Edit. Re-runs the §12 §5 step 2 dep check on save (the §12 §6 unblock path) |
-| `POST /jobs/:id/pause` | Set `status='paused'`, `next_due_at=null` |
-| `POST /jobs/:id/resume` | Set `status='active'`, recompute `next_due_at` from now. 409 `JOB_BLOCKED` if `status='blocked'` (resolve the dep first) |
-| `POST /jobs/:id/archive` | Soft archive: `archived_at=now()`, `next_due_at=null`. Run history stays queryable |
-| `POST /talks/:talkId/jobs/:jobId/run-now` | Manual fire (§12 §6) |
-| `GET /jobs/:id/runs?limit=&cursor=` | Run history — `runs` filtered by `job_id`, newest first |
+| Endpoint                                         | Purpose                                                                                                                  |
+| ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------ |
+| `POST /talks/:talkId/jobs`                       | Create job on a Talk                                                                                                     |
+| `GET /talks/:talkId/jobs?status=&archived=false` | List jobs on a Talk                                                                                                      |
+| `GET /jobs/:id`                                  | Detail (includes `nextDueAt`, `lastRunStatus`, `runCount`, `blockReason`)                                                |
+| `PATCH /jobs/:id`                                | Edit. Re-runs the §12 §5 step 2 dep check on save (the §12 §6 unblock path)                                              |
+| `POST /jobs/:id/pause`                           | Set `status='paused'`, `next_due_at=null`                                                                                |
+| `POST /jobs/:id/resume`                          | Set `status='active'`, recompute `next_due_at` from now. 409 `JOB_BLOCKED` if `status='blocked'` (resolve the dep first) |
+| `POST /jobs/:id/archive`                         | Soft archive: `archived_at=now()`, `next_due_at=null`. Run history stays queryable                                       |
+| `POST /talks/:talkId/jobs/:jobId/run-now`        | Manual fire (§12 §6)                                                                                                     |
+| `GET /jobs/:id/runs?limit=&cursor=`              | Run history — `runs` filtered by `job_id`, newest first                                                                  |
+
+Job create requires Talk job-edit access (workspace owner/admin or Talk creator) and always sets `jobs.created_by` to the caller. Edit, pause, resume, and archive require Talk job-edit access so owner/admin users can manage orphaned schedules. Manual run-now still requires the job creator because `jobs.created_by` is the execution principal for frozen tool permissions and per-user Google credentials.
 
 #### `POST /talks/:talkId/jobs`
 
@@ -886,7 +945,7 @@ A **Job** is a saved, scheduled run (§12). It fires a normal `conversation` run
   // Must satisfy emitTalkMessage || emitDocumentAppend (§11 §8 CHECK).
   sourceScopeJson: {
     allowWeb: boolean,
-    toolIds: string[]                  // validated at fire time against talk_tools (§12 §5)
+    toolIds: string[]                  // validated against talk_tools and runtime support (§12 §5); Gmail job tools are blocked until the Gmail executor ships
   },
   catchUp: 'skip' | 'run_once'         // §12 §4
 }
@@ -897,11 +956,13 @@ A **Job** is a saved, scheduled run (§12). It fires a normal `conversation` run
 
 #### `POST /talks/:talkId/jobs/:jobId/run-now`
 
-Creates a `trigger='manual'` run per §12 §6. Allowed when `status in ('active','paused')`.
+Creates a `trigger='manual'` run per §12 §6. Allowed when `status in ('active','paused')` and the caller is `jobs.created_by`.
 
 ```ts
 // Response (202)
-{ run: Run }                           // status='queued'
+{
+  run: Run;
+} // status='queued'
 
 // Errors
 // 409 RUN_BUSY — runs_one_active_per_job rejected (a non-terminal run already exists for this job).

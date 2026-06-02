@@ -42,7 +42,10 @@ import {
   type GreenfieldTalkContextSnapshot,
 } from '../../talks/greenfield-context-accessors.js';
 import { getGreenfieldTalk } from '../../talks/greenfield-accessors.js';
-import { resolveWorkspaceForUser } from '../../workspaces/accessors.js';
+import {
+  resolveWorkspaceForUser,
+  type WorkspaceSummaryRecord,
+} from '../../workspaces/accessors.js';
 import { ensureWorkspaceBootstrapForUser } from '../../workspaces/bootstrap.js';
 import type { ApiEnvelope, AuthContext } from '../types.js';
 
@@ -54,6 +57,7 @@ type RouteResult<T> = {
 
 type WorkspaceRouteContext = {
   workspaceId: string;
+  role: WorkspaceSummaryRecord['role'];
 };
 
 type SourceContentResult =
@@ -182,12 +186,19 @@ async function resolveTalkWorkspaceContext(input: {
       talkId: input.talkId,
     });
     if (!talk) return error(404, 'not_found', 'Talk not found.');
-    return { workspaceId: workspace.id };
+    return { workspaceId: workspace.id, role: workspace.role };
   }
 
   const workspaceId = await findVisibleTalkWorkspaceId(input.talkId);
   if (!workspaceId) return error(404, 'not_found', 'Talk not found.');
-  return { workspaceId };
+  const workspace = await resolveWorkspaceForUser({
+    userId: input.userId,
+    requestedWorkspaceId: workspaceId,
+  });
+  if (!workspace) {
+    return error(403, 'workspace_forbidden', 'Workspace is not available.');
+  }
+  return { workspaceId: workspace.id, role: workspace.role };
 }
 
 function isRouteResult(
@@ -224,9 +235,39 @@ async function withTalk<T>(
     return result.body.ok
       ? {
           ...result,
-          scope: { workspaceId: ctx.workspaceId, talkId: input.talkId },
+          scope: {
+            workspaceId: ctx.workspaceId,
+            role: ctx.role,
+            talkId: input.talkId,
+          },
         }
       : result;
+  });
+}
+
+function requireWorkspaceWriter(
+  ctx: WorkspaceRouteContext,
+): RouteResult<never> | null {
+  if (ctx.role !== 'guest') return null;
+  return error(
+    403,
+    'workspace_writer_required',
+    'Workspace write access is required.',
+  );
+}
+
+async function withWritableTalk<T>(
+  input: {
+    auth: AuthContext;
+    workspaceId?: string | null;
+    talkId: string;
+  },
+  fn: (ctx: WorkspaceRouteContext) => Promise<RouteResult<T>>,
+): Promise<RouteResult<T>> {
+  return withTalk(input, async (ctx) => {
+    const writerError = requireWorkspaceWriter(ctx);
+    if (writerError) return writerError;
+    return fn(ctx);
   });
 }
 
@@ -287,7 +328,7 @@ export async function setGreenfieldTalkGoalRoute(input: {
       'Goal must be 1000 characters or fewer.',
     );
   }
-  return withTalk(input, async (ctx) => {
+  return withWritableTalk(input, async (ctx) => {
     const goal = await setGreenfieldContextGoal({
       workspaceId: ctx.workspaceId,
       talkId: input.talkId,
@@ -324,7 +365,7 @@ export async function createGreenfieldTalkContextRuleRoute(input: {
   if (text.length > 800) {
     return error(400, 'rule_too_long', 'Rule must be 800 characters or fewer.');
   }
-  return withTalk(input, async (ctx) => {
+  return withWritableTalk(input, async (ctx) => {
     try {
       const rule = await createGreenfieldContextRule({
         workspaceId: ctx.workspaceId,
@@ -367,7 +408,7 @@ export async function patchGreenfieldTalkContextRuleRoute(input: {
     }
   }
 
-  return withTalk(input, async (ctx) => {
+  return withWritableTalk(input, async (ctx) => {
     try {
       const rule = await patchGreenfieldContextRule({
         workspaceId: ctx.workspaceId,
@@ -397,7 +438,7 @@ export async function deleteGreenfieldTalkContextRuleRoute(input: {
   if (!isUuid(input.ruleId)) {
     return error(400, 'invalid_rule_id', 'Rule id must be a UUID.');
   }
-  return withTalk(input, async (ctx) => {
+  return withWritableTalk(input, async (ctx) => {
     const deleted = await deleteGreenfieldContextRule({
       workspaceId: ctx.workspaceId,
       talkId: input.talkId,
@@ -431,7 +472,7 @@ export async function deleteGreenfieldTalkStateEntryRoute(input: {
       err instanceof Error ? err.message : 'Invalid key.',
     );
   }
-  return withTalk(input, async () =>
+  return withWritableTalk(input, async () =>
     error(404, 'not_found', 'State entry not found.'),
   );
 }
@@ -468,7 +509,7 @@ export async function createGreenfieldTalkContextSourceRoute(input: {
     );
   }
 
-  return withTalk(input, async (ctx) => {
+  return withWritableTalk(input, async (ctx) => {
     try {
       const source = await createGreenfieldContextSource({
         workspaceId: ctx.workspaceId,
@@ -507,7 +548,7 @@ export async function patchGreenfieldTalkContextSourceRoute(input: {
   if (input.title !== undefined && !input.title.trim()) {
     return error(400, 'title_required', 'Source title is required.');
   }
-  return withTalk(input, async (ctx) => {
+  return withWritableTalk(input, async (ctx) => {
     let source: GreenfieldContextSourceSnapshot | undefined;
     try {
       source = await patchGreenfieldContextSource({
@@ -542,7 +583,7 @@ export async function deleteGreenfieldTalkContextSourceRoute(input: {
   if (!isUuid(input.sourceId)) {
     return error(400, 'invalid_source_id', 'Source id must be a UUID.');
   }
-  return withTalk(input, async (ctx) => {
+  return withWritableTalk(input, async (ctx) => {
     const source = await getGreenfieldContextSourceById({
       workspaceId: ctx.workspaceId,
       talkId: input.talkId,
@@ -580,7 +621,7 @@ export async function retryGreenfieldTalkContextSourceRoute(input: {
   if (!isUuid(input.sourceId)) {
     return error(400, 'invalid_source_id', 'Source id must be a UUID.');
   }
-  return withTalk(input, async (ctx) => {
+  return withWritableTalk(input, async (ctx) => {
     const existing = await getGreenfieldContextSourceById({
       workspaceId: ctx.workspaceId,
       talkId: input.talkId,
@@ -615,7 +656,7 @@ export async function uploadGreenfieldTalkContextSourceRoute(input: {
   };
   title?: string;
 }): Promise<RouteResult<{ source: GreenfieldContextSourceSnapshot }>> {
-  return withTalk(input, async (ctx) => {
+  return withWritableTalk(input, async (ctx) => {
     const mimeType = inferSupportedAttachmentMimeType(
       input.file.name,
       input.file.type,
@@ -745,7 +786,7 @@ export async function uploadGreenfieldTalkContextSourcePageImageRoute(input: {
     return error(400, 'invalid_page_format', 'Page image must be a JPEG.');
   }
 
-  return withTalk(input, async (ctx) => {
+  return withWritableTalk(input, async (ctx) => {
     const source = await getGreenfieldContextSourceById({
       workspaceId: ctx.workspaceId,
       talkId: input.talkId,

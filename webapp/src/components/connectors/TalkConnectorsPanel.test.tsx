@@ -14,17 +14,19 @@ function jsonResponse(status: number, body: unknown): Response {
 
 type Channel = {
   id: string;
-  kind: 'slack' | 'telegram';
+  kind: 'slack';
   displayName: string;
   enabled: boolean;
+  hasCredential: boolean;
   linked: boolean;
 };
 
 type DataConnector = {
   id: string;
-  kind: 'posthog' | 'google_docs' | 'google_sheets';
+  kind: 'google_docs' | 'google_sheets';
   displayName: string;
   enabled: boolean;
+  hasCredential: boolean;
   linked: boolean;
 };
 
@@ -37,6 +39,10 @@ function installFetch(seed: {
   const channelPutCalls: Array<{ talkId: string; channelId: string }> = [];
   const channelDeleteCalls: Array<{ talkId: string; channelId: string }> = [];
   const dataConnectorPutCalls: Array<{
+    talkId: string;
+    connectorId: string;
+  }> = [];
+  const dataConnectorDeleteCalls: Array<{
     talkId: string;
     connectorId: string;
   }> = [];
@@ -65,7 +71,7 @@ function installFetch(seed: {
       }
 
       const channelLinkMatch = url.match(
-        /\/api\/v1\/talks\/([^/?]+)\/channels\/([^/?]+)$/,
+        /\/api\/v1\/talks\/([^/?]+)\/connectors\/channels\/([^/?]+)$/,
       );
       if (channelLinkMatch && method === 'PUT') {
         channelPutCalls.push({
@@ -83,7 +89,7 @@ function installFetch(seed: {
       }
 
       const dcLinkMatch = url.match(
-        /\/api\/v1\/talks\/([^/?]+)\/data-connectors\/([^/?]+)$/,
+        /\/api\/v1\/talks\/([^/?]+)\/connectors\/data-connectors\/([^/?]+)$/,
       );
       if (dcLinkMatch && method === 'PUT') {
         dataConnectorPutCalls.push({
@@ -92,12 +98,24 @@ function installFetch(seed: {
         });
         return jsonResponse(200, { ok: true, data: { linked: true } });
       }
+      if (dcLinkMatch && method === 'DELETE') {
+        dataConnectorDeleteCalls.push({
+          talkId: decodeURIComponent(dcLinkMatch[1]),
+          connectorId: decodeURIComponent(dcLinkMatch[2]),
+        });
+        return jsonResponse(200, { ok: true, data: { unlinked: true } });
+      }
 
       throw new Error(`Unexpected fetch: ${method} ${url}`);
     }),
   );
 
-  return { channelPutCalls, channelDeleteCalls, dataConnectorPutCalls };
+  return {
+    channelPutCalls,
+    channelDeleteCalls,
+    dataConnectorPutCalls,
+    dataConnectorDeleteCalls,
+  };
 }
 
 describe('TalkConnectorsPanel', () => {
@@ -115,15 +133,17 @@ describe('TalkConnectorsPanel', () => {
           kind: 'slack',
           displayName: 'Eng Slack',
           enabled: true,
+          hasCredential: true,
           linked: false,
         },
       ],
       dataConnectors: [
         {
           id: 'dc-1',
-          kind: 'posthog',
-          displayName: 'Prod analytics',
+          kind: 'google_sheets',
+          displayName: 'Metrics sheet',
           enabled: true,
+          hasCredential: true,
           linked: true,
         },
       ],
@@ -139,17 +159,17 @@ describe('TalkConnectorsPanel', () => {
     expect(screen.getByRole('heading', { name: 'Channels' })).toBeTruthy();
     expect(screen.getByRole('heading', { name: 'Data sources' })).toBeTruthy();
     expect(screen.getByText('Eng Slack')).toBeTruthy();
-    expect(screen.getByText('Prod analytics')).toBeTruthy();
+    expect(screen.getByText('Metrics sheet')).toBeTruthy();
 
     const slackToggle = screen.getByRole('switch', {
       name: /Enable channel Eng Slack/,
     });
     expect(slackToggle.getAttribute('aria-checked')).toBe('false');
 
-    const posthogToggle = screen.getByRole('switch', {
-      name: /Disable data source Prod analytics/,
+    const googleSheetsToggle = screen.getByRole('switch', {
+      name: /Disable data source Metrics sheet/,
     });
-    expect(posthogToggle.getAttribute('aria-checked')).toBe('true');
+    expect(googleSheetsToggle.getAttribute('aria-checked')).toBe('true');
   });
 
   it('toggle ON calls PUT against the talk-channel link endpoint', async () => {
@@ -160,6 +180,7 @@ describe('TalkConnectorsPanel', () => {
           kind: 'slack',
           displayName: 'Eng Slack',
           enabled: true,
+          hasCredential: true,
           linked: false,
         },
       ],
@@ -180,6 +201,54 @@ describe('TalkConnectorsPanel', () => {
 
     expect(calls.channelPutCalls).toEqual([
       { talkId: 'talk-1', channelId: 'ch-1' },
+    ]);
+  });
+
+  it('blocks enabling missing credentials but still allows unlinking', async () => {
+    const calls = installFetch({
+      channels: [
+        {
+          id: 'ch-missing',
+          kind: 'slack',
+          displayName: 'Missing Slack',
+          enabled: true,
+          hasCredential: false,
+          linked: false,
+        },
+      ],
+      dataConnectors: [
+        {
+          id: 'dc-linked-missing',
+          kind: 'google_docs',
+          displayName: 'Broken Docs',
+          enabled: true,
+          hasCredential: false,
+          linked: true,
+        },
+      ],
+    });
+    const user = userEvent.setup();
+
+    render(
+      <MemoryRouter>
+        <TalkConnectorsPanel talkId="talk-1" onUnauthorized={vi.fn()} />
+      </MemoryRouter>,
+    );
+
+    await screen.findByText('Missing Slack');
+    expect(screen.getAllByLabelText('Credential missing')).toHaveLength(2);
+    expect(
+      screen.getByRole('switch', { name: /Enable channel Missing Slack/ }),
+    ).toBeDisabled();
+
+    const linkedMissing = screen.getByRole('switch', {
+      name: /Disable data source Broken Docs/,
+    });
+    expect(linkedMissing).not.toBeDisabled();
+    await user.click(linkedMissing);
+
+    expect(calls.dataConnectorDeleteCalls).toEqual([
+      { talkId: 'talk-1', connectorId: 'dc-linked-missing' },
     ]);
   });
 

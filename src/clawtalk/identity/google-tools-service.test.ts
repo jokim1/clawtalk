@@ -36,6 +36,7 @@ import {
   getUserGoogleCredential,
   upsertUserGoogleCredential,
 } from '../db/talk-tools-accessors.js';
+import { ensureWorkspaceBootstrapForUser } from '../workspaces/bootstrap.js';
 
 import {
   decryptGoogleToolCredential,
@@ -48,19 +49,23 @@ import {
   getValidGoogleToolAccessToken,
   refreshCredentialIfNeeded,
 } from './google-tools-service.js';
+import { withTrustedDbWrites } from '../../db.js';
 
 const DRIVE_READONLY_URL = 'https://www.googleapis.com/auth/drive.readonly';
 const DOCUMENTS_URL = 'https://www.googleapis.com/auth/documents';
 
 async function seedGoogleCredential(input: {
   userId: string;
+  workspaceId?: string;
   accessToken?: string;
   refreshToken?: string | null;
   expiryDate?: string | null;
   scopes?: string[]; // URL form
   email?: string;
   displayName?: string | null;
-}): Promise<void> {
+}): Promise<string> {
+  const workspaceId =
+    input.workspaceId ?? (await ensureWorkspaceBootstrapForUser(input.userId));
   const scopes = input.scopes ?? [DRIVE_READONLY_URL, DOCUMENTS_URL];
   const payload: GoogleToolCredentialPayload = {
     kind: 'google_tools',
@@ -78,6 +83,7 @@ async function seedGoogleCredential(input: {
     delete payload.refreshToken;
   }
   await upsertUserGoogleCredential({
+    workspaceId,
     userId: input.userId,
     googleSubject: `sub-${input.userId.slice(0, 8)}`,
     email: input.email ?? 'tester@example.com',
@@ -86,6 +92,7 @@ async function seedGoogleCredential(input: {
     ciphertext: encryptGoogleToolCredential(payload),
     accessExpiresAt: payload.expiryDate ?? null,
   });
+  return workspaceId;
 }
 
 function mockRefreshFetch(input: {
@@ -131,9 +138,10 @@ describe('google-tools-service', () => {
       userIds.push(userId);
       const fetchSpy = vi.spyOn(globalThis, 'fetch');
       await withUserContext(userId, async () => {
-        await seedGoogleCredential({ userId });
+        const workspaceId = await seedGoogleCredential({ userId });
         const result = await getValidGoogleToolAccessToken({
           userId,
+          workspaceId,
           requiredScopes: ['drive.readonly'],
         });
         expect(result.accessToken).toBe('access-old');
@@ -148,10 +156,12 @@ describe('google-tools-service', () => {
     it('throws google_account_not_connected when no credential exists', async () => {
       const userId = await seedAuthUser();
       userIds.push(userId);
+      const workspaceId = await ensureWorkspaceBootstrapForUser(userId);
       await withUserContext(userId, async () => {
         await expect(
           getValidGoogleToolAccessToken({
             userId,
+            workspaceId,
             requiredScopes: ['drive.readonly'],
           }),
         ).rejects.toMatchObject({
@@ -165,13 +175,14 @@ describe('google-tools-service', () => {
       const userId = await seedAuthUser();
       userIds.push(userId);
       await withUserContext(userId, async () => {
-        await seedGoogleCredential({
+        const workspaceId = await seedGoogleCredential({
           userId,
           scopes: [DRIVE_READONLY_URL], // documents intentionally absent
         });
         await expect(
           getValidGoogleToolAccessToken({
             userId,
+            workspaceId,
             requiredScopes: ['drive.readonly', 'documents'],
           }),
         ).rejects.toMatchObject({
@@ -185,12 +196,13 @@ describe('google-tools-service', () => {
       const userId = await seedAuthUser();
       userIds.push(userId);
       await withUserContext(userId, async () => {
-        await seedGoogleCredential({
+        const workspaceId = await seedGoogleCredential({
           userId,
           scopes: ['https://www.googleapis.com/auth/spreadsheets'],
         });
         const result = await getValidGoogleToolAccessToken({
           userId,
+          workspaceId,
           requiredScopes: ['spreadsheets.readonly'],
         });
         expect(result.accessToken).toBe('access-old');
@@ -202,12 +214,13 @@ describe('google-tools-service', () => {
       const userId = await seedAuthUser();
       userIds.push(userId);
       await withUserContext(userId, async () => {
-        await seedGoogleCredential({
+        const workspaceId = await seedGoogleCredential({
           userId,
           scopes: ['https://www.googleapis.com/auth/documents'],
         });
         const result = await getValidGoogleToolAccessToken({
           userId,
+          workspaceId,
           requiredScopes: ['documents.readonly'],
         });
         expect(result.accessToken).toBe('access-old');
@@ -218,13 +231,14 @@ describe('google-tools-service', () => {
       const userId = await seedAuthUser();
       userIds.push(userId);
       await withUserContext(userId, async () => {
-        await seedGoogleCredential({
+        const workspaceId = await seedGoogleCredential({
           userId,
           scopes: ['https://www.googleapis.com/auth/documents.readonly'],
         });
         await expect(
           getValidGoogleToolAccessToken({
             userId,
+            workspaceId,
             requiredScopes: ['documents'],
           }),
         ).rejects.toMatchObject({
@@ -238,24 +252,32 @@ describe('google-tools-service', () => {
       const userId = await seedAuthUser();
       userIds.push(userId);
       await withUserContext(userId, async () => {
-        // Insert a deliberately-malformed ciphertext to simulate either a
-        // rotated encryption key or a corrupted row.
+        // Corrupt the connector secret to simulate either a rotated
+        // encryption key or a malformed persisted payload.
         const db = getDbPg();
-        await db`
-          insert into public.user_google_credentials
-            (user_id, google_subject, email, display_name, scopes_json,
-             ciphertext, access_expires_at)
-          values
-            (${userId}::uuid, 'sub', 'tester@example.com', 'T',
-             ${db.json(['drive.readonly'] as never)}, 'not-json', null)
-        `;
+        const workspaceId = await seedGoogleCredential({ userId });
+        await withTrustedDbWrites(async () => {
+          await db`
+            update public.connector_secrets cs
+            set ciphertext = 'not-json',
+                updated_at = now()
+            from public.connectors c
+            where c.workspace_id = ${workspaceId}::uuid
+              and c.service = 'gdrive'
+              and c.config_json->>'compatSurface' = 'google_tools'
+              and c.config_json->>'authorizedByUserId' = ${userId}
+              and cs.workspace_id = c.workspace_id
+              and cs.id = c.secret_ref
+          `;
+        });
         await expect(
           getValidGoogleToolAccessToken({
             userId,
+            workspaceId,
             requiredScopes: ['drive.readonly'],
           }),
         ).rejects.toMatchObject({ code: 'google_reauth_required' });
-        const after = await getUserGoogleCredential();
+        const after = await getUserGoogleCredential({ workspaceId });
         expect(after).toBeUndefined();
       });
     });
@@ -274,16 +296,17 @@ describe('google-tools-service', () => {
         },
       });
       await withUserContext(userId, async () => {
-        await seedGoogleCredential({
+        const workspaceId = await seedGoogleCredential({
           userId,
           expiryDate: new Date(Date.now() - 60_000).toISOString(),
         });
         const result = await getValidGoogleToolAccessToken({
           userId,
+          workspaceId,
           requiredScopes: ['drive.readonly'],
         });
         expect(result.accessToken).toBe('access-fresh');
-        const stored = await getUserGoogleCredential();
+        const stored = await getUserGoogleCredential({ workspaceId });
         expect(stored).toBeDefined();
         const decoded = decryptGoogleToolCredential(stored!.ciphertext);
         expect(decoded.accessToken).toBe('access-fresh');
@@ -303,20 +326,21 @@ describe('google-tools-service', () => {
         body: { error: 'invalid_grant' },
       });
       await withUserContext(userId, async () => {
-        await seedGoogleCredential({
+        const workspaceId = await seedGoogleCredential({
           userId,
           expiryDate: new Date(Date.now() - 60_000).toISOString(),
         });
         await expect(
           getValidGoogleToolAccessToken({
             userId,
+            workspaceId,
             requiredScopes: ['drive.readonly'],
           }),
         ).rejects.toMatchObject({
           code: 'google_reauth_required',
           status: 401,
         });
-        const after = await getUserGoogleCredential();
+        const after = await getUserGoogleCredential({ workspaceId });
         expect(after).toBeUndefined();
       });
     });
@@ -326,7 +350,7 @@ describe('google-tools-service', () => {
       userIds.push(userId);
       const fetchSpy = vi.spyOn(globalThis, 'fetch');
       await withUserContext(userId, async () => {
-        await seedGoogleCredential({
+        const workspaceId = await seedGoogleCredential({
           userId,
           refreshToken: null,
           expiryDate: new Date(Date.now() - 60_000).toISOString(),
@@ -334,6 +358,7 @@ describe('google-tools-service', () => {
         await expect(
           getValidGoogleToolAccessToken({
             userId,
+            workspaceId,
             requiredScopes: ['drive.readonly'],
           }),
         ).rejects.toMatchObject({ code: 'google_reauth_required' });
@@ -353,16 +378,17 @@ describe('google-tools-service', () => {
         },
       });
       await withUserContext(userId, async () => {
-        await seedGoogleCredential({
+        const workspaceId = await seedGoogleCredential({
           userId,
           refreshToken: 'refresh-original',
           expiryDate: new Date(Date.now() - 60_000).toISOString(),
         });
         await getValidGoogleToolAccessToken({
           userId,
+          workspaceId,
           requiredScopes: ['drive.readonly'],
         });
-        const stored = await getUserGoogleCredential();
+        const stored = await getUserGoogleCredential({ workspaceId });
         const decoded = decryptGoogleToolCredential(stored!.ciphertext);
         expect(decoded.refreshToken).toBe('refresh-original');
         expect(decoded.accessToken).toBe('access-fresh-2');
@@ -382,19 +408,20 @@ describe('google-tools-service', () => {
       });
       await withUserContext(userId, async () => {
         const priorScopes = [DRIVE_READONLY_URL, DOCUMENTS_URL];
-        await seedGoogleCredential({
+        const workspaceId = await seedGoogleCredential({
           userId,
           scopes: priorScopes,
           expiryDate: new Date(Date.now() - 60_000).toISOString(),
         });
         const result = await getValidGoogleToolAccessToken({
           userId,
+          workspaceId,
           // Both scopes are still required post-refresh; if the refresh path
           // ever narrows the persisted set this assertion fails.
           requiredScopes: ['drive.readonly', 'documents'],
         });
         expect(result.accessToken).toBe('access-fresh-3');
-        const stored = await getUserGoogleCredential();
+        const stored = await getUserGoogleCredential({ workspaceId });
         const decoded = decryptGoogleToolCredential(stored!.ciphertext);
         expect([...decoded.scopes].sort()).toEqual([...priorScopes].sort());
       });
@@ -425,18 +452,22 @@ describe('google-tools-service', () => {
           );
         });
       await withUserContext(userId, async () => {
-        await seedGoogleCredential({
+        const workspaceId = await seedGoogleCredential({
           userId,
           expiryDate: new Date(Date.now() - 60_000).toISOString(),
         });
-        const stored = await getUserGoogleCredential();
+        const stored = await getUserGoogleCredential({ workspaceId });
         const expired = decryptGoogleToolCredential(stored!.ciphertext);
 
         // Both callers see the expired payload and reach refreshCredentialIfNeeded.
         // The second call should hit the in-flight map and reuse the promise
         // started by the first call instead of issuing a second fetch.
-        const callA = refreshCredentialIfNeeded(userId, expired);
-        const callB = refreshCredentialIfNeeded(userId, expired);
+        const callA = refreshCredentialIfNeeded(userId, expired, {
+          workspaceId,
+        });
+        const callB = refreshCredentialIfNeeded(userId, expired, {
+          workspaceId,
+        });
         expect(fetchSpy).toHaveBeenCalledTimes(1);
 
         resolveRefresh!({
@@ -485,24 +516,26 @@ describe('google-tools-service', () => {
         } as unknown as Response);
 
       await withUserContext(userId, async () => {
-        await seedGoogleCredential({
+        const workspaceId = await seedGoogleCredential({
           userId,
           expiryDate: new Date(Date.now() - 60_000).toISOString(),
         });
         const expired = decryptGoogleToolCredential(
-          (await getUserGoogleCredential())!.ciphertext,
+          (await getUserGoogleCredential({ workspaceId }))!.ciphertext,
         );
 
         // Attempt 1: transient 502 → performRefresh throws
         // token_exchange_failed; the .finally cleanup should drain the map.
         await expect(
-          refreshCredentialIfNeeded(userId, expired),
+          refreshCredentialIfNeeded(userId, expired, { workspaceId }),
         ).rejects.toMatchObject({ code: 'token_exchange_failed' });
 
         // Attempt 2: with the map cleared, a fresh call must call fetch
         // again and succeed. If the rejected promise were still cached
         // we'd get an immediate re-throw without a second fetch.
-        const result = await refreshCredentialIfNeeded(userId, expired);
+        const result = await refreshCredentialIfNeeded(userId, expired, {
+          workspaceId,
+        });
         expect(result.accessToken).toBe('access-retry');
       });
       // vi.spyOn returns the same spy across .mockResolvedValueOnce calls;
@@ -517,8 +550,8 @@ describe('google-tools-service', () => {
       const userId = await seedAuthUser();
       userIds.push(userId);
       await withUserContext(userId, async () => {
-        await seedGoogleCredential({ userId });
-        const session = await buildGooglePickerSession(userId);
+        const workspaceId = await seedGoogleCredential({ userId });
+        const session = await buildGooglePickerSession(userId, { workspaceId });
         expect(session).toEqual({
           oauthToken: 'access-old',
           developerKey: 'test-picker-key',
@@ -531,11 +564,13 @@ describe('google-tools-service', () => {
       const userId = await seedAuthUser();
       userIds.push(userId);
       await withUserContext(userId, async () => {
-        await seedGoogleCredential({
+        const workspaceId = await seedGoogleCredential({
           userId,
           scopes: [DOCUMENTS_URL], // no drive.readonly
         });
-        await expect(buildGooglePickerSession(userId)).rejects.toMatchObject({
+        await expect(
+          buildGooglePickerSession(userId, { workspaceId }),
+        ).rejects.toMatchObject({
           code: 'google_scopes_missing',
           missingScopes: ['drive.readonly'],
         });

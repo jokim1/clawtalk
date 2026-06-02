@@ -290,6 +290,28 @@ describe('GET /api/v1/events (user-scope)', () => {
 // ─── /api/v1/talks/:talkId/events — talk-scope ─────────────────────────
 
 describe('GET /api/v1/talks/:talkId/events (talk-scope)', () => {
+  it('returns 400 for malformed talk ids before querying or forwarding', async () => {
+    const token = await mintJwt();
+    const { binding, captured } = makeMockEventHub();
+    const app = getWorkerApp();
+    const res = await app.request(
+      '/api/v1/talks/not-a-uuid/events',
+      {
+        headers: {
+          origin: VALID_ORIGIN,
+          cookie: `${ACCESS_TOKEN_COOKIE}=${token}`,
+        },
+      },
+      envForWorker({ USER_EVENT_HUB: binding }),
+    );
+    expect(res.status).toBe(400);
+    await expect(res.json()).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'invalid_talk_id' },
+    });
+    expect(captured).toHaveLength(0);
+  });
+
   it("returns 404 when canUserAccessTalk denies (e.g., talkId doesn't exist for this user)", async () => {
     const token = await mintJwt();
     const { binding, captured } = makeMockEventHub();

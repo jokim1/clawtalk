@@ -93,9 +93,10 @@ export async function processTalkRunMessage(
   // Retry visibility: when this is a redelivery (attempts > 1), emit a
   // `talk_run_retrying` outbox event so the UI can swap the stale
   // "Queued · 2:30" badge for "Retrying N/maxRetries". We look the row
-  // up out-of-tx with getGreenfieldQueueRunById to get talk_id/owner_ids for the
-  // event payload; if the row is gone (run was deleted mid-retry), skip
-  // the emit and let markGreenfieldRunRunning's not_found path ack normally.
+  // up out-of-tx with getGreenfieldQueueRunById to get the talk/thread
+  // routing ids plus owner_ids for the event payload; if the row is gone
+  // (run was deleted mid-retry), skip the emit and let
+  // markGreenfieldRunRunning's not_found path ack normally.
   if (input.attempts !== undefined && input.attempts > 1) {
     const runRow = await getGreenfieldQueueRunById(input.runId);
     if (runRow) {
@@ -106,7 +107,7 @@ export async function processTalkRunMessage(
         eventType: 'talk_run_retrying',
         payload: {
           talkId: runRow.talk_id,
-          threadId: runRow.talk_id,
+          threadId: runRow.thread_id,
           runId: input.runId,
           retryAttempt,
           maxRetries,
@@ -229,7 +230,7 @@ export async function processTalkRunMessage(
         {
           runId: run.id,
           talkId: run.talk_id,
-          threadId: run.talk_id,
+          threadId: run.thread_id,
           requestedBy: run.requested_by,
           triggerMessageId: promptInput.id ?? '',
           triggerContent: promptInput.body,

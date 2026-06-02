@@ -1,7 +1,6 @@
 export interface TalkJobExecutionPolicy {
   jobId: string;
   allowedConnectorIds: string[];
-  allowedChannelBindingIds: string[];
   allowWeb: boolean;
   allowStateMutation: boolean;
   // C6: gate for tools that mutate external state (Google Docs create/update,

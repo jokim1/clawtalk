@@ -72,9 +72,10 @@ function badJob(errorValue: unknown): RouteResult<never> {
 
 function canEditTalkJobs(ctx: TalkContext, userId: string): boolean {
   return (
-    ctx.workspace.role === 'owner' ||
-    ctx.workspace.role === 'admin' ||
-    ctx.talk.created_by === userId
+    ctx.workspace.role !== 'guest' &&
+    (ctx.workspace.role === 'owner' ||
+      ctx.workspace.role === 'admin' ||
+      ctx.talk.created_by === userId)
   );
 }
 
@@ -87,6 +88,18 @@ function requireJobEditAccess(
     403,
     'forbidden',
     'You do not have permission to edit jobs for this talk.',
+  );
+}
+
+function requireJobOwnerAccess(
+  job: GreenfieldJob,
+  userId: string,
+): RouteResult<never> | null {
+  if (job.createdBy === userId) return null;
+  return error(
+    403,
+    'forbidden',
+    'Only the job creator can modify or run this job.',
   );
 }
 
@@ -263,6 +276,14 @@ export async function patchGreenfieldTalkJobRoute(input: {
   return withTalk(input, async (ctx) => {
     const denied = requireJobEditAccess(ctx, input.auth.userId);
     if (denied) return denied;
+    const current = await getGreenfieldJob({
+      workspaceId: ctx.workspace.id,
+      talkId: ctx.talkId,
+      jobId: input.jobId,
+    });
+    if (!current) return error(404, 'not_found', 'Job not found.');
+    const ownerDenied = requireJobOwnerAccess(current, input.auth.userId);
+    if (ownerDenied) return ownerDenied;
     try {
       const job = await patchGreenfieldJob({
         workspaceId: ctx.workspace.id,
@@ -298,6 +319,14 @@ export async function deleteGreenfieldTalkJobRoute(input: {
   return withTalk(input, async (ctx) => {
     const denied = requireJobEditAccess(ctx, input.auth.userId);
     if (denied) return denied;
+    const current = await getGreenfieldJob({
+      workspaceId: ctx.workspace.id,
+      talkId: ctx.talkId,
+      jobId: input.jobId,
+    });
+    if (!current) return error(404, 'not_found', 'Job not found.');
+    const ownerDenied = requireJobOwnerAccess(current, input.auth.userId);
+    if (ownerDenied) return ownerDenied;
     const deleted = await archiveGreenfieldJob({
       workspaceId: ctx.workspace.id,
       talkId: ctx.talkId,
@@ -320,6 +349,14 @@ export async function pauseGreenfieldTalkJobRoute(input: {
   return withTalk(input, async (ctx) => {
     const denied = requireJobEditAccess(ctx, input.auth.userId);
     if (denied) return denied;
+    const current = await getGreenfieldJob({
+      workspaceId: ctx.workspace.id,
+      talkId: ctx.talkId,
+      jobId: input.jobId,
+    });
+    if (!current) return error(404, 'not_found', 'Job not found.');
+    const ownerDenied = requireJobOwnerAccess(current, input.auth.userId);
+    if (ownerDenied) return ownerDenied;
     const job = await pauseGreenfieldJob({
       workspaceId: ctx.workspace.id,
       talkId: ctx.talkId,
@@ -342,6 +379,14 @@ export async function resumeGreenfieldTalkJobRoute(input: {
   return withTalk(input, async (ctx) => {
     const denied = requireJobEditAccess(ctx, input.auth.userId);
     if (denied) return denied;
+    const current = await getGreenfieldJob({
+      workspaceId: ctx.workspace.id,
+      talkId: ctx.talkId,
+      jobId: input.jobId,
+    });
+    if (!current) return error(404, 'not_found', 'Job not found.');
+    const ownerDenied = requireJobOwnerAccess(current, input.auth.userId);
+    if (ownerDenied) return ownerDenied;
     const result = await resumeGreenfieldJob({
       workspaceId: ctx.workspace.id,
       talkId: ctx.talkId,
@@ -375,8 +420,21 @@ export async function runGreenfieldTalkJobNowRoute(input: {
     return error(400, 'invalid_job_id', 'Job id must be a UUID.');
   }
   return withTalk(input, async (ctx) => {
-    const denied = requireJobEditAccess(ctx, input.auth.userId);
-    if (denied) return denied;
+    const current = await getGreenfieldJob({
+      workspaceId: ctx.workspace.id,
+      talkId: ctx.talkId,
+      jobId: input.jobId,
+    });
+    if (!current) return error(404, 'not_found', 'Job not found.');
+    if (ctx.workspace.role === 'guest') {
+      return error(
+        403,
+        'forbidden',
+        'You do not have permission to run jobs for this talk.',
+      );
+    }
+    const ownerDenied = requireJobOwnerAccess(current, input.auth.userId);
+    if (ownerDenied) return ownerDenied;
     const result = await createGreenfieldJobRunNow({
       workspaceId: ctx.workspace.id,
       talkId: ctx.talkId,
@@ -384,6 +442,12 @@ export async function runGreenfieldTalkJobNowRoute(input: {
       requestedBy: input.auth.userId,
     });
     switch (result.status) {
+      case 'forbidden':
+        return error(
+          403,
+          'forbidden',
+          'Only the job creator can modify or run this job.',
+        );
       case 'not_found':
         return error(404, 'not_found', 'Job not found.');
       case 'archived':

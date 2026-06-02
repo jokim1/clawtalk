@@ -366,85 +366,27 @@ describe('api auth retry behavior', () => {
     );
   });
 
-  it('retries multipart attachment uploads after csrf_failed and preserves the file payload', async () => {
-    const mutationHeaders: Array<Record<string, string>> = [];
-    const uploadedFiles: string[] = [];
-
-    cookieValue = '';
-    vi.stubGlobal(
-      'fetch',
-      async (input: RequestInfo | URL, init?: RequestInit) => {
-        const path = normalizePath(input);
-        if (path === '/api/v1/talks/talk-1/attachments') {
-          mutationHeaders.push(readHeaders(init));
-
-          if (!(init?.body instanceof FormData)) {
-            throw new Error('Expected multipart FormData upload body');
-          }
-
-          const file = init.body.get('file');
-          if (!(file instanceof File)) {
-            throw new Error('Expected file entry in upload FormData');
-          }
-          uploadedFiles.push(`${file.name}:${file.type}:${file.size}`);
-
-          if (mutationHeaders.length === 1) {
-            return jsonResponse(403, {
-              ok: false,
-              error: {
-                code: 'csrf_failed',
-                message: 'Missing X-CSRF-Token header',
-              },
-            });
-          }
-
-          return jsonResponse(201, {
-            ok: true,
-            data: {
-              attachment: {
-                id: 'att-1',
-                fileName: file.name,
-                fileSize: file.size,
-                mimeType: file.type,
-                extractionStatus: 'ready',
-              },
-            },
-          });
-        }
-
-        if (path === '/api/v1/auth/refresh') {
-          cookieValue = 'cr_csrf_token=upload-refresh-token';
-          return jsonResponse(200, {
-            ok: true,
-            data: {
-              user: {
-                id: 'u1',
-                email: 'owner@example.com',
-                displayName: 'Owner',
-                role: 'owner',
-              },
-            },
-          });
-        }
-
-        throw new Error(`Unexpected fetch path: ${path}`);
-      },
-    );
+  it('keeps message attachment helpers quarantined while greenfield storage is unavailable', async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
 
     const api = await loadApiModule();
-    const attachment = await api.uploadTalkAttachment(
-      'talk-1',
-      new File(['hello'], 'notes.txt', { type: 'text/plain' }),
-    );
-
-    expect(attachment.attachment.id).toBe('att-1');
-    expect(mutationHeaders).toHaveLength(2);
-    expect(mutationHeaders[0]['x-csrf-token']).toBeUndefined();
-    expect(mutationHeaders[1]['x-csrf-token']).toBe('upload-refresh-token');
-    expect(uploadedFiles).toEqual([
-      'notes.txt:text/plain:5',
-      'notes.txt:text/plain:5',
-    ]);
+    await expect(
+      api.uploadTalkAttachment(
+        'talk-1',
+        new File(['hello'], 'notes.txt', { type: 'text/plain' }),
+      ),
+    ).rejects.toMatchObject({
+      status: 501,
+      code: 'attachments_not_available',
+    });
+    await expect(
+      api.deleteTalkAttachment('talk-1', 'attachment-1'),
+    ).rejects.toMatchObject({
+      status: 501,
+      code: 'attachments_not_available',
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it('coalesces concurrent mutation refreshes and rebuilds fresh headers for both retries', async () => {
@@ -589,6 +531,164 @@ describe('api auth retry behavior', () => {
       code: 'forbidden',
     });
     expect(paths).toEqual(['/api/v1/talks']);
+  });
+
+  it('preserves workspace session fields after updating profile', async () => {
+    const paths: string[] = [];
+    vi.stubGlobal('fetch', async (input: RequestInfo | URL) => {
+      paths.push(String(input));
+      return jsonResponse(200, {
+        ok: true,
+        data: {
+          user: {
+            id: 'u1',
+            email: 'owner@example.com',
+            displayName: 'Owner Renamed',
+            role: 'owner',
+            createdAt: '2026-03-08T00:00:00.000Z',
+          },
+          workspaces: [
+            {
+              id: 'workspace-a',
+              name: 'Workspace A',
+              role: 'owner',
+              initials: 'WA',
+            },
+            {
+              id: 'workspace-b',
+              name: 'Workspace B',
+              role: 'admin',
+              initials: 'WB',
+            },
+          ],
+          currentWorkspaceId: 'workspace-b',
+        },
+      });
+    });
+
+    const api = await loadApiModule();
+    const user = await api.updateSessionMe({
+      workspaceId: 'workspace-b',
+      displayName: 'Owner Renamed',
+    });
+
+    expect(user.displayName).toBe('Owner Renamed');
+    expect(user.currentWorkspaceId).toBe('workspace-b');
+    expect(user.workspaces?.map((workspace) => workspace.id)).toEqual([
+      'workspace-a',
+      'workspace-b',
+    ]);
+    expect(paths).toEqual(['/api/v1/session/me?workspaceId=workspace-b']);
+  });
+
+  it('passes workspaceId through chat send and cancel requests', async () => {
+    const paths: string[] = [];
+    const bodies: unknown[] = [];
+    vi.stubGlobal(
+      'fetch',
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        paths.push(String(input));
+        if (typeof init?.body === 'string' && init.body.trim()) {
+          bodies.push(JSON.parse(init.body));
+        }
+        return jsonResponse(200, {
+          ok: true,
+          data: String(input).includes('/chat/cancel')
+            ? { talkId: 'talk-1', cancelledRuns: 2 }
+            : { talkId: 'talk-1', message: { id: 'message-1' }, runs: [] },
+        });
+      },
+    );
+
+    const api = await loadApiModule();
+    await api.sendTalkMessage({
+      workspaceId: 'workspace-b',
+      talkId: 'talk-1',
+      content: 'Hello',
+      targetAgentIds: ['agent-1'],
+      threadId: 'talk-1',
+    });
+    await api.cancelTalkRuns('talk-1', 'talk-1', {
+      workspaceId: 'workspace-b',
+    });
+
+    expect(paths).toEqual([
+      '/api/v1/talks/talk-1/chat?workspaceId=workspace-b',
+      '/api/v1/talks/talk-1/chat/cancel?workspaceId=workspace-b',
+    ]);
+    expect(bodies).toEqual([
+      {
+        content: 'Hello',
+        targetAgentIds: ['agent-1'],
+        attachmentIds: [],
+        threadId: 'talk-1',
+      },
+      { threadId: 'talk-1' },
+    ]);
+  });
+
+  it('passes workspaceId through registered-agent API calls without putting it in mutation bodies', async () => {
+    const paths: string[] = [];
+    const bodies: unknown[] = [];
+    vi.stubGlobal(
+      'fetch',
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        const path = normalizePath(input);
+        paths.push(String(input));
+        if (typeof init?.body === 'string' && init.body.trim()) {
+          bodies.push(JSON.parse(init.body));
+        }
+        return jsonResponse(200, {
+          ok: true,
+          data:
+            path.startsWith('/api/v1/registered-agents?') &&
+            init?.method !== 'POST'
+              ? []
+              : {
+                  id: 'agent-1',
+                  name: 'Agent One',
+                },
+        });
+      },
+    );
+
+    const api = await loadApiModule();
+
+    await api.listRegisteredAgents({ workspaceId: 'workspace-b' });
+    await api.getMainRegisteredAgent({ workspaceId: 'workspace-b' });
+    await api.updateMainRegisteredAgent('agent-1', {
+      workspaceId: 'workspace-b',
+    });
+    await api.createRegisteredAgent({
+      workspaceId: 'workspace-b',
+      name: 'Agent One',
+      providerId: 'provider.test',
+      modelId: 'model.test',
+    });
+    await api.updateRegisteredAgent({
+      workspaceId: 'workspace-b',
+      agentId: 'agent-1',
+      name: 'Agent Renamed',
+    });
+    await api.deleteRegisteredAgent('agent-1', { workspaceId: 'workspace-b' });
+    await api.dismissAgentModelUpgrade('agent-1', {
+      workspaceId: 'workspace-b',
+    });
+
+    expect(paths).toEqual([
+      '/api/v1/registered-agents?workspaceId=workspace-b',
+      '/api/v1/registered-agents/main?workspaceId=workspace-b',
+      '/api/v1/registered-agents/main?workspaceId=workspace-b',
+      '/api/v1/registered-agents?workspaceId=workspace-b',
+      '/api/v1/registered-agents/agent-1?workspaceId=workspace-b',
+      '/api/v1/registered-agents/agent-1?workspaceId=workspace-b',
+      '/api/v1/registered-agents/agent-1/dismiss-model-upgrade?workspaceId=workspace-b',
+    ]);
+    expect(bodies).toEqual([
+      { agentId: 'agent-1' },
+      { name: 'Agent One', providerId: 'provider.test', modelId: 'model.test' },
+      { name: 'Agent Renamed' },
+    ]);
   });
 
   it('stops retrying after one auth refresh and one csrf refresh', async () => {

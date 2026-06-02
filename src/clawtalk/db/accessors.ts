@@ -33,12 +33,16 @@ import {
   getCurrentUserId,
   getDbPg,
   getOutOfBandSql,
+  withTrustedDbWrites,
   type Sql,
 } from '../../db.js';
 import { logger } from '../../logger.js';
 import { resolveCredentialKindSnapshot } from '../agents/execution-resolver.js';
 import { emitOutboxEvent } from '../talks/outbox-emit.js';
-import { getRegisteredAgent } from './agent-accessors.js';
+import {
+  getRegisteredAgent,
+  normalizeTalkToolFamiliesFromRows,
+} from './agent-accessors.js';
 import {
   listContentsForSidebar,
   type ContentSidebarRecord,
@@ -1433,9 +1437,8 @@ export interface TalkRunRecord {
   ended_at: string | null;
   cancel_reason: string | null;
   metadata_json: Record<string, unknown> | null;
-  // Snapshot of talks.active_tool_families_json captured at run-creation.
-  // Null on rows created before migration 0031 — consumers fall back to
-  // a live read in that case.
+  // Snapshot of Talk tool families captured at run-creation.
+  // Null on older rows — consumers fall back to a live read in that case.
   active_tool_families_snapshot: Record<string, boolean> | null;
   // Snapshot of the credential kind the resolver picked at enqueue
   // time. Null on rows created before migration 0032; the executor
@@ -1476,7 +1479,7 @@ export async function createTalkRun(input: {
   transport?: TalkRunTransport | null;
   timeoutPhase?: string | null;
   metadata?: Record<string, unknown> | null;
-  // Snapshot of talks.active_tool_families_json captured by the caller
+  // Snapshot of Talk tool families captured by the caller
   // at run-creation time. Pre-toggle-feature callers leave this
   // undefined; the consumer falls back to a live read.
   activeToolFamiliesSnapshot?: Record<string, boolean> | null;
@@ -1821,11 +1824,10 @@ export function getTalkRunTimeoutPhase(
 // ---------------------------------------------------------------------------
 // Event outbox
 //
-// Migration 0003 grants INSERT + SELECT on event_outbox to the
-// authenticated role. The table itself has no RLS — topic-level
-// authorization happens at the route layer (the SSE subscribe handler
-// verifies the caller can read talk:${talkId}). Payload is jsonb in pg,
-// so accessor accepts/returns objects directly.
+// event_outbox is trusted runtime infrastructure. Authenticated browser
+// sessions cannot read or write it directly; producers insert through the
+// trusted-write wrapper after route/accessor authorization has succeeded.
+// Topic authorization happens at subscribe/notify time.
 // ---------------------------------------------------------------------------
 
 export interface OutboxEvent {
@@ -1870,13 +1872,15 @@ export async function appendOutboxEvent(input: {
     begin?: <T>(fn: (sql: Sql) => Promise<T>) => Promise<T>;
     savepoint?: unknown;
   };
-  if (
-    typeof maybeTransaction.savepoint === 'function' ||
-    typeof maybeTransaction.begin !== 'function'
-  ) {
-    return insert(db);
-  }
-  return maybeTransaction.begin(insert);
+  return withTrustedDbWrites(async () => {
+    if (
+      typeof maybeTransaction.savepoint === 'function' ||
+      typeof maybeTransaction.begin !== 'function'
+    ) {
+      return insert(db);
+    }
+    return maybeTransaction.begin(insert);
+  });
 }
 
 /**
@@ -2252,7 +2256,7 @@ async function maybePersistTalkThreadTitleFromMessages(
 // loadEnqueueTurnContext — combined pre-loop read for enqueueTalkTurnAtomic
 //
 // Replaces three sequential SELECTs (active-rounds count, thread title,
-// talks.active_tool_families_json) with one JOIN-and-subquery so the
+// Talk tool state) with one JOIN-and-subquery so the
 // per-request tx pays a single round-trip for the pre-loop context.
 // T-new-A2 measured the savings at ~250 ms median (n=10 haiku, both
 // N=1 and N=3 — codex C-H3 shadow-query gate). Throws
@@ -2261,6 +2265,7 @@ async function maybePersistTalkThreadTitleFromMessages(
 // ---------------------------------------------------------------------------
 
 export interface EnqueueTurnContext {
+  workspaceId: string;
   title: string | null;
   activeFamilies: Record<string, boolean>;
   activeCount: number;
@@ -2287,7 +2292,8 @@ export async function loadEnqueueTurnContext(
   // accessors that don't care.
   const db = getDbPg() as unknown as postgres.TransactionSql;
   let rows: Array<{
-    active_tool_families_json: Record<string, boolean> | null;
+    workspace_id: string;
+    talk_tool_rows: Array<{ tool_id: string; enabled: boolean }> | null;
     title: string | null;
     active_count: number;
   }>;
@@ -2300,20 +2306,37 @@ export async function loadEnqueueTurnContext(
     // expects to do via its own catch in talks.ts).
     rows = await db.savepoint<
       {
-        active_tool_families_json: Record<string, boolean> | null;
+        workspace_id: string;
+        talk_tool_rows: Array<{ tool_id: string; enabled: boolean }> | null;
         title: string | null;
         active_count: number;
       }[]
     >(async (sp) => {
       return await sp<
         {
-          active_tool_families_json: Record<string, boolean> | null;
+          workspace_id: string;
+          talk_tool_rows: Array<{ tool_id: string; enabled: boolean }> | null;
           title: string | null;
           active_count: number;
         }[]
       >`
         select
-          tk.active_tool_families_json,
+          tk.workspace_id::text as workspace_id,
+          coalesce(
+            (
+              select jsonb_agg(
+                jsonb_build_object(
+                  'tool_id', tt.tool_id,
+                  'enabled', tt.enabled
+                )
+                order by tt.tool_id
+              )
+              from public.talk_tools tt
+              where tt.workspace_id = tk.workspace_id
+                and tt.talk_id = tk.id
+            ),
+            '[]'::jsonb
+          ) as talk_tool_rows,
           th.title,
           (
             select count(*)::int from public.talk_runs
@@ -2343,8 +2366,11 @@ export async function loadEnqueueTurnContext(
   }
   const row = rows[0];
   return {
+    workspaceId: row.workspace_id,
     title: row.title,
-    activeFamilies: row.active_tool_families_json ?? {},
+    activeFamilies: normalizeTalkToolFamiliesFromRows(
+      Array.isArray(row.talk_tool_rows) ? row.talk_tool_rows : [],
+    ),
     activeCount: row.active_count,
   };
 }
@@ -2397,7 +2423,7 @@ export async function enqueueTalkTurnAtomic(input: {
   });
 
   // One combined SELECT replaces three sequential reads: the
-  // active-rounds count, thread title, and talk.active_tool_families_json
+  // active-rounds count, thread title, and Talk tool rows
   // snapshot. The active-rounds count still gates the throw before any
   // INSERT runs (same ordering as before). Throws
   // EnqueueTurnContextNotFoundError if talk or thread is no longer
@@ -2459,7 +2485,10 @@ export async function enqueueTalkTurnAtomic(input: {
     const agentId = input.targetAgentIds[i];
     const agentRecord = await getRegisteredAgent(agentId);
     const credentialKindSnapshot = agentRecord
-      ? await resolveCredentialKindSnapshot(agentRecord)
+      ? await resolveCredentialKindSnapshot(agentRecord, {
+          principalUserId: input.userId,
+          workspaceId: ctx.workspaceId,
+        })
       : null;
     const run = await createTalkRun({
       ownerId: input.ownerId,
@@ -3295,9 +3324,9 @@ export async function appendRuntimeTalkMessage(input: {
 }
 
 // ---------------------------------------------------------------------------
-// Settings KV (system-managed; migration 0004 grants select/insert/update on
-// public.settings_kv to authenticated. Admin gating happens at the route
-// layer under the cloud-era auth model — there is no per-row owner_id.)
+// Settings KV (system-managed global table). Authenticated clients get read
+// access only; trusted server write paths temporarily restore the service role
+// after route/accessor-level authorization has already run.
 // ---------------------------------------------------------------------------
 
 export async function getSettingValue(key: string): Promise<string | null> {
@@ -3313,23 +3342,27 @@ export async function upsertSettingValue(input: {
   value: string | null;
   updatedBy?: string | null;
 }): Promise<void> {
-  const db = getDbPg();
-  await db`
-    insert into public.settings_kv (key, value, updated_by)
-    values (${input.key}, ${input.value},
-            ${input.updatedBy ?? null}::uuid)
-    on conflict (key) do update set
-      value = excluded.value,
-      updated_at = now(),
-      updated_by = excluded.updated_by
-  `;
+  await withTrustedDbWrites(async () => {
+    const db = getDbPg();
+    await db`
+      insert into public.settings_kv (key, value, updated_by)
+      values (${input.key}, ${input.value},
+              ${input.updatedBy ?? null}::uuid)
+      on conflict (key) do update set
+        value = excluded.value,
+        updated_at = now(),
+        updated_by = excluded.updated_by
+    `;
+  });
 }
 
 export async function deleteSettingValue(key: string): Promise<void> {
-  const db = getDbPg();
-  await db`
-    delete from public.settings_kv where key = ${key}
-  `;
+  await withTrustedDbWrites(async () => {
+    const db = getDbPg();
+    await db`
+      delete from public.settings_kv where key = ${key}
+    `;
+  });
 }
 
 // ---------------------------------------------------------------------------

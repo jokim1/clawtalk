@@ -973,14 +973,14 @@ Example:
 - Quant may have `calculate`.
 - Editor may have `propose_document_edits`.
 
-Even if the agent has a capability, the run cannot use it unless the Talk has enabled the corresponding tool **and** the workspace has valid authorization. Per-Talk enablement is read from `talk_tools(workspace_id, talk_id, tool_id, enabled)` (§11 §6) at run start; the tool-manifest section of prompt assembly (§7 step 8) and the runtime capability gate both query this table. A tool that depends on a connector (e.g. `gdrive-read` → `gdrive`) additionally requires the workspace's `connectors` row to be `authorized = true` (§11 §6 tool↔connector dependency).
+Even if the agent has a capability, the run cannot use it unless the Talk has enabled the corresponding tool **and** the required authorization is valid for the execution principal. Per-Talk enablement is read from `talk_tools(workspace_id, talk_id, tool_id, enabled)` (§11 §6) at run start; the tool-manifest section of prompt assembly (§7 step 8) and the runtime capability gate both query this table. Workspace connector tools such as Slack messaging require a matching workspace connector row with `authorized = true`; Google tools additionally require a per-user `connectors` row with `compatSurface = 'google_tools'`, `secret_ref is not null`, `authorizedByUserId = <execution user id>`, and the tool's required Google scopes (§11 §6, §12 §5).
 
 #### 8.1.1 Dispatch-Time Authorization Check (Chat Runs)
 
 At run dispatch time — the `POST /api/v1/chat` handler before enqueue, and again as the executor pre-step inside the queue consumer (defense-in-depth across the boundary) — the runtime validates **every** tool in the run's resolved toolset:
 
 1. **Per-Talk enablement.** A `talk_tools(workspace_id, talk_id, tool_id, enabled = true)` row exists (§11 §6).
-2. **Connector authorization.** If the static `tool_id → required_service` map (§11 §6 design notes) marks the tool as connector-dependent, the matching `connectors(workspace_id, service, authorized = true)` row exists.
+2. **Connector authorization.** If the static `tool_id → required_service` map (§11 §6 design notes) marks the tool as connector-dependent, the runtime validates the matching authorization shape. Workspace connectors need `connectors(workspace_id, service, authorized = true)`. Google tools need the execution user's `google_tools` connector row with a secret and sufficient scopes; a Talk resource row, data-source catalog row, or another user's OAuth credential is not sufficient.
 
 If either check fails, the executor emits an `agent_replied` message with body `'Tool {tool_id} is not available — connector authorization required'` (the UI renders the connector-action button from this body shape) and terminates the run with `status = 'failed'` and `error_json = {'code': 'tool_not_authorized', 'tool_id': '<id>', 'required_service': '<service or null>'}`. The check uses the same code path as the fire-time check in §12 §5 step 2 (jobs surface) — only the failure surface differs (run-fail with an agent message here vs. job-block + inbox event there).
 

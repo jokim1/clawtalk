@@ -19,35 +19,42 @@ import {
   createGreenfieldTalkContentRoute,
   createGreenfieldThreadRoute,
   deleteGreenfieldMessagesRoute,
+  getGreenfieldRunContextRoute,
   getGreenfieldSnapshotRoute,
+  getGreenfieldTalkContentRoute,
   getGreenfieldThreadContentRoute,
   listGreenfieldMessagesRoute,
   listGreenfieldRunsRoute,
   listGreenfieldThreadsRoute,
   patchGreenfieldContentRoute,
+  patchGreenfieldThreadRoute,
   rejectGreenfieldContentEditRoute,
   rejectGreenfieldContentEditRunRoute,
   searchGreenfieldMessagesRoute,
 } from './greenfield-detail.js';
 
 const USER_ID = '0c939393-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
+const GUEST_USER_ID = '0c939393-bbbb-bbbb-bbbb-bbbbbbbbbbbb';
 
-function auth(): AuthContext {
+function auth(userId = USER_ID): AuthContext {
   return {
     sessionId: 'greenfield-detail-session',
-    userId: USER_ID,
+    userId,
     role: 'owner',
     authType: 'bearer',
   };
 }
 
-async function seedAuthUser(): Promise<void> {
+async function seedAuthUser(
+  userId = USER_ID,
+  email = 'greenfield-detail@clawtalk.local',
+): Promise<void> {
   const db = getDbPg();
   await db`
     insert into auth.users (id, email, raw_user_meta_data)
     values (
-      ${USER_ID}::uuid,
-      'greenfield-detail@clawtalk.local',
+      ${userId}::uuid,
+      ${email},
       jsonb_build_object('full_name', 'Detail User')
     )
     on conflict (id) do update set
@@ -59,21 +66,65 @@ async function seedAuthUser(): Promise<void> {
 async function deleteUser(): Promise<void> {
   const db = getDbPg();
   await db`
-    delete from public.workspaces where owner_id = ${USER_ID}::uuid
+    delete from public.workspaces
+    where owner_id in (${USER_ID}::uuid, ${GUEST_USER_ID}::uuid)
   `;
   await db`
-    delete from auth.users where id = ${USER_ID}::uuid
+    delete from auth.users
+    where id in (${USER_ID}::uuid, ${GUEST_USER_ID}::uuid)
   `;
 }
 
-async function createTalkFixture(): Promise<{
+async function addGuestToWorkspace(workspaceId: string): Promise<void> {
+  await seedAuthUser(GUEST_USER_ID, 'greenfield-detail-guest@clawtalk.local');
+  const db = getDbPg();
+  await db`
+    insert into public.workspace_members (workspace_id, user_id, role)
+    values (${workspaceId}::uuid, ${GUEST_USER_ID}::uuid, 'guest')
+    on conflict (workspace_id, user_id) do update set role = excluded.role
+  `;
+}
+
+async function createAdditionalWorkspace(name: string): Promise<string> {
+  const db = getDbPg();
+  const [workspace] = await db<{ id: string }[]>`
+    insert into public.workspaces (name, owner_id)
+    values (${name}, ${USER_ID}::uuid)
+    returning id
+  `;
+  if (!workspace) throw new Error('Expected workspace insert to return a row');
+  await db`
+    insert into public.workspace_members (workspace_id, user_id, role)
+    values (${workspace.id}::uuid, ${USER_ID}::uuid, 'owner')
+  `;
+  await db`
+    insert into public.agents (
+      workspace_id, role_key, name, handle, initials, accent, accent_dark,
+      model_id, default_model_id, temperature, method, is_default, is_custom,
+      is_system, enabled, created_from_template_version
+    )
+    select
+      ${workspace.id}::uuid, t.role_key, t.default_name, t.default_handle,
+      t.default_initials, t.default_accent, t.default_accent_dark,
+      t.default_model_id, t.default_model_id, t.default_temperature,
+      t.method_default, true, false, false, true, t.version
+    from public.agent_role_templates t
+    where t.role_key in ('strategist', 'critic', 'researcher', 'editor', 'quant')
+  `;
+  return workspace.id;
+}
+
+async function createTalkFixture(input?: { workspaceId?: string }): Promise<{
   workspaceId: string;
   talkId: string;
   agentIds: string[];
 }> {
-  const me = await getGreenfieldMeRoute({ auth: auth() });
-  if (!me.body.ok) throw new Error('Expected session route to succeed');
-  const workspaceId = me.body.data.currentWorkspaceId;
+  let workspaceId = input?.workspaceId;
+  if (!workspaceId) {
+    const me = await getGreenfieldMeRoute({ auth: auth() });
+    if (!me.body.ok) throw new Error('Expected session route to succeed');
+    workspaceId = me.body.data.currentWorkspaceId;
+  }
   const agents = await listGreenfieldAgentsRoute({ auth: auth(), workspaceId });
   if (!agents.body.ok) throw new Error('Expected agents route to succeed');
   const agentIds = agents.body.data.agents.slice(0, 2).map((agent) => agent.id);
@@ -325,10 +376,22 @@ describe('greenfield detail routes', () => {
       workspaceId,
       talkId,
     });
-    expect(createdThread.statusCode).toBe(201);
+    expect(createdThread.statusCode).toBe(409);
     expect(createdThread.body).toMatchObject({
-      ok: true,
-      data: { thread: { id: talkId, talk_id: talkId } },
+      ok: false,
+      error: { code: 'threads_not_supported' },
+    });
+
+    const patchedThread = await patchGreenfieldThreadRoute({
+      auth: auth(),
+      workspaceId,
+      talkId,
+      threadId: talkId,
+    });
+    expect(patchedThread.statusCode).toBe(409);
+    expect(patchedThread.body).toMatchObject({
+      ok: false,
+      error: { code: 'thread_metadata_not_supported' },
     });
 
     const runs = await listGreenfieldRunsRoute({
@@ -350,6 +413,85 @@ describe('greenfield detail routes', () => {
       },
     });
 
+    const db = getDbPg();
+    const promptSnapshotId = '10000000-0000-4000-8000-00000000c0de';
+    const [runSnapshotSource] = await db<
+      Array<{ agent_snapshot_id: string; model_id: string }>
+    >`
+      select agent_snapshot_id, model_id
+      from public.runs
+      where workspace_id = ${workspaceId}::uuid
+        and talk_id = ${talkId}::uuid
+        and id = ${seeded.runId}::uuid
+    `;
+    await db`
+      insert into public.run_prompt_snapshots (
+        id,
+        workspace_id,
+        run_id,
+        talk_id,
+        agent_snapshot_id,
+        model_id,
+        provider,
+        prompt_assembly_version,
+        tool_manifest_json,
+        prompt_text_redacted
+      )
+      values (
+        ${promptSnapshotId}::uuid,
+        ${workspaceId}::uuid,
+        ${seeded.runId}::uuid,
+        ${talkId}::uuid,
+        ${runSnapshotSource!.agent_snapshot_id}::uuid,
+        ${runSnapshotSource!.model_id},
+        'provider.test',
+        1,
+        ${db.json({
+          effectiveTools: [
+            {
+              toolFamily: 'web',
+              runtimeTools: ['web-fetch', 'web-search'],
+              enabled: true,
+              requiresApproval: false,
+            },
+            {
+              toolFamily: 'gmail_send',
+              runtimeTools: ['gmail-send'],
+              enabled: false,
+              requiresApproval: true,
+            },
+          ],
+        } as never)},
+        'Prompt text captured for this run.'
+      )
+    `;
+    await db`
+      update public.runs
+      set prompt_snapshot_id = ${promptSnapshotId}::uuid
+      where workspace_id = ${workspaceId}::uuid
+        and talk_id = ${talkId}::uuid
+        and id = ${seeded.runId}::uuid
+    `;
+
+    const runContext = await getGreenfieldRunContextRoute({
+      auth: auth(),
+      workspaceId,
+      talkId,
+      runId: seeded.runId,
+    });
+    expect(runContext.body).toMatchObject({
+      ok: true,
+      data: {
+        talkId,
+        runId: seeded.runId,
+        contextSnapshot: {
+          version: 1,
+          threadId: talkId,
+          tools: { contextToolNames: ['web-fetch', 'web-search'] },
+        },
+      },
+    });
+
     const snapshot = await getGreenfieldSnapshotRoute({
       auth: auth(),
       workspaceId,
@@ -360,12 +502,105 @@ describe('greenfield detail routes', () => {
       ok: true,
       data: {
         activeThreadId: talkId,
+        talk: { accessRole: 'owner', workspaceId },
         threads: [{ id: talkId, talkId, messageCount: 2 }],
         messages: [{ id: seeded.userMessageId }, { id: seeded.agentMessageId }],
         runs: [{ id: seeded.runId }],
         agents: [{ agentId: agentIds[0] }, { agentId: agentIds[1] }],
       },
     });
+  });
+
+  it('resolves omitted workspaceId for talk detail and content routes from the visible talk', async () => {
+    const me = await getGreenfieldMeRoute({ auth: auth() });
+    if (!me.body.ok) throw new Error('Expected session route to succeed');
+    const defaultWorkspaceId = me.body.data.currentWorkspaceId;
+    const workspaceId = await createAdditionalWorkspace(
+      'Detail Second Workspace',
+    );
+    expect(workspaceId).not.toBe(defaultWorkspaceId);
+
+    const { talkId, agentIds } = await createTalkFixture({ workspaceId });
+    const seeded = await seedMessages({
+      workspaceId,
+      talkId,
+      agentId: agentIds[0]!,
+    });
+
+    const snapshot = await getGreenfieldSnapshotRoute({
+      auth: auth(),
+      talkId,
+      threadId: talkId,
+    });
+    expect(snapshot.statusCode).toBe(200);
+    expect(snapshot.body).toMatchObject({
+      ok: true,
+      data: {
+        activeThreadId: talkId,
+        talk: { workspaceId },
+        messages: [{ id: seeded.userMessageId }, { id: seeded.agentMessageId }],
+        runs: [{ id: seeded.runId }],
+      },
+    });
+
+    const runs = await listGreenfieldRunsRoute({
+      auth: auth(),
+      talkId,
+    });
+    expect(runs.statusCode).toBe(200);
+    expect(runs.body).toMatchObject({
+      ok: true,
+      data: { runs: [{ id: seeded.runId, threadId: talkId }] },
+    });
+
+    const createdContent = await createGreenfieldTalkContentRoute({
+      auth: auth(),
+      talkId,
+      title: 'Second Workspace Draft',
+      format: 'markdown',
+    });
+    expect(createdContent.statusCode).toBe(201);
+    if (!createdContent.body.ok) {
+      throw new Error('Expected content create to succeed');
+    }
+
+    const patchedContent = await patchGreenfieldContentRoute({
+      auth: auth(),
+      contentId: createdContent.body.data.content.id,
+      expectedVersion: createdContent.body.data.content.bodyVersion,
+      bodyMarkdown: 'Updated from a direct link.',
+    });
+    expect(patchedContent.statusCode).toBe(200);
+    expect(patchedContent.body).toMatchObject({
+      ok: true,
+      data: {
+        content: {
+          id: createdContent.body.data.content.id,
+          bodyMarkdown: 'Updated from a direct link.',
+        },
+      },
+    });
+  });
+
+  it('rejects malformed talk ids before omitted-workspace scope resolution casts', async () => {
+    const results = await Promise.all([
+      getGreenfieldTalkContentRoute({
+        auth: auth(),
+        talkId: 'not-a-uuid',
+      }),
+      listGreenfieldThreadsRoute({
+        auth: auth(),
+        talkId: 'not-a-uuid',
+      }),
+    ]);
+
+    for (const result of results) {
+      expect(result.statusCode).toBe(400);
+      expect(result.body).toMatchObject({
+        ok: false,
+        error: { code: 'invalid_talk_id' },
+      });
+    }
   });
 
   it('creates, patches, and reads primary document content through talk and thread endpoints', async () => {
@@ -491,6 +726,48 @@ describe('greenfield detail routes', () => {
     });
   });
 
+  it('makes concurrent primary document creation idempotent for one talk', async () => {
+    const { workspaceId, talkId } = await createTalkFixture();
+
+    const [first, second] = await Promise.all([
+      createGreenfieldTalkContentRoute({
+        auth: auth(),
+        workspaceId,
+        talkId,
+        title: 'Launch Draft',
+        format: 'markdown',
+      }),
+      createGreenfieldTalkContentRoute({
+        auth: auth(),
+        workspaceId,
+        talkId,
+        title: 'Launch Draft',
+        format: 'markdown',
+      }),
+    ]);
+
+    expect(first.body.ok).toBe(true);
+    expect(second.body.ok).toBe(true);
+    if (!first.body.ok || !second.body.ok) {
+      throw new Error('Expected both content creates to succeed');
+    }
+    expect(first.body.data.content.id).toBe(second.body.data.content.id);
+
+    const db = getDbPg();
+    const rows = await db<Array<{ document_count: number; tab_count: number }>>`
+      select
+        count(distinct d.id)::int as document_count,
+        count(dt.id)::int as tab_count
+      from public.documents d
+      left join public.doc_tabs dt
+        on dt.workspace_id = d.workspace_id
+       and dt.document_id = d.id
+      where d.workspace_id = ${workspaceId}::uuid
+        and d.primary_talk_id = ${talkId}::uuid
+    `;
+    expect(rows[0]).toEqual({ document_count: 1, tab_count: 1 });
+  });
+
   it('keeps the direct block replacement version bump contract', async () => {
     const { workspaceId, talkId } = await createTalkFixture();
     const created = await createGreenfieldTalkContentRoute({
@@ -532,6 +809,33 @@ describe('greenfield detail routes', () => {
       threadId: talkId,
     });
     expect(content.body).toMatchObject({
+      ok: true,
+      data: {
+        content: {
+          bodyMarkdown: 'Direct replacement.',
+          bodyVersion: tab.list_version + 1,
+        },
+      },
+    });
+
+    await expect(
+      replaceGreenfieldDocumentBlocks({
+        workspaceId,
+        documentId: contentId,
+        tabId: tab.id,
+        blocks: [
+          { kind: 'p', text: 'Partial replacement.' },
+          { kind: 'not-a-kind' as 'p', text: 'Invalid replacement.' },
+        ],
+      }),
+    ).rejects.toMatchObject({ code: '23514' });
+
+    const rolledBackContent = await getGreenfieldThreadContentRoute({
+      auth: auth(),
+      workspaceId,
+      threadId: talkId,
+    });
+    expect(rolledBackContent.body).toMatchObject({
       ok: true,
       data: {
         content: {
@@ -1034,6 +1338,140 @@ describe('greenfield detail routes', () => {
     });
   });
 
+  it('blocks read-only workspace guests from content and edit mutations', async () => {
+    const { workspaceId, talkId, agentIds } = await createTalkFixture();
+    const seeded = await seedMessages({
+      workspaceId,
+      talkId,
+      agentId: agentIds[0]!,
+    });
+    const created = await createGreenfieldTalkContentRoute({
+      auth: auth(),
+      workspaceId,
+      talkId,
+      title: 'Guest Guard Draft',
+      format: 'markdown',
+    });
+    if (!created.body.ok) throw new Error('Expected content create to succeed');
+    const contentId = created.body.data.content.id;
+    const patched = await patchGreenfieldContentRoute({
+      auth: auth(),
+      workspaceId,
+      contentId,
+      expectedVersion: created.body.data.content.bodyVersion,
+      bodyMarkdown: 'Owner paragraph.',
+    });
+    if (!patched.body.ok) throw new Error('Expected content patch to succeed');
+    const block = await firstDocumentBlock({
+      workspaceId,
+      documentId: contentId,
+    });
+    const editId = await insertPendingDocumentEdit({
+      workspaceId,
+      documentId: contentId,
+      tabId: block.tab_id,
+      runId: seeded.runId,
+      op: 'insert',
+      baseListVersion: patched.body.data.content.bodyVersion,
+      newKind: 'p',
+      newText: 'Guest must not resolve this.',
+    });
+    await addGuestToWorkspace(workspaceId);
+    const guest = auth(GUEST_USER_ID);
+
+    const guestSnapshot = await getGreenfieldSnapshotRoute({
+      auth: guest,
+      workspaceId,
+      talkId,
+    });
+    expect(guestSnapshot.statusCode).toBe(200);
+    expect(guestSnapshot.body).toMatchObject({
+      ok: true,
+      data: { talk: { accessRole: 'viewer' } },
+    });
+
+    const deniedCreate = await createGreenfieldTalkContentRoute({
+      auth: guest,
+      workspaceId,
+      talkId,
+      title: 'Guest draft',
+      format: 'markdown',
+    });
+    expect(deniedCreate.statusCode).toBe(403);
+    expect(deniedCreate.body).toMatchObject({
+      ok: false,
+      error: { code: 'workspace_writer_required' },
+    });
+
+    const deniedPatch = await patchGreenfieldContentRoute({
+      auth: guest,
+      workspaceId,
+      contentId,
+      expectedVersion: patched.body.data.content.bodyVersion,
+      bodyMarkdown: 'Guest overwrite.',
+    });
+    expect(deniedPatch.statusCode).toBe(403);
+    expect(deniedPatch.body).toMatchObject({
+      ok: false,
+      error: { code: 'workspace_writer_required' },
+    });
+
+    for (const result of [
+      await acceptGreenfieldContentEditRoute({
+        auth: guest,
+        workspaceId,
+        contentId,
+        editId,
+        expectedContentVersion: patched.body.data.content.bodyVersion,
+      }),
+      await rejectGreenfieldContentEditRoute({
+        auth: guest,
+        workspaceId,
+        contentId,
+        editId,
+      }),
+      await acceptGreenfieldContentEditRunRoute({
+        auth: guest,
+        workspaceId,
+        contentId,
+        runId: seeded.runId,
+        expectedContentVersion: patched.body.data.content.bodyVersion,
+      }),
+      await rejectGreenfieldContentEditRunRoute({
+        auth: guest,
+        workspaceId,
+        contentId,
+        runId: seeded.runId,
+      }),
+      await deleteGreenfieldMessagesRoute({
+        auth: guest,
+        workspaceId,
+        talkId,
+        messageIds: [seeded.userMessageId],
+      }),
+    ]) {
+      expect(result.statusCode).toBe(403);
+      expect(result.body).toMatchObject({
+        ok: false,
+        error: { code: 'workspace_writer_required' },
+      });
+    }
+
+    const db = getDbPg();
+    const [editRow] = await db<Array<{ status: string }>>`
+      select status
+      from public.document_edits
+      where id = ${editId}::uuid
+    `;
+    expect(editRow).toEqual({ status: 'pending' });
+    const [messageRow] = await db<Array<{ count: number }>>`
+      select count(*)::int as count
+      from public.messages
+      where id = ${seeded.userMessageId}::uuid
+    `;
+    expect(messageRow).toEqual({ count: 1 });
+  });
+
   it('preserves multiple accepted inserts from the same run batch', async () => {
     const { workspaceId, talkId, agentIds } = await createTalkFixture();
     const seeded = await seedMessages({
@@ -1433,5 +1871,44 @@ describe('greenfield detail routes', () => {
       where id = ${seeded.runId}::uuid
     `;
     expect(runRows[0]?.trigger_message_id).toBeNull();
+  });
+
+  it('rejects malformed message delete ids before mutating messages', async () => {
+    const { workspaceId, talkId, agentIds } = await createTalkFixture();
+    const seeded = await seedMessages({
+      workspaceId,
+      talkId,
+      agentId: agentIds[0]!,
+    });
+
+    const malformedInputs: unknown[] = [
+      undefined,
+      null,
+      'not-an-array',
+      [],
+      [seeded.userMessageId, 42],
+      ['not-a-uuid'],
+    ];
+    for (const messageIds of malformedInputs) {
+      const result = await deleteGreenfieldMessagesRoute({
+        auth: auth(),
+        workspaceId,
+        talkId,
+        messageIds,
+      });
+      expect(result.statusCode).toBe(400);
+      expect(result.body).toMatchObject({
+        ok: false,
+        error: { code: 'invalid_message_id' },
+      });
+    }
+
+    const db = getDbPg();
+    const [messageRow] = await db<Array<{ count: number }>>`
+      select count(*)::int as count
+      from public.messages
+      where id = ${seeded.userMessageId}::uuid
+    `;
+    expect(messageRow).toEqual({ count: 1 });
   });
 });

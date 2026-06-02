@@ -119,6 +119,19 @@ describe('ensureRunnableModel', () => {
     expect(agent.model_id).toBe('claude-opus-4-7'); // untouched
   });
 
+  it('passes credential scope into discovery', async () => {
+    const agent = makeAgent({ model_id: 'claude-opus-4-7' });
+    const deps = makeDeps();
+    const credentialScope = {
+      principalUserId: '33333333-3333-3333-3333-333333333333',
+      workspaceId: '44444444-4444-4444-4444-444444444444',
+    };
+
+    await ensureRunnableModel(agent, { credentialScope, deps });
+
+    expect(deps.loadSupport).toHaveBeenCalledWith(ANTHROPIC, credentialScope);
+  });
+
   it('fails open when resolveTarget throws', async () => {
     const agent = makeAgent({ model_id: 'claude-opus-4-7' });
     const deps = makeDeps({

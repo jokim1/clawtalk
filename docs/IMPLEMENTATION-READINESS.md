@@ -20,7 +20,7 @@ That means:
 
 Reviewed:
 
-- Canonical docs: `01` through `12`, `DECISIONS.md`, `SECURITY.md`, `SPEC-READINESS.md`, `DOC-AUDIT.md`, `GLOSSARY.md`, `engineering-notes.md`, `eval-suite.md`, `canonical-greenfield-migration.sql`.
+- Canonical docs: `01` through `12`, `DECISIONS.md`, `SECURITY.md`, `SPEC-READINESS.md`, `DOC-AUDIT.md`, `GLOSSARY.md`, `engineering-notes.md`, `eval-suite.md`. `canonical-greenfield-migration.sql` is a historical pointer only; the executable schema source is `supabase/migrations/0001_clawtalk_greenfield.sql`.
 - Current source: `src/worker.ts`, `src/db.ts`, `src/clawtalk/web/worker-app.ts`, `src/clawtalk/web/routes/*`, `src/clawtalk/db/*`, `src/clawtalk/talks/*`, `src/clawtalk/agents/*`, `src/clawtalk/identity/*`, `src/clawtalk/llm/*`, `webapp/src/*`, `prototype/*`, `shared/data.jsx`.
 - Current migration stream: the active implementation branch has `supabase/migrations/0001_clawtalk_greenfield.sql`; historical `0001` through `0038` plus rollback baggage live under `docs/archive/legacy-supabase-migrations/`.
 
@@ -74,7 +74,7 @@ Start with a refactor branch and proceed in this order:
 1. **Cutover foundation** ✅ committed
    - Create a fresh Supabase baseline at `supabase/migrations/0001_clawtalk_greenfield.sql`.
    - Remove or archive the old `supabase/migrations/0001`-`0038` files from the active migration path. If using the same Supabase project, reset/recreate the database instead of preserving migration history.
-   - Use `docs/canonical-greenfield-migration.sql` and `11-data-model.md` as source material, but normalize the active baseline into final-state DDL: create all final tables directly; no legacy `DROP`/`ALTER` compatibility sequence, no backfill.
+   - Use `11-data-model.md` as the schema design source and keep `supabase/migrations/0001_clawtalk_greenfield.sql` as the single executable final-state DDL: create all final tables directly; no legacy `DROP`/`ALTER` compatibility sequence, no backfill.
    - Add the `agent_role_templates` seed and first-signin workspace bootstrap.
    - Add §11 verification tests first, including composite-FK, RLS, document-edit CAS, jobs invariants, and system-agent visibility.
 

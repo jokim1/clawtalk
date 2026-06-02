@@ -1,4 +1,4 @@
-import { withUserContext } from '../../../db.js';
+import { getDbPg, withUserContext } from '../../../db.js';
 import {
   cancelGreenfieldTalkRuns,
   enqueueGreenfieldChatTurn,
@@ -58,15 +58,28 @@ function canEditTalkJobs(input: {
   userId: string;
 }): boolean {
   return (
-    input.workspace.role === 'owner' ||
-    input.workspace.role === 'admin' ||
-    input.talk.created_by === input.userId
+    input.workspace.role !== 'guest' &&
+    (input.workspace.role === 'owner' ||
+      input.workspace.role === 'admin' ||
+      input.talk.created_by === input.userId)
+  );
+}
+
+function requireWorkspaceWriter(
+  workspace: WorkspaceSummaryRecord,
+): RouteResult<never> | null {
+  if (workspace.role !== 'guest') return null;
+  return error(
+    403,
+    'workspace_writer_required',
+    'Workspace write access is required.',
   );
 }
 
 async function withResolvedWorkspace<T>(
   auth: AuthContext,
   requestedWorkspaceId: string | null | undefined,
+  options: { talkId?: string } | undefined,
   fn: (ctx: WorkspaceContext) => Promise<RouteResult<T>>,
 ): Promise<RouteResult<T>> {
   try {
@@ -76,6 +89,14 @@ async function withResolvedWorkspace<T>(
   }
 
   return withUserContext(auth.userId, async () => {
+    if (!requestedWorkspaceId && options?.talkId) {
+      const talkWorkspace = await resolveWorkspaceForTalk({
+        userId: auth.userId,
+        talkId: options.talkId,
+      });
+      if (talkWorkspace) return fn({ workspace: talkWorkspace });
+    }
+
     const workspace = await resolveWorkspaceForUser({
       userId: auth.userId,
       requestedWorkspaceId,
@@ -93,6 +114,31 @@ async function withResolvedWorkspace<T>(
   });
 }
 
+async function resolveWorkspaceForTalk(input: {
+  userId: string;
+  talkId: string;
+}): Promise<WorkspaceSummaryRecord | undefined> {
+  const db = getDbPg();
+  const rows = await db<WorkspaceSummaryRecord[]>`
+    select
+      w.id,
+      w.name,
+      wm.role,
+      upper(left(regexp_replace(w.name, '[^[:alnum:]]+', '', 'g'), 2)) as initials,
+      w.created_at,
+      w.updated_at
+    from public.talks t
+    join public.workspaces w
+      on w.id = t.workspace_id
+    join public.workspace_members wm
+      on wm.workspace_id = w.id
+     and wm.user_id = ${input.userId}::uuid
+    where t.id = ${input.talkId}::uuid
+    limit 1
+  `;
+  return rows[0];
+}
+
 function assertTalkAndThread(input: {
   talkId: string;
   threadId?: string | null;
@@ -106,34 +152,20 @@ function assertTalkAndThread(input: {
   return error(404, 'thread_not_found', 'Thread not found.');
 }
 
-function normalizeExtractionStatus(
+function normalizeOptionalStringArray(
   value: unknown,
-): NormalizedAttachment['extractionStatus'] {
-  if (value === 'ready' || value === 'failed') return value;
-  return 'pending';
-}
-
-function normalizeAttachments(value: unknown): NormalizedAttachment[] {
-  if (!Array.isArray(value)) return [];
-  return value
-    .filter((entry): entry is Record<string, unknown> => {
-      return (
-        Boolean(entry) && typeof entry === 'object' && !Array.isArray(entry)
-      );
-    })
-    .map(
-      (entry): NormalizedAttachment => ({
-        id: typeof entry.id === 'string' ? entry.id : '',
-        fileName: typeof entry.fileName === 'string' ? entry.fileName : '',
-        fileSize: typeof entry.fileSize === 'number' ? entry.fileSize : 0,
-        mimeType:
-          typeof entry.mimeType === 'string'
-            ? entry.mimeType
-            : 'application/octet-stream',
-        extractionStatus: normalizeExtractionStatus(entry.extractionStatus),
-      }),
-    )
-    .filter((entry) => entry.id);
+): { ok: true; values: string[] } | { ok: false } {
+  if (value === undefined || value === null) return { ok: true, values: [] };
+  if (!Array.isArray(value)) return { ok: false };
+  if (!value.every((entry) => typeof entry === 'string')) {
+    return { ok: false };
+  }
+  return {
+    ok: true,
+    values: Array.from(
+      new Set(value.map((entry) => entry.trim()).filter(Boolean)),
+    ),
+  };
 }
 
 function toMessageApi(message: GreenfieldMessageRecord): {
@@ -147,7 +179,7 @@ function toMessageApi(message: GreenfieldMessageRecord): {
   agentId: string | null;
   agentNickname: string | null;
   metadata: Record<string, unknown> | null;
-  attachments: ReturnType<typeof normalizeAttachments>;
+  attachments: NormalizedAttachment[];
 } {
   return {
     id: message.id,
@@ -164,7 +196,7 @@ function toMessageApi(message: GreenfieldMessageRecord): {
       authorKind: message.author_kind,
       agentRole: message.agent_role_key,
     },
-    attachments: normalizeAttachments(message.attachments_json),
+    attachments: [],
   };
 }
 
@@ -231,9 +263,9 @@ export async function enqueueGreenfieldChatRoute(input: {
   workspaceId?: string | null;
   talkId: string;
   threadId?: string | null;
-  content: string;
-  targetAgentIds?: string[] | null;
-  attachmentIds?: string[] | null;
+  content: unknown;
+  targetAgentIds?: unknown;
+  attachmentIds?: unknown;
 }): Promise<
   RouteResult<{
     talkId: string;
@@ -248,6 +280,9 @@ export async function enqueueGreenfieldChatRoute(input: {
   });
   if (talkError) return talkError;
 
+  if (typeof input.content !== 'string') {
+    return error(400, 'message_required', 'Message content is required');
+  }
   const content = input.content.trim();
   if (!content) {
     return error(400, 'message_required', 'Message content is required');
@@ -260,17 +295,31 @@ export async function enqueueGreenfieldChatRoute(input: {
     );
   }
 
-  const targetAgentIds = Array.from(
-    new Set(
-      (input.targetAgentIds ?? []).map((id) => id.trim()).filter(Boolean),
-    ),
+  const normalizedTargetAgentIds = normalizeOptionalStringArray(
+    input.targetAgentIds,
   );
+  if (!normalizedTargetAgentIds.ok) {
+    return error(
+      400,
+      'invalid_target_agent_id',
+      'targetAgentIds must be an array of UUID strings.',
+    );
+  }
+  const targetAgentIds = normalizedTargetAgentIds.values;
   if (!targetAgentIds.every(isUuid)) {
     return error(400, 'invalid_target_agent_id', 'Agent ids must be UUIDs.');
   }
-  const attachmentIds = Array.from(
-    new Set((input.attachmentIds ?? []).map((id) => id.trim()).filter(Boolean)),
+  const normalizedAttachmentIds = normalizeOptionalStringArray(
+    input.attachmentIds,
   );
+  if (!normalizedAttachmentIds.ok) {
+    return error(
+      400,
+      'invalid_attachment_id',
+      'attachmentIds must be an array of strings.',
+    );
+  }
+  const attachmentIds = normalizedAttachmentIds.values;
   if (attachmentIds.length > 0) {
     return error(
       400,
@@ -279,55 +328,62 @@ export async function enqueueGreenfieldChatRoute(input: {
     );
   }
 
-  return withResolvedWorkspace(input.auth, input.workspaceId, async (ctx) => {
-    const result = await enqueueGreenfieldChatTurn({
-      workspaceId: ctx.workspace.id,
-      talkId: input.talkId,
-      userId: input.auth.userId,
-      content,
-      targetAgentIds,
-    });
-    if (!result.ok) {
-      if (result.reason === 'talk_not_found') {
-        return error(404, 'talk_not_found', 'Talk not found.');
-      }
-      if (result.reason === 'talk_archived') {
+  return withResolvedWorkspace(
+    input.auth,
+    input.workspaceId,
+    { talkId: input.talkId },
+    async (ctx) => {
+      const writerError = requireWorkspaceWriter(ctx.workspace);
+      if (writerError) return writerError;
+      const result = await enqueueGreenfieldChatTurn({
+        workspaceId: ctx.workspace.id,
+        talkId: input.talkId,
+        userId: input.auth.userId,
+        content,
+        targetAgentIds,
+      });
+      if (!result.ok) {
+        if (result.reason === 'talk_not_found') {
+          return error(404, 'talk_not_found', 'Talk not found.');
+        }
+        if (result.reason === 'talk_archived') {
+          return error(
+            409,
+            'talk_archived',
+            'Archived talks cannot receive new messages.',
+          );
+        }
+        if (result.reason === 'talk_round_active') {
+          return error(
+            409,
+            'talk_round_active',
+            'Wait for the current round to finish or cancel it before sending another message.',
+          );
+        }
+        if (result.reason === 'agent_model_not_found') {
+          return error(
+            409,
+            'agent_model_not_found',
+            'A selected agent references a model that is not available.',
+          );
+        }
         return error(
-          409,
-          'talk_archived',
-          'Archived talks cannot receive new messages.',
+          400,
+          'talk_agent_not_found',
+          'No valid talk agent is available for this talk.',
         );
       }
-      if (result.reason === 'talk_round_active') {
-        return error(
-          409,
-          'talk_round_active',
-          'Wait for the current round to finish or cancel it before sending another message.',
-        );
-      }
-      if (result.reason === 'agent_model_not_found') {
-        return error(
-          409,
-          'agent_model_not_found',
-          'A selected agent references a model that is not available.',
-        );
-      }
-      return error(
-        400,
-        'talk_agent_not_found',
-        'No valid talk agent is available for this talk.',
+      return ok(
+        {
+          talkId: result.talkId,
+          message: toMessageApi(result.message),
+          runs: result.runs.map(toRunApi),
+          forcedSerialReason: null,
+        },
+        202,
       );
-    }
-    return ok(
-      {
-        talkId: result.talkId,
-        message: toMessageApi(result.message),
-        runs: result.runs.map(toRunApi),
-        forcedSerialReason: null,
-      },
-      202,
-    );
-  });
+    },
+  );
 }
 
 export async function cancelGreenfieldChatRoute(input: {
@@ -348,33 +404,40 @@ export async function cancelGreenfieldChatRoute(input: {
   });
   if (talkError) return talkError;
 
-  return withResolvedWorkspace(input.auth, input.workspaceId, async (ctx) => {
-    const talk = await getGreenfieldTalk({
-      workspaceId: ctx.workspace.id,
-      talkId: input.talkId,
-    });
-    if (!talk) return error(404, 'talk_not_found', 'Talk not found.');
-    const cancelled = await cancelGreenfieldTalkRuns({
-      workspaceId: ctx.workspace.id,
-      talkId: input.talkId,
-      userId: input.auth.userId,
-      includeJobRuns: canEditTalkJobs({
-        workspace: ctx.workspace,
-        talk,
+  return withResolvedWorkspace(
+    input.auth,
+    input.workspaceId,
+    { talkId: input.talkId },
+    async (ctx) => {
+      const writerError = requireWorkspaceWriter(ctx.workspace);
+      if (writerError) return writerError;
+      const talk = await getGreenfieldTalk({
+        workspaceId: ctx.workspace.id,
+        talkId: input.talkId,
+      });
+      if (!talk) return error(404, 'talk_not_found', 'Talk not found.');
+      const cancelled = await cancelGreenfieldTalkRuns({
+        workspaceId: ctx.workspace.id,
+        talkId: input.talkId,
         userId: input.auth.userId,
-      }),
-    });
-    if (cancelled.cancelledRuns === 0) {
-      return error(
-        404,
-        'no_active_run',
-        'No running or queued chat exists for this talk',
-      );
-    }
-    return ok({
-      talkId: input.talkId,
-      threadId: input.threadId ?? null,
-      cancelledRuns: cancelled.cancelledRuns,
-    });
-  });
+        includeJobRuns: canEditTalkJobs({
+          workspace: ctx.workspace,
+          talk,
+          userId: input.auth.userId,
+        }),
+      });
+      if (cancelled.cancelledRuns === 0) {
+        return error(
+          404,
+          'no_active_run',
+          'No running or queued chat exists for this talk',
+        );
+      }
+      return ok({
+        talkId: input.talkId,
+        threadId: input.threadId ?? null,
+        cancelledRuns: cancelled.cancelledRuns,
+      });
+    },
+  );
 }

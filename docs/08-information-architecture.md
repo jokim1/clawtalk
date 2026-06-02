@@ -306,7 +306,8 @@ A Message:
 - when `author_kind = 'agent'`: carries `agent_snapshot_id` (the immutable
   per-run roster snapshot of the speaking agent, §11 §4) and `run_id` (a
   back-edge to the run that produced it)
-- has an immutable `body` plus optional `attachments_json`
+- has an immutable `body`. Message attachments are deferred from the active
+  greenfield baseline; source files use Context rows instead.
 
 Composite FKs (§11 §3) tie every message to its parent Talk on
 `(workspace_id, talk_id)` and to its run on `(workspace_id, talk_id, run_id)`,
@@ -661,7 +662,6 @@ author_user_id uuid nullable         -- set when author_kind = 'user'
 agent_snapshot_id uuid nullable      -- set when author_kind = 'agent'
 run_id uuid nullable                 -- set when author_kind = 'agent' (back-edge)
 body text
-attachments_json jsonb
 created_at
 ```
 

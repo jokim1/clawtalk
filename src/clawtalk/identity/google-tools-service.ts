@@ -23,7 +23,9 @@
 //   handles duplicate refresh_token requests idempotently within its window.
 //
 // Storage shape:
-//   - DB row `scopes_json`: alias form (e.g. 'drive.readonly', 'documents').
+//   - DB row `connectors.config_json.scopes`: alias form
+//     (e.g. 'drive.readonly', 'documents').
+//   - DB row `connector_secrets.ciphertext`: encrypted token payload.
 //   - Ciphertext payload `scopes`: URL form
 //     (e.g. 'https://www.googleapis.com/auth/drive.readonly'). Matches the
 //     convention established by `persistGoogleOAuthIdentity`.
@@ -143,6 +145,7 @@ function parseRefreshPayload(payload: unknown): {
 export async function performRefresh(
   userId: string,
   payload: GoogleToolCredentialPayload,
+  input: { workspaceId: string },
 ): Promise<GoogleToolCredentialPayload> {
   if (!payload.refreshToken) {
     throw new GoogleToolCredentialError(
@@ -181,7 +184,7 @@ export async function performRefresh(
     // drop it so the next caller sees google_account_not_connected and we
     // surface a clean reconnect prompt to the user.
     if (response.status === 400 || response.status === 401) {
-      await deleteUserGoogleCredential();
+      await deleteUserGoogleCredential({ workspaceId: input.workspaceId });
       throw new GoogleToolCredentialError(
         'google_reauth_required',
         'Google tools credential was revoked or expired and must be reconnected.',
@@ -196,7 +199,9 @@ export async function performRefresh(
   }
 
   const refreshed = parseRefreshPayload(await response.json());
-  const existing = await getUserGoogleCredential();
+  const existing = await getUserGoogleCredential({
+    workspaceId: input.workspaceId,
+  });
   if (!existing) {
     throw new GoogleToolCredentialError(
       'google_account_not_connected',
@@ -224,6 +229,7 @@ export async function performRefresh(
   };
 
   await upsertUserGoogleCredential({
+    workspaceId: input.workspaceId,
     userId,
     googleSubject: existing.googleSubject,
     email: existing.email,
@@ -239,29 +245,34 @@ export async function performRefresh(
 export async function refreshCredentialIfNeeded(
   userId: string,
   payload: GoogleToolCredentialPayload,
+  input: { workspaceId: string },
 ): Promise<GoogleToolCredentialPayload> {
   if (!isExpired(payload)) return payload;
 
-  const existing = refreshInFlight.get(userId);
+  const refreshKey = `${input.workspaceId}:${userId}`;
+  const existing = refreshInFlight.get(refreshKey);
   if (existing) return existing;
 
-  const refreshPromise = performRefresh(userId, payload).finally(() => {
-    refreshInFlight.delete(userId);
+  const refreshPromise = performRefresh(userId, payload, input).finally(() => {
+    refreshInFlight.delete(refreshKey);
   });
-  refreshInFlight.set(userId, refreshPromise);
+  refreshInFlight.set(refreshKey, refreshPromise);
   return refreshPromise;
 }
 
 export async function getValidGoogleToolAccessToken(input: {
   userId: string;
   requiredScopes: string[];
+  workspaceId: string;
 }): Promise<{
   accessToken: string;
   scopes: string[];
   email: string;
   displayName: string | null;
 }> {
-  const credential = await getUserGoogleCredential();
+  const credential = await getUserGoogleCredential({
+    workspaceId: input.workspaceId,
+  });
   if (!credential) {
     throw new GoogleToolCredentialError(
       'google_account_not_connected',
@@ -276,7 +287,7 @@ export async function getValidGoogleToolAccessToken(input: {
   } catch {
     // Corrupt ciphertext (encryption secret rotated, manual tamper, etc.).
     // Drop the credential so the user is prompted to reconnect.
-    await deleteUserGoogleCredential();
+    await deleteUserGoogleCredential({ workspaceId: input.workspaceId });
     throw new GoogleToolCredentialError(
       'google_reauth_required',
       'Stored Google credential is invalid and must be reconnected.',
@@ -284,7 +295,9 @@ export async function getValidGoogleToolAccessToken(input: {
     );
   }
 
-  payload = await refreshCredentialIfNeeded(input.userId, payload);
+  payload = await refreshCredentialIfNeeded(input.userId, payload, {
+    workspaceId: input.workspaceId,
+  });
   assertRequiredScopes(payload, input.requiredScopes);
 
   return {
@@ -295,7 +308,10 @@ export async function getValidGoogleToolAccessToken(input: {
   };
 }
 
-export async function buildGooglePickerSession(userId: string): Promise<{
+export async function buildGooglePickerSession(
+  userId: string,
+  input: { workspaceId: string },
+): Promise<{
   oauthToken: string;
   developerKey: string;
   appId: string;
@@ -314,6 +330,7 @@ export async function buildGooglePickerSession(userId: string): Promise<{
 
   const token = await getValidGoogleToolAccessToken({
     userId,
+    workspaceId: input.workspaceId,
     requiredScopes: ['drive.readonly'],
   });
 

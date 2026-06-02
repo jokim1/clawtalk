@@ -115,11 +115,13 @@ describe('TalkToolsPanel', () => {
           },
         ],
       });
-    vi.spyOn(api, 'getGooglePickerSession').mockResolvedValueOnce({
-      oauthToken: 'token',
-      developerKey: 'devkey',
-      appId: 'appid',
-    });
+    const pickerSessionSpy = vi
+      .spyOn(api, 'getGooglePickerSession')
+      .mockResolvedValueOnce({
+        oauthToken: 'token',
+        developerKey: 'devkey',
+        appId: 'appid',
+      });
     vi.spyOn(picker, 'openGoogleDrivePicker').mockResolvedValueOnce([
       {
         externalId: 'doc-picked',
@@ -147,6 +149,7 @@ describe('TalkToolsPanel', () => {
       screen.getByRole('button', { name: /Add file from Drive/i }),
     );
     await waitFor(() => {
+      expect(pickerSessionSpy).toHaveBeenCalledWith({ talkId: TALK_ID });
       expect(createSpy).toHaveBeenCalledWith({
         talkId: TALK_ID,
         kind: 'google_drive_file',

@@ -14,9 +14,8 @@
 //   - `completeSlackInstallCallback` runs from a PUBLIC callback route — Slack
 //     redirects the browser directly with no clawtalk session cookies. The
 //     pool runs as the BYPASSRLS `postgres` role so the state-claim DELETE
-//     and the install UPSERT both run outside RLS. After the install row is
-//     written we enter `withUserContext(installed_by)` for any follow-up
-//     work (none in PR 1 — the picker is PR 2).
+//     and the install UPSERT both run outside RLS. The callback rechecks that
+//     the initiating user is still an owner/admin before exchanging the code.
 //
 // nonce_hash and code_verifier_hash columns on `oauth_state` are NOT NULL
 // (the schema was built around the Google PKCE/OIDC flow). For Slack we
@@ -80,6 +79,7 @@ function sha256Base64Url(input: string): string {
 
 export interface StartSlackInstallInput {
   userId: string;
+  workspaceId: string;
   redirectUri: string;
   returnTo?: string | null;
 }
@@ -117,10 +117,10 @@ export async function startSlackInstall(
   const db = getDbPg();
   await db`
     insert into public.oauth_state
-      (user_id, provider, state_hash, nonce_hash, code_verifier_hash,
+      (user_id, workspace_id, provider, state_hash, nonce_hash, code_verifier_hash,
        code_verifier, redirect_uri, return_to, expires_at)
     values
-      (${input.userId}::uuid, ${PROVIDER}, ${stateHash}, ${placeholderNonceHash},
+      (${input.userId}::uuid, ${input.workspaceId}::uuid, ${PROVIDER}, ${stateHash}, ${placeholderNonceHash},
        ${placeholderVerifierHash}, null, ${input.redirectUri},
        ${input.returnTo ?? null}, ${expiresAt}::timestamptz)
   `;
@@ -156,6 +156,7 @@ export interface CompleteSlackInstallCallbackResult {
 interface ClaimedStateRow {
   id: string;
   user_id: string;
+  workspace_id: string;
   provider: string;
   redirect_uri: string;
   return_to: string | null;
@@ -173,6 +174,22 @@ interface SlackOauthAccessResponse {
   team?: { id?: string; name?: string };
 }
 
+async function userCanInstallSlack(input: {
+  workspaceId: string;
+  userId: string;
+}): Promise<boolean> {
+  const db = getDbPg();
+  const rows = await db<Array<{ role: 'owner' | 'admin' }>>`
+    select role
+    from public.workspace_members
+    where workspace_id = ${input.workspaceId}::uuid
+      and user_id = ${input.userId}::uuid
+      and role in ('owner', 'admin')
+    limit 1
+  `;
+  return rows.length === 1;
+}
+
 export async function completeSlackInstallCallback(
   input: CompleteSlackInstallCallbackInput,
 ): Promise<CompleteSlackInstallCallbackResult> {
@@ -183,7 +200,7 @@ export async function completeSlackInstallCallback(
     where state_hash = ${stateHash}
       and provider = ${PROVIDER}
       and expires_at > now()
-    returning id, user_id, provider, redirect_uri, return_to, expires_at
+    returning id, user_id, workspace_id, provider, redirect_uri, return_to, expires_at
   `;
   if (claimed.length === 0) {
     return {
@@ -213,6 +230,19 @@ export async function completeSlackInstallCallback(
       status: 'error',
       errorCode: 'missing_code',
       message: 'Could not complete install.',
+    };
+  }
+  if (
+    !(await userCanInstallSlack({
+      workspaceId: row.workspace_id,
+      userId: row.user_id,
+    }))
+  ) {
+    return {
+      status: 'error',
+      errorCode: 'workspace_admin_required',
+      message:
+        'You no longer have permission to install Slack for this workspace.',
     };
   }
 
@@ -280,6 +310,7 @@ export async function completeSlackInstallCallback(
     .filter(Boolean);
 
   await upsertWorkspaceSlackInstall({
+    workspaceId: row.workspace_id,
     teamId,
     teamName,
     botUserId: tokenPayload.bot_user_id ?? null,

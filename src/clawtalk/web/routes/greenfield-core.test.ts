@@ -15,7 +15,10 @@ import {
   listGreenfieldTalkAgentsRoute,
   listGreenfieldTalkSidebarRoute,
   listGreenfieldTalksRoute,
+  deleteGreenfieldFolderRoute,
+  patchGreenfieldFolderRoute,
   patchGreenfieldTalkRoute,
+  reorderGreenfieldTalkSidebarRoute,
   updateGreenfieldTalkAgentsRoute,
   updateGreenfieldTalkPolicyRoute,
   updateGreenfieldTalkToolRoute,
@@ -87,6 +90,35 @@ async function currentWorkspaceId(): Promise<string> {
   expect(me.statusCode).toBe(200);
   if (!me.body.ok) throw new Error('Expected session route to succeed');
   return me.body.data.currentWorkspaceId;
+}
+
+async function createAdditionalWorkspace(name: string): Promise<string> {
+  const db = getDbPg();
+  const [workspace] = await db<{ id: string }[]>`
+    insert into public.workspaces (name, owner_id)
+    values (${name}, ${USER_ID}::uuid)
+    returning id
+  `;
+  if (!workspace) throw new Error('Expected workspace insert to return a row');
+  await db`
+    insert into public.workspace_members (workspace_id, user_id, role)
+    values (${workspace.id}::uuid, ${USER_ID}::uuid, 'owner')
+  `;
+  await db`
+    insert into public.agents (
+      workspace_id, role_key, name, handle, initials, accent, accent_dark,
+      model_id, default_model_id, temperature, method, is_default, is_custom,
+      is_system, enabled, created_from_template_version
+    )
+    select
+      ${workspace.id}::uuid, t.role_key, t.default_name, t.default_handle,
+      t.default_initials, t.default_accent, t.default_accent_dark,
+      t.default_model_id, t.default_model_id, t.default_temperature,
+      t.method_default, true, false, false, true, t.version
+    from public.agent_role_templates t
+    where t.role_key in ('strategist', 'critic', 'researcher', 'editor', 'quant')
+  `;
+  return workspace.id;
 }
 
 describe('greenfield core routes', () => {
@@ -213,6 +245,43 @@ describe('greenfield core routes', () => {
       data: { talk: { id: created.body.data.talk.id, title: 'Q2 Plan' } },
     });
 
+    const db = getDbPg();
+    await db`
+      insert into public.messages (
+        workspace_id, talk_id, round, author_kind, author_user_id, body
+      )
+      values
+        (
+          ${workspaceId}::uuid,
+          ${created.body.data.talk.id}::uuid,
+          1,
+          'user',
+          ${USER_ID}::uuid,
+          'First message'
+        ),
+        (
+          ${workspaceId}::uuid,
+          ${created.body.data.talk.id}::uuid,
+          2,
+          'user',
+          ${USER_ID}::uuid,
+          'Second message'
+        )
+    `;
+    const fetchedWithMessages = await getGreenfieldTalkRoute({
+      auth: auth(),
+      workspaceId,
+      talkId: created.body.data.talk.id,
+    });
+    expect(fetchedWithMessages.statusCode).toBe(200);
+    if (!fetchedWithMessages.body.ok) {
+      throw new Error('Expected talk route to succeed after messages');
+    }
+    expect(fetchedWithMessages.body.data.talk.agents).toEqual(
+      requestedAgentIds,
+    );
+    expect(fetchedWithMessages.body.data.talk.messageCount).toBe(2);
+
     const roster = await listGreenfieldTalkAgentsRoute({
       auth: auth(),
       workspaceId,
@@ -285,6 +354,369 @@ describe('greenfield core routes', () => {
       ok: true,
       data: { talks: [{ id: created.body.data.talk.id, status: 'archived' }] },
     });
+  });
+
+  it('reports talk access roles from the resolved workspace membership', async () => {
+    const workspaceId = await currentWorkspaceId();
+    const created = await createGreenfieldTalkRoute({
+      auth: auth(),
+      workspaceId,
+      body: { title: 'Shared Access Talk' },
+    });
+    expect(created.statusCode).toBe(201);
+    if (!created.body.ok) throw new Error('Expected talk route to succeed');
+    expect(created.body.data.talk.accessRole).toBe('owner');
+    const talkId = created.body.data.talk.id;
+
+    await seedAuthUser(
+      OTHER_USER_ID,
+      'shared-access@clawtalk.local',
+      'Shared Access',
+    );
+    const db = getDbPg();
+    await db`
+      insert into public.workspace_members (workspace_id, user_id, role)
+      values (${workspaceId}::uuid, ${OTHER_USER_ID}::uuid, 'member')
+      on conflict (workspace_id, user_id) do update set role = excluded.role
+    `;
+
+    const memberList = await listGreenfieldTalksRoute({
+      auth: auth(OTHER_USER_ID),
+      workspaceId,
+    });
+    expect(memberList.statusCode).toBe(200);
+    if (!memberList.body.ok) {
+      throw new Error('Expected member list route to succeed');
+    }
+    expect(
+      memberList.body.data.talks.find((talk) => talk.id === talkId)?.accessRole,
+    ).toBe('editor');
+
+    const memberGet = await getGreenfieldTalkRoute({
+      auth: auth(OTHER_USER_ID),
+      workspaceId,
+      talkId,
+    });
+    expect(memberGet.statusCode).toBe(200);
+    if (!memberGet.body.ok) throw new Error('Expected member get to succeed');
+    expect(memberGet.body.data.talk.accessRole).toBe('editor');
+
+    await db`
+      update public.workspace_members
+      set role = 'admin'
+      where workspace_id = ${workspaceId}::uuid
+        and user_id = ${OTHER_USER_ID}::uuid
+    `;
+    const adminGet = await getGreenfieldTalkRoute({
+      auth: auth(OTHER_USER_ID),
+      workspaceId,
+      talkId,
+    });
+    expect(adminGet.statusCode).toBe(200);
+    if (!adminGet.body.ok) throw new Error('Expected admin get to succeed');
+    expect(adminGet.body.data.talk.accessRole).toBe('admin');
+
+    await db`
+      update public.workspace_members
+      set role = 'guest'
+      where workspace_id = ${workspaceId}::uuid
+        and user_id = ${OTHER_USER_ID}::uuid
+    `;
+    const guestList = await listGreenfieldTalksRoute({
+      auth: auth(OTHER_USER_ID),
+      workspaceId,
+    });
+    expect(guestList.statusCode).toBe(200);
+    if (!guestList.body.ok) {
+      throw new Error('Expected guest list route to succeed');
+    }
+    expect(
+      guestList.body.data.talks.find((talk) => talk.id === talkId)?.accessRole,
+    ).toBe('viewer');
+
+    const guestGet = await getGreenfieldTalkRoute({
+      auth: auth(OTHER_USER_ID),
+      workspaceId,
+      talkId,
+    });
+    expect(guestGet.statusCode).toBe(200);
+    if (!guestGet.body.ok) throw new Error('Expected guest get to succeed');
+    expect(guestGet.body.data.talk.accessRole).toBe('viewer');
+  });
+
+  it('resolves omitted workspaceId for talk-scoped core routes from the visible talk', async () => {
+    const defaultWorkspaceId = await currentWorkspaceId();
+    const workspaceId = await createAdditionalWorkspace('Second Workspace');
+    expect(workspaceId).not.toBe(defaultWorkspaceId);
+
+    const agents = await listGreenfieldAgentsRoute({
+      auth: auth(),
+      workspaceId,
+    });
+    expect(agents.statusCode).toBe(200);
+    if (!agents.body.ok) throw new Error('Expected agent route to succeed');
+    const agentIds = agents.body.data.agents
+      .slice(0, 2)
+      .map((agent) => agent.id);
+
+    const created = await createGreenfieldTalkRoute({
+      auth: auth(),
+      workspaceId,
+      body: { title: 'Second Workspace Talk', team: agentIds },
+    });
+    expect(created.statusCode).toBe(201);
+    if (!created.body.ok) throw new Error('Expected talk route to succeed');
+    const talkId = created.body.data.talk.id;
+
+    const fetched = await getGreenfieldTalkRoute({ auth: auth(), talkId });
+    expect(fetched.statusCode).toBe(200);
+    expect(fetched.body).toMatchObject({
+      ok: true,
+      data: { talk: { id: talkId, title: 'Second Workspace Talk' } },
+    });
+
+    const roster = await listGreenfieldTalkAgentsRoute({
+      auth: auth(),
+      talkId,
+    });
+    expect(roster.statusCode).toBe(200);
+    if (!roster.body.ok) throw new Error('Expected roster route to succeed');
+    expect(roster.body.data.agents.map((agent) => agent.id)).toEqual(agentIds);
+
+    const updatedTools = await updateGreenfieldTalkToolRoute({
+      auth: auth(),
+      talkId,
+      body: { family: 'web', enabled: true },
+    });
+    expect(updatedTools.statusCode).toBe(200);
+    expect(updatedTools.body).toMatchObject({
+      ok: true,
+      data: { talkId, active: { web: true } },
+    });
+
+    const policy = await getGreenfieldTalkPolicyRoute({
+      auth: auth(),
+      talkId,
+    });
+    expect(policy.statusCode).toBe(200);
+    expect(policy.body).toMatchObject({ ok: true, data: { talkId } });
+
+    const updatedRoster = await updateGreenfieldTalkAgentsRoute({
+      auth: auth(),
+      talkId,
+      agents: [agentIds[0]],
+    });
+    expect(updatedRoster.statusCode).toBe(200);
+    expect(updatedRoster.body).toMatchObject({
+      ok: true,
+      data: { talkId, agents: [{ id: agentIds[0] }] },
+    });
+  });
+
+  it('reorders greenfield sidebar folders and talks without legacy schema', async () => {
+    const workspaceId = await currentWorkspaceId();
+    const agents = await listGreenfieldAgentsRoute({
+      auth: auth(),
+      workspaceId,
+    });
+    if (!agents.body.ok) throw new Error('Expected agent route to succeed');
+    const team = agents.body.data.agents.slice(0, 1).map((agent) => agent.id);
+
+    const folderA = await createGreenfieldFolderRoute({
+      auth: auth(),
+      workspaceId,
+      title: 'Folder A',
+    });
+    const folderB = await createGreenfieldFolderRoute({
+      auth: auth(),
+      workspaceId,
+      title: 'Folder B',
+    });
+    if (!folderA.body.ok || !folderB.body.ok) {
+      throw new Error('Expected folder routes to succeed');
+    }
+    const rootTalk = await createGreenfieldTalkRoute({
+      auth: auth(),
+      workspaceId,
+      body: { title: 'Root Talk', team },
+    });
+    const nestedTalk = await createGreenfieldTalkRoute({
+      auth: auth(),
+      workspaceId,
+      body: {
+        title: 'Nested Talk',
+        folderId: folderA.body.data.folder.id,
+        team,
+      },
+    });
+    if (!rootTalk.body.ok || !nestedTalk.body.ok) {
+      throw new Error('Expected talk routes to succeed');
+    }
+
+    const intoFolder = await reorderGreenfieldTalkSidebarRoute({
+      auth: auth(),
+      workspaceId,
+      itemType: 'talk',
+      itemId: rootTalk.body.data.talk.id,
+      destinationFolderId: folderB.body.data.folder.id,
+      destinationIndex: 0,
+    });
+    expect(intoFolder.body).toEqual({ ok: true, data: { reordered: true } });
+
+    const folderToTop = await reorderGreenfieldTalkSidebarRoute({
+      auth: auth(),
+      workspaceId,
+      itemType: 'folder',
+      itemId: folderB.body.data.folder.id,
+      destinationFolderId: null,
+      destinationIndex: 0,
+    });
+    expect(folderToTop.body).toEqual({ ok: true, data: { reordered: true } });
+
+    const sidebar = await listGreenfieldTalkSidebarRoute({
+      auth: auth(),
+      workspaceId,
+    });
+    expect(sidebar.statusCode).toBe(200);
+    if (!sidebar.body.ok) throw new Error('Expected sidebar route to succeed');
+    expect(sidebar.body.data.items[0]).toMatchObject({
+      type: 'folder',
+      id: folderB.body.data.folder.id,
+      talks: [{ id: rootTalk.body.data.talk.id, title: 'Root Talk' }],
+    });
+    expect(sidebar.body.data.items[1]).toMatchObject({
+      type: 'folder',
+      id: folderA.body.data.folder.id,
+      talks: [{ id: nestedTalk.body.data.talk.id, title: 'Nested Talk' }],
+    });
+
+    const invalidFolderNest = await reorderGreenfieldTalkSidebarRoute({
+      auth: auth(),
+      workspaceId,
+      itemType: 'folder',
+      itemId: folderA.body.data.folder.id,
+      destinationFolderId: folderB.body.data.folder.id,
+      destinationIndex: 0,
+    });
+    expect(invalidFolderNest.statusCode).toBe(400);
+    expect(invalidFolderNest.body).toMatchObject({
+      ok: false,
+      error: { code: 'invalid_sidebar_reorder' },
+    });
+
+    const outOfRangeIndex = await reorderGreenfieldTalkSidebarRoute({
+      auth: auth(),
+      workspaceId,
+      itemType: 'folder',
+      itemId: folderA.body.data.folder.id,
+      destinationFolderId: null,
+      destinationIndex: 99,
+    });
+    expect(outOfRangeIndex.statusCode).toBe(400);
+    expect(outOfRangeIndex.body).toMatchObject({
+      ok: false,
+      error: { code: 'invalid_sidebar_reorder' },
+    });
+  });
+
+  it.each([
+    ['negative', -1],
+    ['fractional', 1.5],
+  ])(
+    'rejects %s sidebar reorder destinationIndex values',
+    async (_caseName, destinationIndex) => {
+      const result = await reorderGreenfieldTalkSidebarRoute({
+        auth: auth(),
+        workspaceId: '10000000-0000-4000-8000-000000000001',
+        itemType: 'talk',
+        itemId: '10000000-0000-4000-8000-000000000aaa',
+        destinationFolderId: null,
+        destinationIndex,
+      });
+
+      expect(result.statusCode).toBe(400);
+      expect(result.body).toMatchObject({
+        ok: false,
+        error: { code: 'invalid_sidebar_reorder' },
+      });
+    },
+  );
+
+  it('resolves omitted workspaceId for secondary-workspace folder mutations', async () => {
+    const secondaryWorkspaceId = await createAdditionalWorkspace('Secondary');
+    const agents = await listGreenfieldAgentsRoute({
+      auth: auth(),
+      workspaceId: secondaryWorkspaceId,
+    });
+    if (!agents.body.ok) throw new Error('Expected agent route to succeed');
+    const team = agents.body.data.agents.slice(0, 1).map((agent) => agent.id);
+
+    const folderA = await createGreenfieldFolderRoute({
+      auth: auth(),
+      workspaceId: secondaryWorkspaceId,
+      title: 'Secondary A',
+    });
+    const folderB = await createGreenfieldFolderRoute({
+      auth: auth(),
+      workspaceId: secondaryWorkspaceId,
+      title: 'Secondary B',
+    });
+    if (!folderA.body.ok || !folderB.body.ok) {
+      throw new Error('Expected secondary folder routes to succeed');
+    }
+    await createGreenfieldTalkRoute({
+      auth: auth(),
+      workspaceId: secondaryWorkspaceId,
+      body: {
+        title: 'Secondary Talk',
+        folderId: folderA.body.data.folder.id,
+        team,
+      },
+    });
+
+    const renamed = await patchGreenfieldFolderRoute({
+      auth: auth(),
+      folderId: folderB.body.data.folder.id,
+      title: 'Secondary B Renamed',
+    });
+    expect(renamed.statusCode).toBe(200);
+    expect(renamed.body).toMatchObject({
+      ok: true,
+      data: {
+        folder: {
+          id: folderB.body.data.folder.id,
+          workspaceId: secondaryWorkspaceId,
+          title: 'Secondary B Renamed',
+        },
+      },
+    });
+
+    const reordered = await reorderGreenfieldTalkSidebarRoute({
+      auth: auth(),
+      itemType: 'folder',
+      itemId: folderB.body.data.folder.id,
+      destinationFolderId: null,
+      destinationIndex: 0,
+    });
+    expect(reordered.statusCode).toBe(200);
+
+    const sidebar = await listGreenfieldTalkSidebarRoute({
+      auth: auth(),
+      workspaceId: secondaryWorkspaceId,
+    });
+    expect(sidebar.statusCode).toBe(200);
+    if (!sidebar.body.ok) throw new Error('Expected sidebar route to succeed');
+    expect(sidebar.body.data.items[0]).toMatchObject({
+      type: 'folder',
+      id: folderB.body.data.folder.id,
+      title: 'Secondary B Renamed',
+    });
+
+    const deleted = await deleteGreenfieldFolderRoute({
+      auth: auth(),
+      folderId: folderB.body.data.folder.id,
+    });
+    expect(deleted.body).toEqual({ ok: true, data: { deleted: true } });
   });
 
   it('replaces a talk roster using greenfield agents and display order', async () => {
@@ -584,6 +1016,63 @@ describe('greenfield core routes', () => {
       talkId: created.body.data.talk.id,
       active: { web: false },
     });
+  });
+
+  it('returns 403 before upserting talk tools for guest workspace members', async () => {
+    const workspaceId = await currentWorkspaceId();
+    await seedAuthUser(
+      OTHER_USER_ID,
+      'tool-guest@clawtalk.local',
+      'Tool Guest',
+    );
+    const db = getDbPg();
+    await db`
+      insert into public.workspace_members (workspace_id, user_id, role)
+      values (${workspaceId}::uuid, ${OTHER_USER_ID}::uuid, 'member')
+      on conflict (workspace_id, user_id) do update set role = excluded.role
+    `;
+    const agents = await listGreenfieldAgentsRoute({
+      auth: auth(OTHER_USER_ID),
+      workspaceId,
+    });
+    if (!agents.body.ok) throw new Error('Expected agent route to succeed');
+    const created = await createGreenfieldTalkRoute({
+      auth: auth(OTHER_USER_ID),
+      workspaceId,
+      body: {
+        title: 'Guest Tool Toggle Talk',
+        team: agents.body.data.agents.slice(0, 1).map((agent) => agent.id),
+      },
+    });
+    expect(created.statusCode).toBe(201);
+    if (!created.body.ok) throw new Error('Expected talk route to succeed');
+
+    await db`
+      update public.workspace_members
+      set role = 'guest'
+      where workspace_id = ${workspaceId}::uuid
+        and user_id = ${OTHER_USER_ID}::uuid
+    `;
+
+    const denied = await updateGreenfieldTalkToolRoute({
+      auth: auth(OTHER_USER_ID),
+      workspaceId,
+      talkId: created.body.data.talk.id,
+      body: { family: 'web', enabled: true },
+    });
+    expect(denied.statusCode).toBe(403);
+    expect(denied.body).toMatchObject({
+      ok: false,
+      error: { code: 'workspace_writer_required' },
+    });
+
+    const rows = await db<{ count: number }[]>`
+      select count(*)::int as count
+      from public.talk_tools
+      where workspace_id = ${workspaceId}::uuid
+        and talk_id = ${created.body.data.talk.id}::uuid
+    `;
+    expect(rows[0]?.count ?? 0).toBe(0);
   });
 
   it('persists every talk tool family using the canonical greenfield tool ids', async () => {

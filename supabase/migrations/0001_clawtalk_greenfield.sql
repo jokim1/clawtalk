@@ -3,10 +3,25 @@
 -- Fresh Supabase baseline for the ClawTalk greenfield cutover.
 -- Applies to an empty/reset database. Do not prepend the legacy 0001-0038
 -- migration stream and do not add compatibility DROP/ALTER cleanup here.
--- Source material: docs/11-data-model.md and docs/canonical-greenfield-migration.sql.
+-- Cutover guardrail: do not run this through `supabase db push` against a
+-- database that has recorded legacy migration versions. Reset/recreate the
+-- target database and apply this baseline from zero.
+-- Source material: docs/11-data-model.md. This file is the canonical
+-- executable reset baseline; docs/canonical-greenfield-migration.sql is a
+-- non-executable historical pointer kept only for older docs/PR links.
 
 begin;
 
+do $$
+begin
+  if to_regclass('supabase_migrations.schema_migrations') is not null
+     and exists (select 1 from supabase_migrations.schema_migrations) then
+    raise exception
+      'clawtalk greenfield baseline requires an empty/reset Supabase database; found existing migration history'
+      using errcode = 'CT900';
+  end if;
+end;
+$$;
 
 -- =============================================================================
 -- STEP 1: Final-state runtime tables recreated directly (§11 §1 / §11 §11)
@@ -15,16 +30,34 @@ begin;
 create extension if not exists pgcrypto;
 create extension if not exists citext;
 
+create table public.web_search_providers (
+  id text primary key,
+  name text not null,
+  base_url text not null,
+  enabled boolean not null default true,
+  updated_at timestamptz not null default now()
+);
+
 create table public.users (
   id uuid primary key references auth.users(id) on delete cascade,
   email citext unique not null,
   name text not null,
   avatar_color text,
   initials text,
+  preferred_web_search_provider_id text references public.web_search_providers(id) on delete set null,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
 create index users_email_idx on public.users (email);
+
+create table public.web_search_provider_secrets (
+  owner_id uuid not null references public.users(id) on delete cascade,
+  provider_id text not null references public.web_search_providers(id) on delete cascade,
+  enc_key_version integer not null default 1,
+  ciphertext text not null,
+  updated_at timestamptz not null default now(),
+  primary key (owner_id, provider_id)
+);
 
 create or replace function public.handle_new_auth_user()
 returns trigger
@@ -149,25 +182,6 @@ create table public.llm_ttft_stats (
     references public.llm_provider_models(provider_id, model_id) on delete cascade
 );
 
-create table public.provider_oauth_states (
-  id uuid primary key default gen_random_uuid(),
-  provider_id text not null references public.llm_providers(id) on delete cascade,
-  scope text not null check (scope in ('user', 'workspace')),
-  flow_kind text not null check (flow_kind in ('pkce', 'device_code')),
-  state text not null,
-  user_id uuid not null references public.users(id) on delete cascade,
-  code_verifier text,
-  device_auth_id text,
-  user_code text,
-  return_path text,
-  expires_at timestamptz not null,
-  consumed_at timestamptz,
-  created_at timestamptz not null default now(),
-  unique (provider_id, state)
-);
-create index provider_oauth_states_user_idx on public.provider_oauth_states (user_id, created_at desc);
-create index provider_oauth_states_expires_idx on public.provider_oauth_states (provider_id, expires_at desc);
-
 insert into public.llm_providers (
   id, name, provider_kind, api_format, base_url, auth_scheme,
   enabled, response_start_timeout_ms, stream_idle_timeout_ms, absolute_timeout_ms
@@ -262,6 +276,21 @@ begin
 end;
 $$;
 
+create or replace function public.is_workspace_writer(ws uuid) returns boolean
+  language plpgsql stable security definer set search_path = public as $$
+declare
+  found_row boolean;
+begin
+  select exists (
+    select 1 from public.workspace_members
+    where workspace_id = ws
+      and user_id = auth.uid()
+      and role in ('owner','admin','member')
+  ) into found_row;
+  return found_row;
+end;
+$$;
+
 -- 3.3. doc_tabs last-tab guard (§11 §5)
 create or replace function public.doc_tabs_block_last_delete() returns trigger
   language plpgsql as $$
@@ -298,6 +327,10 @@ begin
           and status = 'pending'
           and ((new.after_block_id is null and after_block_id is null)
                or after_block_id = new.after_block_id)
+          and not (
+            new.proposed_by_run_id is not null
+            and proposed_by_run_id = new.proposed_by_run_id
+          )
           and id <> new.id;
     elsif new.op in ('replace','delete') then
       update public.doc_blocks
@@ -347,6 +380,19 @@ begin
 end;
 $$;
 
+create or replace function public.jobs_block_identity_change() returns trigger
+  language plpgsql as $$
+begin
+  if new.workspace_id is distinct from old.workspace_id
+     or new.talk_id is distinct from old.talk_id
+     or new.created_by is distinct from old.created_by then
+    raise exception 'job workspace_id, talk_id, and created_by are immutable'
+      using errcode = '42501';
+  end if;
+  return new;
+end;
+$$;
+
 -- =============================================================================
 -- STEP 4: Create greenfield tables in dependency order (§11 §1–§10)
 -- =============================================================================
@@ -373,6 +419,44 @@ create table public.workspace_members (
   created_at timestamptz not null default now(),
   primary key (workspace_id, user_id)
 );
+
+create table public.provider_oauth_states (
+  id uuid primary key default gen_random_uuid(),
+  provider_id text not null references public.llm_providers(id) on delete cascade,
+  scope text not null check (scope in ('user', 'workspace')),
+  flow_kind text not null check (flow_kind in ('pkce', 'device_code')),
+  state text not null,
+  user_id uuid not null references public.users(id) on delete cascade,
+  workspace_id uuid references public.workspaces(id) on delete cascade,
+  code_verifier text,
+  device_auth_id text,
+  user_code text,
+  return_path text,
+  expires_at timestamptz not null,
+  consumed_at timestamptz,
+  created_at timestamptz not null default now(),
+  unique (provider_id, state)
+);
+create index provider_oauth_states_user_idx on public.provider_oauth_states (user_id, created_at desc);
+create index provider_oauth_states_expires_idx on public.provider_oauth_states (provider_id, expires_at desc);
+
+create table public.oauth_state (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references public.users(id) on delete cascade,
+  workspace_id uuid not null references public.workspaces(id) on delete cascade,
+  provider text not null,
+  state_hash text not null unique,
+  nonce_hash text not null,
+  code_verifier_hash text not null,
+  code_verifier text,
+  redirect_uri text not null,
+  return_to text,
+  created_at timestamptz not null default now(),
+  expires_at timestamptz not null,
+  used_at timestamptz
+);
+create index oauth_state_expires_at_idx on public.oauth_state (expires_at);
+create index oauth_state_user_idx on public.oauth_state (user_id, created_at desc);
 
 create table public.user_tool_permissions (
   user_id uuid not null references public.users(id) on delete cascade,
@@ -479,6 +563,7 @@ create table public.agents (
   model_id text not null references public.llm_provider_models(model_id),
   default_model_id text not null references public.llm_provider_models(model_id),
   temperature numeric not null,
+  persona_role text,
   persona text,
   focus text,
   method text[] not null default '{}',
@@ -487,6 +572,9 @@ create table public.agents (
   is_custom boolean not null default false,
   is_system boolean not null default false,
   enabled boolean not null default true,
+  credential_mode text check (credential_mode in ('api_key','subscription')),
+  model_auto_upgraded_from text,
+  model_auto_upgraded_at timestamptz,
   created_from_template_version int,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
@@ -590,7 +678,6 @@ create table public.messages (
   agent_snapshot_id uuid,
   run_id uuid,                                                       -- back-edge; FK added later deferrable
   body text,
-  attachments_json jsonb not null default '[]',
   created_at timestamptz not null default now(),
   unique (workspace_id, id),
   unique (workspace_id, talk_id, id),
@@ -934,6 +1021,40 @@ create table public.connectors (
   unique (workspace_id, id),
   foreign key (workspace_id, secret_ref) references public.connector_secrets(workspace_id, id) on delete set null (secret_ref)
 );
+create unique index connectors_talk_resource_singleton_uniq
+  on public.connectors(workspace_id, service)
+  where config_json->>'compatSurface' = 'talk_resource';
+create unique index connectors_google_tools_user_uniq
+  on public.connectors(
+    workspace_id,
+    service,
+    (coalesce(config_json->>'authorizedByUserId', ''))
+  )
+  where config_json->>'compatSurface' = 'google_tools';
+create unique index connectors_slack_install_team_uniq
+  on public.connectors(
+    workspace_id,
+    service,
+    (coalesce(config_json->>'teamId', config_json->>'workspace_id'))
+  )
+  where service = 'slack' and config_json->>'compatSurface' = 'slack_install';
+create unique index connectors_slack_channel_target_uniq
+  on public.connectors(
+    workspace_id,
+    service,
+    (coalesce(config_json->>'teamId', config_json->>'workspace_id')),
+    (config_json->>'channel_id')
+  )
+  where service = 'slack'
+    and config_json->>'compatSurface' = 'channel'
+    and coalesce(config_json->>'teamId', config_json->>'workspace_id') is not null
+    and config_json->>'channel_id' is not null;
+-- OAuth-service singleton rows are only the final native connector shape.
+-- Compatibility data_connector/google_tools/talk_resource/slack_install rows
+-- carry explicit compatSurface values and are intentionally excluded.
+create unique index connectors_oauth_service_uniq
+  on public.connectors(workspace_id, service)
+  where config_json->>'compatSurface' is null;
 
 create table public.connector_bindings (
   id uuid primary key default gen_random_uuid(),
@@ -943,10 +1064,29 @@ create table public.connector_bindings (
   target text,
   scope text[] not null default '{}',
   enabled boolean not null default true,
-  unique (connector_id, talk_id),
+  display_name text,
+  meta_json jsonb not null default '{}',
+  created_by_user_id uuid not null references public.users(id) on delete restrict,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
   foreign key (workspace_id, connector_id) references public.connectors(workspace_id, id) on delete cascade,
   foreign key (workspace_id, talk_id) references public.talks(workspace_id, id) on delete cascade
 );
+create unique index connector_bindings_default_target_uniq
+  on public.connector_bindings(connector_id, talk_id)
+  where target is null;
+-- Upserts must name the matching partial-conflict target:
+--   ON CONFLICT (connector_id, talk_id) WHERE target IS NULL
+-- for default Talk links, and the full target tuple below for resource links.
+create unique index connector_bindings_target_uniq
+  on public.connector_bindings(
+    connector_id,
+    talk_id,
+    target,
+    created_by_user_id,
+    (coalesce(meta_json->>'resourceKind', ''))
+  )
+  where target is not null;
 
 -- ---------------------------------------------------------------------------
 -- §8 Jobs (before §7 home_inbox_items which references jobs)
@@ -1442,6 +1582,10 @@ create index on public.audit_events (workspace_id, entity_type, entity_id, creat
 
 create trigger touch_updated_at before update on public.users
   for each row execute function public.tg_touch_updated_at();
+create trigger touch_updated_at before update on public.web_search_providers
+  for each row execute function public.tg_touch_updated_at();
+create trigger touch_updated_at before update on public.web_search_provider_secrets
+  for each row execute function public.tg_touch_updated_at();
 create trigger touch_updated_at before update on public.workspaces
   for each row execute function public.tg_touch_updated_at();
 create trigger touch_updated_at before update on public.folders
@@ -1465,6 +1609,8 @@ create trigger touch_updated_at before update on public.context_sources
 create trigger touch_updated_at before update on public.connector_secrets
   for each row execute function public.tg_touch_updated_at();
 create trigger touch_updated_at before update on public.connectors
+  for each row execute function public.tg_touch_updated_at();
+create trigger touch_updated_at before update on public.connector_bindings
   for each row execute function public.tg_touch_updated_at();
 create trigger touch_updated_at before update on public.jobs
   for each row execute function public.tg_touch_updated_at();
@@ -1508,6 +1654,11 @@ create trigger jobs_require_agent_in_roster
   before insert or update of talk_id, agent_id on public.jobs
   for each row execute function public.jobs_require_agent_in_roster();
 
+-- Jobs cannot be moved between talks/workspaces or reassigned to another creator.
+create trigger jobs_block_identity_change
+  before update of workspace_id, talk_id, created_by on public.jobs
+  for each row execute function public.jobs_block_identity_change();
+
 
 -- =============================================================================
 -- STEP 6.5: Seed runtime catalogs (§11 §4 / docs/03-agents.md)
@@ -1516,6 +1667,16 @@ create trigger jobs_require_agent_in_roster
 -- The five user-facing prompts are copied from docs/03-agents.md. Model defaults
 -- are normalized to the live provider catalog seeded above so workspace bootstrap
 -- never points at retired or unseeded model ids.
+insert into public.web_search_providers (id, name, base_url) values
+  ('web_search.tavily', 'Tavily', 'https://api.tavily.com'),
+  ('web_search.brave', 'Brave Search', 'https://api.search.brave.com'),
+  ('web_search.firecrawl', 'Firecrawl', 'https://api.firecrawl.dev'),
+  ('web_search.exa', 'Exa', 'https://api.exa.ai')
+on conflict (id) do update set
+  name = excluded.name,
+  base_url = excluded.base_url,
+  updated_at = now();
+
 insert into public.agent_role_templates (
   role_key, default_name, default_handle, default_initials, default_accent,
   default_accent_dark, default_model_id, default_temperature, job,
@@ -1823,10 +1984,9 @@ do $$
 declare
   tbl text;
   member_write_tables text[] := array[
-    'folders','talks','talk_agents','talk_tools','talk_reads','messages',
-    'context_sources','context_source_pages','agents','agent_feedback_events',
-    'team_compositions','team_composition_agents','documents','doc_tabs','doc_blocks',
-    'document_edits','doc_tab_coeditors','jobs','improvement_runs','document_versions',
+    'folders','talks','talk_agents','talk_tools','talk_reads',
+    'agent_feedback_events',
+    'team_compositions','team_composition_agents','improvement_runs',
     'improvement_run_held_out_personas','forge_audiences','forge_audience_personas',
     'forge_personas','forge_reference_sets','forge_questions','home_inbox_items','home_recommendations',
     'home_recommendation_candidates','home_recommendation_events','home_news_topics','home_news_matches',
@@ -1837,10 +1997,37 @@ begin
     execute format('alter table public.%I enable row level security', tbl);
     execute format('create policy %I_read on public.%I for select using (public.is_workspace_member(workspace_id))', tbl, tbl);
     execute format(
-      'create policy %I_write on public.%I for all using (public.is_workspace_member(workspace_id)) with check (public.is_workspace_member(workspace_id))',
+      'create policy %I_write on public.%I for all using (public.is_workspace_writer(workspace_id)) with check (public.is_workspace_writer(workspace_id))',
       tbl, tbl);
   end loop;
 end $$;
+
+-- Server-authored workflow tables. Workspace members can read these through
+-- RLS, but all mutations must go through the Worker/API trusted-write path so
+-- direct Supabase clients cannot forge chat history, source ingestion state, or
+-- document content outside the validated route contracts.
+do $$
+declare
+  tbl text;
+  trusted_write_tables text[] := array[
+    'messages',
+    'context_sources','context_source_pages',
+    'documents','doc_tabs','doc_blocks','doc_tab_coeditors','document_versions'
+  ];
+begin
+  foreach tbl in array trusted_write_tables loop
+    execute format('alter table public.%I enable row level security', tbl);
+    execute format('create policy %I_read on public.%I for select using (public.is_workspace_member(workspace_id))', tbl, tbl);
+  end loop;
+end $$;
+
+alter table public.document_edits enable row level security;
+create policy document_edits_read on public.document_edits
+  for select using (public.is_workspace_member(workspace_id));
+
+alter table public.jobs enable row level security;
+create policy jobs_read on public.jobs
+  for select using (public.is_workspace_member(workspace_id));
 
 -- Runtime/snapshot tables are trusted execution inputs. Members can read them.
 -- Runtime row materialization and cancellation are service/trusted-app only so
@@ -1867,7 +2054,8 @@ do $$
 declare
   tbl text;
   admin_write_tables text[] := array[
-    'connectors','connector_bindings','connector_secrets','ssr_connections',
+    'agents',
+    'connector_bindings','ssr_connections',
     'home_optimization_proposals','home_algorithm_versions','home_algorithm_assignments',
     'home_ranking_profiles'
   ];
@@ -1888,6 +2076,41 @@ begin
     end if;
   end loop;
 end $$;
+
+alter table public.connectors enable row level security;
+create policy connectors_read on public.connectors
+  for select using (
+    public.is_workspace_member(workspace_id)
+    and (
+      config_json->>'compatSurface' is distinct from 'google_tools'
+      or config_json->>'authorizedByUserId' = auth.uid()::text
+    )
+  );
+create policy connectors_insert on public.connectors
+  for insert with check (
+    public.is_workspace_admin(workspace_id)
+    and config_json->>'compatSurface' is distinct from 'google_tools'
+  );
+create policy connectors_update on public.connectors
+  for update using (
+    public.is_workspace_admin(workspace_id)
+    and config_json->>'compatSurface' is distinct from 'google_tools'
+  )
+  with check (
+    public.is_workspace_admin(workspace_id)
+    and config_json->>'compatSurface' is distinct from 'google_tools'
+  );
+create policy connectors_delete on public.connectors
+  for delete using (
+    public.is_workspace_admin(workspace_id)
+    and config_json->>'compatSurface' is distinct from 'google_tools'
+  );
+
+alter table public.connector_secrets enable row level security;
+create policy connector_secrets_read on public.connector_secrets
+  for select using (false);
+create policy connector_secrets_write on public.connector_secrets
+  for all using (false) with check (false);
 
 -- Shared pool: home_news_items (no workspace_id)
 alter table public.home_news_items enable row level security;
@@ -1913,7 +2136,17 @@ create policy users_self_update on public.users
   with check (id = auth.uid());
 
 grant select on public.users to authenticated;
-grant update (name, avatar_color, initials, updated_at) on public.users to authenticated;
+grant update (name, avatar_color, initials, preferred_web_search_provider_id, updated_at) on public.users to authenticated;
+
+alter table public.web_search_providers enable row level security;
+create policy web_search_providers_read on public.web_search_providers
+  for select using (true);
+
+alter table public.web_search_provider_secrets enable row level security;
+create policy web_search_provider_secrets_owner on public.web_search_provider_secrets
+  for all to authenticated
+  using (owner_id = auth.uid())
+  with check (owner_id = auth.uid());
 
 alter table public.llm_provider_secrets enable row level security;
 create policy llm_provider_secrets_owner on public.llm_provider_secrets
@@ -1933,6 +2166,21 @@ create policy provider_oauth_states_owner on public.provider_oauth_states
   using (user_id = auth.uid())
   with check (user_id = auth.uid());
 
+alter table public.oauth_state enable row level security;
+create policy oauth_state_owner on public.oauth_state
+  for all to authenticated
+  using (
+    user_id = auth.uid()
+    and public.is_workspace_member(workspace_id)
+  )
+  with check (
+    user_id = auth.uid()
+    and (
+      (provider = 'slack_app_install' and public.is_workspace_admin(workspace_id))
+      or (provider <> 'slack_app_install' and public.is_workspace_member(workspace_id))
+    )
+  );
+
 alter table public.idempotency_cache enable row level security;
 create policy idempotency_cache_owner on public.idempotency_cache
   for all to authenticated
@@ -1940,13 +2188,9 @@ create policy idempotency_cache_owner on public.idempotency_cache
   with check (user_id = auth.uid());
 
 alter table public.workspace_provider_secrets enable row level security;
-create policy workspace_provider_secrets_read on public.workspace_provider_secrets
-  for select to authenticated
-  using (public.is_workspace_member(workspace_id));
-create policy workspace_provider_secrets_write on public.workspace_provider_secrets
-  for all to authenticated
-  using (public.is_workspace_admin(workspace_id))
-  with check (public.is_workspace_admin(workspace_id));
+-- Shared LLM ciphertext is server-only. Admins can create/update/delete
+-- credentials only through trusted server routes; authenticated browser sessions
+-- cannot read or mutate ciphertext directly through Supabase.
 
 alter table public.workspace_provider_verifications enable row level security;
 create policy workspace_provider_verifications_read on public.workspace_provider_verifications
@@ -1959,15 +2203,16 @@ create policy workspace_provider_verifications_write on public.workspace_provide
 
 grant select on public.llm_providers to authenticated;
 grant select on public.llm_provider_models to authenticated;
+grant select on public.web_search_providers to authenticated;
+grant select, insert, update, delete on public.web_search_provider_secrets to authenticated;
+grant select on public.settings_kv to authenticated;
 grant select on public.llm_ttft_stats to authenticated;
 grant select, insert, update, delete on public.llm_provider_secrets to authenticated;
 grant select, insert, update, delete on public.llm_provider_verifications to authenticated;
 grant select, insert, update, delete on public.provider_oauth_states to authenticated;
+grant select, insert, update, delete on public.oauth_state to authenticated;
 grant select, insert, update, delete on public.idempotency_cache to authenticated;
-grant select, insert, update, delete on public.workspace_provider_secrets to authenticated;
 grant select, insert, update, delete on public.workspace_provider_verifications to authenticated;
-grant select, insert, update, delete on public.settings_kv to authenticated;
-grant select, insert, update on public.llm_ttft_stats to authenticated;
 revoke all on function public.ensure_user_workspace_bootstrap(uuid) from public;
 grant execute on function public.ensure_user_workspace_bootstrap(uuid) to authenticated;
 
@@ -1979,9 +2224,8 @@ begin
 end
 $$;
 
-grant insert on public.event_outbox to authenticated;
-grant usage, select on sequence public.event_outbox_event_id_seq to authenticated;
-revoke select, update, delete on public.event_outbox from authenticated;
+revoke all on public.event_outbox from authenticated;
+revoke all on sequence public.event_outbox_event_id_seq from authenticated;
 grant select on public.event_outbox to clawtalk_event_hub;
 
 -- Supabase's authenticated role needs table privileges in addition to RLS policies.
@@ -1990,18 +2234,32 @@ grant select, insert, update, delete on all tables in schema public to authentic
 grant usage, select on all sequences in schema public to authenticated;
 
 -- Tighten service/system-owned tables after the broad grant above.
-revoke select, update, delete on public.event_outbox from authenticated;
-grant insert on public.event_outbox to authenticated;
+revoke all on public.event_outbox from authenticated;
+revoke all on sequence public.event_outbox_event_id_seq from authenticated;
+revoke all on public.workspace_provider_secrets from authenticated;
 revoke insert, update, delete on public.llm_providers from authenticated;
 revoke insert, update, delete on public.llm_provider_models from authenticated;
+revoke insert, update, delete on public.web_search_providers from authenticated;
 revoke insert, update, delete on public.home_news_items from authenticated;
 revoke insert, update, delete on public.agent_role_templates from authenticated;
 revoke insert, update, delete on public.home_algorithm_versions from authenticated;
+revoke insert, update, delete on public.messages from authenticated;
+revoke insert, update, delete on public.context_sources from authenticated;
+revoke insert, update, delete on public.context_source_pages from authenticated;
+revoke insert, update, delete on public.documents from authenticated;
+revoke insert, update, delete on public.doc_tabs from authenticated;
+revoke insert, update, delete on public.doc_blocks from authenticated;
+revoke insert, update, delete on public.doc_tab_coeditors from authenticated;
+revoke insert, update, delete on public.document_versions from authenticated;
+revoke insert, update, delete on public.document_edits from authenticated;
+revoke insert, update, delete on public.jobs from authenticated;
 revoke insert, update, delete on public.runs from authenticated;
 revoke insert, update, delete on public.talk_agent_snapshots from authenticated;
 revoke insert, update, delete on public.run_prompt_snapshots from authenticated;
 revoke insert, update, delete on public.audit_events from authenticated;
+revoke insert, update, delete on public.settings_kv from authenticated;
+revoke insert, update, delete on public.llm_ttft_stats from authenticated;
 revoke update on public.users from authenticated;
-grant update (name, avatar_color, initials, updated_at) on public.users to authenticated;
+grant update (name, avatar_color, initials, preferred_web_search_provider_id, updated_at) on public.users to authenticated;
 
 commit;

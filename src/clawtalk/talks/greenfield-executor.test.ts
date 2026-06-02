@@ -8,14 +8,24 @@ import {
   vi,
 } from 'vitest';
 
+const runWebSearchForUserMock = vi.hoisted(() => vi.fn());
+
 vi.mock('../agents/agent-router.js', () => ({
   executeWithResolvedAgent: vi.fn(),
 }));
 vi.mock('./attachment-storage.js', () => ({
   loadPageImage: vi.fn(),
 }));
+vi.mock('../web-search/registry.js', () => ({
+  runWebSearchForUser: runWebSearchForUserMock,
+}));
 
-import { closePgDatabase, getDbPg, initPgDatabase } from '../../db.js';
+import {
+  closePgDatabase,
+  getCurrentUserId,
+  getDbPg,
+  initPgDatabase,
+} from '../../db.js';
 import { executeWithResolvedAgent } from '../agents/agent-router.js';
 import type { LlmContentBlock } from '../agents/llm-client.js';
 import { ensureWorkspaceBootstrapForUser } from '../workspaces/bootstrap.js';
@@ -25,6 +35,15 @@ import {
   listDefaultTalkAgentIds,
 } from './greenfield-accessors.js';
 import { enqueueGreenfieldChatTurn } from './greenfield-chat-accessors.js';
+import {
+  createGreenfieldDocumentForTalk,
+  getGreenfieldDocumentForTalk,
+  replaceGreenfieldDocumentBlocks,
+} from './greenfield-detail-accessors.js';
+import {
+  createGreenfieldJob,
+  createGreenfieldJobRunNow,
+} from './greenfield-job-accessors.js';
 import { processTalkRunMessage } from './queue-consumer.js';
 
 const USER_ID = '0c787878-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
@@ -75,10 +94,48 @@ async function createTalkFixture(options?: {
   return { workspaceId, talkId: talk.id, agentIds };
 }
 
-function mockResolvedExecution(content: string): {
+async function seedWorkspaceProviderSecret(
+  workspaceId: string,
+  credentialKind: 'api_key' | 'subscription' = 'api_key',
+): Promise<void> {
+  const db = getDbPg();
+  await db`
+    insert into public.workspace_provider_secrets (
+      workspace_id, provider_id, credential_kind, ciphertext, updated_by
+    )
+    values (
+      ${workspaceId}::uuid, 'provider.anthropic', ${credentialKind},
+      'greenfield-executor-test-secret', ${USER_ID}::uuid
+    )
+    on conflict (workspace_id, provider_id, credential_kind) do update set
+      ciphertext = excluded.ciphertext,
+      updated_by = excluded.updated_by,
+      updated_at = now()
+  `;
+}
+
+function mockResolvedExecution(
+  content: string,
+  mockOptions?: {
+    onExecute?: (
+      executeToolCall: NonNullable<
+        Parameters<typeof executeWithResolvedAgent>[3]['executeToolCall']
+      >,
+    ) => Promise<void>;
+  },
+): {
   calls: Array<{
-    agent: { id: string; system_prompt: string | null; model_id: string };
-    context: { systemPrompt: string };
+    agent: {
+      id: string;
+      system_prompt: string | null;
+      model_id: string;
+      credential_mode: 'api_key' | 'subscription' | null;
+    };
+    context: {
+      systemPrompt: string;
+      contextToolNames: string[];
+      connectorToolNames: string[];
+    };
     userMessage: string | LlmContentBlock[];
     effectiveTools: Array<{
       toolFamily: string;
@@ -86,6 +143,9 @@ function mockResolvedExecution(content: string): {
       runtimeTools: string[];
       requiresApproval: boolean;
     }>;
+    hasExecuteToolCall: boolean;
+    forceToolUseOnFirstIteration: boolean | undefined;
+    credentialKindSnapshot: 'api_key' | 'subscription' | null | undefined;
     credentialScope:
       | { principalUserId?: string | null; workspaceId?: string | null }
       | null
@@ -100,14 +160,25 @@ function mockResolvedExecution(content: string): {
           id: agent.id,
           system_prompt: agent.system_prompt,
           model_id: agent.model_id,
+          credential_mode: agent.credential_mode,
         },
         context: {
           systemPrompt: context?.systemPrompt ?? '',
+          contextToolNames:
+            context?.contextTools.map((tool) => tool.name) ?? [],
+          connectorToolNames:
+            context?.connectorTools.map((tool) => tool.name) ?? [],
         },
         userMessage,
         effectiveTools: options.effectiveTools ?? [],
+        hasExecuteToolCall: typeof options.executeToolCall === 'function',
+        forceToolUseOnFirstIteration: options.forceToolUseOnFirstIteration,
+        credentialKindSnapshot: options.credentialKindSnapshot,
         credentialScope: options.credentialScope,
       });
+      if (options.executeToolCall && mockOptions?.onExecute) {
+        await mockOptions.onExecute(options.executeToolCall);
+      }
       options.emit?.({
         type: 'started',
         runId: options.runId,
@@ -142,6 +213,7 @@ describe('GreenfieldTalkExecutor queue integration', () => {
   beforeEach(async () => {
     vi.mocked(executeWithResolvedAgent).mockReset();
     vi.mocked(loadPageImage).mockReset();
+    runWebSearchForUserMock.mockReset();
     await deleteUser();
     await seedAuthUser();
   });
@@ -410,6 +482,8 @@ describe('GreenfieldTalkExecutor queue integration', () => {
     });
 
     expect(calls).toHaveLength(1);
+    expect(calls[0]!.hasExecuteToolCall).toBe(true);
+    expect(calls[0]!.context.contextToolNames).toContain('web_search');
     expect(calls[0]!.effectiveTools).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
@@ -470,6 +544,90 @@ describe('GreenfieldTalkExecutor queue integration', () => {
     );
   });
 
+  it('executes web_search inside the requester user context', async () => {
+    const { workspaceId, talkId, agentIds } = await createTalkFixture();
+    const db = getDbPg();
+    await db`
+      insert into public.talk_tools (workspace_id, talk_id, tool_id, enabled)
+      values (${workspaceId}::uuid, ${talkId}::uuid, 'web-search', true)
+    `;
+    runWebSearchForUserMock.mockImplementation(async (query: string) => {
+      expect(getCurrentUserId()).toBe(USER_ID);
+      return {
+        query,
+        providerId: 'web_search.tavily',
+        results: [],
+      };
+    });
+
+    const enqueued = await enqueueGreenfieldChatTurn({
+      workspaceId,
+      talkId,
+      userId: USER_ID,
+      content: 'Use web search.',
+      targetAgentIds: agentIds,
+    });
+    if (!enqueued.ok) throw new Error(`enqueue failed: ${enqueued.reason}`);
+
+    mockResolvedExecution('Search answer', {
+      onExecute: async (executeToolCall) => {
+        const result = await executeToolCall('web_search', {
+          query: 'current clawtalk status',
+        });
+        expect(result).toEqual({
+          result: JSON.stringify({
+            provider: 'web_search.tavily',
+            query: 'current clawtalk status',
+            results: [],
+            note: 'No results returned by the provider.',
+          }),
+        });
+      },
+    });
+    await processTalkRunMessage({
+      runId: enqueued.runs[0]!.id,
+      dispatch: async () => {},
+      cancelPollIntervalMs: 10_000,
+    });
+
+    expect(runWebSearchForUserMock).toHaveBeenCalledWith(
+      'current clawtalk status',
+      { maxResults: undefined, signal: expect.any(AbortSignal) },
+    );
+  });
+
+  it('rejects deferred read_attachment tool calls before legacy execution', async () => {
+    const { workspaceId, talkId, agentIds } = await createTalkFixture();
+    const enqueued = await enqueueGreenfieldChatTurn({
+      workspaceId,
+      talkId,
+      userId: USER_ID,
+      content: 'Try to read an attachment.',
+      targetAgentIds: agentIds,
+    });
+    if (!enqueued.ok) throw new Error(`enqueue failed: ${enqueued.reason}`);
+
+    const { calls } = mockResolvedExecution('Attachment unavailable', {
+      onExecute: async (executeToolCall) => {
+        const result = await executeToolCall('read_attachment', {
+          attachmentId: '00000000-0000-4000-8000-000000000aaa',
+        });
+        expect(result).toEqual({
+          isError: true,
+          result:
+            'Error: attachments_not_available: Message attachments are not available on the greenfield chat route yet.',
+        });
+      },
+    });
+    await processTalkRunMessage({
+      runId: enqueued.runs[0]!.id,
+      dispatch: async () => {},
+      cancelPollIntervalMs: 10_000,
+    });
+
+    expect(calls).toHaveLength(1);
+  });
+
   it('does not over-grant tools when only the family-level active manifest is present', async () => {
     const { workspaceId, talkId, agentIds } = await createTalkFixture();
     const db = getDbPg();
@@ -518,6 +676,791 @@ describe('GreenfieldTalkExecutor queue integration', () => {
         }),
       ]),
     );
+  });
+
+  it('rejects Google tool calls when the frozen effective tool snapshot does not enable Google', async () => {
+    const { workspaceId, talkId, agentIds } = await createTalkFixture();
+    const db = getDbPg();
+    const enqueued = await enqueueGreenfieldChatTurn({
+      workspaceId,
+      talkId,
+      userId: USER_ID,
+      content: 'Do not use Google tools.',
+      targetAgentIds: agentIds,
+    });
+    if (!enqueued.ok) throw new Error(`enqueue failed: ${enqueued.reason}`);
+
+    await db`
+      update public.run_prompt_snapshots rps
+      set tool_manifest_json = jsonb_build_object(
+        'active',
+        jsonb_build_object('google_read', false, 'google_write', false),
+        'effectiveTools',
+        jsonb_build_array(
+          jsonb_build_object(
+            'toolFamily', 'google_read',
+            'enabled', false,
+            'runtimeTools', jsonb_build_array(),
+            'requiresApproval', false
+          ),
+          jsonb_build_object(
+            'toolFamily', 'google_write',
+            'enabled', false,
+            'runtimeTools', jsonb_build_array(),
+            'requiresApproval', false
+          )
+        )
+      )
+      from public.runs r
+      where r.workspace_id = rps.workspace_id
+        and r.prompt_snapshot_id = rps.id
+        and r.id = ${enqueued.runs[0]!.id}::uuid
+    `;
+
+    const { calls } = mockResolvedExecution('Google calls rejected', {
+      onExecute: async (executeToolCall) => {
+        const readResult = await executeToolCall('google_drive_search', {
+          query: 'private docs',
+        });
+        const writeResult = await executeToolCall('google_docs_create', {
+          title: 'Unauthorized doc',
+        });
+        expect(readResult).toMatchObject({
+          isError: true,
+          result:
+            "Tool 'google_drive_search' is not available in greenfield execution",
+        });
+        expect(writeResult).toMatchObject({
+          isError: true,
+          result:
+            "Tool 'google_docs_create' is not available in greenfield execution",
+        });
+      },
+    });
+    await processTalkRunMessage({
+      runId: enqueued.runs[0]!.id,
+      dispatch: async () => {},
+      cancelPollIntervalMs: 10_000,
+    });
+
+    expect(calls).toHaveLength(1);
+  });
+
+  it('freezes the agent credential mode into the run snapshot', async () => {
+    const { workspaceId, talkId, agentIds } = await createTalkFixture();
+    const db = getDbPg();
+    await seedWorkspaceProviderSecret(workspaceId, 'subscription');
+    await db`
+      update public.agents
+      set credential_mode = 'subscription'
+      where workspace_id = ${workspaceId}::uuid
+        and id = ${agentIds[0]}::uuid
+    `;
+
+    const enqueued = await enqueueGreenfieldChatTurn({
+      workspaceId,
+      talkId,
+      userId: USER_ID,
+      content: 'Use the pinned credential path.',
+      targetAgentIds: agentIds,
+    });
+    if (!enqueued.ok) throw new Error(`enqueue failed: ${enqueued.reason}`);
+
+    await db`
+      update public.agents
+      set credential_mode = 'api_key'
+      where workspace_id = ${workspaceId}::uuid
+        and id = ${agentIds[0]}::uuid
+    `;
+
+    const { calls } = mockResolvedExecution('Pinned credential answer');
+    await processTalkRunMessage({
+      runId: enqueued.runs[0]!.id,
+      dispatch: async () => {},
+      cancelPollIntervalMs: 10_000,
+    });
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.agent.credential_mode).toBe('subscription');
+    expect(calls[0]!.credentialKindSnapshot).toBe('subscription');
+
+    const snapshots = await db<Array<{ agent_credential_mode: string | null }>>`
+      select rps.tool_manifest_json->>'agentCredentialMode' as agent_credential_mode
+      from public.runs r
+      join public.run_prompt_snapshots rps
+        on rps.workspace_id = r.workspace_id
+       and rps.id = r.prompt_snapshot_id
+      where r.id = ${enqueued.runs[0]!.id}::uuid
+    `;
+    expect(snapshots[0]?.agent_credential_mode).toBe('subscription');
+  });
+
+  it('freezes the resolved workspace credential kind for unpinned greenfield runs', async () => {
+    const { workspaceId, talkId, agentIds } = await createTalkFixture();
+    const db = getDbPg();
+    await seedWorkspaceProviderSecret(workspaceId, 'api_key');
+    await db`
+      update public.agents
+      set credential_mode = null
+      where workspace_id = ${workspaceId}::uuid
+        and id = ${agentIds[0]}::uuid
+    `;
+
+    const enqueued = await enqueueGreenfieldChatTurn({
+      workspaceId,
+      talkId,
+      userId: USER_ID,
+      content: 'Use the workspace credential path.',
+      targetAgentIds: agentIds,
+    });
+    if (!enqueued.ok) throw new Error(`enqueue failed: ${enqueued.reason}`);
+
+    await db`
+      update public.agents
+      set credential_mode = 'subscription'
+      where workspace_id = ${workspaceId}::uuid
+        and id = ${agentIds[0]}::uuid
+    `;
+
+    const { calls } = mockResolvedExecution('Workspace credential answer');
+    await processTalkRunMessage({
+      runId: enqueued.runs[0]!.id,
+      dispatch: async () => {},
+      cancelPollIntervalMs: 10_000,
+    });
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.agent.credential_mode).toBe('api_key');
+    expect(calls[0]!.credentialKindSnapshot).toBe('api_key');
+
+    const snapshots = await db<Array<{ agent_credential_mode: string | null }>>`
+      select rps.tool_manifest_json->>'agentCredentialMode' as agent_credential_mode
+      from public.runs r
+      join public.run_prompt_snapshots rps
+        on rps.workspace_id = r.workspace_id
+       and rps.id = r.prompt_snapshot_id
+      where r.id = ${enqueued.runs[0]!.id}::uuid
+    `;
+    expect(snapshots[0]?.agent_credential_mode).toBe('api_key');
+  });
+
+  it('freezes the resolved workspace credential kind for manual job runs', async () => {
+    const { workspaceId, talkId, agentIds } = await createTalkFixture();
+    const db = getDbPg();
+    await seedWorkspaceProviderSecret(workspaceId, 'api_key');
+    await db`
+      update public.agents
+      set credential_mode = null
+      where workspace_id = ${workspaceId}::uuid
+        and id = ${agentIds[0]}::uuid
+    `;
+    const job = await createGreenfieldJob({
+      workspaceId,
+      talkId,
+      title: 'Credential Snapshot Job',
+      prompt: 'Use the workspace credential path.',
+      agentId: agentIds[0]!,
+      schedule: { kind: 'interval', everyHours: 1 },
+      timezone: 'UTC',
+      sourceScope: { allowWeb: false, toolIds: [] },
+      createdBy: USER_ID,
+    });
+
+    const runNow = await createGreenfieldJobRunNow({
+      workspaceId,
+      talkId,
+      jobId: job.id,
+      requestedBy: USER_ID,
+    });
+    if (runNow.status !== 'enqueued') {
+      throw new Error(`Expected job run to enqueue, got ${runNow.status}`);
+    }
+    await db`
+      update public.agents
+      set credential_mode = 'subscription'
+      where workspace_id = ${workspaceId}::uuid
+        and id = ${agentIds[0]}::uuid
+    `;
+
+    const { calls } = mockResolvedExecution('Manual job credential answer');
+    await processTalkRunMessage({
+      runId: runNow.runId,
+      dispatch: async () => {},
+      cancelPollIntervalMs: 10_000,
+    });
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.agent.credential_mode).toBe('api_key');
+    expect(calls[0]!.credentialKindSnapshot).toBe('api_key');
+
+    const snapshots = await db<Array<{ agent_credential_mode: string | null }>>`
+      select rps.tool_manifest_json->>'agentCredentialMode' as agent_credential_mode
+      from public.run_prompt_snapshots rps
+      where rps.workspace_id = ${workspaceId}::uuid
+        and rps.run_id = ${runNow.runId}::uuid
+    `;
+    expect(snapshots[0]?.agent_credential_mode).toBe('api_key');
+  });
+
+  it('advertises and executes only exact frozen runtime tools for greenfield runs', async () => {
+    const { workspaceId, talkId, agentIds } = await createTalkFixture();
+    const db = getDbPg();
+    const enqueued = await enqueueGreenfieldChatTurn({
+      workspaceId,
+      talkId,
+      userId: USER_ID,
+      content: 'Use tools.',
+      targetAgentIds: agentIds,
+    });
+    if (!enqueued.ok) throw new Error(`enqueue failed: ${enqueued.reason}`);
+
+    await db`
+      update public.run_prompt_snapshots rps
+      set tool_manifest_json = jsonb_build_object(
+        'active',
+        jsonb_build_object(
+          'web', true,
+          'google_read', true,
+          'google_write', true
+        ),
+        'effectiveTools',
+        jsonb_build_array(
+          jsonb_build_object(
+            'toolFamily', 'web',
+            'enabled', true,
+            'runtimeTools', jsonb_build_array('web_search'),
+            'requiresApproval', false
+          ),
+          jsonb_build_object(
+            'toolFamily', 'google_read',
+            'enabled', true,
+            'runtimeTools', jsonb_build_array('google_drive_search'),
+            'requiresApproval', false
+          ),
+          jsonb_build_object(
+            'toolFamily', 'google_write',
+            'enabled', true,
+            'runtimeTools', jsonb_build_array('google_docs_create'),
+            'requiresApproval', false
+          )
+        )
+      )
+      from public.runs r
+      where r.workspace_id = rps.workspace_id
+        and r.prompt_snapshot_id = rps.id
+        and r.id = ${enqueued.runs[0]!.id}::uuid
+    `;
+
+    const { calls } = mockResolvedExecution('Tool-enabled answer', {
+      onExecute: async (executeToolCall) => {
+        await expect(
+          executeToolCall('web_fetch', { url: 'https://example.com' }),
+        ).resolves.toMatchObject({
+          isError: true,
+          result: "Tool 'web_fetch' is not available in greenfield execution",
+        });
+        await expect(
+          executeToolCall('google_drive_read', { fileId: 'file_1' }),
+        ).resolves.toMatchObject({
+          isError: true,
+          result:
+            "Tool 'google_drive_read' is not available in greenfield execution",
+        });
+        await expect(
+          executeToolCall('google_docs_batch_update', {
+            documentId: 'doc_1',
+            requests: [],
+          }),
+        ).resolves.toMatchObject({
+          isError: true,
+          result:
+            "Tool 'google_docs_batch_update' is not available in greenfield execution",
+        });
+      },
+    });
+    await processTalkRunMessage({
+      runId: enqueued.runs[0]!.id,
+      dispatch: async () => {},
+      cancelPollIntervalMs: 10_000,
+    });
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.hasExecuteToolCall).toBe(true);
+    expect(calls[0]!.context.contextToolNames).toEqual([
+      'read_source',
+      'list_state',
+      'read_state',
+      'web_search',
+      'google_drive_search',
+      'google_docs_create',
+    ]);
+    expect(calls[0]!.context.connectorToolNames).toEqual([]);
+  });
+
+  it('registers greenfield document edit tools and aborts edit-intent runs without an apply call', async () => {
+    const { workspaceId, talkId, agentIds } = await createTalkFixture();
+    const createdDocument = await createGreenfieldDocumentForTalk({
+      workspaceId,
+      talkId,
+      title: 'Launch Draft',
+      format: 'markdown',
+    });
+    await replaceGreenfieldDocumentBlocks({
+      workspaceId,
+      documentId: createdDocument.id,
+      tabId: createdDocument.tab_id,
+      blocks: [{ kind: 'p', text: 'Old intro paragraph.' }],
+    });
+
+    const enqueued = await enqueueGreenfieldChatTurn({
+      workspaceId,
+      talkId,
+      userId: USER_ID,
+      content: '@doc rewrite the intro.',
+      targetAgentIds: agentIds,
+    });
+    if (!enqueued.ok) throw new Error(`enqueue failed: ${enqueued.reason}`);
+
+    const { calls } = mockResolvedExecution('I will update it.');
+    await processTalkRunMessage({
+      runId: enqueued.runs[0]!.id,
+      dispatch: async () => {},
+      cancelPollIntervalMs: 10_000,
+    });
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.forceToolUseOnFirstIteration).toBe(true);
+    expect(calls[0]!.context.contextToolNames).toContain('apply_content_edit');
+    expect(calls[0]!.context.contextToolNames).toContain('read_source');
+    expect(calls[0]!.context.contextToolNames).toContain('read_state');
+    expect(calls[0]!.context.systemPrompt).toContain('The Doc');
+    expect(calls[0]!.context.systemPrompt).toContain('Old intro paragraph.');
+
+    const db = getDbPg();
+    const events = await db<{ event_type: string }[]>`
+      select event_type
+      from public.event_outbox
+      where topic = ${`talk:${talkId}`}
+        and event_type like 'content_edit_%'
+      order by event_id asc
+    `;
+    expect(events.map((event) => event.event_type)).toEqual([
+      'content_edit_run_started',
+      'content_edit_run_aborted',
+    ]);
+  });
+
+  it('creates pending greenfield document edits through apply_content_edit', async () => {
+    const { workspaceId, talkId, agentIds } = await createTalkFixture();
+    const createdDocument = await createGreenfieldDocumentForTalk({
+      workspaceId,
+      talkId,
+      title: 'Launch Draft',
+      format: 'markdown',
+    });
+    await replaceGreenfieldDocumentBlocks({
+      workspaceId,
+      documentId: createdDocument.id,
+      tabId: createdDocument.tab_id,
+      blocks: [{ kind: 'p', text: 'Old intro paragraph.' }],
+    });
+    const document = await getGreenfieldDocumentForTalk({
+      workspaceId,
+      talkId,
+    });
+    const block = document?.blocks[0];
+    if (!document || !block) throw new Error('Document fixture did not load');
+
+    const enqueued = await enqueueGreenfieldChatTurn({
+      workspaceId,
+      talkId,
+      userId: USER_ID,
+      content: '@doc replace the first paragraph.',
+      targetAgentIds: agentIds,
+    });
+    if (!enqueued.ok) throw new Error(`enqueue failed: ${enqueued.reason}`);
+
+    const { calls } = mockResolvedExecution('Updated.', {
+      onExecute: async (executeToolCall) => {
+        const result = await executeToolCall('apply_content_edit', {
+          kind: 'replace',
+          anchor: block.id,
+          markdown: 'Updated intro paragraph.',
+          rationale: 'Refresh the opening.',
+        });
+        expect(result.isError).not.toBe(true);
+        expect(JSON.parse(result.result).editIds).toHaveLength(1);
+      },
+    });
+    await processTalkRunMessage({
+      runId: enqueued.runs[0]!.id,
+      dispatch: async () => {},
+      cancelPollIntervalMs: 10_000,
+    });
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.forceToolUseOnFirstIteration).toBe(true);
+
+    const db = getDbPg();
+    const edits = await db<
+      Array<{
+        op: string;
+        block_id: string | null;
+        base_block_version: number | null;
+        new_kind: string | null;
+        new_text: string | null;
+        proposed_by_run_id: string | null;
+      }>
+    >`
+      select op, block_id, base_block_version, new_kind, new_text,
+             proposed_by_run_id
+      from public.document_edits
+      where workspace_id = ${workspaceId}::uuid
+        and document_id = ${document.id}::uuid
+        and status = 'pending'
+    `;
+    expect(edits).toEqual([
+      {
+        op: 'replace',
+        block_id: block.id,
+        base_block_version: block.version,
+        new_kind: 'p',
+        new_text: 'Updated intro paragraph.',
+        proposed_by_run_id: enqueued.runs[0]!.id,
+      },
+    ]);
+
+    const events = await db<{ event_type: string }[]>`
+      select event_type
+      from public.event_outbox
+      where topic = ${`talk:${talkId}`}
+        and event_type like 'content_edit_%'
+      order by event_id asc
+    `;
+    expect(events.map((event) => event.event_type)).toEqual([
+      'content_edit_run_started',
+      'content_edit_applied',
+    ]);
+  });
+
+  it('does not advertise or execute document edits when the frozen runtime tool is missing', async () => {
+    const { workspaceId, talkId, agentIds } = await createTalkFixture();
+    const createdDocument = await createGreenfieldDocumentForTalk({
+      workspaceId,
+      talkId,
+      title: 'Launch Draft',
+      format: 'markdown',
+    });
+    await replaceGreenfieldDocumentBlocks({
+      workspaceId,
+      documentId: createdDocument.id,
+      tabId: createdDocument.tab_id,
+      blocks: [{ kind: 'p', text: 'Old intro paragraph.' }],
+    });
+    const document = await getGreenfieldDocumentForTalk({
+      workspaceId,
+      talkId,
+    });
+    const block = document?.blocks[0];
+    if (!document || !block) throw new Error('Document fixture did not load');
+
+    const enqueued = await enqueueGreenfieldChatTurn({
+      workspaceId,
+      talkId,
+      userId: USER_ID,
+      content: '@doc replace the first paragraph.',
+      targetAgentIds: agentIds,
+    });
+    if (!enqueued.ok) throw new Error(`enqueue failed: ${enqueued.reason}`);
+
+    const db = getDbPg();
+    await db`
+      update public.run_prompt_snapshots rps
+      set tool_manifest_json = jsonb_set(
+        rps.tool_manifest_json,
+        '{effectiveTools}',
+        (
+          select coalesce(jsonb_agg(tool), '[]'::jsonb)
+          from jsonb_array_elements(rps.tool_manifest_json->'effectiveTools') as tool
+          where tool->>'toolFamily' <> 'document_edit'
+        )
+      )
+      from public.runs r
+      where r.workspace_id = rps.workspace_id
+        and r.prompt_snapshot_id = rps.id
+        and r.id = ${enqueued.runs[0]!.id}::uuid
+    `;
+
+    const { calls } = mockResolvedExecution('Not edited.', {
+      onExecute: async (executeToolCall) => {
+        const result = await executeToolCall('apply_content_edit', {
+          kind: 'replace',
+          anchor: block.id,
+          markdown: 'Unauthorized edit.',
+        });
+        expect(result).toMatchObject({
+          isError: true,
+          result: 'Error: apply_content_edit is not enabled for this agent',
+        });
+      },
+    });
+    await processTalkRunMessage({
+      runId: enqueued.runs[0]!.id,
+      dispatch: async () => {},
+      cancelPollIntervalMs: 10_000,
+    });
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.forceToolUseOnFirstIteration).toBe(false);
+    expect(calls[0]!.context.contextToolNames).not.toContain(
+      'apply_content_edit',
+    );
+
+    const edits = await db<Array<{ count: number }>>`
+      select count(*)::int as count
+      from public.document_edits
+      where workspace_id = ${workspaceId}::uuid
+        and document_id = ${document.id}::uuid
+    `;
+    expect(edits[0]?.count).toBe(0);
+  });
+
+  it('collapses multi-block document append proposals into one pending insert', async () => {
+    const { workspaceId, talkId, agentIds } = await createTalkFixture();
+    const createdDocument = await createGreenfieldDocumentForTalk({
+      workspaceId,
+      talkId,
+      title: 'Launch Draft',
+      format: 'markdown',
+    });
+    await replaceGreenfieldDocumentBlocks({
+      workspaceId,
+      documentId: createdDocument.id,
+      tabId: createdDocument.tab_id,
+      blocks: [{ kind: 'p', text: 'Anchor paragraph.' }],
+    });
+    const document = await getGreenfieldDocumentForTalk({
+      workspaceId,
+      talkId,
+    });
+    const block = document?.blocks[0];
+    if (!document || !block) throw new Error('Document fixture did not load');
+
+    const enqueued = await enqueueGreenfieldChatTurn({
+      workspaceId,
+      talkId,
+      userId: USER_ID,
+      content: '@doc add two follow-up paragraphs.',
+      targetAgentIds: agentIds,
+    });
+    if (!enqueued.ok) throw new Error(`enqueue failed: ${enqueued.reason}`);
+
+    mockResolvedExecution('Added.', {
+      onExecute: async (executeToolCall) => {
+        const result = await executeToolCall('apply_content_edit', {
+          kind: 'append',
+          anchor: block.id,
+          markdown: 'First follow-up.\n\nSecond follow-up.',
+        });
+        expect(result.isError).not.toBe(true);
+        expect(JSON.parse(result.result).editIds).toHaveLength(1);
+      },
+    });
+    await processTalkRunMessage({
+      runId: enqueued.runs[0]!.id,
+      dispatch: async () => {},
+      cancelPollIntervalMs: 10_000,
+    });
+
+    const db = getDbPg();
+    const edits = await db<
+      Array<{
+        op: string;
+        after_block_id: string | null;
+        base_list_version: number | null;
+        new_kind: string | null;
+        new_text: string | null;
+      }>
+    >`
+      select op, after_block_id, base_list_version, new_kind, new_text
+      from public.document_edits
+      where workspace_id = ${workspaceId}::uuid
+        and document_id = ${document.id}::uuid
+        and status = 'pending'
+    `;
+    expect(edits).toEqual([
+      {
+        op: 'insert',
+        after_block_id: block.id,
+        base_list_version: document.list_version,
+        new_kind: 'p',
+        new_text: 'First follow-up.\n\nSecond follow-up.',
+      },
+    ]);
+  });
+
+  it('rejects bulk document edits until grouped acceptance is implemented', async () => {
+    const { workspaceId, talkId, agentIds } = await createTalkFixture();
+    const createdDocument = await createGreenfieldDocumentForTalk({
+      workspaceId,
+      talkId,
+      title: 'Launch Draft',
+      format: 'markdown',
+    });
+    await replaceGreenfieldDocumentBlocks({
+      workspaceId,
+      documentId: createdDocument.id,
+      tabId: createdDocument.tab_id,
+      blocks: [
+        { kind: 'p', text: 'First paragraph.' },
+        { kind: 'p', text: 'Second paragraph.' },
+      ],
+    });
+    const document = await getGreenfieldDocumentForTalk({
+      workspaceId,
+      talkId,
+    });
+    if (!document) throw new Error('Document fixture did not load');
+
+    const enqueued = await enqueueGreenfieldChatTurn({
+      workspaceId,
+      talkId,
+      userId: USER_ID,
+      content: '@doc rewrite the whole document.',
+      targetAgentIds: agentIds,
+    });
+    if (!enqueued.ok) throw new Error(`enqueue failed: ${enqueued.reason}`);
+
+    mockResolvedExecution('Could not bulk replace.', {
+      onExecute: async (executeToolCall) => {
+        const result = await executeToolCall('apply_content_edit', {
+          kind: 'bulk',
+          markdown: 'Replacement body.',
+        });
+        expect(result).toMatchObject({
+          isError: true,
+          result:
+            "Error: `kind` must be one of 'append', 'replace', or 'delete'.",
+        });
+      },
+    });
+    await processTalkRunMessage({
+      runId: enqueued.runs[0]!.id,
+      dispatch: async () => {},
+      cancelPollIntervalMs: 10_000,
+    });
+
+    const db = getDbPg();
+    const editRows = await db<Array<{ count: number }>>`
+      select count(*)::int as count
+      from public.document_edits
+      where workspace_id = ${workspaceId}::uuid
+        and document_id = ${document.id}::uuid
+    `;
+    expect(editRows[0]?.count).toBe(0);
+    const events = await db<{ event_type: string }[]>`
+      select event_type
+      from public.event_outbox
+      where topic = ${`talk:${talkId}`}
+        and event_type like 'content_edit_%'
+      order by event_id asc
+    `;
+    expect(events.map((event) => event.event_type)).toEqual([
+      'content_edit_run_started',
+      'content_edit_run_aborted',
+    ]);
+  });
+
+  it('does not expose document edit tools to job runs with attached documents', async () => {
+    const { workspaceId, talkId, agentIds } = await createTalkFixture();
+    const createdDocument = await createGreenfieldDocumentForTalk({
+      workspaceId,
+      talkId,
+      title: 'Launch Draft',
+      format: 'markdown',
+    });
+    await replaceGreenfieldDocumentBlocks({
+      workspaceId,
+      documentId: createdDocument.id,
+      tabId: createdDocument.tab_id,
+      blocks: [{ kind: 'p', text: 'Old intro paragraph.' }],
+    });
+    const document = await getGreenfieldDocumentForTalk({
+      workspaceId,
+      talkId,
+    });
+    const block = document?.blocks[0];
+    if (!document || !block) throw new Error('Document fixture did not load');
+
+    const job = await createGreenfieldJob({
+      workspaceId,
+      talkId,
+      title: 'Doc-safe job',
+      prompt: '@doc replace the first paragraph.',
+      agentId: agentIds[0]!,
+      schedule: { kind: 'interval', everyHours: 1 },
+      timezone: 'UTC',
+      sourceScope: { allowWeb: false, toolIds: [] },
+      createdBy: USER_ID,
+    });
+    const runNow = await createGreenfieldJobRunNow({
+      workspaceId,
+      talkId,
+      jobId: job.id,
+      requestedBy: USER_ID,
+    });
+    if (runNow.status !== 'enqueued') {
+      throw new Error(`Expected job run to enqueue, got ${runNow.status}`);
+    }
+
+    const { calls } = mockResolvedExecution('Job answer', {
+      onExecute: async (executeToolCall) => {
+        const result = await executeToolCall('apply_content_edit', {
+          kind: 'replace',
+          anchor: block.id,
+          markdown: 'Unauthorized job edit.',
+          rationale: 'Jobs are read-only.',
+        });
+        expect(result).toMatchObject({
+          isError: true,
+          result:
+            'Error: apply_content_edit is not available for scheduled job runs',
+        });
+      },
+    });
+    await processTalkRunMessage({
+      runId: runNow.runId,
+      dispatch: async () => {},
+      cancelPollIntervalMs: 10_000,
+    });
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.forceToolUseOnFirstIteration).toBe(false);
+    expect(calls[0]!.context.contextToolNames).not.toContain(
+      'apply_content_edit',
+    );
+    expect(calls[0]!.context.systemPrompt).toContain(
+      'scheduled jobs cannot edit the Talk document',
+    );
+    expect(calls[0]!.context.systemPrompt).not.toContain('apply_content_edit');
+
+    const db = getDbPg();
+    const edits = await db<Array<{ count: number }>>`
+      select count(*)::int as count
+      from public.document_edits
+      where workspace_id = ${workspaceId}::uuid
+        and document_id = ${document.id}::uuid
+    `;
+    expect(edits[0]?.count).toBe(0);
+
+    const events = await db<{ event_type: string }[]>`
+      select event_type
+      from public.event_outbox
+      where topic = ${`talk:${talkId}`}
+        and event_type like 'content_edit_%'
+      order by event_id asc
+    `;
+    expect(events).toEqual([]);
   });
 
   it('injects prior ordered outputs before running a downstream synthesis step', async () => {

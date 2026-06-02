@@ -1,25 +1,13 @@
-// Connectors refactor PR 1 — workspace channel + data-connector
-// route handlers + per-Talk link toggles.
-//
-// Workspace CRUD is admin-only (isAdminLike from ai-agents.ts). The
-// underlying RLS policy (current_user_is_workspace_admin) is the
-// belt + suspenders — both layers must agree.
-//
-// Talk-link toggles are talk-owner-gated via `canEditTalk` (mirrors
-// `talk-resources.ts:C3`). RLS on the link tables only enforces
-// `owner_id = auth.uid()`, not talk ownership — without this gate any
-// authenticated user could spoof links onto someone else's talk.
-//
-// No /verify endpoints in PR 1. Verification logic is PR 4 work.
+// Greenfield-backed compatibility handlers for the existing workspace
+// channels/data-connectors UI. Responses keep the existing public shape while
+// filtering server-owned connector metadata out of config payloads.
 
-import { withUserContext } from '../../../db.js';
-import { getTalkForUser } from '../../db/index.js';
+import { getDbPg, withUserContext } from '../../../db.js';
 import {
   CHANNEL_KINDS,
   ConnectorConfigInvalidError,
+  ConnectorConflictError,
   DATA_CONNECTOR_KINDS,
-  type ChannelKind,
-  type DataConnectorKind,
   createWorkspaceChannel,
   createWorkspaceDataConnector,
   deleteWorkspaceChannel,
@@ -37,88 +25,138 @@ import {
   unlinkTalkDataConnector,
   updateWorkspaceChannel,
   updateWorkspaceDataConnector,
+  type ChannelKind,
+  type DataConnectorKind,
   type WorkspaceChannelRecord,
   type WorkspaceDataConnectorRecord,
 } from '../../db/connectors-accessors.js';
-import { canEditTalk } from '../middleware/acl.js';
+import {
+  resolveWorkspaceForUser,
+  type WorkspaceSummaryRecord,
+} from '../../workspaces/accessors.js';
+import { ensureWorkspaceBootstrapForUser } from '../../workspaces/bootstrap.js';
 import { ApiEnvelope, AuthContext } from '../types.js';
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
+type RouteResult<T> = { statusCode: number; body: ApiEnvelope<T> };
+
+type TalkAuthContext = {
+  workspaceId: string;
+  role: 'owner' | 'admin' | 'member' | 'guest';
+  createdBy: string;
+};
+
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 function isAdminLike(role: string): boolean {
   return role === 'owner' || role === 'admin';
 }
 
-function forbiddenAdminResponse(): {
-  statusCode: number;
-  body: ApiEnvelope<never>;
-} {
-  return {
-    statusCode: 403,
-    body: {
-      ok: false,
-      error: {
-        code: 'forbidden',
-        message: 'Only workspace admins can manage connectors.',
-      },
-    },
-  };
+function isUuid(value: string): boolean {
+  return UUID_RE.test(value);
 }
 
-function forbiddenTalkResponse(): {
-  statusCode: number;
-  body: ApiEnvelope<never>;
-} {
-  return {
-    statusCode: 403,
-    body: {
-      ok: false,
-      error: {
-        code: 'forbidden',
-        message: 'You do not have permission to edit this talk.',
-      },
-    },
-  };
+function ok<T>(data: T, statusCode = 200): RouteResult<T> {
+  return { statusCode, body: { ok: true, data } };
 }
 
-function notFoundResponse(message: string): {
-  statusCode: number;
-  body: ApiEnvelope<never>;
-} {
-  return {
-    statusCode: 404,
-    body: { ok: false, error: { code: 'not_found', message } },
-  };
-}
-
-function badRequest(
+function error(
+  statusCode: number,
   code: string,
   message: string,
   details?: unknown,
-): {
-  statusCode: number;
-  body: ApiEnvelope<never>;
-} {
+): RouteResult<never> {
   return {
-    statusCode: 400,
+    statusCode,
     body: {
       ok: false,
-      error: {
-        code,
-        message,
-        ...(details !== undefined ? { details } : {}),
-      },
+      error: { code, message, ...(details !== undefined ? { details } : {}) },
     },
   };
 }
 
-function configErrorResponse(err: ConnectorConfigInvalidError): {
-  statusCode: number;
-  body: ApiEnvelope<never>;
-} {
-  return badRequest('invalid_config', err.message, { issues: err.issues });
+function configErrorResponse(err: ConnectorConfigInvalidError) {
+  return error(400, 'invalid_config', err.message, { issues: err.issues });
+}
+
+async function withResolvedWorkspace<T>(
+  auth: AuthContext,
+  requestedWorkspaceId: string | null | undefined,
+  fn: (workspace: WorkspaceSummaryRecord) => Promise<RouteResult<T>>,
+): Promise<RouteResult<T>> {
+  if (requestedWorkspaceId && !isUuid(requestedWorkspaceId)) {
+    return error(
+      400,
+      'invalid_workspace_id',
+      'workspaceId must be a valid UUID.',
+    );
+  }
+  await ensureWorkspaceBootstrapForUser(auth.userId);
+  return withUserContext(auth.userId, async () => {
+    const workspace = await resolveWorkspaceForUser({
+      userId: auth.userId,
+      requestedWorkspaceId,
+    });
+    if (!workspace) {
+      return error(404, 'workspace_not_found', 'Workspace not found.');
+    }
+    return fn(workspace);
+  });
+}
+
+async function withAdminWorkspace<T>(
+  auth: AuthContext,
+  requestedWorkspaceId: string | null | undefined,
+  fn: (workspace: WorkspaceSummaryRecord) => Promise<RouteResult<T>>,
+): Promise<RouteResult<T>> {
+  return withResolvedWorkspace(
+    auth,
+    requestedWorkspaceId,
+    async (workspace) => {
+      if (!isAdminLike(workspace.role)) {
+        return error(
+          403,
+          'forbidden',
+          'Only workspace admins can manage connectors.',
+        );
+      }
+      return fn(workspace);
+    },
+  );
+}
+
+async function withVisibleTalk<T>(
+  auth: AuthContext,
+  talkId: string,
+  fn: (ctx: TalkAuthContext) => Promise<RouteResult<T>>,
+): Promise<RouteResult<T>> {
+  if (!isUuid(talkId)) {
+    return error(400, 'invalid_talk_id', 'talkId must be a valid UUID.');
+  }
+  await ensureWorkspaceBootstrapForUser(auth.userId);
+  return withUserContext(auth.userId, async () => {
+    const db = getDbPg();
+    const rows = await db<TalkAuthContext[]>`
+      select t.workspace_id as "workspaceId",
+             wm.role,
+             t.created_by as "createdBy"
+      from public.talks t
+      join public.workspace_members wm
+        on wm.workspace_id = t.workspace_id
+       and wm.user_id = ${auth.userId}::uuid
+      where t.id = ${talkId}::uuid
+      limit 1
+    `;
+    const ctx = rows[0];
+    if (!ctx) return error(404, 'not_found', 'Talk not found.');
+    return fn(ctx);
+  });
+}
+
+function canEditTalk(ctx: TalkAuthContext, userId: string): boolean {
+  return (
+    ctx.role !== 'guest' && (isAdminLike(ctx.role) || ctx.createdBy === userId)
+  );
 }
 
 interface ApiWorkspaceChannel {
@@ -149,12 +187,41 @@ interface ApiWorkspaceDataConnector {
   updatedBy: string | null;
 }
 
+const PUBLIC_CHANNEL_CONFIG_KEYS: Record<string, ReadonlySet<string>> = {
+  slack: new Set([
+    'workspace_id',
+    'teamId',
+    'channel_id',
+    'channel_name',
+    'is_private',
+  ]),
+};
+
+const PUBLIC_DATA_CONNECTOR_CONFIG_KEYS: Record<string, ReadonlySet<string>> = {
+  google_docs: new Set(['folder_id']),
+  google_sheets: new Set(['folder_id']),
+};
+
+function publicConnectorConfig(
+  config: Record<string, unknown>,
+  allowedKeys: ReadonlySet<string>,
+): Record<string, unknown> {
+  const publicConfig: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(config)) {
+    if (allowedKeys.has(key)) publicConfig[key] = value;
+  }
+  return publicConfig;
+}
+
 function toApiChannel(row: WorkspaceChannelRecord): ApiWorkspaceChannel {
   return {
     id: row.id,
     kind: row.kind,
     displayName: row.display_name,
-    config: row.config_json,
+    config: publicConnectorConfig(
+      row.config_json,
+      PUBLIC_CHANNEL_CONFIG_KEYS[row.kind] ?? new Set(),
+    ),
     hasCredential: row.has_credential,
     enabled: row.enabled,
     boundTalkCount: row.bound_talk_count,
@@ -172,7 +239,10 @@ function toApiDataConnector(
     id: row.id,
     kind: row.kind,
     displayName: row.display_name,
-    config: row.config_json,
+    config: publicConnectorConfig(
+      row.config_json,
+      PUBLIC_DATA_CONNECTOR_CONFIG_KEYS[row.kind] ?? new Set(),
+    ),
     hasCredential: row.has_credential,
     enabled: row.enabled,
     boundTalkCount: row.bound_talk_count,
@@ -183,434 +253,397 @@ function toApiDataConnector(
   };
 }
 
-// ---------------------------------------------------------------------------
-// Workspace channels CRUD
-// ---------------------------------------------------------------------------
+function readDisplayName(value: unknown): string | RouteResult<never> {
+  if (typeof value !== 'string') {
+    return error(400, 'display_name_required', 'displayName is required.');
+  }
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return error(400, 'display_name_required', 'displayName is required.');
+  }
+  if (trimmed.length > 200) {
+    return error(
+      400,
+      'display_name_too_long',
+      'displayName must be 200 characters or fewer.',
+    );
+  }
+  return trimmed;
+}
 
-export async function listWorkspaceChannelsRoute(auth: AuthContext): Promise<{
-  statusCode: number;
-  body: ApiEnvelope<{ channels: ApiWorkspaceChannel[] }>;
-}> {
-  return withUserContext(auth.userId, async () => {
-    const rows = await listWorkspaceChannels();
-    return {
-      statusCode: 200,
-      body: { ok: true, data: { channels: rows.map(toApiChannel) } },
-    };
-  });
+export async function listWorkspaceChannelsRoute(
+  auth: AuthContext,
+  requestedWorkspaceId?: string | null,
+): Promise<RouteResult<{ channels: ApiWorkspaceChannel[] }>> {
+  return withResolvedWorkspace(auth, requestedWorkspaceId, async (workspace) =>
+    ok({
+      channels: (
+        await listWorkspaceChannels({ workspaceId: workspace.id })
+      ).map(toApiChannel),
+    }),
+  );
 }
 
 export async function createWorkspaceChannelRoute(input: {
   auth: AuthContext;
+  requestedWorkspaceId?: string | null;
   body: {
     kind?: unknown;
     displayName?: unknown;
     config?: unknown;
     enabled?: unknown;
   };
-}): Promise<{
-  statusCode: number;
-  body: ApiEnvelope<{ channel: ApiWorkspaceChannel }>;
-}> {
-  if (!isAdminLike(input.auth.role)) return forbiddenAdminResponse();
-
-  const kindRaw =
-    typeof input.body.kind === 'string' ? input.body.kind.trim() : '';
-  if (!CHANNEL_KINDS.includes(kindRaw as ChannelKind)) {
-    return badRequest(
-      'invalid_kind',
-      `kind must be one of: ${CHANNEL_KINDS.join(', ')}`,
-    );
-  }
-  const displayName =
-    typeof input.body.displayName === 'string'
-      ? input.body.displayName.trim()
-      : '';
-  if (!displayName) {
-    return badRequest('display_name_required', 'displayName is required.');
-  }
-  if (displayName.length > 200) {
-    return badRequest(
-      'display_name_too_long',
-      'displayName must be 200 characters or fewer.',
-    );
-  }
-  const enabled =
-    typeof input.body.enabled === 'boolean' ? input.body.enabled : undefined;
-
+}): Promise<RouteResult<{ channel: ApiWorkspaceChannel }>> {
   try {
-    return await withUserContext(input.auth.userId, async () => {
-      const row = await createWorkspaceChannel({
-        kind: kindRaw as ChannelKind,
-        displayName,
-        config: input.body.config,
-        ...(enabled !== undefined ? { enabled } : {}),
-        createdBy: input.auth.userId,
-      });
-      return {
-        statusCode: 201,
-        body: { ok: true, data: { channel: toApiChannel(row) } },
-      };
-    });
+    return await withAdminWorkspace(
+      input.auth,
+      input.requestedWorkspaceId,
+      async (workspace) => {
+        const kindRaw =
+          typeof input.body.kind === 'string' ? input.body.kind.trim() : '';
+        if (!(CHANNEL_KINDS as readonly string[]).includes(kindRaw)) {
+          return error(
+            400,
+            'invalid_kind',
+            `kind must be one of: ${CHANNEL_KINDS.join(', ')}`,
+          );
+        }
+        const displayName = readDisplayName(input.body.displayName);
+        if (typeof displayName !== 'string') return displayName;
+        const enabled =
+          typeof input.body.enabled === 'boolean'
+            ? input.body.enabled
+            : undefined;
+        return ok(
+          {
+            channel: toApiChannel(
+              await createWorkspaceChannel({
+                workspaceId: workspace.id,
+                kind: kindRaw as ChannelKind,
+                displayName,
+                config: input.body.config,
+                ...(enabled !== undefined ? { enabled } : {}),
+                createdBy: input.auth.userId,
+              }),
+            ),
+          },
+          201,
+        );
+      },
+    );
   } catch (err) {
-    if (err instanceof ConnectorConfigInvalidError) {
-      return configErrorResponse(err);
+    if (err instanceof ConnectorConflictError) {
+      return error(409, 'connector_conflict', err.message);
     }
+    if (err instanceof ConnectorConfigInvalidError)
+      return configErrorResponse(err);
     throw err;
   }
 }
 
 export async function updateWorkspaceChannelRoute(input: {
   auth: AuthContext;
+  requestedWorkspaceId?: string | null;
   channelId: string;
-  body: {
-    displayName?: unknown;
-    config?: unknown;
-    enabled?: unknown;
-  };
-}): Promise<{
-  statusCode: number;
-  body: ApiEnvelope<{ channel: ApiWorkspaceChannel }>;
-}> {
-  if (!isAdminLike(input.auth.role)) return forbiddenAdminResponse();
-
-  const patch: {
-    displayName?: string;
-    config?: unknown;
-    enabled?: boolean;
-    updatedBy: string;
-  } = { updatedBy: input.auth.userId };
-  if (input.body.displayName !== undefined) {
-    if (typeof input.body.displayName !== 'string') {
-      return badRequest(
-        'invalid_display_name',
-        'displayName must be a string.',
-      );
-    }
-    const trimmed = input.body.displayName.trim();
-    if (!trimmed) {
-      return badRequest('display_name_required', 'displayName is required.');
-    }
-    if (trimmed.length > 200) {
-      return badRequest(
-        'display_name_too_long',
-        'displayName must be 200 characters or fewer.',
-      );
-    }
-    patch.displayName = trimmed;
+  body: { displayName?: unknown; config?: unknown; enabled?: unknown };
+}): Promise<RouteResult<{ channel: ApiWorkspaceChannel }>> {
+  if (!isUuid(input.channelId)) {
+    return error(400, 'invalid_channel_id', 'channelId must be a valid UUID.');
   }
-  if (input.body.config !== undefined) {
-    patch.config = input.body.config;
-  }
-  if (input.body.enabled !== undefined) {
-    if (typeof input.body.enabled !== 'boolean') {
-      return badRequest('invalid_enabled', 'enabled must be boolean.');
-    }
-    patch.enabled = input.body.enabled;
-  }
-
   try {
-    return await withUserContext(input.auth.userId, async () => {
-      const row = await updateWorkspaceChannel(input.channelId, patch);
-      if (!row) return notFoundResponse('Channel not found.');
-      return {
-        statusCode: 200,
-        body: { ok: true, data: { channel: toApiChannel(row) } },
-      };
-    });
+    return await withAdminWorkspace(
+      input.auth,
+      input.requestedWorkspaceId,
+      async (workspace) => {
+        const patch: {
+          displayName?: string;
+          config?: unknown;
+          enabled?: boolean;
+          updatedBy: string;
+        } = { updatedBy: input.auth.userId };
+        if (input.body.displayName !== undefined) {
+          const displayName = readDisplayName(input.body.displayName);
+          if (typeof displayName !== 'string') return displayName;
+          patch.displayName = displayName;
+        }
+        if (input.body.config !== undefined) patch.config = input.body.config;
+        if (input.body.enabled !== undefined) {
+          if (typeof input.body.enabled !== 'boolean') {
+            return error(400, 'invalid_enabled', 'enabled must be boolean.');
+          }
+          patch.enabled = input.body.enabled;
+        }
+        const row = await updateWorkspaceChannel(input.channelId, patch, {
+          workspaceId: workspace.id,
+        });
+        if (!row) return error(404, 'not_found', 'Channel not found.');
+        return ok({ channel: toApiChannel(row) });
+      },
+    );
   } catch (err) {
-    if (err instanceof ConnectorConfigInvalidError) {
-      return configErrorResponse(err);
+    if (err instanceof ConnectorConflictError) {
+      return error(409, 'connector_conflict', err.message);
     }
+    if (err instanceof ConnectorConfigInvalidError)
+      return configErrorResponse(err);
     throw err;
   }
 }
 
 export async function deleteWorkspaceChannelRoute(input: {
   auth: AuthContext;
+  requestedWorkspaceId?: string | null;
   channelId: string;
-}): Promise<{
-  statusCode: number;
-  body: ApiEnvelope<{ deleted: true }>;
-}> {
-  if (!isAdminLike(input.auth.role)) return forbiddenAdminResponse();
-  return withUserContext(input.auth.userId, async () => {
-    const deleted = await deleteWorkspaceChannel(input.channelId);
-    if (!deleted) return notFoundResponse('Channel not found.');
-    return {
-      statusCode: 200,
-      body: { ok: true, data: { deleted: true } },
-    };
-  });
+}): Promise<RouteResult<{ deleted: true }>> {
+  if (!isUuid(input.channelId)) {
+    return error(400, 'invalid_channel_id', 'channelId must be a valid UUID.');
+  }
+  return withAdminWorkspace(
+    input.auth,
+    input.requestedWorkspaceId,
+    async (workspace) => {
+      const deleted = await deleteWorkspaceChannel(input.channelId, {
+        workspaceId: workspace.id,
+      });
+      if (!deleted) return error(404, 'not_found', 'Channel not found.');
+      return ok({ deleted: true });
+    },
+  );
 }
 
 export async function setWorkspaceChannelCredentialRoute(input: {
   auth: AuthContext;
+  requestedWorkspaceId?: string | null;
   channelId: string;
   body: { apiKey?: unknown; organizationId?: unknown };
-}): Promise<{
-  statusCode: number;
-  body: ApiEnvelope<{ channel: ApiWorkspaceChannel }>;
-}> {
-  if (!isAdminLike(input.auth.role)) return forbiddenAdminResponse();
-
-  return withUserContext(input.auth.userId, async () => {
-    const existing = await getWorkspaceChannel(input.channelId);
-    if (!existing) return notFoundResponse('Channel not found.');
-
-    const apiKey =
-      typeof input.body.apiKey === 'string' ? input.body.apiKey.trim() : null;
-    const organizationId =
-      typeof input.body.organizationId === 'string'
-        ? input.body.organizationId.trim() || undefined
-        : undefined;
-
-    const row = !apiKey
-      ? await setWorkspaceChannelCredential(
-          input.channelId,
-          null,
-          input.auth.userId,
-        )
-      : await setWorkspaceChannelCredential(
-          input.channelId,
-          {
-            apiKey,
-            ...(organizationId ? { organizationId } : {}),
-          },
-          input.auth.userId,
-        );
-    if (!row) return notFoundResponse('Channel not found.');
-    return {
-      statusCode: 200,
-      body: { ok: true, data: { channel: toApiChannel(row) } },
-    };
-  });
+}): Promise<RouteResult<{ channel: ApiWorkspaceChannel }>> {
+  if (!isUuid(input.channelId)) {
+    return error(400, 'invalid_channel_id', 'channelId must be a valid UUID.');
+  }
+  return withAdminWorkspace(
+    input.auth,
+    input.requestedWorkspaceId,
+    async (workspace) => {
+      const apiKey =
+        typeof input.body.apiKey === 'string' ? input.body.apiKey.trim() : '';
+      const organizationId =
+        typeof input.body.organizationId === 'string'
+          ? input.body.organizationId.trim() || undefined
+          : undefined;
+      const row = await setWorkspaceChannelCredential(
+        input.channelId,
+        apiKey
+          ? { apiKey, ...(organizationId ? { organizationId } : {}) }
+          : null,
+        input.auth.userId,
+        { workspaceId: workspace.id },
+      );
+      if (!row) return error(404, 'not_found', 'Channel not found.');
+      return ok({ channel: toApiChannel(row) });
+    },
+  );
 }
-
-// ---------------------------------------------------------------------------
-// Workspace data connectors CRUD
-// ---------------------------------------------------------------------------
 
 export async function listWorkspaceDataConnectorsRoute(
   auth: AuthContext,
-): Promise<{
-  statusCode: number;
-  body: ApiEnvelope<{ dataConnectors: ApiWorkspaceDataConnector[] }>;
-}> {
-  return withUserContext(auth.userId, async () => {
-    const rows = await listWorkspaceDataConnectors();
-    return {
-      statusCode: 200,
-      body: {
-        ok: true,
-        data: { dataConnectors: rows.map(toApiDataConnector) },
-      },
-    };
-  });
+  requestedWorkspaceId?: string | null,
+): Promise<RouteResult<{ dataConnectors: ApiWorkspaceDataConnector[] }>> {
+  return withResolvedWorkspace(auth, requestedWorkspaceId, async (workspace) =>
+    ok({
+      dataConnectors: (
+        await listWorkspaceDataConnectors({ workspaceId: workspace.id })
+      ).map(toApiDataConnector),
+    }),
+  );
 }
 
 export async function createWorkspaceDataConnectorRoute(input: {
   auth: AuthContext;
+  requestedWorkspaceId?: string | null;
   body: {
     kind?: unknown;
     displayName?: unknown;
     config?: unknown;
     enabled?: unknown;
   };
-}): Promise<{
-  statusCode: number;
-  body: ApiEnvelope<{ dataConnector: ApiWorkspaceDataConnector }>;
-}> {
-  if (!isAdminLike(input.auth.role)) return forbiddenAdminResponse();
-
-  const kindRaw =
-    typeof input.body.kind === 'string' ? input.body.kind.trim() : '';
-  if (!DATA_CONNECTOR_KINDS.includes(kindRaw as DataConnectorKind)) {
-    return badRequest(
-      'invalid_kind',
-      `kind must be one of: ${DATA_CONNECTOR_KINDS.join(', ')}`,
-    );
-  }
-  const displayName =
-    typeof input.body.displayName === 'string'
-      ? input.body.displayName.trim()
-      : '';
-  if (!displayName) {
-    return badRequest('display_name_required', 'displayName is required.');
-  }
-  if (displayName.length > 200) {
-    return badRequest(
-      'display_name_too_long',
-      'displayName must be 200 characters or fewer.',
-    );
-  }
-  const enabled =
-    typeof input.body.enabled === 'boolean' ? input.body.enabled : undefined;
-
+}): Promise<RouteResult<{ dataConnector: ApiWorkspaceDataConnector }>> {
   try {
-    return await withUserContext(input.auth.userId, async () => {
-      const row = await createWorkspaceDataConnector({
-        kind: kindRaw as DataConnectorKind,
-        displayName,
-        config: input.body.config,
-        ...(enabled !== undefined ? { enabled } : {}),
-        createdBy: input.auth.userId,
-      });
-      return {
-        statusCode: 201,
-        body: { ok: true, data: { dataConnector: toApiDataConnector(row) } },
-      };
-    });
+    return await withAdminWorkspace(
+      input.auth,
+      input.requestedWorkspaceId,
+      async (workspace) => {
+        const kindRaw =
+          typeof input.body.kind === 'string' ? input.body.kind.trim() : '';
+        if (!(DATA_CONNECTOR_KINDS as readonly string[]).includes(kindRaw)) {
+          return error(
+            400,
+            'invalid_kind',
+            `kind must be one of: ${DATA_CONNECTOR_KINDS.join(', ')}`,
+          );
+        }
+        const displayName = readDisplayName(input.body.displayName);
+        if (typeof displayName !== 'string') return displayName;
+        const enabled =
+          typeof input.body.enabled === 'boolean'
+            ? input.body.enabled
+            : undefined;
+        return ok(
+          {
+            dataConnector: toApiDataConnector(
+              await createWorkspaceDataConnector({
+                workspaceId: workspace.id,
+                kind: kindRaw as DataConnectorKind,
+                displayName,
+                config: input.body.config,
+                ...(enabled !== undefined ? { enabled } : {}),
+                createdBy: input.auth.userId,
+              }),
+            ),
+          },
+          201,
+        );
+      },
+    );
   } catch (err) {
-    if (err instanceof ConnectorConfigInvalidError) {
-      return configErrorResponse(err);
+    if (err instanceof ConnectorConflictError) {
+      return error(409, 'connector_conflict', err.message);
     }
+    if (err instanceof ConnectorConfigInvalidError)
+      return configErrorResponse(err);
     throw err;
   }
 }
 
 export async function updateWorkspaceDataConnectorRoute(input: {
   auth: AuthContext;
+  requestedWorkspaceId?: string | null;
   connectorId: string;
-  body: {
-    displayName?: unknown;
-    config?: unknown;
-    enabled?: unknown;
-  };
-}): Promise<{
-  statusCode: number;
-  body: ApiEnvelope<{ dataConnector: ApiWorkspaceDataConnector }>;
-}> {
-  if (!isAdminLike(input.auth.role)) return forbiddenAdminResponse();
-
-  const patch: {
-    displayName?: string;
-    config?: unknown;
-    enabled?: boolean;
-    updatedBy: string;
-  } = { updatedBy: input.auth.userId };
-  if (input.body.displayName !== undefined) {
-    if (typeof input.body.displayName !== 'string') {
-      return badRequest(
-        'invalid_display_name',
-        'displayName must be a string.',
-      );
-    }
-    const trimmed = input.body.displayName.trim();
-    if (!trimmed) {
-      return badRequest('display_name_required', 'displayName is required.');
-    }
-    if (trimmed.length > 200) {
-      return badRequest(
-        'display_name_too_long',
-        'displayName must be 200 characters or fewer.',
-      );
-    }
-    patch.displayName = trimmed;
+  body: { displayName?: unknown; config?: unknown; enabled?: unknown };
+}): Promise<RouteResult<{ dataConnector: ApiWorkspaceDataConnector }>> {
+  if (!isUuid(input.connectorId)) {
+    return error(
+      400,
+      'invalid_connector_id',
+      'connectorId must be a valid UUID.',
+    );
   }
-  if (input.body.config !== undefined) {
-    patch.config = input.body.config;
-  }
-  if (input.body.enabled !== undefined) {
-    if (typeof input.body.enabled !== 'boolean') {
-      return badRequest('invalid_enabled', 'enabled must be boolean.');
-    }
-    patch.enabled = input.body.enabled;
-  }
-
   try {
-    return await withUserContext(input.auth.userId, async () => {
-      const row = await updateWorkspaceDataConnector(input.connectorId, patch);
-      if (!row) return notFoundResponse('Data connector not found.');
-      return {
-        statusCode: 200,
-        body: { ok: true, data: { dataConnector: toApiDataConnector(row) } },
-      };
-    });
+    return await withAdminWorkspace(
+      input.auth,
+      input.requestedWorkspaceId,
+      async (workspace) => {
+        const patch: {
+          displayName?: string;
+          config?: unknown;
+          enabled?: boolean;
+          updatedBy: string;
+        } = { updatedBy: input.auth.userId };
+        if (input.body.displayName !== undefined) {
+          const displayName = readDisplayName(input.body.displayName);
+          if (typeof displayName !== 'string') return displayName;
+          patch.displayName = displayName;
+        }
+        if (input.body.config !== undefined) patch.config = input.body.config;
+        if (input.body.enabled !== undefined) {
+          if (typeof input.body.enabled !== 'boolean') {
+            return error(400, 'invalid_enabled', 'enabled must be boolean.');
+          }
+          patch.enabled = input.body.enabled;
+        }
+        const row = await updateWorkspaceDataConnector(
+          input.connectorId,
+          patch,
+          {
+            workspaceId: workspace.id,
+          },
+        );
+        if (!row) return error(404, 'not_found', 'Data connector not found.');
+        return ok({ dataConnector: toApiDataConnector(row) });
+      },
+    );
   } catch (err) {
-    if (err instanceof ConnectorConfigInvalidError) {
-      return configErrorResponse(err);
+    if (err instanceof ConnectorConflictError) {
+      return error(409, 'connector_conflict', err.message);
     }
+    if (err instanceof ConnectorConfigInvalidError)
+      return configErrorResponse(err);
     throw err;
   }
 }
 
 export async function deleteWorkspaceDataConnectorRoute(input: {
   auth: AuthContext;
+  requestedWorkspaceId?: string | null;
   connectorId: string;
-}): Promise<{
-  statusCode: number;
-  body: ApiEnvelope<{ deleted: true }>;
-}> {
-  if (!isAdminLike(input.auth.role)) return forbiddenAdminResponse();
-  return withUserContext(input.auth.userId, async () => {
-    const deleted = await deleteWorkspaceDataConnector(input.connectorId);
-    if (!deleted) return notFoundResponse('Data connector not found.');
-    return {
-      statusCode: 200,
-      body: { ok: true, data: { deleted: true } },
-    };
-  });
+}): Promise<RouteResult<{ deleted: true }>> {
+  if (!isUuid(input.connectorId)) {
+    return error(
+      400,
+      'invalid_connector_id',
+      'connectorId must be a valid UUID.',
+    );
+  }
+  return withAdminWorkspace(
+    input.auth,
+    input.requestedWorkspaceId,
+    async (workspace) => {
+      const deleted = await deleteWorkspaceDataConnector(input.connectorId, {
+        workspaceId: workspace.id,
+      });
+      if (!deleted) return error(404, 'not_found', 'Data connector not found.');
+      return ok({ deleted: true });
+    },
+  );
 }
 
 export async function setWorkspaceDataConnectorCredentialRoute(input: {
   auth: AuthContext;
+  requestedWorkspaceId?: string | null;
   connectorId: string;
   body: { apiKey?: unknown; organizationId?: unknown };
-}): Promise<{
-  statusCode: number;
-  body: ApiEnvelope<{ dataConnector: ApiWorkspaceDataConnector }>;
-}> {
-  if (!isAdminLike(input.auth.role)) return forbiddenAdminResponse();
-
-  return withUserContext(input.auth.userId, async () => {
-    const existing = await getWorkspaceDataConnector(input.connectorId);
-    if (!existing) return notFoundResponse('Data connector not found.');
-
-    const apiKey =
-      typeof input.body.apiKey === 'string' ? input.body.apiKey.trim() : null;
-    const organizationId =
-      typeof input.body.organizationId === 'string'
-        ? input.body.organizationId.trim() || undefined
-        : undefined;
-
-    const row = !apiKey
-      ? await setWorkspaceDataConnectorCredential(
-          input.connectorId,
-          null,
-          input.auth.userId,
-        )
-      : await setWorkspaceDataConnectorCredential(
-          input.connectorId,
-          {
-            apiKey,
-            ...(organizationId ? { organizationId } : {}),
-          },
-          input.auth.userId,
-        );
-    if (!row) return notFoundResponse('Data connector not found.');
-    return {
-      statusCode: 200,
-      body: { ok: true, data: { dataConnector: toApiDataConnector(row) } },
-    };
-  });
+}): Promise<RouteResult<{ dataConnector: ApiWorkspaceDataConnector }>> {
+  if (!isUuid(input.connectorId)) {
+    return error(
+      400,
+      'invalid_connector_id',
+      'connectorId must be a valid UUID.',
+    );
+  }
+  return withAdminWorkspace(
+    input.auth,
+    input.requestedWorkspaceId,
+    async (workspace) => {
+      const apiKey =
+        typeof input.body.apiKey === 'string' ? input.body.apiKey.trim() : '';
+      const organizationId =
+        typeof input.body.organizationId === 'string'
+          ? input.body.organizationId.trim() || undefined
+          : undefined;
+      const row = await setWorkspaceDataConnectorCredential(
+        input.connectorId,
+        apiKey
+          ? { apiKey, ...(organizationId ? { organizationId } : {}) }
+          : null,
+        input.auth.userId,
+        { workspaceId: workspace.id },
+      );
+      if (!row) return error(404, 'not_found', 'Data connector not found.');
+      return ok({ dataConnector: toApiDataConnector(row) });
+    },
+  );
 }
-
-// ---------------------------------------------------------------------------
-// Per-Talk connector picker + toggles
-// ---------------------------------------------------------------------------
 
 export async function getTalkConnectorsRoute(input: {
   auth: AuthContext;
   talkId: string;
-}): Promise<{
-  statusCode: number;
-  body: ApiEnvelope<{
+}): Promise<
+  RouteResult<{
     channels: Array<{
       id: string;
       kind: ChannelKind;
       displayName: string;
       enabled: boolean;
+      hasCredential: boolean;
       linked: boolean;
     }>;
     dataConnectors: Array<{
@@ -618,36 +651,34 @@ export async function getTalkConnectorsRoute(input: {
       kind: DataConnectorKind;
       displayName: string;
       enabled: boolean;
+      hasCredential: boolean;
       linked: boolean;
     }>;
-  }>;
-}> {
-  return withUserContext(input.auth.userId, async () => {
-    const talk = await getTalkForUser(input.talkId);
-    if (!talk) return notFoundResponse('Talk not found.');
-    const view = await getTalkConnectorsView(input.talkId);
-    return {
-      statusCode: 200,
-      body: {
-        ok: true,
-        data: {
-          channels: view.channels.map((c) => ({
-            id: c.id,
-            kind: c.kind as ChannelKind,
-            displayName: c.displayName,
-            enabled: c.enabled,
-            linked: c.linked,
-          })),
-          dataConnectors: view.dataConnectors.map((d) => ({
-            id: d.id,
-            kind: d.kind as DataConnectorKind,
-            displayName: d.displayName,
-            enabled: d.enabled,
-            linked: d.linked,
-          })),
-        },
-      },
-    };
+  }>
+> {
+  return withVisibleTalk(input.auth, input.talkId, async (ctx) => {
+    const view = await getTalkConnectorsView({
+      workspaceId: ctx.workspaceId,
+      talkId: input.talkId,
+    });
+    return ok({
+      channels: view.channels.map((channel) => ({
+        id: channel.id,
+        kind: channel.kind,
+        displayName: channel.displayName,
+        enabled: channel.enabled,
+        hasCredential: channel.hasCredential,
+        linked: channel.linked,
+      })),
+      dataConnectors: view.dataConnectors.map((connector) => ({
+        id: connector.id,
+        kind: connector.kind,
+        displayName: connector.displayName,
+        enabled: connector.enabled,
+        hasCredential: connector.hasCredential,
+        linked: connector.linked,
+      })),
+    });
   });
 }
 
@@ -655,28 +686,39 @@ export async function setTalkChannelLinkRoute(input: {
   auth: AuthContext;
   talkId: string;
   channelId: string;
-}): Promise<{
-  statusCode: number;
-  body: ApiEnvelope<{ linked: true }>;
-}> {
-  return withUserContext(input.auth.userId, async () => {
-    const talk = await getTalkForUser(input.talkId);
-    if (!talk) return notFoundResponse('Talk not found.');
-    if (!(await canEditTalk(input.talkId))) {
-      return forbiddenTalkResponse();
+}): Promise<RouteResult<{ linked: true }>> {
+  if (!isUuid(input.channelId)) {
+    return error(400, 'invalid_channel_id', 'channelId must be a valid UUID.');
+  }
+  return withVisibleTalk(input.auth, input.talkId, async (ctx) => {
+    if (!canEditTalk(ctx, input.auth.userId)) {
+      return error(
+        403,
+        'forbidden',
+        'You do not have permission to edit this talk.',
+      );
     }
-    const channel = await getWorkspaceChannel(input.channelId);
-    if (!channel) return notFoundResponse('Channel not found.');
-
-    await linkTalkChannel({
+    const channel = await getWorkspaceChannel(input.channelId, {
+      workspaceId: ctx.workspaceId,
+    });
+    if (!channel) return error(404, 'not_found', 'Channel not found.');
+    if (channel.workspace_id !== ctx.workspaceId) {
+      return error(404, 'not_found', 'Channel not found.');
+    }
+    if (!channel.enabled || !channel.has_credential) {
+      return error(
+        409,
+        'connector_not_authorized',
+        'Connector is not authorized.',
+      );
+    }
+    const linked = await linkTalkChannel({
       talkId: input.talkId,
       channelId: input.channelId,
       ownerId: input.auth.userId,
     });
-    return {
-      statusCode: 200,
-      body: { ok: true, data: { linked: true } },
-    };
+    if (!linked) return error(404, 'not_found', 'Channel not found.');
+    return ok({ linked: true });
   });
 }
 
@@ -684,24 +726,23 @@ export async function deleteTalkChannelLinkRoute(input: {
   auth: AuthContext;
   talkId: string;
   channelId: string;
-}): Promise<{
-  statusCode: number;
-  body: ApiEnvelope<{ unlinked: true }>;
-}> {
-  return withUserContext(input.auth.userId, async () => {
-    const talk = await getTalkForUser(input.talkId);
-    if (!talk) return notFoundResponse('Talk not found.');
-    if (!(await canEditTalk(input.talkId))) {
-      return forbiddenTalkResponse();
+}): Promise<RouteResult<{ unlinked: true }>> {
+  if (!isUuid(input.channelId)) {
+    return error(400, 'invalid_channel_id', 'channelId must be a valid UUID.');
+  }
+  return withVisibleTalk(input.auth, input.talkId, async (ctx) => {
+    if (!canEditTalk(ctx, input.auth.userId)) {
+      return error(
+        403,
+        'forbidden',
+        'You do not have permission to edit this talk.',
+      );
     }
     await unlinkTalkChannel({
       talkId: input.talkId,
       channelId: input.channelId,
     });
-    return {
-      statusCode: 200,
-      body: { ok: true, data: { unlinked: true } },
-    };
+    return ok({ unlinked: true });
   });
 }
 
@@ -709,28 +750,43 @@ export async function setTalkDataConnectorLinkRoute(input: {
   auth: AuthContext;
   talkId: string;
   connectorId: string;
-}): Promise<{
-  statusCode: number;
-  body: ApiEnvelope<{ linked: true }>;
-}> {
-  return withUserContext(input.auth.userId, async () => {
-    const talk = await getTalkForUser(input.talkId);
-    if (!talk) return notFoundResponse('Talk not found.');
-    if (!(await canEditTalk(input.talkId))) {
-      return forbiddenTalkResponse();
+}): Promise<RouteResult<{ linked: true }>> {
+  if (!isUuid(input.connectorId)) {
+    return error(
+      400,
+      'invalid_connector_id',
+      'connectorId must be a valid UUID.',
+    );
+  }
+  return withVisibleTalk(input.auth, input.talkId, async (ctx) => {
+    if (!canEditTalk(ctx, input.auth.userId)) {
+      return error(
+        403,
+        'forbidden',
+        'You do not have permission to edit this talk.',
+      );
     }
-    const dc = await getWorkspaceDataConnector(input.connectorId);
-    if (!dc) return notFoundResponse('Data connector not found.');
-
-    await linkTalkDataConnector({
+    const connector = await getWorkspaceDataConnector(input.connectorId, {
+      workspaceId: ctx.workspaceId,
+    });
+    if (!connector) return error(404, 'not_found', 'Data connector not found.');
+    if (connector.workspace_id !== ctx.workspaceId) {
+      return error(404, 'not_found', 'Data connector not found.');
+    }
+    if (!connector.enabled || !connector.has_credential) {
+      return error(
+        409,
+        'connector_not_authorized',
+        'Connector is not authorized.',
+      );
+    }
+    const linked = await linkTalkDataConnector({
       talkId: input.talkId,
       dataConnectorId: input.connectorId,
       ownerId: input.auth.userId,
     });
-    return {
-      statusCode: 200,
-      body: { ok: true, data: { linked: true } },
-    };
+    if (!linked) return error(404, 'not_found', 'Data connector not found.');
+    return ok({ linked: true });
   });
 }
 
@@ -738,23 +794,26 @@ export async function deleteTalkDataConnectorLinkRoute(input: {
   auth: AuthContext;
   talkId: string;
   connectorId: string;
-}): Promise<{
-  statusCode: number;
-  body: ApiEnvelope<{ unlinked: true }>;
-}> {
-  return withUserContext(input.auth.userId, async () => {
-    const talk = await getTalkForUser(input.talkId);
-    if (!talk) return notFoundResponse('Talk not found.');
-    if (!(await canEditTalk(input.talkId))) {
-      return forbiddenTalkResponse();
+}): Promise<RouteResult<{ unlinked: true }>> {
+  if (!isUuid(input.connectorId)) {
+    return error(
+      400,
+      'invalid_connector_id',
+      'connectorId must be a valid UUID.',
+    );
+  }
+  return withVisibleTalk(input.auth, input.talkId, async (ctx) => {
+    if (!canEditTalk(ctx, input.auth.userId)) {
+      return error(
+        403,
+        'forbidden',
+        'You do not have permission to edit this talk.',
+      );
     }
     await unlinkTalkDataConnector({
       talkId: input.talkId,
       dataConnectorId: input.connectorId,
     });
-    return {
-      statusCode: 200,
-      body: { ok: true, data: { unlinked: true } },
-    };
+    return ok({ unlinked: true });
   });
 }

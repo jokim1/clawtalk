@@ -1,4 +1,4 @@
-import { withUserContext } from '../../../db.js';
+import { getDbPg, withUserContext } from '../../../db.js';
 import {
   acceptGreenfieldDocumentEdit,
   acceptGreenfieldDocumentEditRun,
@@ -6,6 +6,7 @@ import {
   bumpGreenfieldDocumentPatchVersion,
   getGreenfieldDocumentById,
   getGreenfieldDocumentForTalk,
+  getGreenfieldRunContextSnapshotRecord,
   getGreenfieldThreadMetrics,
   listGreenfieldMessages,
   listGreenfieldRuns,
@@ -21,9 +22,11 @@ import {
   type GreenfieldDocumentEditRecord,
   type GreenfieldDocumentRecord,
   type GreenfieldMessageRecord,
+  type GreenfieldRunContextSnapshotRecord,
   type GreenfieldRunRecord,
   type GreenfieldThreadMetrics,
 } from '../../talks/greenfield-detail-accessors.js';
+import type { TalkRunContextSnapshot } from '../../talks/context-loader.js';
 import { emitOutboxEvent } from '../../talks/outbox-emit.js';
 import {
   getGreenfieldTalk,
@@ -47,8 +50,15 @@ type WorkspaceContext = {
   workspace: WorkspaceSummaryRecord;
 };
 
+type WorkspaceResolutionScope = {
+  talkId?: string | null;
+  contentId?: string | null;
+};
+
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const MAX_DOCUMENT_PATCH_BODY_CHARS = 500_000;
+const MAX_DOCUMENT_PATCH_BLOCKS = 5_000;
 
 function ok<T>(data: T, statusCode = 200): RouteResult<T> {
   return { statusCode, body: { ok: true, data } };
@@ -100,11 +110,30 @@ function anchorMissing(anchorId: string): RouteResult<never> {
   );
 }
 
+function requireWorkspaceWriter(
+  workspace: WorkspaceSummaryRecord,
+): RouteResult<never> | null {
+  if (workspace.role !== 'guest') return null;
+  return error(
+    403,
+    'workspace_writer_required',
+    'Workspace write access is required.',
+  );
+}
+
 async function withResolvedWorkspace<T>(
   auth: AuthContext,
   requestedWorkspaceId: string | null | undefined,
+  scope: WorkspaceResolutionScope | null,
   fn: (ctx: WorkspaceContext) => Promise<RouteResult<T>>,
 ): Promise<RouteResult<T>> {
+  if (scope?.talkId && !isUuid(scope.talkId)) {
+    return error(400, 'invalid_talk_id', 'Talk id must be a UUID.');
+  }
+  if (scope?.contentId && !isUuid(scope.contentId)) {
+    return error(400, 'invalid_content_id', 'Content id must be a UUID.');
+  }
+
   try {
     await ensureWorkspaceBootstrapForUser(auth.userId);
   } catch {
@@ -112,21 +141,60 @@ async function withResolvedWorkspace<T>(
   }
 
   return withUserContext(auth.userId, async () => {
+    const scopedWorkspaceId =
+      requestedWorkspaceId ??
+      (await findVisibleWorkspaceIdForScope({
+        userId: auth.userId,
+        scope,
+      }));
     const workspace = await resolveWorkspaceForUser({
       userId: auth.userId,
-      requestedWorkspaceId,
+      requestedWorkspaceId: scopedWorkspaceId,
     });
     if (!workspace) {
       return error(
-        requestedWorkspaceId ? 403 : 404,
-        requestedWorkspaceId ? 'workspace_forbidden' : 'workspace_not_found',
-        requestedWorkspaceId
+        scopedWorkspaceId ? 403 : 404,
+        scopedWorkspaceId ? 'workspace_forbidden' : 'workspace_not_found',
+        scopedWorkspaceId
           ? 'Workspace is not available to this user.'
           : 'No workspace exists for this user.',
       );
     }
     return fn({ workspace });
   });
+}
+
+async function findVisibleWorkspaceIdForScope(input: {
+  userId: string;
+  scope: WorkspaceResolutionScope | null;
+}): Promise<string | undefined> {
+  if (!input.scope) return undefined;
+  const db = getDbPg();
+  if (input.scope.talkId) {
+    const rows = await db<{ workspace_id: string }[]>`
+      select t.workspace_id
+      from public.talks t
+      join public.workspace_members wm
+        on wm.workspace_id = t.workspace_id
+       and wm.user_id = ${input.userId}::uuid
+      where t.id = ${input.scope.talkId}::uuid
+      limit 1
+    `;
+    return rows[0]?.workspace_id;
+  }
+  if (input.scope.contentId) {
+    const rows = await db<{ workspace_id: string }[]>`
+      select d.workspace_id
+      from public.documents d
+      join public.workspace_members wm
+        on wm.workspace_id = d.workspace_id
+       and wm.user_id = ${input.userId}::uuid
+      where d.id = ${input.scope.contentId}::uuid
+      limit 1
+    `;
+    return rows[0]?.workspace_id;
+  }
+  return undefined;
 }
 
 function syntheticThreadId(talkId: string): string {
@@ -233,46 +301,8 @@ function toMessageApi(message: GreenfieldMessageRecord): {
       authorKind: message.author_kind,
       agentRole: message.agent_role_key,
     },
-    attachments: normalizeAttachments(message.attachments_json),
+    attachments: [],
   };
-}
-
-function normalizeAttachments(value: unknown): Array<{
-  id: string;
-  fileName: string;
-  fileSize: number;
-  mimeType: string;
-  extractionStatus: 'pending' | 'ready' | 'failed';
-}> {
-  if (!Array.isArray(value)) return [];
-  return value.flatMap((item, index) => {
-    if (!item || typeof item !== 'object') return [];
-    const record = item as Record<string, unknown>;
-    const id =
-      typeof record.id === 'string' ? record.id : `attachment-${index}`;
-    const fileName =
-      typeof record.fileName === 'string'
-        ? record.fileName
-        : typeof record.name === 'string'
-          ? record.name
-          : 'Attachment';
-    const fileSize =
-      typeof record.fileSize === 'number'
-        ? record.fileSize
-        : typeof record.size === 'number'
-          ? record.size
-          : 0;
-    const mimeType =
-      typeof record.mimeType === 'string'
-        ? record.mimeType
-        : typeof record.type === 'string'
-          ? record.type
-          : 'application/octet-stream';
-    const rawStatus = record.extractionStatus;
-    const extractionStatus =
-      rawStatus === 'pending' || rawStatus === 'failed' ? rawStatus : 'ready';
-    return [{ id, fileName, fileSize, mimeType, extractionStatus }];
-  });
 }
 
 function toSearchResult(message: GreenfieldMessageRecord): {
@@ -385,6 +415,107 @@ function toSnapshotRunApi(run: GreenfieldRunRecord): {
     targetAgentId: run.target_agent_id,
     executorAlias: run.target_agent_name,
     executorModel: run.model_id,
+  };
+}
+
+function recordOf(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function toPersonaRole(
+  roleKey: string | null,
+): TalkRunContextSnapshot['personaRole'] {
+  switch (roleKey) {
+    case 'assistant':
+    case 'analyst':
+    case 'critic':
+    case 'strategist':
+    case 'devils-advocate':
+    case 'synthesizer':
+    case 'editor':
+      return roleKey;
+    case 'researcher':
+    case 'quant':
+      return 'analyst';
+    default:
+      return null;
+  }
+}
+
+function parsePersistedRunContextSnapshot(
+  value: unknown,
+): TalkRunContextSnapshot | null {
+  const record = recordOf(value);
+  const candidate = recordOf(record?.contextSnapshot) ?? record;
+  if (candidate?.version !== 1) return null;
+  return candidate as unknown as TalkRunContextSnapshot;
+}
+
+function enabledRuntimeToolNames(value: unknown): string[] {
+  const manifest = recordOf(value);
+  const effectiveTools = manifest?.effectiveTools;
+  if (!Array.isArray(effectiveTools)) return [];
+  const names = new Set<string>();
+  for (const entry of effectiveTools) {
+    const tool = recordOf(entry);
+    if (tool?.enabled !== true || !Array.isArray(tool.runtimeTools)) continue;
+    for (const name of tool.runtimeTools) {
+      if (typeof name === 'string' && name.trim()) names.add(name.trim());
+    }
+  }
+  return Array.from(names).sort();
+}
+
+function toRunContextSnapshot(
+  record: GreenfieldRunContextSnapshotRecord,
+): TalkRunContextSnapshot {
+  const persisted = parsePersistedRunContextSnapshot(
+    record.context_manifest_json,
+  );
+  if (persisted) return persisted;
+
+  const promptChars = record.prompt_text_redacted?.length ?? 0;
+  return {
+    version: 1,
+    threadId: syntheticThreadId(record.talk_id),
+    personaRole: toPersonaRole(record.role_key),
+    roleHint: null,
+    goalIncluded: false,
+    summaryIncluded: false,
+    activeRules: [],
+    stateSnapshot: {
+      totalCount: 0,
+      omittedCount: 0,
+      included: [],
+    },
+    sources: {
+      totalCount: 0,
+      manifest: [],
+      inline: [],
+      forcedInjection: {
+        refs: [],
+        slugs: [],
+        bytes: 0,
+      },
+    },
+    retrieval: {
+      query: null,
+      queryTerms: [],
+      roleTerms: [],
+      state: [],
+      sources: [],
+    },
+    tools: {
+      contextToolNames: enabledRuntimeToolNames(record.tool_manifest_json),
+      connectorToolNames: [],
+    },
+    history: {
+      messageIds: record.trigger_message_id ? [record.trigger_message_id] : [],
+      turnCount: Math.max(0, record.round),
+    },
+    estimatedTokens: Math.ceil(promptChars / 4),
   };
 }
 
@@ -588,8 +719,28 @@ async function emitContentUpdated(
   });
 }
 
-function toSnapshotTalk(talk: GreenfieldTalkRecord): {
+type SnapshotAccessRole = 'owner' | 'admin' | 'editor' | 'viewer';
+
+function snapshotAccessRole(input: {
+  talk: GreenfieldTalkRecord;
+  workspace: WorkspaceSummaryRecord;
+  userId: string;
+}): SnapshotAccessRole {
+  if (input.workspace.role === 'guest') return 'viewer';
+  if (input.talk.created_by === input.userId) return 'owner';
+  if (input.workspace.role === 'owner' || input.workspace.role === 'admin') {
+    return 'admin';
+  }
+  return 'editor';
+}
+
+function toSnapshotTalk(input: {
+  talk: GreenfieldTalkRecord;
+  workspace: WorkspaceSummaryRecord;
+  userId: string;
+}): {
   id: string;
+  workspaceId: string;
   ownerId: string;
   folderId: string | null;
   sortOrder: number;
@@ -599,10 +750,12 @@ function toSnapshotTalk(talk: GreenfieldTalkRecord): {
   version: number;
   createdAt: string;
   updatedAt: string;
-  accessRole: 'owner';
+  accessRole: SnapshotAccessRole;
 } {
+  const { talk } = input;
   return {
     id: talk.id,
+    workspaceId: input.workspace.id,
     ownerId: talk.created_by,
     folderId: talk.folder_id,
     sortOrder: talk.sort_order,
@@ -612,7 +765,7 @@ function toSnapshotTalk(talk: GreenfieldTalkRecord): {
     version: 1,
     createdAt: talk.created_at,
     updatedAt: talk.updated_at,
-    accessRole: 'owner',
+    accessRole: snapshotAccessRole(input),
   };
 }
 
@@ -666,29 +819,34 @@ export async function listGreenfieldMessagesRoute(input: {
     threadId: input.threadId,
   });
   if (threadError) return threadError;
-  return withResolvedWorkspace(input.auth, input.workspaceId, async (ctx) => {
-    const talk = await loadTalkOr404({
-      workspaceId: ctx.workspace.id,
-      talkId: input.talkId,
-    });
-    if ('statusCode' in talk) return talk;
-    const limit = Math.min(Math.max(input.limit ?? 200, 1), 500);
-    const messages = await listGreenfieldMessages({
-      workspaceId: ctx.workspace.id,
-      talkId: input.talkId,
-      beforeCreatedAt: input.beforeCreatedAt,
-      limit,
-    });
-    return ok({
-      talkId: input.talkId,
-      messages: messages.map(toMessageApi),
-      page: {
+  return withResolvedWorkspace(
+    input.auth,
+    input.workspaceId,
+    { talkId: input.talkId },
+    async (ctx) => {
+      const talk = await loadTalkOr404({
+        workspaceId: ctx.workspace.id,
+        talkId: input.talkId,
+      });
+      if ('statusCode' in talk) return talk;
+      const limit = Math.min(Math.max(input.limit ?? 200, 1), 500);
+      const messages = await listGreenfieldMessages({
+        workspaceId: ctx.workspace.id,
+        talkId: input.talkId,
+        beforeCreatedAt: input.beforeCreatedAt,
         limit,
-        count: messages.length,
-        beforeCreatedAt: input.beforeCreatedAt ?? null,
-      },
-    });
-  });
+      });
+      return ok({
+        talkId: input.talkId,
+        messages: messages.map(toMessageApi),
+        page: {
+          limit,
+          count: messages.length,
+          beforeCreatedAt: input.beforeCreatedAt ?? null,
+        },
+      });
+    },
+  );
 }
 
 export async function searchGreenfieldMessagesRoute(input: {
@@ -704,33 +862,38 @@ export async function searchGreenfieldMessagesRoute(input: {
     results: ReturnType<typeof toSearchResult>[];
   }>
 > {
-  return withResolvedWorkspace(input.auth, input.workspaceId, async (ctx) => {
-    const talk = await loadTalkOr404({
-      workspaceId: ctx.workspace.id,
-      talkId: input.talkId,
-    });
-    if ('statusCode' in talk) return talk;
-    const query = input.query.trim();
-    if (!query) return ok({ talkId: input.talkId, query, results: [] });
-    const messages = await searchGreenfieldMessages({
-      workspaceId: ctx.workspace.id,
-      talkId: input.talkId,
-      query,
-      limit: input.limit,
-    });
-    return ok({
-      talkId: input.talkId,
-      query,
-      results: messages.map(toSearchResult),
-    });
-  });
+  return withResolvedWorkspace(
+    input.auth,
+    input.workspaceId,
+    { talkId: input.talkId },
+    async (ctx) => {
+      const talk = await loadTalkOr404({
+        workspaceId: ctx.workspace.id,
+        talkId: input.talkId,
+      });
+      if ('statusCode' in talk) return talk;
+      const query = input.query.trim();
+      if (!query) return ok({ talkId: input.talkId, query, results: [] });
+      const messages = await searchGreenfieldMessages({
+        workspaceId: ctx.workspace.id,
+        talkId: input.talkId,
+        query,
+        limit: input.limit,
+      });
+      return ok({
+        talkId: input.talkId,
+        query,
+        results: messages.map(toSearchResult),
+      });
+    },
+  );
 }
 
 export async function deleteGreenfieldMessagesRoute(input: {
   auth: AuthContext;
   workspaceId?: string | null;
   talkId: string;
-  messageIds: string[];
+  messageIds: unknown;
 }): Promise<
   RouteResult<{
     talkId: string;
@@ -738,26 +901,44 @@ export async function deleteGreenfieldMessagesRoute(input: {
     deletedMessageIds: string[];
   }>
 > {
-  return withResolvedWorkspace(input.auth, input.workspaceId, async (ctx) => {
-    const talk = await loadTalkOr404({
-      workspaceId: ctx.workspace.id,
-      talkId: input.talkId,
-    });
-    if ('statusCode' in talk) return talk;
-    if (!input.messageIds.every(isUuid)) {
-      return error(400, 'invalid_message_id', 'Message ids must be UUIDs.');
-    }
-    const deletedIds = await deleteGreenfieldMessages({
-      workspaceId: ctx.workspace.id,
-      talkId: input.talkId,
-      messageIds: input.messageIds,
-    });
-    return ok({
-      talkId: input.talkId,
-      deletedCount: deletedIds.length,
-      deletedMessageIds: deletedIds,
-    });
-  });
+  return withResolvedWorkspace(
+    input.auth,
+    input.workspaceId,
+    { talkId: input.talkId },
+    async (ctx) => {
+      const talk = await loadTalkOr404({
+        workspaceId: ctx.workspace.id,
+        talkId: input.talkId,
+      });
+      if ('statusCode' in talk) return talk;
+      const writerError = requireWorkspaceWriter(ctx.workspace);
+      if (writerError) return writerError;
+      if (
+        !Array.isArray(input.messageIds) ||
+        input.messageIds.length === 0 ||
+        input.messageIds.some((messageId) => typeof messageId !== 'string')
+      ) {
+        return error(
+          400,
+          'invalid_message_id',
+          'Message ids must be a non-empty array of UUID strings.',
+        );
+      }
+      if (!input.messageIds.every(isUuid)) {
+        return error(400, 'invalid_message_id', 'Message ids must be UUIDs.');
+      }
+      const deletedIds = await deleteGreenfieldMessages({
+        workspaceId: ctx.workspace.id,
+        talkId: input.talkId,
+        messageIds: input.messageIds,
+      });
+      return ok({
+        talkId: input.talkId,
+        deletedCount: deletedIds.length,
+        deletedMessageIds: deletedIds,
+      });
+    },
+  );
 }
 
 export async function listGreenfieldThreadsRoute(input: {
@@ -765,19 +946,24 @@ export async function listGreenfieldThreadsRoute(input: {
   workspaceId?: string | null;
   talkId: string;
 }): Promise<RouteResult<{ threads: ReturnType<typeof toThreadApi>[] }>> {
-  return withResolvedWorkspace(input.auth, input.workspaceId, async (ctx) => {
-    const talk = await loadTalkOr404({
-      workspaceId: ctx.workspace.id,
-      talkId: input.talkId,
-    });
-    if ('statusCode' in talk) return talk;
-    const metrics = await getGreenfieldThreadMetrics({
-      workspaceId: ctx.workspace.id,
-      talkId: input.talkId,
-    });
-    if (!metrics) return error(404, 'talk_not_found', 'Talk not found.');
-    return ok({ threads: [toThreadApi(talk, metrics)] });
-  });
+  return withResolvedWorkspace(
+    input.auth,
+    input.workspaceId,
+    { talkId: input.talkId },
+    async (ctx) => {
+      const talk = await loadTalkOr404({
+        workspaceId: ctx.workspace.id,
+        talkId: input.talkId,
+      });
+      if ('statusCode' in talk) return talk;
+      const metrics = await getGreenfieldThreadMetrics({
+        workspaceId: ctx.workspace.id,
+        talkId: input.talkId,
+      });
+      if (!metrics) return error(404, 'talk_not_found', 'Talk not found.');
+      return ok({ threads: [toThreadApi(talk, metrics)] });
+    },
+  );
 }
 
 export async function createGreenfieldThreadRoute(input: {
@@ -785,9 +971,23 @@ export async function createGreenfieldThreadRoute(input: {
   workspaceId?: string | null;
   talkId: string;
 }): Promise<RouteResult<{ thread: ReturnType<typeof toThreadApi> }>> {
-  const threads = await listGreenfieldThreadsRoute(input);
-  if (!threads.body.ok) return failure(threads);
-  return ok({ thread: threads.body.data.threads[0]! }, 201);
+  return withResolvedWorkspace(
+    input.auth,
+    input.workspaceId,
+    { talkId: input.talkId },
+    async (ctx) => {
+      const talk = await loadTalkOr404({
+        workspaceId: ctx.workspace.id,
+        talkId: input.talkId,
+      });
+      if ('statusCode' in talk) return talk;
+      return error(
+        409,
+        'threads_not_supported',
+        'Greenfield Talks currently expose one default thread. Creating additional threads is not supported yet.',
+      );
+    },
+  );
 }
 
 export async function patchGreenfieldThreadRoute(input: {
@@ -801,9 +1001,23 @@ export async function patchGreenfieldThreadRoute(input: {
     threadId: input.threadId,
   });
   if (threadError) return threadError;
-  const threads = await listGreenfieldThreadsRoute(input);
-  if (!threads.body.ok) return failure(threads);
-  return ok(threads.body.data.threads[0]!);
+  return withResolvedWorkspace(
+    input.auth,
+    input.workspaceId,
+    { talkId: input.talkId },
+    async (ctx) => {
+      const talk = await loadTalkOr404({
+        workspaceId: ctx.workspace.id,
+        talkId: input.talkId,
+      });
+      if ('statusCode' in talk) return talk;
+      return error(
+        409,
+        'thread_metadata_not_supported',
+        'Greenfield Talks currently expose one default thread, so thread rename and pin changes are not supported yet.',
+      );
+    },
+  );
 }
 
 export async function deleteGreenfieldThreadRoute(input: {
@@ -853,20 +1067,25 @@ export async function getGreenfieldTalkContentRoute(input: {
     ? RouteResult<T>
     : never
 > {
-  return withResolvedWorkspace(input.auth, input.workspaceId, async (ctx) => {
-    const talk = await loadTalkOr404({
-      workspaceId: ctx.workspace.id,
-      talkId: input.talkId,
-    });
-    if ('statusCode' in talk) return talk;
-    const document = await getGreenfieldDocumentForTalk({
-      workspaceId: ctx.workspace.id,
-      talkId: input.talkId,
-    });
-    return ok(
-      await contentPayload({ workspaceId: ctx.workspace.id, document }),
-    );
-  });
+  return withResolvedWorkspace(
+    input.auth,
+    input.workspaceId,
+    { talkId: input.talkId },
+    async (ctx) => {
+      const talk = await loadTalkOr404({
+        workspaceId: ctx.workspace.id,
+        talkId: input.talkId,
+      });
+      if ('statusCode' in talk) return talk;
+      const document = await getGreenfieldDocumentForTalk({
+        workspaceId: ctx.workspace.id,
+        talkId: input.talkId,
+      });
+      return ok(
+        await contentPayload({ workspaceId: ctx.workspace.id, document }),
+      );
+    },
+  );
 }
 
 export async function getGreenfieldThreadContentRoute(input: {
@@ -892,34 +1111,41 @@ export async function createGreenfieldTalkContentRoute(input: {
   title?: unknown;
   format?: unknown;
 }): Promise<RouteResult<{ content: ReturnType<typeof toContentApi> }>> {
-  return withResolvedWorkspace(input.auth, input.workspaceId, async (ctx) => {
-    const talk = await loadTalkOr404({
-      workspaceId: ctx.workspace.id,
-      talkId: input.talkId,
-    });
-    if ('statusCode' in talk) return talk;
-    if (typeof input.title !== 'string' || !input.title.trim()) {
-      return error(400, 'title_required', 'Content title is required.');
-    }
-    const format =
-      input.format === undefined || input.format === null
-        ? 'markdown'
-        : input.format;
-    if (format !== 'markdown' && format !== 'html') {
-      return error(
-        400,
-        'invalid_format',
-        'Content format must be markdown or html.',
-      );
-    }
-    const document = await createGreenfieldDocumentForTalk({
-      workspaceId: ctx.workspace.id,
-      talkId: input.talkId,
-      title: input.title.trim(),
-      format,
-    });
-    return ok({ content: toContentApi(document) }, 201);
-  });
+  return withResolvedWorkspace(
+    input.auth,
+    input.workspaceId,
+    { talkId: input.talkId },
+    async (ctx) => {
+      const talk = await loadTalkOr404({
+        workspaceId: ctx.workspace.id,
+        talkId: input.talkId,
+      });
+      if ('statusCode' in talk) return talk;
+      const writerError = requireWorkspaceWriter(ctx.workspace);
+      if (writerError) return writerError;
+      if (typeof input.title !== 'string' || !input.title.trim()) {
+        return error(400, 'title_required', 'Content title is required.');
+      }
+      const format =
+        input.format === undefined || input.format === null
+          ? 'markdown'
+          : input.format;
+      if (format !== 'markdown' && format !== 'html') {
+        return error(
+          400,
+          'invalid_format',
+          'Content format must be markdown or html.',
+        );
+      }
+      const document = await createGreenfieldDocumentForTalk({
+        workspaceId: ctx.workspace.id,
+        talkId: input.talkId,
+        title: input.title.trim(),
+        format,
+      });
+      return ok({ content: toContentApi(document) }, 201);
+    },
+  );
 }
 
 export async function createGreenfieldThreadContentRoute(input: {
@@ -990,6 +1216,21 @@ export async function patchGreenfieldContentRoute(input: {
     : wantsHtml
       ? htmlToText(input.bodyHtml as string)
       : null;
+  if (nextBody !== null && nextBody.length > MAX_DOCUMENT_PATCH_BODY_CHARS) {
+    return error(
+      413,
+      'body_too_large',
+      `Content body exceeds ${MAX_DOCUMENT_PATCH_BODY_CHARS} characters.`,
+    );
+  }
+  const nextBlocks = nextBody !== null ? markdownToBlocks(nextBody) : null;
+  if (nextBlocks !== null && nextBlocks.length > MAX_DOCUMENT_PATCH_BLOCKS) {
+    return error(
+      413,
+      'too_many_blocks',
+      `Content body exceeds ${MAX_DOCUMENT_PATCH_BLOCKS} blocks.`,
+    );
+  }
   const wantsPatchWrite = input.title !== undefined || nextBody !== null;
   if (!wantsPatchWrite && pendingEditIds.length === 0) {
     return error(
@@ -998,108 +1239,117 @@ export async function patchGreenfieldContentRoute(input: {
       'PATCH must include bodyMarkdown, bodyHtml, title, or acceptPendingEditIds.',
     );
   }
-  return withResolvedWorkspace(input.auth, input.workspaceId, async (ctx) => {
-    const document = await getGreenfieldDocumentById({
-      workspaceId: ctx.workspace.id,
-      documentId: input.contentId,
-    });
-    if (!document) return error(404, 'not_found', 'Content not found.');
-    if (document.format === 'markdown' && wantsHtml) {
-      return error(
-        400,
-        'format_mismatch',
-        'Content format is markdown; bodyMarkdown is required.',
-      );
-    }
-    if (document.format === 'html' && wantsMarkdown) {
-      return error(
-        400,
-        'format_mismatch',
-        'Content format is html; bodyHtml is required.',
-      );
-    }
-    if (document.list_version !== input.expectedVersion) {
-      return versionConflict(document.list_version);
-    }
-    let acceptedPendingEditIds: string[] = [];
-    let acceptedPendingEditRunId: string | null = null;
-    let workingListVersion = document.list_version;
-    if (pendingEditIds.length > 0) {
-      const accepted = await acceptGreenfieldDocumentEdits({
+  return withResolvedWorkspace(
+    input.auth,
+    input.workspaceId,
+    { contentId: input.contentId },
+    async (ctx) => {
+      const writerError = requireWorkspaceWriter(ctx.workspace);
+      if (writerError) return writerError;
+      const document = await getGreenfieldDocumentById({
         workspaceId: ctx.workspace.id,
-        documentId: document.id,
-        editIds: pendingEditIds,
+        documentId: input.contentId,
       });
-      switch (accepted.kind) {
-        case 'not_found':
-          return error(404, 'not_found', 'Pending edit not found.');
-        case 'version_conflict':
-          return versionConflict(accepted.currentVersion);
-        case 'anchor_missing':
-          return anchorMissing(accepted.anchorId);
-        case 'invalid_edit':
-          return error(409, 'invalid_pending_edit', accepted.message);
-        case 'ok':
-          acceptedPendingEditIds = accepted.editIds;
-          acceptedPendingEditRunId = accepted.runId;
-          workingListVersion = accepted.document.list_version;
-          break;
+      if (!document) return error(404, 'not_found', 'Content not found.');
+      if (document.format === 'markdown' && wantsHtml) {
+        return error(
+          400,
+          'format_mismatch',
+          'Content format is markdown; bodyMarkdown is required.',
+        );
       }
-    }
-    if (input.title !== undefined || nextBody !== null) {
-      const bumped = await bumpGreenfieldDocumentPatchVersion({
-        workspaceId: ctx.workspace.id,
-        documentId: document.id,
-        tabId: document.tab_id,
-        expectedListVersion: workingListVersion,
-      });
-      switch (bumped.kind) {
-        case 'not_found':
-          return error(404, 'not_found', 'Content not found.');
-        case 'version_conflict':
-          return versionConflict(bumped.currentVersion);
-        case 'ok':
-          workingListVersion = bumped.listVersion;
-          break;
+      if (document.format === 'html' && wantsMarkdown) {
+        return error(
+          400,
+          'format_mismatch',
+          'Content format is html; bodyHtml is required.',
+        );
       }
-    }
-    if (input.title !== undefined) {
-      await updateGreenfieldDocumentTitle({
+      if (document.list_version !== input.expectedVersion) {
+        return versionConflict(document.list_version);
+      }
+      // withResolvedWorkspace runs inside withUserContext, so all mutation
+      // accessors below share one transaction and roll back together.
+      let acceptedPendingEditIds: string[] = [];
+      let acceptedPendingEditRunId: string | null = null;
+      let workingListVersion = document.list_version;
+      if (pendingEditIds.length > 0) {
+        const accepted = await acceptGreenfieldDocumentEdits({
+          workspaceId: ctx.workspace.id,
+          documentId: document.id,
+          editIds: pendingEditIds,
+        });
+        switch (accepted.kind) {
+          case 'not_found':
+            return error(404, 'not_found', 'Pending edit not found.');
+          case 'version_conflict':
+            return versionConflict(accepted.currentVersion);
+          case 'anchor_missing':
+            return anchorMissing(accepted.anchorId);
+          case 'invalid_edit':
+            return error(409, 'invalid_pending_edit', accepted.message);
+          case 'ok':
+            acceptedPendingEditIds = accepted.editIds;
+            acceptedPendingEditRunId = accepted.runId;
+            workingListVersion = accepted.document.list_version;
+            break;
+        }
+      }
+      if (input.title !== undefined || nextBody !== null) {
+        const bumped = await bumpGreenfieldDocumentPatchVersion({
+          workspaceId: ctx.workspace.id,
+          documentId: document.id,
+          tabId: document.tab_id,
+          expectedListVersion: workingListVersion,
+        });
+        switch (bumped.kind) {
+          case 'not_found':
+            return error(404, 'not_found', 'Content not found.');
+          case 'version_conflict':
+            return versionConflict(bumped.currentVersion);
+          case 'ok':
+            workingListVersion = bumped.listVersion;
+            break;
+        }
+      }
+      if (input.title !== undefined) {
+        await updateGreenfieldDocumentTitle({
+          workspaceId: ctx.workspace.id,
+          documentId: document.id,
+          title: title!,
+        });
+      }
+      if (nextBlocks !== null) {
+        await replaceGreenfieldDocumentBlocks({
+          workspaceId: ctx.workspace.id,
+          documentId: document.id,
+          tabId: document.tab_id,
+          blocks: nextBlocks,
+          skipListVersionBump: true,
+        });
+      }
+      const updated = await getGreenfieldDocumentById({
         workspaceId: ctx.workspace.id,
         documentId: document.id,
-        title: title!,
       });
-    }
-    if (nextBody !== null) {
-      await replaceGreenfieldDocumentBlocks({
-        workspaceId: ctx.workspace.id,
-        documentId: document.id,
-        tabId: document.tab_id,
-        blocks: markdownToBlocks(nextBody),
-        skipListVersionBump: true,
+      if (!updated) return error(404, 'not_found', 'Content not found.');
+      if (acceptedPendingEditIds.length > 0) {
+        await emitContentEditResolved({
+          document: updated,
+          editIds: acceptedPendingEditIds,
+          runId: acceptedPendingEditRunId,
+          resolution: 'accepted',
+          includeContentUpdated: true,
+        });
+      } else if (wantsPatchWrite) {
+        await emitContentUpdated(updated);
+      }
+      return ok({
+        content: toContentApi(updated),
+        acceptedPendingEditIds,
       });
-    }
-    const updated = await getGreenfieldDocumentById({
-      workspaceId: ctx.workspace.id,
-      documentId: document.id,
-    });
-    if (!updated) return error(404, 'not_found', 'Content not found.');
-    if (acceptedPendingEditIds.length > 0) {
-      await emitContentEditResolved({
-        document: updated,
-        editIds: acceptedPendingEditIds,
-        runId: acceptedPendingEditRunId,
-        resolution: 'accepted',
-        includeContentUpdated: true,
-      });
-    } else if (wantsPatchWrite) {
-      await emitContentUpdated(updated);
-    }
-    return ok({
-      content: toContentApi(updated),
-      acceptedPendingEditIds,
-    });
-  });
+    },
+  );
 }
 
 export async function acceptGreenfieldContentEditRoute(input: {
@@ -1122,37 +1372,44 @@ export async function acceptGreenfieldContentEditRoute(input: {
     input.expectedContentVersion,
   );
   if (typeof expected === 'object') return expected;
-  return withResolvedWorkspace(input.auth, input.workspaceId, async (ctx) => {
-    const result = await acceptGreenfieldDocumentEdit({
-      workspaceId: ctx.workspace.id,
-      documentId: input.contentId,
-      editId: input.editId,
-      expectedContentVersion: expected,
-    });
-    switch (result.kind) {
-      case 'not_found':
-        return error(404, 'not_found', 'Pending edit not found.');
-      case 'version_conflict':
-        return versionConflict(result.currentVersion);
-      case 'anchor_missing':
-        return anchorMissing(result.anchorId);
-      case 'invalid_edit':
-        return error(409, 'invalid_pending_edit', result.message);
-      case 'ok':
-        await emitContentEditResolved({
-          document: result.document,
-          editIds: result.editIds,
-          runId: result.runId,
-          resolution: 'accepted',
-          includeContentUpdated: true,
-        });
-        return ok({
-          content: toContentApi(result.document),
-          editId: result.editIds[0]!,
-          runId: result.runId ?? '',
-        });
-    }
-  });
+  return withResolvedWorkspace(
+    input.auth,
+    input.workspaceId,
+    { contentId: input.contentId },
+    async (ctx) => {
+      const writerError = requireWorkspaceWriter(ctx.workspace);
+      if (writerError) return writerError;
+      const result = await acceptGreenfieldDocumentEdit({
+        workspaceId: ctx.workspace.id,
+        documentId: input.contentId,
+        editId: input.editId,
+        expectedContentVersion: expected,
+      });
+      switch (result.kind) {
+        case 'not_found':
+          return error(404, 'not_found', 'Pending edit not found.');
+        case 'version_conflict':
+          return versionConflict(result.currentVersion);
+        case 'anchor_missing':
+          return anchorMissing(result.anchorId);
+        case 'invalid_edit':
+          return error(409, 'invalid_pending_edit', result.message);
+        case 'ok':
+          await emitContentEditResolved({
+            document: result.document,
+            editIds: result.editIds,
+            runId: result.runId,
+            resolution: 'accepted',
+            includeContentUpdated: true,
+          });
+          return ok({
+            content: toContentApi(result.document),
+            editId: result.editIds[0]!,
+            runId: result.runId ?? '',
+          });
+      }
+    },
+  );
 }
 
 export async function rejectGreenfieldContentEditRoute(input: {
@@ -1164,28 +1421,35 @@ export async function rejectGreenfieldContentEditRoute(input: {
   if (!isUuid(input.contentId) || !isUuid(input.editId)) {
     return error(400, 'invalid_id', 'Content id and edit id must be UUIDs.');
   }
-  return withResolvedWorkspace(input.auth, input.workspaceId, async (ctx) => {
-    const document = await getGreenfieldDocumentById({
-      workspaceId: ctx.workspace.id,
-      documentId: input.contentId,
-    });
-    if (!document) return error(404, 'not_found', 'Content not found.');
-    const result = await rejectGreenfieldDocumentEdit({
-      workspaceId: ctx.workspace.id,
-      documentId: document.id,
-      editId: input.editId,
-    });
-    if (result.kind === 'not_found') {
-      return error(404, 'not_found', 'Pending edit not found.');
-    }
-    await emitContentEditResolved({
-      document,
-      editIds: [result.editId],
-      runId: result.runId,
-      resolution: 'rejected',
-    });
-    return ok({ editId: result.editId, runId: result.runId ?? '' });
-  });
+  return withResolvedWorkspace(
+    input.auth,
+    input.workspaceId,
+    { contentId: input.contentId },
+    async (ctx) => {
+      const writerError = requireWorkspaceWriter(ctx.workspace);
+      if (writerError) return writerError;
+      const document = await getGreenfieldDocumentById({
+        workspaceId: ctx.workspace.id,
+        documentId: input.contentId,
+      });
+      if (!document) return error(404, 'not_found', 'Content not found.');
+      const result = await rejectGreenfieldDocumentEdit({
+        workspaceId: ctx.workspace.id,
+        documentId: document.id,
+        editId: input.editId,
+      });
+      if (result.kind === 'not_found') {
+        return error(404, 'not_found', 'Pending edit not found.');
+      }
+      await emitContentEditResolved({
+        document,
+        editIds: [result.editId],
+        runId: result.runId,
+        resolution: 'rejected',
+      });
+      return ok({ editId: result.editId, runId: result.runId ?? '' });
+    },
+  );
 }
 
 export async function acceptGreenfieldContentEditRunRoute(input: {
@@ -1208,37 +1472,44 @@ export async function acceptGreenfieldContentEditRunRoute(input: {
     input.expectedContentVersion,
   );
   if (typeof expected === 'object') return expected;
-  return withResolvedWorkspace(input.auth, input.workspaceId, async (ctx) => {
-    const result = await acceptGreenfieldDocumentEditRun({
-      workspaceId: ctx.workspace.id,
-      documentId: input.contentId,
-      runId: input.runId,
-      expectedContentVersion: expected,
-    });
-    switch (result.kind) {
-      case 'not_found':
-        return error(404, 'not_found', 'Pending edit run not found.');
-      case 'version_conflict':
-        return versionConflict(result.currentVersion);
-      case 'anchor_missing':
-        return anchorMissing(result.anchorId);
-      case 'invalid_edit':
-        return error(409, 'invalid_pending_edit', result.message);
-      case 'ok':
-        await emitContentEditResolved({
-          document: result.document,
-          editIds: result.editIds,
-          runId: result.runId,
-          resolution: 'accepted',
-          includeContentUpdated: true,
-        });
-        return ok({
-          content: toContentApi(result.document),
-          runId: result.runId ?? '',
-          editIds: result.editIds,
-        });
-    }
-  });
+  return withResolvedWorkspace(
+    input.auth,
+    input.workspaceId,
+    { contentId: input.contentId },
+    async (ctx) => {
+      const writerError = requireWorkspaceWriter(ctx.workspace);
+      if (writerError) return writerError;
+      const result = await acceptGreenfieldDocumentEditRun({
+        workspaceId: ctx.workspace.id,
+        documentId: input.contentId,
+        runId: input.runId,
+        expectedContentVersion: expected,
+      });
+      switch (result.kind) {
+        case 'not_found':
+          return error(404, 'not_found', 'Pending edit run not found.');
+        case 'version_conflict':
+          return versionConflict(result.currentVersion);
+        case 'anchor_missing':
+          return anchorMissing(result.anchorId);
+        case 'invalid_edit':
+          return error(409, 'invalid_pending_edit', result.message);
+        case 'ok':
+          await emitContentEditResolved({
+            document: result.document,
+            editIds: result.editIds,
+            runId: result.runId,
+            resolution: 'accepted',
+            includeContentUpdated: true,
+          });
+          return ok({
+            content: toContentApi(result.document),
+            runId: result.runId ?? '',
+            editIds: result.editIds,
+          });
+      }
+    },
+  );
 }
 
 export async function rejectGreenfieldContentEditRunRoute(input: {
@@ -1250,28 +1521,35 @@ export async function rejectGreenfieldContentEditRunRoute(input: {
   if (!isUuid(input.contentId) || !isUuid(input.runId)) {
     return error(400, 'invalid_id', 'Content id and run id must be UUIDs.');
   }
-  return withResolvedWorkspace(input.auth, input.workspaceId, async (ctx) => {
-    const document = await getGreenfieldDocumentById({
-      workspaceId: ctx.workspace.id,
-      documentId: input.contentId,
-    });
-    if (!document) return error(404, 'not_found', 'Content not found.');
-    const result = await rejectGreenfieldDocumentEditRun({
-      workspaceId: ctx.workspace.id,
-      documentId: document.id,
-      runId: input.runId,
-    });
-    if (result.kind === 'not_found') {
-      return error(404, 'not_found', 'Pending edit run not found.');
-    }
-    await emitContentEditResolved({
-      document,
-      editIds: result.editIds,
-      runId: result.runId,
-      resolution: 'rejected',
-    });
-    return ok({ runId: result.runId, editIds: result.editIds });
-  });
+  return withResolvedWorkspace(
+    input.auth,
+    input.workspaceId,
+    { contentId: input.contentId },
+    async (ctx) => {
+      const writerError = requireWorkspaceWriter(ctx.workspace);
+      if (writerError) return writerError;
+      const document = await getGreenfieldDocumentById({
+        workspaceId: ctx.workspace.id,
+        documentId: input.contentId,
+      });
+      if (!document) return error(404, 'not_found', 'Content not found.');
+      const result = await rejectGreenfieldDocumentEditRun({
+        workspaceId: ctx.workspace.id,
+        documentId: document.id,
+        runId: input.runId,
+      });
+      if (result.kind === 'not_found') {
+        return error(404, 'not_found', 'Pending edit run not found.');
+      }
+      await emitContentEditResolved({
+        document,
+        editIds: result.editIds,
+        runId: result.runId,
+        resolution: 'rejected',
+      });
+      return ok({ runId: result.runId, editIds: result.editIds });
+    },
+  );
 }
 
 export async function listGreenfieldRunsRoute(input: {
@@ -1281,18 +1559,68 @@ export async function listGreenfieldRunsRoute(input: {
 }): Promise<
   RouteResult<{ talkId: string; runs: ReturnType<typeof toRunApi>[] }>
 > {
-  return withResolvedWorkspace(input.auth, input.workspaceId, async (ctx) => {
-    const talk = await loadTalkOr404({
-      workspaceId: ctx.workspace.id,
-      talkId: input.talkId,
-    });
-    if ('statusCode' in talk) return talk;
-    const runs = await listGreenfieldRuns({
-      workspaceId: ctx.workspace.id,
-      talkId: input.talkId,
-    });
-    return ok({ talkId: input.talkId, runs: runs.map(toRunApi) });
-  });
+  return withResolvedWorkspace(
+    input.auth,
+    input.workspaceId,
+    { talkId: input.talkId },
+    async (ctx) => {
+      const talk = await loadTalkOr404({
+        workspaceId: ctx.workspace.id,
+        talkId: input.talkId,
+      });
+      if ('statusCode' in talk) return talk;
+      const runs = await listGreenfieldRuns({
+        workspaceId: ctx.workspace.id,
+        talkId: input.talkId,
+      });
+      return ok({ talkId: input.talkId, runs: runs.map(toRunApi) });
+    },
+  );
+}
+
+export async function getGreenfieldRunContextRoute(input: {
+  auth: AuthContext;
+  workspaceId?: string | null;
+  talkId: string;
+  runId: string;
+}): Promise<
+  RouteResult<{
+    talkId: string;
+    runId: string;
+    contextSnapshot: TalkRunContextSnapshot | null;
+  }>
+> {
+  if (!isUuid(input.talkId)) {
+    return error(400, 'invalid_talk_id', 'Talk id must be a UUID.');
+  }
+  if (!isUuid(input.runId)) {
+    return error(400, 'invalid_run_id', 'Run id must be a UUID.');
+  }
+  return withResolvedWorkspace(
+    input.auth,
+    input.workspaceId,
+    { talkId: input.talkId },
+    async (ctx) => {
+      const talk = await loadTalkOr404({
+        workspaceId: ctx.workspace.id,
+        talkId: input.talkId,
+      });
+      if ('statusCode' in talk) return talk;
+      const snapshotRecord = await getGreenfieldRunContextSnapshotRecord({
+        workspaceId: ctx.workspace.id,
+        talkId: input.talkId,
+        runId: input.runId,
+      });
+      if (!snapshotRecord) {
+        return error(404, 'run_not_found', 'Run not found.');
+      }
+      return ok({
+        talkId: input.talkId,
+        runId: input.runId,
+        contextSnapshot: toRunContextSnapshot(snapshotRecord),
+      });
+    },
+  );
 }
 
 export async function getGreenfieldSnapshotRoute(input: {
@@ -1319,53 +1647,62 @@ export async function getGreenfieldSnapshotRoute(input: {
     threadId: input.threadId,
   });
   if (threadError) return threadError;
-  return withResolvedWorkspace(input.auth, input.workspaceId, async (ctx) => {
-    const talk = await loadTalkOr404({
-      workspaceId: ctx.workspace.id,
-      talkId: input.talkId,
-    });
-    if ('statusCode' in talk) return talk;
-    const [metrics, rawMessages, document, runs, agents] = await Promise.all([
-      getGreenfieldThreadMetrics({
+  return withResolvedWorkspace(
+    input.auth,
+    input.workspaceId,
+    { talkId: input.talkId },
+    async (ctx) => {
+      const talk = await loadTalkOr404({
         workspaceId: ctx.workspace.id,
         talkId: input.talkId,
-      }),
-      listGreenfieldMessages({
+      });
+      if ('statusCode' in talk) return talk;
+      const [metrics, rawMessages, document, runs, agents] = await Promise.all([
+        getGreenfieldThreadMetrics({
+          workspaceId: ctx.workspace.id,
+          talkId: input.talkId,
+        }),
+        listGreenfieldMessages({
+          workspaceId: ctx.workspace.id,
+          talkId: input.talkId,
+          limit: 201,
+        }),
+        getGreenfieldDocumentForTalk({
+          workspaceId: ctx.workspace.id,
+          talkId: input.talkId,
+        }),
+        listGreenfieldRuns({
+          workspaceId: ctx.workspace.id,
+          talkId: input.talkId,
+        }),
+        listGreenfieldTalkAgents({
+          workspaceId: ctx.workspace.id,
+          talkId: input.talkId,
+        }),
+      ]);
+      if (!metrics) return error(404, 'talk_not_found', 'Talk not found.');
+      const messages =
+        rawMessages.length > 200 ? rawMessages.slice(1) : rawMessages;
+      const content = await contentPayload({
         workspaceId: ctx.workspace.id,
-        talkId: input.talkId,
-        limit: 201,
-      }),
-      getGreenfieldDocumentForTalk({
-        workspaceId: ctx.workspace.id,
-        talkId: input.talkId,
-      }),
-      listGreenfieldRuns({
-        workspaceId: ctx.workspace.id,
-        talkId: input.talkId,
-      }),
-      listGreenfieldTalkAgents({
-        workspaceId: ctx.workspace.id,
-        talkId: input.talkId,
-      }),
-    ]);
-    if (!metrics) return error(404, 'talk_not_found', 'Talk not found.');
-    const messages =
-      rawMessages.length > 200 ? rawMessages.slice(1) : rawMessages;
-    const content = await contentPayload({
-      workspaceId: ctx.workspace.id,
-      document,
-    });
-    return ok({
-      talk: toSnapshotTalk(talk),
-      threads: [toSnapshotThreadApi(talk, metrics)],
-      activeThreadId: syntheticThreadId(talk.id),
-      messages: messages.map(toMessageApi),
-      hasOlderMessages: rawMessages.length > 200,
-      content: content.content,
-      pendingEdits: content.pendingEdits,
-      runs: runs.map(toSnapshotRunApi),
-      agents: agents.map(toSnapshotAgent),
-      snapshotVersion: Date.parse(talk.updated_at) || 1,
-    });
-  });
+        document,
+      });
+      return ok({
+        talk: toSnapshotTalk({
+          talk,
+          workspace: ctx.workspace,
+          userId: input.auth.userId,
+        }),
+        threads: [toSnapshotThreadApi(talk, metrics)],
+        activeThreadId: syntheticThreadId(talk.id),
+        messages: messages.map(toMessageApi),
+        hasOlderMessages: rawMessages.length > 200,
+        content: content.content,
+        pendingEdits: content.pendingEdits,
+        runs: runs.map(toSnapshotRunApi),
+        agents: agents.map(toSnapshotAgent),
+        snapshotVersion: Date.parse(talk.updated_at) || 1,
+      });
+    },
+  );
 }

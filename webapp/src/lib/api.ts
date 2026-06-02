@@ -25,6 +25,15 @@ export type SessionUser = {
   displayName: string;
   role: string;
   createdAt: string;
+  workspaces?: SessionWorkspace[];
+  currentWorkspaceId?: string;
+};
+
+export type SessionWorkspace = {
+  id: string;
+  name: string;
+  role: string;
+  initials: string;
 };
 
 export type Talk = {
@@ -96,229 +105,6 @@ export type Content = {
   createdByUserId: string | null;
   updatedByUserId: string | null;
   updatedByRunId: string | null;
-};
-
-export type DataConnectorVerificationStatus =
-  | 'missing'
-  | 'not_verified'
-  | 'verifying'
-  | 'verified'
-  | 'invalid'
-  | 'unavailable';
-
-export type DataConnector = {
-  id: string;
-  name: string;
-  connectorKind: 'google_docs' | 'google_sheets' | 'posthog';
-  config: Record<string, unknown> | null;
-  discovered: Record<string, unknown> | null;
-  enabled: boolean;
-  hasCredential: boolean;
-  verificationStatus: DataConnectorVerificationStatus;
-  lastVerifiedAt: string | null;
-  lastVerificationError: string | null;
-  attachedTalkCount: number;
-  createdAt: string;
-  updatedAt: string;
-};
-
-export type TalkDataConnector = DataConnector & {
-  attachedAt: string;
-  attachedBy: string | null;
-};
-
-export type ChannelConnection = {
-  id: string;
-  platform: 'telegram' | 'slack';
-  connectionMode: string;
-  accountKey: string;
-  displayName: string;
-  enabled: boolean;
-  healthStatus: 'healthy' | 'degraded' | 'disconnected' | 'error';
-  lastHealthCheckAt: string | null;
-  lastHealthError: string | null;
-  config: Record<string, unknown> | null;
-  tokenSource: 'db' | 'env' | 'missing' | null;
-  envTokenAvailable: boolean;
-  hasStoredSecret: boolean;
-  createdAt: string;
-  updatedAt: string;
-};
-
-export type ChannelTarget = {
-  connectionId: string;
-  targetKind: string;
-  targetId: string;
-  displayName: string;
-  metadata: Record<string, unknown> | null;
-  approved: boolean;
-  registeredAt: string | null;
-  registeredBy: string | null;
-  lastSeenAt: string;
-  createdAt: string;
-  updatedAt: string;
-  activeBindingId?: string | null;
-  activeBindingTalkId?: string | null;
-  activeBindingTalkTitle?: string | null;
-  activeBindingTalkAccessible?: boolean;
-};
-
-export type ChannelTargetListPage = {
-  targets: ChannelTarget[];
-  totalCount: number;
-  hasMore: boolean;
-  nextOffset: number | null;
-};
-
-export type TelegramConnectorBot = {
-  botUserId: number | null;
-  botUsername: string | null;
-  botDisplayName: string | null;
-  canJoinGroups: boolean;
-};
-
-export type TelegramChannelConnector = {
-  connection: ChannelConnection;
-  bot: TelegramConnectorBot;
-  targets: ChannelTarget[];
-};
-
-export type SlackProviderConfig = {
-  clientId: string | null;
-  hasClientSecret: boolean;
-  hasSigningSecret: boolean;
-  redirectUrl: string | null;
-  eventsApiUrl: string | null;
-  eventsApiReady: boolean;
-  oauthInstallReady: boolean;
-  available: boolean;
-  availabilityReason: string | null;
-  updatedAt: string | null;
-  updatedBy: string | null;
-};
-
-export type SlackChannelConnector = {
-  config: SlackProviderConfig;
-  workspaces: ChannelConnection[];
-};
-
-export type SlackWorkspaceIdentity = {
-  teamId: string;
-  teamName: string | null;
-  teamUrl: string | null;
-  botUserId: string | null;
-  botUserName: string | null;
-  scopeSet: string[];
-};
-
-export type SlackWorkspaceInstall = {
-  connectionId: string;
-  workspace: SlackWorkspaceIdentity;
-};
-
-export type SlackTargetDiagnostic = {
-  ok: true;
-  code: 'ok';
-  message: string;
-  target: {
-    ok: true;
-    targetKind: 'channel';
-    targetId: string;
-    displayName: string;
-    metadata: Record<string, unknown>;
-  };
-};
-
-export type BindingDiagnosisAction = {
-  label: string;
-  type: 'retry' | 'unquarantine' | 'test' | 'dismiss';
-};
-
-export type BindingDiagnosis = {
-  status: 'ok' | 'warning' | 'error' | 'quarantined' | 'paused';
-  headline: string;
-  detail: string | null;
-  action: BindingDiagnosisAction | null;
-};
-
-export type TalkChannelBindingStateEntry = {
-  id: string;
-  key: string;
-  keySuffix: string;
-  value: unknown;
-  version: number;
-  updatedAt: string;
-  updatedByUserId: string | null;
-  updatedByRunId: string | null;
-};
-
-export type ChannelInstructionReview = {
-  strengths: string[];
-  missing: string[];
-  removeOrSimplify: string[];
-  rewrittenInstructions: string | null;
-};
-
-export type TalkChannelBinding = {
-  id: string;
-  talkId: string;
-  connectionId: string;
-  platform: 'telegram' | 'slack';
-  connectionDisplayName: string;
-  connectionHealthStatus: string;
-  targetKind: string;
-  targetId: string;
-  displayName: string;
-  active: boolean;
-  responseMode: 'off' | 'mentions' | 'all';
-  responderMode: 'primary' | 'agent';
-  responderAgentId: string | null;
-  deliveryMode: 'reply' | 'channel';
-  timezone: string;
-  instructions: string | null;
-  stateNamespace: string;
-  inboundRateLimitPerMinute: number;
-  maxPendingEvents: number;
-  overflowPolicy: 'drop_oldest' | 'drop_newest';
-  maxDeferredAgeMinutes: number;
-  pendingIngressCount: number;
-  deferredIngressCount: number;
-  deadLetterCount: number;
-  unresolvedIngressCount: number;
-  suppressedReplyCount: number;
-  lastSuppressedAt: string | null;
-  lastSuppressionReason: string | null;
-  lastIngressAt: string | null;
-  lastDeliveryAt: string | null;
-  lastIngressReasonCode: string | null;
-  lastDeliveryReasonCode: string | null;
-  healthQuarantined: boolean;
-  healthQuarantineCode: string | null;
-  diagnosis: BindingDiagnosis;
-};
-
-export type ChannelQueueFailure = {
-  id: string;
-  bindingId: string;
-  talkId: string;
-  connectionId?: string;
-  targetKind: string;
-  targetId: string;
-  platformEventId?: string | null;
-  externalMessageId?: string | null;
-  senderId?: string | null;
-  senderName?: string | null;
-  runId?: string | null;
-  talkMessageId?: string | null;
-  payload: Record<string, unknown> | null;
-  status: string;
-  reasonCode: string | null;
-  reasonDetail: string | null;
-  dedupeKey: string;
-  availableAt: string;
-  createdAt: string;
-  updatedAt: string;
-  attemptCount: number;
 };
 
 // ---------------------------------------------------------------------------
@@ -398,6 +184,11 @@ export type TalkJobSchedule =
       everyHours: number;
     }
   | {
+      kind: 'daily';
+      hour: number;
+      minute: number;
+    }
+  | {
       kind: 'weekly';
       weekdays: TalkJobWeekday[];
       hour: number;
@@ -405,8 +196,7 @@ export type TalkJobSchedule =
     };
 
 export type TalkJobScope = {
-  connectorIds: string[];
-  channelBindingIds: string[];
+  toolIds: string[];
   allowWeb: boolean;
 };
 
@@ -1041,24 +831,41 @@ export async function getAuthConfig(): Promise<AuthConfigPayload> {
   return apiRequest<AuthConfigPayload>('/api/v1/auth/config');
 }
 
+type SessionMePayload = {
+  user: Omit<SessionUser, 'workspaces' | 'currentWorkspaceId'>;
+  workspaces?: SessionWorkspace[];
+  currentWorkspaceId?: string;
+};
+
+function sessionUserFromPayload(envelope: SessionMePayload): SessionUser {
+  return {
+    ...envelope.user,
+    ...(envelope.workspaces ? { workspaces: envelope.workspaces } : {}),
+    ...(envelope.currentWorkspaceId
+      ? { currentWorkspaceId: envelope.currentWorkspaceId }
+      : {}),
+  };
+}
+
 export async function getSessionMe(): Promise<SessionUser> {
-  const envelope = await apiRequest<{ user: SessionUser }>(
-    '/api/v1/session/me',
+  return sessionUserFromPayload(
+    await apiRequest<SessionMePayload>('/api/v1/session/me'),
   );
-  return envelope.user;
 }
 
 export async function updateSessionMe(input: {
+  workspaceId?: string | null;
   displayName?: string;
 }): Promise<SessionUser> {
-  const envelope = await apiMutationRequest<{ user: SessionUser }>(
-    '/api/v1/session/me',
+  const { workspaceId, ...body } = input;
+  const envelope = await apiMutationRequest<SessionMePayload>(
+    withWorkspaceQuery('/api/v1/session/me', workspaceId),
     {
       method: 'PATCH',
-      body: JSON.stringify(input),
+      body: JSON.stringify(body),
     },
   );
-  return envelope.user;
+  return sessionUserFromPayload(envelope);
 }
 
 export async function startGoogleAuth(input?: {
@@ -1230,6 +1037,7 @@ export type TalkSnapshotThread = {
 
 export type TalkSnapshotTalk = {
   id: string;
+  workspaceId: string;
   ownerId: string;
   folderId: string | null;
   sortOrder: number;
@@ -1726,19 +1534,40 @@ export async function deleteTalkResource(input: {
   );
 }
 
-export async function getUserGoogleAccount(): Promise<UserGoogleAccount> {
+type WorkspaceScopedRequest = {
+  workspaceId?: string | null;
+};
+
+type RequiredWorkspaceScopedRequest = {
+  workspaceId: string;
+};
+
+type GooglePickerSessionRequest =
+  | { talkId: string; workspaceId?: string | null }
+  | { workspaceId: string; talkId?: string | null };
+
+function withWorkspaceQuery(path: string, workspaceId?: string | null): string {
+  if (!workspaceId) return path;
+  const separator = path.includes('?') ? '&' : '?';
+  return `${path}${separator}workspaceId=${encodeURIComponent(workspaceId)}`;
+}
+
+export async function getUserGoogleAccount(
+  input: RequiredWorkspaceScopedRequest,
+): Promise<UserGoogleAccount> {
   const envelope = await apiRequest<{ googleAccount: UserGoogleAccount }>(
-    '/api/v1/me/google-account',
+    withWorkspaceQuery('/api/v1/me/google-account', input.workspaceId),
   );
   return envelope.googleAccount;
 }
 
-export async function connectUserGoogleAccount(input?: {
+export async function connectUserGoogleAccount(input: {
+  workspaceId: string;
   returnTo?: string;
   scopes?: string[];
 }): Promise<GoogleAccountAuthorizationLaunch> {
   const envelope = await apiMutationRequest<GoogleAccountAuthorizationLaunch>(
-    '/api/v1/me/google-account/connect',
+    withWorkspaceQuery('/api/v1/me/google-account/connect', input.workspaceId),
     {
       method: 'POST',
       includeJson: true,
@@ -1752,11 +1581,15 @@ export async function connectUserGoogleAccount(input?: {
 }
 
 export async function expandUserGoogleScopes(input: {
+  workspaceId: string;
   scopes: string[];
   returnTo?: string;
 }): Promise<GoogleAccountAuthorizationLaunch> {
   const envelope = await apiMutationRequest<GoogleAccountAuthorizationLaunch>(
-    '/api/v1/me/google-account/expand-scopes',
+    withWorkspaceQuery(
+      '/api/v1/me/google-account/expand-scopes',
+      input.workspaceId,
+    ),
     {
       method: 'POST',
       includeJson: true,
@@ -1769,17 +1602,31 @@ export async function expandUserGoogleScopes(input: {
   return envelope;
 }
 
-export async function getGooglePickerSession(): Promise<GooglePickerSession> {
+export async function getGooglePickerSession(
+  input: GooglePickerSessionRequest,
+): Promise<GooglePickerSession>;
+export async function getGooglePickerSession(
+  input: GooglePickerSessionRequest,
+): Promise<GooglePickerSession> {
+  const params = new URLSearchParams();
+  if (input.talkId) params.set('talkId', input.talkId);
+  if (input.workspaceId) params.set('workspaceId', input.workspaceId);
+  const query = params.size > 0 ? `?${params.toString()}` : '';
   return apiRequest<GooglePickerSession>(
-    '/api/v1/me/google-account/picker-token',
+    `/api/v1/me/google-account/picker-token${query}`,
   );
 }
 
-export async function disconnectUserGoogleAccount(): Promise<{
+export async function disconnectUserGoogleAccount(
+  input: RequiredWorkspaceScopedRequest,
+): Promise<{
   disconnected: boolean;
 }> {
   return apiMutationRequest<{ disconnected: boolean }>(
-    '/api/v1/me/google-account/disconnect',
+    withWorkspaceQuery(
+      '/api/v1/me/google-account/disconnect',
+      input.workspaceId,
+    ),
     {
       method: 'POST',
       includeJson: true,
@@ -2026,8 +1873,12 @@ export async function updateTalkTool(input: {
   );
 }
 
-export async function getAiAgents(): Promise<AiAgentsPageData> {
-  return apiRequest<AiAgentsPageData>('/api/v1/agents');
+export async function getAiAgents(input?: {
+  workspaceId?: string | null;
+}): Promise<AiAgentsPageData> {
+  return apiRequest<AiAgentsPageData>(
+    withWorkspaceQuery('/api/v1/agents', input?.workspaceId),
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -2145,33 +1996,50 @@ export type RegisteredAgent = {
   modelUpdateAvailable: { modelId: string; displayName: string | null } | null;
 };
 
-export async function listRegisteredAgents(): Promise<RegisteredAgent[]> {
-  return apiRequest<RegisteredAgent[]>('/api/v1/registered-agents');
+export async function listRegisteredAgents(
+  input?: WorkspaceScopedRequest,
+): Promise<RegisteredAgent[]> {
+  return apiRequest<RegisteredAgent[]>(
+    withWorkspaceQuery('/api/v1/registered-agents', input?.workspaceId),
+  );
 }
 
 export async function getRegisteredAgent(
   agentId: string,
+  input?: WorkspaceScopedRequest,
 ): Promise<RegisteredAgent> {
   return apiRequest<RegisteredAgent>(
-    `/api/v1/registered-agents/${encodeURIComponent(agentId)}`,
+    withWorkspaceQuery(
+      `/api/v1/registered-agents/${encodeURIComponent(agentId)}`,
+      input?.workspaceId,
+    ),
   );
 }
 
-export async function getMainRegisteredAgent(): Promise<RegisteredAgent> {
-  return apiRequest<RegisteredAgent>('/api/v1/registered-agents/main');
+export async function getMainRegisteredAgent(
+  input?: WorkspaceScopedRequest,
+): Promise<RegisteredAgent> {
+  return apiRequest<RegisteredAgent>(
+    withWorkspaceQuery('/api/v1/registered-agents/main', input?.workspaceId),
+  );
 }
 
 export async function updateMainRegisteredAgent(
   agentId: string,
+  input?: WorkspaceScopedRequest,
 ): Promise<RegisteredAgent> {
-  return apiMutationRequest<RegisteredAgent>('/api/v1/registered-agents/main', {
-    method: 'PUT',
-    includeJson: true,
-    body: JSON.stringify({ agentId }),
-  });
+  return apiMutationRequest<RegisteredAgent>(
+    withWorkspaceQuery('/api/v1/registered-agents/main', input?.workspaceId),
+    {
+      method: 'PUT',
+      includeJson: true,
+      body: JSON.stringify({ agentId }),
+    },
+  );
 }
 
 export async function createRegisteredAgent(input: {
+  workspaceId?: string | null;
   name: string;
   providerId: string;
   modelId: string;
@@ -2180,14 +2048,19 @@ export async function createRegisteredAgent(input: {
   description?: string;
   credentialMode?: RegisteredAgentCredentialMode | null;
 }): Promise<RegisteredAgent> {
-  return apiMutationRequest<RegisteredAgent>('/api/v1/registered-agents', {
-    method: 'POST',
-    includeJson: true,
-    body: JSON.stringify(input),
-  });
+  const { workspaceId, ...body } = input;
+  return apiMutationRequest<RegisteredAgent>(
+    withWorkspaceQuery('/api/v1/registered-agents', workspaceId),
+    {
+      method: 'POST',
+      includeJson: true,
+      body: JSON.stringify(body),
+    },
+  );
 }
 
 export async function updateRegisteredAgent(input: {
+  workspaceId?: string | null;
   agentId: string;
   name?: string;
   providerId?: string;
@@ -2198,9 +2071,12 @@ export async function updateRegisteredAgent(input: {
   enabled?: boolean;
   credentialMode?: RegisteredAgentCredentialMode | null;
 }): Promise<RegisteredAgent> {
-  const { agentId, ...body } = input;
+  const { agentId, workspaceId, ...body } = input;
   return apiMutationRequest<RegisteredAgent>(
-    `/api/v1/registered-agents/${encodeURIComponent(agentId)}`,
+    withWorkspaceQuery(
+      `/api/v1/registered-agents/${encodeURIComponent(agentId)}`,
+      workspaceId,
+    ),
     {
       method: 'PUT',
       includeJson: true,
@@ -2209,9 +2085,15 @@ export async function updateRegisteredAgent(input: {
   );
 }
 
-export async function deleteRegisteredAgent(agentId: string): Promise<void> {
+export async function deleteRegisteredAgent(
+  agentId: string,
+  input?: WorkspaceScopedRequest,
+): Promise<void> {
   await apiMutationRequest<{ deleted: true }>(
-    `/api/v1/registered-agents/${encodeURIComponent(agentId)}`,
+    withWorkspaceQuery(
+      `/api/v1/registered-agents/${encodeURIComponent(agentId)}`,
+      input?.workspaceId,
+    ),
     {
       method: 'DELETE',
     },
@@ -2225,894 +2107,15 @@ export async function deleteRegisteredAgent(agentId: string): Promise<void> {
  */
 export async function dismissAgentModelUpgrade(
   agentId: string,
+  input?: WorkspaceScopedRequest,
 ): Promise<RegisteredAgent> {
   return apiMutationRequest<RegisteredAgent>(
-    `/api/v1/registered-agents/${encodeURIComponent(agentId)}/dismiss-model-upgrade`,
+    withWorkspaceQuery(
+      `/api/v1/registered-agents/${encodeURIComponent(agentId)}/dismiss-model-upgrade`,
+      input?.workspaceId,
+    ),
     {
       method: 'POST',
-    },
-  );
-}
-
-export async function getDataConnectors(): Promise<DataConnector[]> {
-  const envelope = await apiRequest<{ connectors: DataConnector[] }>(
-    '/api/v1/data-connectors',
-  );
-  return envelope.connectors;
-}
-
-export async function createDataConnector(input: {
-  name: string;
-  connectorKind: DataConnector['connectorKind'];
-  config?: Record<string, unknown>;
-  enabled?: boolean;
-}): Promise<DataConnector> {
-  const envelope = await apiMutationRequest<{ connector: DataConnector }>(
-    '/api/v1/data-connectors',
-    {
-      method: 'POST',
-      includeJson: true,
-      body: JSON.stringify(input),
-    },
-  );
-  return envelope.connector;
-}
-
-export async function patchDataConnector(input: {
-  connectorId: string;
-  name?: string;
-  config?: Record<string, unknown>;
-  enabled?: boolean;
-}): Promise<DataConnector> {
-  const envelope = await apiMutationRequest<{ connector: DataConnector }>(
-    `/api/v1/data-connectors/${encodeURIComponent(input.connectorId)}`,
-    {
-      method: 'PATCH',
-      includeJson: true,
-      body: JSON.stringify({
-        name: input.name,
-        config: input.config,
-        enabled: input.enabled,
-      }),
-    },
-  );
-  return envelope.connector;
-}
-
-export async function deleteDataConnector(connectorId: string): Promise<void> {
-  await apiMutationRequest<{ deleted: true }>(
-    `/api/v1/data-connectors/${encodeURIComponent(connectorId)}`,
-    {
-      method: 'DELETE',
-    },
-  );
-}
-
-export async function setDataConnectorCredential(input: {
-  connectorId: string;
-  apiKey?: string | null;
-  useGoogleAccount?: boolean;
-  clearCredential?: boolean;
-}): Promise<DataConnector> {
-  const envelope = await apiMutationRequest<{ connector: DataConnector }>(
-    `/api/v1/data-connectors/${encodeURIComponent(input.connectorId)}/credential`,
-    {
-      method: 'PUT',
-      includeJson: true,
-      body: JSON.stringify({
-        apiKey: input.apiKey ?? null,
-        useGoogleAccount: input.useGoogleAccount ?? false,
-        clearCredential: input.clearCredential ?? false,
-      }),
-    },
-  );
-  return envelope.connector;
-}
-
-export async function getTalkDataConnectors(
-  talkId: string,
-): Promise<TalkDataConnector[]> {
-  const envelope = await apiRequest<{
-    talkId: string;
-    connectors: TalkDataConnector[];
-  }>(`/api/v1/talks/${encodeURIComponent(talkId)}/data-connectors`);
-  return envelope.connectors;
-}
-
-export async function attachTalkDataConnector(input: {
-  talkId: string;
-  connectorId: string;
-}): Promise<TalkDataConnector> {
-  const envelope = await apiMutationRequest<{ connector: TalkDataConnector }>(
-    `/api/v1/talks/${encodeURIComponent(input.talkId)}/data-connectors`,
-    {
-      method: 'POST',
-      includeJson: true,
-      body: JSON.stringify({
-        connectorId: input.connectorId,
-      }),
-    },
-  );
-  return envelope.connector;
-}
-
-export async function detachTalkDataConnector(input: {
-  talkId: string;
-  connectorId: string;
-}): Promise<void> {
-  await apiMutationRequest<{ deleted: true }>(
-    `/api/v1/talks/${encodeURIComponent(input.talkId)}/data-connectors/${encodeURIComponent(input.connectorId)}`,
-    {
-      method: 'DELETE',
-    },
-  );
-}
-
-type ChannelConnectionApiRecord = {
-  id: string;
-  platform: 'telegram' | 'slack';
-  connection_mode: string;
-  account_key: string;
-  display_name: string;
-  enabled: number;
-  health_status: 'healthy' | 'degraded' | 'disconnected' | 'error';
-  last_health_check_at: string | null;
-  last_health_error: string | null;
-  consecutive_probe_failures?: number;
-  config_json: string | null;
-  token_source: 'db' | 'env' | 'missing' | null;
-  env_token_available: number;
-  has_stored_secret: number;
-  created_at: string;
-  updated_at: string;
-};
-
-type SlackProviderConfigApiRecord = {
-  clientId: string | null;
-  hasClientSecret: boolean;
-  hasSigningSecret: boolean;
-  redirectUrl: string | null;
-  eventsApiUrl: string | null;
-  eventsApiReady: boolean;
-  oauthInstallReady: boolean;
-  available: boolean;
-  availabilityReason: string | null;
-  updatedAt: string | null;
-  updatedBy: string | null;
-};
-
-type ChannelTargetApiRecord = {
-  connection_id: string;
-  target_kind: string;
-  target_id: string;
-  display_name: string;
-  metadata_json: string | null;
-  approved: number;
-  registered_at: string | null;
-  registered_by: string | null;
-  last_seen_at: string;
-  created_at: string;
-  updated_at: string;
-  active_binding_id?: string | null;
-  active_binding_talk_id?: string | null;
-  active_binding_talk_title?: string | null;
-  active_binding_talk_accessible?: number;
-};
-
-type ChannelQueueFailureApiRecord = {
-  id: string;
-  binding_id: string;
-  talk_id: string;
-  connection_id?: string;
-  target_kind: string;
-  target_id: string;
-  platform_event_id?: string | null;
-  external_message_id?: string | null;
-  sender_id?: string | null;
-  sender_name?: string | null;
-  run_id?: string | null;
-  talk_message_id?: string | null;
-  payload_json: string | null;
-  status: string;
-  reason_code: string | null;
-  reason_detail: string | null;
-  dedupe_key: string;
-  available_at: string;
-  created_at: string;
-  updated_at: string;
-  attempt_count: number;
-};
-
-function parseJsonObject(value: string | null): Record<string, unknown> | null {
-  if (!value) return null;
-  try {
-    const parsed = JSON.parse(value) as unknown;
-    return parsed && typeof parsed === 'object'
-      ? (parsed as Record<string, unknown>)
-      : null;
-  } catch {
-    return null;
-  }
-}
-
-function mapChannelConnection(
-  record: ChannelConnectionApiRecord,
-): ChannelConnection {
-  return {
-    id: record.id,
-    platform: record.platform,
-    connectionMode: record.connection_mode,
-    accountKey: record.account_key,
-    displayName: record.display_name,
-    enabled: record.enabled === 1,
-    healthStatus: record.health_status,
-    lastHealthCheckAt: record.last_health_check_at,
-    lastHealthError: record.last_health_error,
-    config: parseJsonObject(record.config_json),
-    tokenSource: record.token_source,
-    envTokenAvailable: record.env_token_available === 1,
-    hasStoredSecret: record.has_stored_secret === 1,
-    createdAt: record.created_at,
-    updatedAt: record.updated_at,
-  };
-}
-
-function mapChannelTarget(record: ChannelTargetApiRecord): ChannelTarget {
-  return {
-    connectionId: record.connection_id,
-    targetKind: record.target_kind,
-    targetId: record.target_id,
-    displayName: record.display_name,
-    metadata: parseJsonObject(record.metadata_json),
-    approved: record.approved === 1,
-    registeredAt: record.registered_at,
-    registeredBy: record.registered_by,
-    lastSeenAt: record.last_seen_at,
-    createdAt: record.created_at,
-    updatedAt: record.updated_at,
-    activeBindingId: record.active_binding_id ?? null,
-    activeBindingTalkId: record.active_binding_talk_id ?? null,
-    activeBindingTalkTitle: record.active_binding_talk_title ?? null,
-    activeBindingTalkAccessible: record.active_binding_talk_accessible === 1,
-  };
-}
-
-function mapSlackProviderConfig(
-  record: SlackProviderConfigApiRecord,
-): SlackProviderConfig {
-  return {
-    clientId: record.clientId,
-    hasClientSecret: record.hasClientSecret,
-    hasSigningSecret: record.hasSigningSecret,
-    redirectUrl: record.redirectUrl,
-    eventsApiUrl: record.eventsApiUrl,
-    eventsApiReady: record.eventsApiReady,
-    oauthInstallReady: record.oauthInstallReady,
-    available: record.available,
-    availabilityReason: record.availabilityReason,
-    updatedAt: record.updatedAt,
-    updatedBy: record.updatedBy,
-  };
-}
-
-function mapChannelQueueFailure(
-  record: ChannelQueueFailureApiRecord,
-): ChannelQueueFailure {
-  return {
-    id: record.id,
-    bindingId: record.binding_id,
-    talkId: record.talk_id,
-    connectionId: record.connection_id,
-    targetKind: record.target_kind,
-    targetId: record.target_id,
-    platformEventId: record.platform_event_id,
-    externalMessageId: record.external_message_id,
-    senderId: record.sender_id,
-    senderName: record.sender_name,
-    runId: record.run_id,
-    talkMessageId: record.talk_message_id,
-    payload: parseJsonObject(record.payload_json),
-    status: record.status,
-    reasonCode: record.reason_code,
-    reasonDetail: record.reason_detail,
-    dedupeKey: record.dedupe_key,
-    availableAt: record.available_at,
-    createdAt: record.created_at,
-    updatedAt: record.updated_at,
-    attemptCount: record.attempt_count,
-  };
-}
-
-export async function listChannelConnections(): Promise<ChannelConnection[]> {
-  const envelope = await apiRequest<{
-    connections: ChannelConnectionApiRecord[];
-  }>('/api/v1/channel-connections');
-  return envelope.connections.map(mapChannelConnection);
-}
-
-export async function getTelegramChannelConnector(): Promise<TelegramChannelConnector> {
-  const envelope = await apiRequest<{
-    connection: ChannelConnectionApiRecord;
-    targets: ChannelTargetApiRecord[];
-  }>('/api/v1/channel-connectors/telegram');
-  const connection = mapChannelConnection(envelope.connection);
-  const config = connection.config || {};
-  return {
-    connection,
-    bot: {
-      botUserId: typeof config.botUserId === 'number' ? config.botUserId : null,
-      botUsername:
-        typeof config.botUsername === 'string' ? config.botUsername : null,
-      botDisplayName:
-        typeof config.botDisplayName === 'string'
-          ? config.botDisplayName
-          : null,
-      canJoinGroups: config.canJoinGroups === true,
-    },
-    targets: envelope.targets.map(mapChannelTarget),
-  };
-}
-
-export async function validateTelegramChannelConnector(
-  botToken: string,
-): Promise<{
-  bot: {
-    botUserId: number;
-    botUsername: string | null;
-    botDisplayName: string;
-    canJoinGroups: boolean;
-  };
-}> {
-  return apiMutationRequest('/api/v1/channel-connectors/telegram/validate', {
-    method: 'POST',
-    includeJson: true,
-    body: JSON.stringify({ botToken }),
-  });
-}
-
-export async function saveTelegramChannelConnectorToken(
-  botToken: string,
-): Promise<TelegramChannelConnector> {
-  const envelope = await apiMutationRequest<{
-    connection: ChannelConnectionApiRecord;
-    targets: ChannelTargetApiRecord[];
-  }>('/api/v1/channel-connectors/telegram/token', {
-    method: 'PUT',
-    includeJson: true,
-    body: JSON.stringify({ botToken }),
-  });
-  const connection = mapChannelConnection(envelope.connection);
-  const config = connection.config || {};
-  return {
-    connection,
-    bot: {
-      botUserId: typeof config.botUserId === 'number' ? config.botUserId : null,
-      botUsername:
-        typeof config.botUsername === 'string' ? config.botUsername : null,
-      botDisplayName:
-        typeof config.botDisplayName === 'string'
-          ? config.botDisplayName
-          : null,
-      canJoinGroups: config.canJoinGroups === true,
-    },
-    targets: envelope.targets.map(mapChannelTarget),
-  };
-}
-
-export async function clearTelegramChannelConnectorToken(): Promise<TelegramChannelConnector> {
-  const envelope = await apiMutationRequest<{
-    connection: ChannelConnectionApiRecord;
-    targets: ChannelTargetApiRecord[];
-  }>('/api/v1/channel-connectors/telegram/token', {
-    method: 'DELETE',
-  });
-  const connection = mapChannelConnection(envelope.connection);
-  const config = connection.config || {};
-  return {
-    connection,
-    bot: {
-      botUserId: typeof config.botUserId === 'number' ? config.botUserId : null,
-      botUsername:
-        typeof config.botUsername === 'string' ? config.botUsername : null,
-      botDisplayName:
-        typeof config.botDisplayName === 'string'
-          ? config.botDisplayName
-          : null,
-      canJoinGroups: config.canJoinGroups === true,
-    },
-    targets: envelope.targets.map(mapChannelTarget),
-  };
-}
-
-export async function adoptTelegramChannelConnectorEnvToken(): Promise<TelegramChannelConnector> {
-  const envelope = await apiMutationRequest<{
-    connection: ChannelConnectionApiRecord;
-    targets: ChannelTargetApiRecord[];
-  }>('/api/v1/channel-connectors/telegram/adopt-env', {
-    method: 'POST',
-  });
-  const connection = mapChannelConnection(envelope.connection);
-  const config = connection.config || {};
-  return {
-    connection,
-    bot: {
-      botUserId: typeof config.botUserId === 'number' ? config.botUserId : null,
-      botUsername:
-        typeof config.botUsername === 'string' ? config.botUsername : null,
-      botDisplayName:
-        typeof config.botDisplayName === 'string'
-          ? config.botDisplayName
-          : null,
-      canJoinGroups: config.canJoinGroups === true,
-    },
-    targets: envelope.targets.map(mapChannelTarget),
-  };
-}
-
-export async function getSlackChannelConnector(): Promise<SlackChannelConnector> {
-  const envelope = await apiRequest<{
-    config: SlackProviderConfigApiRecord;
-    workspaces: ChannelConnectionApiRecord[];
-  }>('/api/v1/channel-connectors/slack');
-  return {
-    config: mapSlackProviderConfig(envelope.config),
-    workspaces: envelope.workspaces.map(mapChannelConnection),
-  };
-}
-
-export async function saveSlackChannelConnectorConfig(input: {
-  clientId: string;
-  clientSecret?: string;
-  signingSecret?: string;
-}): Promise<SlackChannelConnector> {
-  const envelope = await apiMutationRequest<{
-    config: SlackProviderConfigApiRecord;
-    workspaces: ChannelConnectionApiRecord[];
-  }>('/api/v1/channel-connectors/slack/config', {
-    method: 'PUT',
-    includeJson: true,
-    body: JSON.stringify(input),
-  });
-  return {
-    config: mapSlackProviderConfig(envelope.config),
-    workspaces: envelope.workspaces.map(mapChannelConnection),
-  };
-}
-
-export async function clearSlackChannelConnectorConfig(): Promise<SlackChannelConnector> {
-  const envelope = await apiMutationRequest<{
-    config: SlackProviderConfigApiRecord;
-    workspaces: ChannelConnectionApiRecord[];
-  }>('/api/v1/channel-connectors/slack/config', {
-    method: 'DELETE',
-  });
-  return {
-    config: mapSlackProviderConfig(envelope.config),
-    workspaces: envelope.workspaces.map(mapChannelConnection),
-  };
-}
-
-export async function startSlackChannelConnectorInstall(
-  returnTo?: string,
-): Promise<{ authorizationUrl: string; expiresInSec: number }> {
-  return apiMutationRequest('/api/v1/channel-connectors/slack/oauth/start', {
-    method: 'POST',
-    includeJson: true,
-    body: JSON.stringify({ returnTo }),
-  });
-}
-
-export async function syncSlackWorkspace(connectionId: string): Promise<{
-  syncedCount: number;
-  publicCount: number;
-  privateCount: number;
-}> {
-  return apiMutationRequest(
-    `/api/v1/channel-connectors/slack/workspaces/${encodeURIComponent(connectionId)}/sync`,
-    {
-      method: 'POST',
-    },
-  );
-}
-
-export async function disconnectSlackWorkspace(
-  connectionId: string,
-): Promise<void> {
-  await apiMutationRequest<{ deleted: true }>(
-    `/api/v1/channel-connectors/slack/workspaces/${encodeURIComponent(connectionId)}`,
-    {
-      method: 'DELETE',
-    },
-  );
-}
-
-export async function diagnoseSlackWorkspaceTarget(input: {
-  connectionId: string;
-  rawInput: string;
-}): Promise<SlackTargetDiagnostic> {
-  return apiMutationRequest(
-    `/api/v1/channel-connectors/slack/workspaces/${encodeURIComponent(input.connectionId)}/diagnose-target`,
-    {
-      method: 'POST',
-      includeJson: true,
-      body: JSON.stringify({ rawInput: input.rawInput }),
-    },
-  );
-}
-
-export async function listChannelTargets(input: {
-  connectionId: string;
-  query?: string;
-  limit?: number;
-  offset?: number;
-  approval?: 'all' | 'approved' | 'discovered';
-}): Promise<ChannelTargetListPage> {
-  const params = new URLSearchParams();
-  if (input.query?.trim()) {
-    params.set('query', input.query.trim());
-  }
-  if (typeof input.limit === 'number') {
-    params.set('limit', String(input.limit));
-  }
-  if (typeof input.offset === 'number') {
-    params.set('offset', String(input.offset));
-  }
-  if (input.approval && input.approval !== 'all') {
-    params.set('approval', input.approval);
-  }
-  const suffix = params.toString() ? `?${params.toString()}` : '';
-  const envelope = await apiRequest<{
-    targets: ChannelTargetApiRecord[];
-    totalCount?: number;
-    hasMore?: boolean;
-    nextOffset?: number | null;
-  }>(
-    `/api/v1/channel-connections/${encodeURIComponent(input.connectionId)}/targets${suffix}`,
-  );
-  return {
-    targets: envelope.targets.map(mapChannelTarget),
-    totalCount: envelope.totalCount ?? envelope.targets.length,
-    hasMore: envelope.hasMore === true,
-    nextOffset: envelope.nextOffset ?? null,
-  };
-}
-
-export async function approveChannelTarget(input: {
-  connectionId: string;
-  targetKind: string;
-  targetId: string;
-  displayName?: string;
-  metadata?: Record<string, unknown> | null;
-}): Promise<ChannelTarget> {
-  const envelope = await apiMutationRequest<{ target: ChannelTargetApiRecord }>(
-    `/api/v1/channel-connections/${encodeURIComponent(input.connectionId)}/targets/approve`,
-    {
-      method: 'POST',
-      includeJson: true,
-      body: JSON.stringify(input),
-    },
-  );
-  return mapChannelTarget(envelope.target);
-}
-
-export async function unapproveChannelTarget(input: {
-  connectionId: string;
-  targetKind: string;
-  targetId: string;
-}): Promise<{ removed: true; deactivatedBindingCount?: number }> {
-  return apiMutationRequest(
-    `/api/v1/channel-connections/${encodeURIComponent(input.connectionId)}/targets/${encodeURIComponent(input.targetKind)}/${encodeURIComponent(input.targetId)}/approval`,
-    {
-      method: 'DELETE',
-    },
-  );
-}
-
-export async function approveTelegramChannelTarget(input: {
-  rawInput?: string;
-  targetKind?: string;
-  targetId?: string;
-  displayName?: string;
-}): Promise<ChannelTarget> {
-  const envelope = await apiMutationRequest<{ target: ChannelTargetApiRecord }>(
-    '/api/v1/channel-connectors/telegram/targets/approve',
-    {
-      method: 'POST',
-      includeJson: true,
-      body: JSON.stringify(input),
-    },
-  );
-  return mapChannelTarget(envelope.target);
-}
-
-export async function unapproveTelegramChannelTarget(input: {
-  targetKind: string;
-  targetId: string;
-}): Promise<void> {
-  await apiMutationRequest<{ removed: true }>(
-    `/api/v1/channel-connectors/telegram/targets/${encodeURIComponent(input.targetKind)}/${encodeURIComponent(input.targetId)}/approval`,
-    {
-      method: 'DELETE',
-    },
-  );
-}
-
-export async function listTalkChannels(
-  talkId: string,
-): Promise<TalkChannelBinding[]> {
-  const envelope = await apiRequest<{
-    talkId: string;
-    bindings: TalkChannelBinding[];
-  }>(`/api/v1/talks/${encodeURIComponent(talkId)}/channels`);
-  return envelope.bindings;
-}
-
-export async function createTalkChannel(input: {
-  talkId: string;
-  connectionId: string;
-  targetKind: string;
-  targetId: string;
-  displayName: string;
-  responseMode?: TalkChannelBinding['responseMode'];
-  responderMode?: TalkChannelBinding['responderMode'];
-  responderAgentId?: string | null;
-  deliveryMode?: TalkChannelBinding['deliveryMode'];
-  timezone?: string | null;
-  instructions?: string | null;
-  inboundRateLimitPerMinute?: number;
-  maxPendingEvents?: number;
-  overflowPolicy?: TalkChannelBinding['overflowPolicy'];
-  maxDeferredAgeMinutes?: number;
-}): Promise<TalkChannelBinding> {
-  const envelope = await apiMutationRequest<{ binding: TalkChannelBinding }>(
-    `/api/v1/talks/${encodeURIComponent(input.talkId)}/channels`,
-    {
-      method: 'POST',
-      includeJson: true,
-      body: JSON.stringify(input),
-    },
-  );
-  return envelope.binding;
-}
-
-export async function patchTalkChannel(input: {
-  talkId: string;
-  bindingId: string;
-  active?: boolean;
-  displayName?: string;
-  responseMode?: TalkChannelBinding['responseMode'];
-  responderMode?: TalkChannelBinding['responderMode'];
-  responderAgentId?: string | null;
-  deliveryMode?: TalkChannelBinding['deliveryMode'];
-  timezone?: string | null;
-  instructions?: string | null;
-  inboundRateLimitPerMinute?: number;
-  maxPendingEvents?: number;
-  overflowPolicy?: TalkChannelBinding['overflowPolicy'];
-  maxDeferredAgeMinutes?: number;
-}): Promise<TalkChannelBinding> {
-  const { talkId, bindingId, ...patch } = input;
-  const envelope = await apiMutationRequest<{ binding: TalkChannelBinding }>(
-    `/api/v1/talks/${encodeURIComponent(talkId)}/channels/${encodeURIComponent(bindingId)}`,
-    {
-      method: 'PATCH',
-      includeJson: true,
-      body: JSON.stringify(patch),
-    },
-  );
-  return envelope.binding;
-}
-
-export async function deleteTalkChannel(input: {
-  talkId: string;
-  bindingId: string;
-}): Promise<void> {
-  await apiMutationRequest<{ deleted: true }>(
-    `/api/v1/talks/${encodeURIComponent(input.talkId)}/channels/${encodeURIComponent(input.bindingId)}`,
-    {
-      method: 'DELETE',
-    },
-  );
-}
-
-export async function testTalkChannelBinding(input: {
-  talkId: string;
-  bindingId: string;
-}): Promise<void> {
-  await apiMutationRequest<{ sent: true }>(
-    `/api/v1/talks/${encodeURIComponent(input.talkId)}/channels/${encodeURIComponent(input.bindingId)}/test`,
-    {
-      method: 'POST',
-    },
-  );
-}
-
-export async function listTalkChannelBindingState(input: {
-  talkId: string;
-  bindingId: string;
-}): Promise<{
-  stateNamespace: string;
-  entries: TalkChannelBindingStateEntry[];
-}> {
-  const envelope = await apiRequest<{
-    stateNamespace: string;
-    entries: TalkChannelBindingStateEntry[];
-  }>(
-    `/api/v1/talks/${encodeURIComponent(input.talkId)}/channels/${encodeURIComponent(input.bindingId)}/state`,
-  );
-  return envelope;
-}
-
-export async function upsertTalkChannelBindingState(input: {
-  talkId: string;
-  bindingId: string;
-  keySuffix: string;
-  value: unknown;
-  expectedVersion: number;
-}): Promise<TalkChannelBindingStateEntry> {
-  const envelope = await apiMutationRequest<{
-    entry: TalkChannelBindingStateEntry;
-  }>(
-    `/api/v1/talks/${encodeURIComponent(input.talkId)}/channels/${encodeURIComponent(input.bindingId)}/state`,
-    {
-      method: 'POST',
-      includeJson: true,
-      body: JSON.stringify({
-        keySuffix: input.keySuffix,
-        value: input.value,
-        expectedVersion: input.expectedVersion,
-      }),
-    },
-  );
-  return envelope.entry;
-}
-
-export async function deleteTalkChannelBindingState(input: {
-  talkId: string;
-  bindingId: string;
-  keySuffix: string;
-  expectedVersion: number;
-}): Promise<void> {
-  await apiMutationRequest<{ deleted: true }>(
-    `/api/v1/talks/${encodeURIComponent(input.talkId)}/channels/${encodeURIComponent(input.bindingId)}/state`,
-    {
-      method: 'DELETE',
-      includeJson: true,
-      body: JSON.stringify({
-        keySuffix: input.keySuffix,
-        expectedVersion: input.expectedVersion,
-      }),
-    },
-  );
-}
-
-export async function reviewTalkChannelInstructions(input: {
-  talkId: string;
-  platform: 'slack' | 'telegram';
-  instructions: string;
-  bindingId?: string | null;
-  bindingLabel?: string | null;
-  timezone?: string | null;
-}): Promise<ChannelInstructionReview> {
-  const envelope = await apiMutationRequest<{
-    review: ChannelInstructionReview;
-  }>(
-    `/api/v1/talks/${encodeURIComponent(input.talkId)}/channel-instruction-review`,
-    {
-      method: 'POST',
-      includeJson: true,
-      body: JSON.stringify(input),
-    },
-  );
-  return envelope.review;
-}
-
-export async function unquarantineTalkChannelBinding(input: {
-  talkId: string;
-  bindingId: string;
-}): Promise<{ unquarantined: boolean }> {
-  return apiMutationRequest<{ unquarantined: boolean }>(
-    `/api/v1/talks/${encodeURIComponent(input.talkId)}/channels/${encodeURIComponent(input.bindingId)}/unquarantine`,
-    {
-      method: 'POST',
-    },
-  );
-}
-
-export async function retryTalkChannelDeliveryFailuresCapped(input: {
-  talkId: string;
-  bindingId: string;
-  maxAgeMins?: number;
-  maxCount?: number;
-}): Promise<{ retried: number; tooOld: number; totalRemaining: number }> {
-  return apiMutationRequest<{
-    retried: number;
-    tooOld: number;
-    totalRemaining: number;
-  }>(
-    `/api/v1/talks/${encodeURIComponent(input.talkId)}/channels/${encodeURIComponent(input.bindingId)}/retry-failures`,
-    {
-      method: 'POST',
-      body: JSON.stringify({
-        maxAgeMins: input.maxAgeMins,
-        maxCount: input.maxCount,
-      }),
-    },
-  );
-}
-
-export async function listTalkChannelIngressFailures(input: {
-  talkId: string;
-  bindingId: string;
-}): Promise<ChannelQueueFailure[]> {
-  const envelope = await apiRequest<{
-    failures: ChannelQueueFailureApiRecord[];
-  }>(
-    `/api/v1/talks/${encodeURIComponent(input.talkId)}/channels/${encodeURIComponent(input.bindingId)}/ingress-failures`,
-  );
-  return envelope.failures.map(mapChannelQueueFailure);
-}
-
-export async function retryTalkChannelIngressFailure(input: {
-  talkId: string;
-  bindingId: string;
-  rowId: string;
-}): Promise<void> {
-  await apiMutationRequest<{ retried: true }>(
-    `/api/v1/talks/${encodeURIComponent(input.talkId)}/channels/${encodeURIComponent(input.bindingId)}/ingress-failures/${encodeURIComponent(input.rowId)}/retry`,
-    {
-      method: 'POST',
-    },
-  );
-}
-
-export async function deleteTalkChannelIngressFailure(input: {
-  talkId: string;
-  bindingId: string;
-  rowId: string;
-}): Promise<void> {
-  await apiMutationRequest<{ deleted: true }>(
-    `/api/v1/talks/${encodeURIComponent(input.talkId)}/channels/${encodeURIComponent(input.bindingId)}/ingress-failures/${encodeURIComponent(input.rowId)}`,
-    {
-      method: 'DELETE',
-    },
-  );
-}
-
-export async function listTalkChannelDeliveryFailures(input: {
-  talkId: string;
-  bindingId: string;
-}): Promise<ChannelQueueFailure[]> {
-  const envelope = await apiRequest<{
-    failures: ChannelQueueFailureApiRecord[];
-  }>(
-    `/api/v1/talks/${encodeURIComponent(input.talkId)}/channels/${encodeURIComponent(input.bindingId)}/delivery-failures`,
-  );
-  return envelope.failures.map(mapChannelQueueFailure);
-}
-
-export async function retryTalkChannelDeliveryFailure(input: {
-  talkId: string;
-  bindingId: string;
-  rowId: string;
-}): Promise<void> {
-  await apiMutationRequest<{ retried: true }>(
-    `/api/v1/talks/${encodeURIComponent(input.talkId)}/channels/${encodeURIComponent(input.bindingId)}/delivery-failures/${encodeURIComponent(input.rowId)}/retry`,
-    {
-      method: 'POST',
-    },
-  );
-}
-
-export async function deleteTalkChannelDeliveryFailure(input: {
-  talkId: string;
-  bindingId: string;
-  rowId: string;
-}): Promise<void> {
-  await apiMutationRequest<{ deleted: true }>(
-    `/api/v1/talks/${encodeURIComponent(input.talkId)}/channels/${encodeURIComponent(input.bindingId)}/delivery-failures/${encodeURIComponent(input.rowId)}`,
-    {
-      method: 'DELETE',
     },
   );
 }
@@ -3312,11 +2315,11 @@ export async function resumeTalkJob(input: {
 export async function runTalkJobNow(input: {
   talkId: string;
   jobId: string;
-}): Promise<{ job: TalkJob; runId: string; triggerMessageId: string }> {
+}): Promise<{ job: TalkJob; runId: string; triggerMessageId: null }> {
   return apiMutationRequest<{
     job: TalkJob;
     runId: string;
-    triggerMessageId: string;
+    triggerMessageId: null;
   }>(
     `/api/v1/talks/${encodeURIComponent(input.talkId)}/jobs/${encodeURIComponent(input.jobId)}/run-now`,
     { method: 'POST' },
@@ -3452,28 +2455,37 @@ export async function uploadSourcePageImage(input: {
 
 export async function updateDefaultClaudeModel(
   modelId: string,
+  input?: { workspaceId?: string | null },
 ): Promise<AiAgentsPageData> {
-  return apiMutationRequest<AiAgentsPageData>('/api/v1/agents/default-claude', {
-    method: 'PUT',
-    includeJson: true,
-    body: JSON.stringify({ modelId }),
-  });
+  return apiMutationRequest<AiAgentsPageData>(
+    withWorkspaceQuery('/api/v1/agents/default-claude', input?.workspaceId),
+    {
+      method: 'PUT',
+      includeJson: true,
+      body: JSON.stringify({ modelId }),
+    },
+  );
 }
 
 export async function saveAiProviderCredential(input: {
   providerId: string;
+  workspaceId?: string | null;
   apiKey?: string | null;
   organizationId?: string | null;
   baseUrl?: string | null;
   authScheme?: 'x_api_key' | 'bearer';
   scope?: ProviderCredentialScope;
 }): Promise<AgentProviderCard> {
+  const { workspaceId, ...body } = input;
   const envelope = await apiMutationRequest<{ provider: AgentProviderCard }>(
-    `/api/v1/agents/providers/${encodeURIComponent(input.providerId)}`,
+    withWorkspaceQuery(
+      `/api/v1/agents/providers/${encodeURIComponent(input.providerId)}`,
+      workspaceId,
+    ),
     {
       method: 'PUT',
       includeJson: true,
-      body: JSON.stringify(input),
+      body: JSON.stringify(body),
     },
   );
   return envelope.provider;
@@ -3482,10 +2494,14 @@ export async function saveAiProviderCredential(input: {
 export async function verifyAiProviderCredential(
   providerId: string,
   scope: ProviderCredentialScope = 'user',
+  input?: { workspaceId?: string | null },
 ): Promise<AgentProviderCard> {
-  const query = scope === 'workspace' ? '?scope=workspace' : '';
+  const query = new URLSearchParams();
+  if (scope === 'workspace') query.set('scope', 'workspace');
+  if (input?.workspaceId) query.set('workspaceId', input.workspaceId);
+  const suffix = query.toString() ? `?${query.toString()}` : '';
   const envelope = await apiMutationRequest<{ provider: AgentProviderCard }>(
-    `/api/v1/agents/providers/${encodeURIComponent(providerId)}/verify${query}`,
+    `/api/v1/agents/providers/${encodeURIComponent(providerId)}/verify${suffix}`,
     {
       method: 'POST',
     },
@@ -3502,13 +2518,14 @@ export interface AnthropicOauthInitiateResult {
 
 export async function initiateAnthropicSubscriptionOauth(
   scope: ProviderCredentialScope = 'user',
+  input?: { workspaceId?: string | null },
 ): Promise<AnthropicOauthInitiateResult> {
   return apiMutationRequest<AnthropicOauthInitiateResult>(
     '/api/v1/agents/providers/provider.anthropic/oauth/initiate',
     {
       method: 'POST',
       includeJson: true,
-      body: JSON.stringify({ scope }),
+      body: JSON.stringify({ scope, workspaceId: input?.workspaceId }),
     },
   );
 }
@@ -3542,13 +2559,14 @@ export interface OpenAiCodexOauthInitiateResult {
 
 export async function initiateOpenAiCodexSubscriptionOauth(
   scope: ProviderCredentialScope = 'user',
+  input?: { workspaceId?: string | null },
 ): Promise<OpenAiCodexOauthInitiateResult> {
   return apiMutationRequest<OpenAiCodexOauthInitiateResult>(
     '/api/v1/agents/providers/provider.openai_codex/oauth/initiate',
     {
       method: 'POST',
       includeJson: true,
-      body: JSON.stringify({ scope }),
+      body: JSON.stringify({ scope, workspaceId: input?.workspaceId }),
     },
   );
 }
@@ -3610,6 +2628,7 @@ export async function getHealthStatus(): Promise<boolean> {
 }
 
 export async function sendTalkMessage(input: {
+  workspaceId?: string | null;
   talkId: string;
   content: string;
   targetAgentIds?: string[];
@@ -3620,41 +2639,43 @@ export async function sendTalkMessage(input: {
     talkId: string;
     message: TalkMessage;
     runs: TalkRun[];
-  }>(`/api/v1/talks/${encodeURIComponent(input.talkId)}/chat`, {
-    method: 'POST',
-    includeJson: true,
-    body: JSON.stringify({
-      content: input.content,
-      targetAgentIds: input.targetAgentIds ?? [],
-      attachmentIds: input.attachmentIds ?? [],
-      threadId: input.threadId ?? null,
-    }),
-  });
-}
-
-export async function uploadTalkAttachment(
-  talkId: string,
-  file: File,
-): Promise<{ attachment: TalkMessageAttachment }> {
-  const formData = new FormData();
-  formData.append('file', file);
-  return apiMutationRequest<{ attachment: TalkMessageAttachment }>(
-    `/api/v1/talks/${encodeURIComponent(talkId)}/attachments`,
+  }>(
+    withWorkspaceQuery(
+      `/api/v1/talks/${encodeURIComponent(input.talkId)}/chat`,
+      input.workspaceId,
+    ),
     {
       method: 'POST',
-      body: formData,
-      // Do NOT set includeJson — this is multipart, not JSON
+      includeJson: true,
+      body: JSON.stringify({
+        content: input.content,
+        targetAgentIds: input.targetAgentIds ?? [],
+        attachmentIds: input.attachmentIds ?? [],
+        threadId: input.threadId ?? null,
+      }),
     },
   );
 }
 
+export async function uploadTalkAttachment(
+  _talkId: string,
+  _file: File,
+): Promise<{ attachment: TalkMessageAttachment }> {
+  throw new ApiError(
+    'Message attachments are not available on the greenfield chat route yet.',
+    501,
+    'attachments_not_available',
+  );
+}
+
 export async function deleteTalkAttachment(
-  talkId: string,
-  attachmentId: string,
+  _talkId: string,
+  _attachmentId: string,
 ): Promise<void> {
-  await apiMutationRequest<{ ok: boolean }>(
-    `/api/v1/talks/${encodeURIComponent(talkId)}/attachments/${encodeURIComponent(attachmentId)}`,
-    { method: 'DELETE' },
+  throw new ApiError(
+    'Message attachments are not available on the greenfield chat route yet.',
+    501,
+    'attachments_not_available',
   );
 }
 
@@ -3693,9 +2714,13 @@ export async function uploadContentImage(
 export async function cancelTalkRuns(
   talkId: string,
   threadId?: string | null,
+  input?: WorkspaceScopedRequest,
 ): Promise<{ talkId: string; cancelledRuns: number }> {
   return apiMutationRequest<{ talkId: string; cancelledRuns: number }>(
-    `/api/v1/talks/${encodeURIComponent(talkId)}/chat/cancel`,
+    withWorkspaceQuery(
+      `/api/v1/talks/${encodeURIComponent(talkId)}/chat/cancel`,
+      input?.workspaceId,
+    ),
     {
       method: 'POST',
       includeJson: true,
@@ -4111,14 +3136,12 @@ function buildIdempotencyKey(): string {
 }
 
 // ---------------------------------------------------------------------------
-// Workspace connectors (channels + data connectors) — PR 2 additive surface.
-// Coexists with chassis-era DataConnector/ChannelConnection/etc. types above;
-// those get removed in PR 3 once nothing else references them.
+// Workspace connectors (channels + data connectors).
 // ---------------------------------------------------------------------------
 
-export type ChannelKind = 'slack' | 'telegram';
+export type ChannelKind = 'slack';
 
-export type DataConnectorKind = 'posthog' | 'google_docs' | 'google_sheets';
+export type DataConnectorKind = 'google_docs' | 'google_sheets';
 
 export type WorkspaceChannel = {
   id: string;
@@ -4153,6 +3176,7 @@ export type TalkConnectorChannelRow = {
   kind: ChannelKind;
   displayName: string;
   enabled: boolean;
+  hasCredential: boolean;
   linked: boolean;
 };
 
@@ -4161,6 +3185,7 @@ export type TalkConnectorDataConnectorRow = {
   kind: DataConnectorKind;
   displayName: string;
   enabled: boolean;
+  hasCredential: boolean;
   linked: boolean;
 };
 
@@ -4186,39 +3211,47 @@ export type SlackInstallAuthorizationLaunch = {
   expiresInSec: number;
 };
 
-export async function listWorkspaceChannels(): Promise<WorkspaceChannel[]> {
+export async function listWorkspaceChannels(
+  input?: WorkspaceScopedRequest,
+): Promise<WorkspaceChannel[]> {
   const envelope = await apiRequest<{ channels: WorkspaceChannel[] }>(
-    '/api/v1/workspace/channels',
+    withWorkspaceQuery('/api/v1/workspace/channels', input?.workspaceId),
   );
   return envelope.channels;
 }
 
 export async function createWorkspaceChannel(input: {
+  workspaceId?: string | null;
   kind: ChannelKind;
   displayName: string;
   config: Record<string, unknown>;
   enabled?: boolean;
 }): Promise<WorkspaceChannel> {
+  const { workspaceId, ...body } = input;
   const envelope = await apiMutationRequest<{ channel: WorkspaceChannel }>(
-    '/api/v1/workspace/channels',
+    withWorkspaceQuery('/api/v1/workspace/channels', workspaceId),
     {
       method: 'POST',
       includeJson: true,
-      body: JSON.stringify(input),
+      body: JSON.stringify(body),
     },
   );
   return envelope.channel;
 }
 
 export async function updateWorkspaceChannel(input: {
+  workspaceId?: string | null;
   channelId: string;
   displayName?: string;
   config?: Record<string, unknown>;
   enabled?: boolean;
 }): Promise<WorkspaceChannel> {
-  const { channelId, ...patch } = input;
+  const { workspaceId, channelId, ...patch } = input;
   const envelope = await apiMutationRequest<{ channel: WorkspaceChannel }>(
-    `/api/v1/workspace/channels/${encodeURIComponent(channelId)}`,
+    withWorkspaceQuery(
+      `/api/v1/workspace/channels/${encodeURIComponent(channelId)}`,
+      workspaceId,
+    ),
     {
       method: 'PATCH',
       includeJson: true,
@@ -4228,9 +3261,15 @@ export async function updateWorkspaceChannel(input: {
   return envelope.channel;
 }
 
-export async function deleteWorkspaceChannel(channelId: string): Promise<void> {
+export async function deleteWorkspaceChannel(
+  channelId: string,
+  input?: WorkspaceScopedRequest,
+): Promise<void> {
   await apiMutationRequest<{ deleted: true }>(
-    `/api/v1/workspace/channels/${encodeURIComponent(channelId)}`,
+    withWorkspaceQuery(
+      `/api/v1/workspace/channels/${encodeURIComponent(channelId)}`,
+      input?.workspaceId,
+    ),
     {
       method: 'DELETE',
     },
@@ -4238,12 +3277,16 @@ export async function deleteWorkspaceChannel(channelId: string): Promise<void> {
 }
 
 export async function setWorkspaceChannelCredential(input: {
+  workspaceId?: string | null;
   channelId: string;
   apiKey: string | null;
   organizationId?: string;
 }): Promise<WorkspaceChannel> {
   const envelope = await apiMutationRequest<{ channel: WorkspaceChannel }>(
-    `/api/v1/workspace/channels/${encodeURIComponent(input.channelId)}/credential`,
+    withWorkspaceQuery(
+      `/api/v1/workspace/channels/${encodeURIComponent(input.channelId)}/credential`,
+      input.workspaceId,
+    ),
     {
       method: 'PUT',
       includeJson: true,
@@ -4258,53 +3301,68 @@ export async function setWorkspaceChannelCredential(input: {
   return envelope.channel;
 }
 
-export async function listWorkspaceDataConnectors(): Promise<
-  WorkspaceDataConnector[]
-> {
+export async function listWorkspaceDataConnectors(
+  input?: WorkspaceScopedRequest,
+): Promise<WorkspaceDataConnector[]> {
   const envelope = await apiRequest<{
     dataConnectors: WorkspaceDataConnector[];
-  }>('/api/v1/workspace/data-connectors');
+  }>(
+    withWorkspaceQuery('/api/v1/workspace/data-connectors', input?.workspaceId),
+  );
   return envelope.dataConnectors;
 }
 
 export async function createWorkspaceDataConnector(input: {
+  workspaceId?: string | null;
   kind: DataConnectorKind;
   displayName: string;
   config: Record<string, unknown>;
   enabled?: boolean;
 }): Promise<WorkspaceDataConnector> {
+  const { workspaceId, ...body } = input;
   const envelope = await apiMutationRequest<{
     dataConnector: WorkspaceDataConnector;
-  }>('/api/v1/workspace/data-connectors', {
+  }>(withWorkspaceQuery('/api/v1/workspace/data-connectors', workspaceId), {
     method: 'POST',
     includeJson: true,
-    body: JSON.stringify(input),
+    body: JSON.stringify(body),
   });
   return envelope.dataConnector;
 }
 
 export async function updateWorkspaceDataConnector(input: {
+  workspaceId?: string | null;
   connectorId: string;
   displayName?: string;
   config?: Record<string, unknown>;
   enabled?: boolean;
 }): Promise<WorkspaceDataConnector> {
-  const { connectorId, ...patch } = input;
+  const { workspaceId, connectorId, ...patch } = input;
   const envelope = await apiMutationRequest<{
     dataConnector: WorkspaceDataConnector;
-  }>(`/api/v1/workspace/data-connectors/${encodeURIComponent(connectorId)}`, {
-    method: 'PATCH',
-    includeJson: true,
-    body: JSON.stringify(patch),
-  });
+  }>(
+    withWorkspaceQuery(
+      `/api/v1/workspace/data-connectors/${encodeURIComponent(connectorId)}`,
+      workspaceId,
+    ),
+    {
+      method: 'PATCH',
+      includeJson: true,
+      body: JSON.stringify(patch),
+    },
+  );
   return envelope.dataConnector;
 }
 
 export async function deleteWorkspaceDataConnector(
   connectorId: string,
+  input?: WorkspaceScopedRequest,
 ): Promise<void> {
   await apiMutationRequest<{ deleted: true }>(
-    `/api/v1/workspace/data-connectors/${encodeURIComponent(connectorId)}`,
+    withWorkspaceQuery(
+      `/api/v1/workspace/data-connectors/${encodeURIComponent(connectorId)}`,
+      input?.workspaceId,
+    ),
     {
       method: 'DELETE',
     },
@@ -4312,6 +3370,7 @@ export async function deleteWorkspaceDataConnector(
 }
 
 export async function setWorkspaceDataConnectorCredential(input: {
+  workspaceId?: string | null;
   connectorId: string;
   apiKey: string | null;
   organizationId?: string;
@@ -4319,7 +3378,10 @@ export async function setWorkspaceDataConnectorCredential(input: {
   const envelope = await apiMutationRequest<{
     dataConnector: WorkspaceDataConnector;
   }>(
-    `/api/v1/workspace/data-connectors/${encodeURIComponent(input.connectorId)}/credential`,
+    withWorkspaceQuery(
+      `/api/v1/workspace/data-connectors/${encodeURIComponent(input.connectorId)}/credential`,
+      input.workspaceId,
+    ),
     {
       method: 'PUT',
       includeJson: true,
@@ -4342,20 +3404,27 @@ export async function getTalkConnectors(
   );
 }
 
-export async function listWorkspaceSlackInstalls(): Promise<
-  WorkspaceSlackInstall[]
-> {
+export async function listWorkspaceSlackInstalls(
+  input?: WorkspaceScopedRequest,
+): Promise<WorkspaceSlackInstall[]> {
   const envelope = await apiRequest<{ installs: WorkspaceSlackInstall[] }>(
-    '/api/v1/workspace/connectors/slack/installs',
+    withWorkspaceQuery(
+      '/api/v1/workspace/connectors/slack/installs',
+      input?.workspaceId,
+    ),
   );
   return envelope.installs;
 }
 
 export async function connectWorkspaceSlackInstall(input?: {
   returnTo?: string;
+  workspaceId?: string | null;
 }): Promise<SlackInstallAuthorizationLaunch> {
   return apiMutationRequest<SlackInstallAuthorizationLaunch>(
-    '/api/v1/workspace/connectors/slack/installs/connect',
+    withWorkspaceQuery(
+      '/api/v1/workspace/connectors/slack/installs/connect',
+      input?.workspaceId,
+    ),
     {
       method: 'POST',
       includeJson: true,
@@ -4366,9 +3435,13 @@ export async function connectWorkspaceSlackInstall(input?: {
 
 export async function deleteWorkspaceSlackInstall(
   teamId: string,
+  input?: WorkspaceScopedRequest,
 ): Promise<void> {
   await apiMutationRequest<{ deleted: boolean }>(
-    `/api/v1/workspace/connectors/slack/installs/${encodeURIComponent(teamId)}`,
+    withWorkspaceQuery(
+      `/api/v1/workspace/connectors/slack/installs/${encodeURIComponent(teamId)}`,
+      input?.workspaceId,
+    ),
     {
       method: 'DELETE',
     },
@@ -4387,9 +3460,13 @@ export type SlackChannelOption = {
 
 export async function listSlackInstallChannels(
   teamId: string,
+  input?: WorkspaceScopedRequest,
 ): Promise<SlackChannelOption[]> {
   const envelope = await apiRequest<{ channels: SlackChannelOption[] }>(
-    `/api/v1/workspace/connectors/slack/installs/${encodeURIComponent(teamId)}/channels`,
+    withWorkspaceQuery(
+      `/api/v1/workspace/connectors/slack/installs/${encodeURIComponent(teamId)}/channels`,
+      input?.workspaceId,
+    ),
   );
   return envelope.channels;
 }
@@ -4408,13 +3485,17 @@ export type SlackChannelAddResult = {
 };
 
 export async function bulkAddSlackChannels(input: {
+  workspaceId?: string | null;
   teamId: string;
   channels: SlackChannelPickInput[];
 }): Promise<SlackChannelAddResult[]> {
   const envelope = await apiMutationRequest<{
     created: SlackChannelAddResult[];
   }>(
-    `/api/v1/workspace/connectors/slack/installs/${encodeURIComponent(input.teamId)}/channels`,
+    withWorkspaceQuery(
+      `/api/v1/workspace/connectors/slack/installs/${encodeURIComponent(input.teamId)}/channels`,
+      input.workspaceId,
+    ),
     {
       method: 'POST',
       includeJson: true,
@@ -4429,7 +3510,7 @@ export async function setTalkChannelLink(input: {
   channelId: string;
 }): Promise<void> {
   await apiMutationRequest<{ linked: true }>(
-    `/api/v1/talks/${encodeURIComponent(input.talkId)}/channels/${encodeURIComponent(input.channelId)}`,
+    `/api/v1/talks/${encodeURIComponent(input.talkId)}/connectors/channels/${encodeURIComponent(input.channelId)}`,
     {
       method: 'PUT',
     },
@@ -4441,7 +3522,7 @@ export async function deleteTalkChannelLink(input: {
   channelId: string;
 }): Promise<void> {
   await apiMutationRequest<{ unlinked: true }>(
-    `/api/v1/talks/${encodeURIComponent(input.talkId)}/channels/${encodeURIComponent(input.channelId)}`,
+    `/api/v1/talks/${encodeURIComponent(input.talkId)}/connectors/channels/${encodeURIComponent(input.channelId)}`,
     {
       method: 'DELETE',
     },
@@ -4453,7 +3534,7 @@ export async function setTalkDataConnectorLink(input: {
   connectorId: string;
 }): Promise<void> {
   await apiMutationRequest<{ linked: true }>(
-    `/api/v1/talks/${encodeURIComponent(input.talkId)}/data-connectors/${encodeURIComponent(input.connectorId)}`,
+    `/api/v1/talks/${encodeURIComponent(input.talkId)}/connectors/data-connectors/${encodeURIComponent(input.connectorId)}`,
     {
       method: 'PUT',
     },
@@ -4465,7 +3546,7 @@ export async function deleteTalkDataConnectorLink(input: {
   connectorId: string;
 }): Promise<void> {
   await apiMutationRequest<{ unlinked: true }>(
-    `/api/v1/talks/${encodeURIComponent(input.talkId)}/data-connectors/${encodeURIComponent(input.connectorId)}`,
+    `/api/v1/talks/${encodeURIComponent(input.talkId)}/connectors/data-connectors/${encodeURIComponent(input.connectorId)}`,
     {
       method: 'DELETE',
     },

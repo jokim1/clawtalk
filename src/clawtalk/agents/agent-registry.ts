@@ -11,7 +11,7 @@
  *   - `accessors-pg.ts` for `settings_kv` (main agent / default talk agent
  *     pointers — system table grant landed in migration 0004).
  *   - `talk-agents-pg.ts` for the per-Talk `talk_agents` CRUD.
- *   - `agent-accessors-pg.ts` for the `registered_agents` surface.
+ *   - `agent-accessors-pg.ts` for the greenfield `agents` compatibility surface.
  *
  * Callers MUST run within `withUserContext(userId, async () => ...)` so that
  * RLS gates writes on `auth.uid()`. The `setTalkAgents` /
@@ -29,6 +29,7 @@ import {
   listEnabledAgents,
   listRegisteredAgents,
   setFallbackSteps,
+  toAgentSnapshot,
   updateRegisteredAgent,
   type RegisteredAgentRecord,
   type RegisteredAgentSnapshot,
@@ -54,14 +55,26 @@ const MAIN_AGENT_SETTING_KEY = 'system.mainAgentId';
 const DEFAULT_TALK_AGENT_SETTING_KEY = 'system.defaultTalkAgentId';
 const DEFAULT_TALK_AGENT_FALLBACK_ID = 'agent.talk';
 
+function workspaceMainAgentSettingKey(workspaceId?: string | null): string {
+  return workspaceId
+    ? `workspace.${workspaceId}.mainAgentId`
+    : MAIN_AGENT_SETTING_KEY;
+}
+
 /**
  * Returns the main agent ID from settings_kv.
  */
-export async function getMainAgentId(): Promise<string> {
-  const value = await getSettingValue(MAIN_AGENT_SETTING_KEY);
+export async function getMainAgentId(
+  workspaceId?: string | null,
+): Promise<string> {
+  const value = await getSettingValue(
+    workspaceMainAgentSettingKey(workspaceId),
+  );
   if (!value) {
     throw new Error(
-      'Main agent not configured. Check settings_kv for system.mainAgentId.',
+      workspaceId
+        ? `Main agent not configured for workspace ${workspaceId}.`
+        : 'Main agent not configured. Check settings_kv for system.mainAgentId.',
     );
   }
   return value;
@@ -74,8 +87,12 @@ export async function getMainAgentId(): Promise<string> {
  * compare against (e.g. "don't delete the main agent") and a missing
  * main is a benign state rather than an error.
  */
-export async function getMainAgentIdOrNull(): Promise<string | null> {
-  const value = await getSettingValue(MAIN_AGENT_SETTING_KEY);
+export async function getMainAgentIdOrNull(
+  workspaceId?: string | null,
+): Promise<string | null> {
+  const value = await getSettingValue(
+    workspaceMainAgentSettingKey(workspaceId),
+  );
   return value ? value : null;
 }
 
@@ -84,14 +101,16 @@ export async function getMainAgentIdOrNull(): Promise<string | null> {
  * Falls back to the direct-safe seeded Talk agent when the setting is absent,
  * and then to the main agent if the fallback agent has been removed.
  */
-export async function getDefaultTalkAgentId(): Promise<string> {
+export async function getDefaultTalkAgentId(
+  workspaceId?: string | null,
+): Promise<string> {
   const value = await getSettingValue(DEFAULT_TALK_AGENT_SETTING_KEY);
   const candidate = value?.trim() || DEFAULT_TALK_AGENT_FALLBACK_ID;
-  const agent = await getRegisteredAgent(candidate);
+  const agent = await getRegisteredAgent(candidate, workspaceId);
   if (agent && agent.enabled === true) {
     return candidate;
   }
-  return getMainAgentId();
+  return getMainAgentId(workspaceId);
 }
 
 /**
@@ -101,25 +120,29 @@ export async function getDefaultTalkAgentId(): Promise<string> {
  * "protected agent" comparison and shouldn't 500 when no defaults
  * exist yet.
  */
-export async function getDefaultTalkAgentIdOrNull(): Promise<string | null> {
+export async function getDefaultTalkAgentIdOrNull(
+  workspaceId?: string | null,
+): Promise<string | null> {
   const value = await getSettingValue(DEFAULT_TALK_AGENT_SETTING_KEY);
   const candidate = value?.trim() || DEFAULT_TALK_AGENT_FALLBACK_ID;
-  const agent = await getRegisteredAgent(candidate);
+  const agent = await getRegisteredAgent(candidate, workspaceId);
   if (agent && agent.enabled === true) {
     return candidate;
   }
-  return getMainAgentIdOrNull();
+  return getMainAgentIdOrNull(workspaceId);
 }
 
 /**
  * Returns the main agent record.
  * Throws if the agent has been disabled since it was set as main.
  */
-export async function getMainAgent(): Promise<RegisteredAgentRecord> {
-  const id = await getMainAgentId();
-  const agent = await getRegisteredAgent(id);
+export async function getMainAgent(
+  workspaceId?: string | null,
+): Promise<RegisteredAgentRecord> {
+  const id = await getMainAgentId(workspaceId);
+  const agent = await getRegisteredAgent(id, workspaceId);
   if (!agent) {
-    throw new Error(`Main agent '${id}' not found in registered_agents.`);
+    throw new Error(`Main agent '${id}' not found in agents.`);
   }
   if (agent.enabled !== true) {
     throw new Error(
@@ -134,11 +157,14 @@ export async function getMainAgent(): Promise<RegisteredAgentRecord> {
  * Returns the main agent as a snapshot (API-friendly format).
  * Throws if the agent has been disabled since it was set as main.
  */
-export async function getMainAgentSnapshot(): Promise<RegisteredAgentSnapshot> {
-  const id = await getMainAgentId();
-  const snapshot = await getRegisteredAgentSnapshot(id);
+export async function getMainAgentSnapshot(
+  workspaceId?: string | null,
+): Promise<RegisteredAgentSnapshot> {
+  const id = await getMainAgentId(workspaceId);
+  const agent = await getRegisteredAgent(id, workspaceId);
+  const snapshot = agent ? toAgentSnapshot(agent) : undefined;
   if (!snapshot) {
-    throw new Error(`Main agent '${id}' not found in registered_agents.`);
+    throw new Error(`Main agent '${id}' not found in agents.`);
   }
   if (!snapshot.enabled) {
     throw new Error(
@@ -326,13 +352,18 @@ export async function ensureTalkUsesUsableDefaultAgent(
 // ---------------------------------------------------------------------------
 
 /**
- * Set the system-wide main agent ID.
+ * Set the main agent ID. Greenfield callers pass a workspace id so the pointer
+ * is stored per workspace; legacy callers without one still use the global key.
  * Validates the agent exists and is enabled before writing.
  */
-export async function setMainAgentId(agentId: string): Promise<void> {
-  const agent = await getRegisteredAgent(agentId);
+export async function setMainAgentId(
+  agentId: string,
+  workspaceId?: string | null,
+  updatedBy?: string | null,
+): Promise<void> {
+  const agent = await getRegisteredAgent(agentId, workspaceId);
   if (!agent) {
-    throw new Error(`Agent '${agentId}' not found in registered_agents.`);
+    throw new Error(`Agent '${agentId}' not found in agents.`);
   }
   if (agent.enabled !== true) {
     throw new Error(
@@ -340,8 +371,9 @@ export async function setMainAgentId(agentId: string): Promise<void> {
     );
   }
   await upsertSettingValue({
-    key: MAIN_AGENT_SETTING_KEY,
+    key: workspaceMainAgentSettingKey(workspaceId),
     value: agentId,
+    updatedBy,
   });
 }
 

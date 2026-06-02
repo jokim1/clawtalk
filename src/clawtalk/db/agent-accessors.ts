@@ -264,22 +264,162 @@ function toUserToolPermission(
 const UUID_REGEX =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+const AGENT_COMPAT_COLUMNS = `
+  a.id,
+  w.owner_id,
+  a.name,
+  m.provider_id,
+  a.model_id,
+  a.persona_role,
+  a.persona as system_prompt,
+  a.focus as description,
+  a.enabled,
+  a.credential_mode,
+  a.model_auto_upgraded_from,
+  a.model_auto_upgraded_at,
+  a.created_at,
+  a.updated_at
+`;
+
+type AgentTemplateRow = {
+  role_key: string;
+  default_handle: string;
+  default_initials: string;
+  default_accent: string;
+  default_accent_dark: string | null;
+  default_temperature: string | number;
+  method_default: string[];
+  version: number;
+};
+
+function normalizeRoleKey(value: string | null | undefined): string {
+  const role = (value ?? '').trim().toLowerCase();
+  return [
+    'strategist',
+    'critic',
+    'researcher',
+    'editor',
+    'quant',
+    'forge_rewriter',
+    'forge_critic',
+  ].includes(role)
+    ? role
+    : 'strategist';
+}
+
+function buildHandle(name: string): string {
+  const slug = name
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 32);
+  return slug || 'agent';
+}
+
+function buildInitials(name: string): string {
+  const letters = name
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((part) => part[0]?.toUpperCase() ?? '')
+    .join('');
+  return letters || 'AI';
+}
+
+async function resolveFirstWorkspaceIdForUser(
+  db: Sql,
+  userId: string,
+): Promise<string> {
+  const rows = await db<{ id: string }[]>`
+    select w.id
+    from public.workspace_members wm
+    join public.workspaces w
+      on w.id = wm.workspace_id
+    where wm.user_id = ${userId}::uuid
+    order by wm.created_at asc, w.created_at asc, w.id asc
+    limit 1
+  `;
+  const workspaceId = rows[0]?.id;
+  if (!workspaceId) throw new Error('No workspace exists for this user.');
+  return workspaceId;
+}
+
+async function getAgentTemplate(
+  db: Sql,
+  roleKey: string,
+): Promise<AgentTemplateRow> {
+  const rows = await db<AgentTemplateRow[]>`
+    select role_key, default_handle, default_initials, default_accent,
+           default_accent_dark, default_temperature, method_default, version
+    from public.agent_role_templates
+    where role_key = ${roleKey}
+    limit 1
+  `;
+  const template = rows[0];
+  if (!template) {
+    throw new Error(`Agent role template '${roleKey}' is not configured.`);
+  }
+  return template;
+}
+
+async function assertModelBelongsToProvider(
+  db: Sql,
+  providerId: string,
+  modelId: string,
+): Promise<void> {
+  const rows = await db<{ model_id: string }[]>`
+    select model_id
+    from public.llm_provider_models
+    where provider_id = ${providerId}
+      and model_id = ${modelId}
+    limit 1
+  `;
+  if (!rows[0]) {
+    throw new Error(`Model '${modelId}' is not available for ${providerId}.`);
+  }
+}
+
+async function firstModelForProvider(
+  db: Sql,
+  providerId: string,
+): Promise<string> {
+  const rows = await db<{ model_id: string }[]>`
+    select model_id
+    from public.llm_provider_models
+    where provider_id = ${providerId}
+      and enabled = true
+    order by display_name asc, model_id asc
+    limit 1
+  `;
+  const modelId = rows[0]?.model_id;
+  if (!modelId) {
+    throw new Error(`No enabled model is configured for ${providerId}.`);
+  }
+  return modelId;
+}
+
 export async function getRegisteredAgent(
   agentId: string,
+  workspaceId?: string | null,
 ): Promise<RegisteredAgentRecord | undefined> {
   // Short-circuit non-UUID input so legacy slug-style identifiers
   // (e.g. the sqlite-era 'agent.talk' fallback ID) don't pollute the
   // current transaction with a postgres 22P02 cast error.
   if (!UUID_REGEX.test(agentId)) return undefined;
+  if (workspaceId && !UUID_REGEX.test(workspaceId)) return undefined;
   const db: Sql = getDbPg();
   const rows = await db<RegisteredAgentRecord[]>`
-    select id, owner_id, name, provider_id, model_id,
-           persona_role, system_prompt,
-           description, enabled, credential_mode,
-           model_auto_upgraded_from, model_auto_upgraded_at,
-           created_at, updated_at
-    from public.registered_agents
-    where id = ${agentId}::uuid
+    select ${db.unsafe(AGENT_COMPAT_COLUMNS)}
+    from public.agents a
+    join public.workspaces w
+      on w.id = a.workspace_id
+    join public.llm_provider_models m
+      on m.model_id = a.model_id
+    where a.id = ${agentId}::uuid
+      and (${workspaceId ?? null}::uuid is null
+           or a.workspace_id = ${workspaceId ?? null}::uuid)
     limit 1
   `;
   return rows[0];
@@ -292,35 +432,42 @@ export async function getRegisteredAgentSnapshot(
   return record ? toAgentSnapshot(record) : undefined;
 }
 
-export async function listRegisteredAgents(): Promise<RegisteredAgentRecord[]> {
+export async function listRegisteredAgents(
+  workspaceId?: string | null,
+): Promise<RegisteredAgentRecord[]> {
   const db = getDbPg();
   return await db<RegisteredAgentRecord[]>`
-    select id, owner_id, name, provider_id, model_id,
-           persona_role, system_prompt,
-           description, enabled, credential_mode,
-           model_auto_upgraded_from, model_auto_upgraded_at,
-           created_at, updated_at
-    from public.registered_agents
-    order by created_at asc
+    select ${db.unsafe(AGENT_COMPAT_COLUMNS)}
+    from public.agents a
+    join public.workspaces w
+      on w.id = a.workspace_id
+    join public.llm_provider_models m
+      on m.model_id = a.model_id
+    where a.is_system = false
+      and (${workspaceId ?? null}::uuid is null
+           or a.workspace_id = ${workspaceId ?? null}::uuid)
+    order by a.is_default desc, a.created_at asc, a.id asc
   `;
 }
 
 export async function listEnabledAgents(): Promise<RegisteredAgentRecord[]> {
   const db = getDbPg();
   return await db<RegisteredAgentRecord[]>`
-    select id, owner_id, name, provider_id, model_id,
-           persona_role, system_prompt,
-           description, enabled, credential_mode,
-           model_auto_upgraded_from, model_auto_upgraded_at,
-           created_at, updated_at
-    from public.registered_agents
-    where enabled = true
-    order by created_at asc
+    select ${db.unsafe(AGENT_COMPAT_COLUMNS)}
+    from public.agents a
+    join public.workspaces w
+      on w.id = a.workspace_id
+    join public.llm_provider_models m
+      on m.model_id = a.model_id
+    where a.enabled = true
+      and a.is_system = false
+    order by a.is_default desc, a.created_at asc, a.id asc
   `;
 }
 
 export async function createRegisteredAgent(params: {
   ownerId: string;
+  workspaceId?: string | null;
   name: string;
   providerId: string;
   modelId: string;
@@ -330,26 +477,35 @@ export async function createRegisteredAgent(params: {
   credentialMode?: RegisteredAgentCredentialMode | null;
 }): Promise<RegisteredAgentRecord> {
   const db = getDbPg();
-  const rows = await db<RegisteredAgentRecord[]>`
-    insert into public.registered_agents
-      (owner_id, name, provider_id, model_id,
-       persona_role, system_prompt, description, enabled, credential_mode)
+  const workspaceId =
+    params.workspaceId ??
+    (await resolveFirstWorkspaceIdForUser(db, params.ownerId));
+  const roleKey = normalizeRoleKey(params.personaRole);
+  const template = await getAgentTemplate(db, roleKey);
+  await assertModelBelongsToProvider(db, params.providerId, params.modelId);
+  const rows = await db<{ id: string }[]>`
+    insert into public.agents
+      (workspace_id, role_key, name, handle, initials, accent, accent_dark,
+       model_id, default_model_id, temperature, persona_role, persona, focus,
+       method, is_default, is_custom, is_system, enabled, credential_mode,
+       created_from_template_version)
     values
-      (${params.ownerId}::uuid, ${params.name}, ${params.providerId},
-       ${params.modelId},
+      (${workspaceId}::uuid, ${roleKey}, ${params.name},
+       ${buildHandle(params.name)}, ${buildInitials(params.name)},
+       ${template.default_accent}, ${template.default_accent_dark},
+       ${params.modelId}, ${params.modelId}, ${template.default_temperature},
        ${params.personaRole ?? null}, ${params.systemPrompt ?? null},
-       ${params.description ?? null}, true,
-       ${params.credentialMode ?? null})
-    returning id, owner_id, name, provider_id, model_id,
-              persona_role, system_prompt,
-              description, enabled, credential_mode,
-              model_auto_upgraded_from, model_auto_upgraded_at,
-              created_at, updated_at
+       ${params.description ?? null}, ${template.method_default}, false, true,
+       false, true, ${params.credentialMode ?? null}, ${template.version})
+    returning id
   `;
-  if (!rows[0]) {
+  const id = rows[0]?.id;
+  if (!id) {
     throw new Error('Failed to create agent');
   }
-  return rows[0];
+  const created = await getRegisteredAgent(id);
+  if (!created) throw new Error('Failed to load created agent');
+  return created;
 }
 
 export async function updateRegisteredAgent(
@@ -364,6 +520,7 @@ export async function updateRegisteredAgent(
     enabled: boolean;
     credentialMode: RegisteredAgentCredentialMode | null;
   }>,
+  workspaceId?: string | null,
 ): Promise<RegisteredAgentRecord | undefined> {
   // postgres.js doesn't have an Edit-clauses-as-array builder, so each
   // optional update is its own COALESCE column expression. Passing
@@ -371,18 +528,30 @@ export async function updateRegisteredAgent(
   // sentinel is the explicit { name: 'name' | null } shape from the
   // updates object. Approach lifted from editorialroom's
   // editorial-piece-meta updater.
+  if (workspaceId && !UUID_REGEX.test(workspaceId)) return undefined;
   const db = getDbPg();
-  const rows = await db<RegisteredAgentRecord[]>`
-    update public.registered_agents set
+  const modelId =
+    updates.modelId ??
+    (updates.providerId !== undefined
+      ? await firstModelForProvider(db, updates.providerId)
+      : undefined);
+  if (updates.providerId !== undefined && modelId !== undefined) {
+    await assertModelBelongsToProvider(db, updates.providerId, modelId);
+  }
+  const rows = await db<{ id: string }[]>`
+    update public.agents set
       name = coalesce(${updates.name ?? null}, name),
-      provider_id = coalesce(${updates.providerId ?? null}, provider_id),
-      model_id = coalesce(${updates.modelId ?? null}, model_id),
+      handle = case when ${updates.name !== undefined}::boolean
+        then ${buildHandle(updates.name ?? '')} else handle end,
+      initials = case when ${updates.name !== undefined}::boolean
+        then ${buildInitials(updates.name ?? '')} else initials end,
+      model_id = coalesce(${modelId ?? null}, model_id),
       persona_role = case when ${updates.personaRole !== undefined}::boolean
         then ${updates.personaRole ?? null} else persona_role end,
-      system_prompt = case when ${updates.systemPrompt !== undefined}::boolean
-        then ${updates.systemPrompt ?? null} else system_prompt end,
-      description = case when ${updates.description !== undefined}::boolean
-        then ${updates.description ?? null} else description end,
+      persona = case when ${updates.systemPrompt !== undefined}::boolean
+        then ${updates.systemPrompt ?? null} else persona end,
+      focus = case when ${updates.description !== undefined}::boolean
+        then ${updates.description ?? null} else focus end,
       enabled = coalesce(${updates.enabled ?? null}, enabled),
       credential_mode = case when ${updates.credentialMode !== undefined}::boolean
         then ${updates.credentialMode ?? null} else credential_mode end,
@@ -394,13 +563,14 @@ export async function updateRegisteredAgent(
         then null else model_auto_upgraded_at end,
       updated_at = now()
     where id = ${agentId}::uuid
-    returning id, owner_id, name, provider_id, model_id,
-              persona_role, system_prompt,
-              description, enabled, credential_mode,
-              model_auto_upgraded_from, model_auto_upgraded_at,
-              created_at, updated_at
+      and is_system = false
+      and (${workspaceId ?? null}::uuid is null
+           or workspace_id = ${workspaceId ?? null}::uuid)
+    returning id
   `;
-  return rows[0];
+  return rows[0]
+    ? await getRegisteredAgent(rows[0].id, workspaceId)
+    : undefined;
 }
 
 /**
@@ -418,20 +588,16 @@ export async function autoUpgradeAgentModel(
 ): Promise<RegisteredAgentRecord | undefined> {
   if (!UUID_REGEX.test(agentId)) return undefined;
   const db = getDbPg();
-  const rows = await db<RegisteredAgentRecord[]>`
-    update public.registered_agents set
+  const rows = await db<{ id: string }[]>`
+    update public.agents set
       model_id = ${toModel},
       model_auto_upgraded_from = ${fromModel},
       model_auto_upgraded_at = now(),
       updated_at = now()
     where id = ${agentId}::uuid and model_id = ${fromModel}
-    returning id, owner_id, name, provider_id, model_id,
-              persona_role, system_prompt,
-              description, enabled, credential_mode,
-              model_auto_upgraded_from, model_auto_upgraded_at,
-              created_at, updated_at
+    returning id
   `;
-  return rows[0];
+  return rows[0] ? await getRegisteredAgent(rows[0].id) : undefined;
 }
 
 /**
@@ -470,22 +636,34 @@ export async function autoUpgradeAgentModelOutsideTx(
 ): Promise<RegisteredAgentRecord | undefined> {
   if (!UUID_REGEX.test(agentId)) return undefined;
   const db = getOutOfBandSql();
-  const rows = await db<RegisteredAgentRecord[]>`
-    update public.registered_agents set
+  const rows = await db<{ id: string }[]>`
+    update public.agents set
       model_id = ${toModel},
       model_auto_upgraded_from = ${fromModel},
       model_auto_upgraded_at = now(),
       updated_at = now()
     where id = ${agentId}::uuid
-      and provider_id = ${expectedProviderId}
+      and exists (
+        select 1
+        from public.llm_provider_models m
+        where m.model_id = public.agents.model_id
+          and m.provider_id = ${expectedProviderId}
+      )
       and model_id = ${fromModel}
-    returning id, owner_id, name, provider_id, model_id,
-              persona_role, system_prompt,
-              description, enabled, credential_mode,
-              model_auto_upgraded_from, model_auto_upgraded_at,
-              created_at, updated_at
+    returning id
   `;
-  return rows[0];
+  if (!rows[0]) return undefined;
+  const loaded = await db<RegisteredAgentRecord[]>`
+    select ${db.unsafe(AGENT_COMPAT_COLUMNS)}
+    from public.agents a
+    join public.workspaces w
+      on w.id = a.workspace_id
+    join public.llm_provider_models m
+      on m.model_id = a.model_id
+    where a.id = ${rows[0].id}::uuid
+    limit 1
+  `;
+  return loaded[0];
 }
 
 /**
@@ -494,29 +672,41 @@ export async function autoUpgradeAgentModelOutsideTx(
  */
 export async function clearAgentModelUpgradeNotice(
   agentId: string,
+  workspaceId?: string | null,
 ): Promise<boolean> {
   if (!UUID_REGEX.test(agentId)) return false;
+  if (workspaceId && !UUID_REGEX.test(workspaceId)) return false;
   const db = getDbPg();
   const rows = await db<{ id: string }[]>`
-    update public.registered_agents set
+    update public.agents set
       model_auto_upgraded_from = null,
       model_auto_upgraded_at = null
     where id = ${agentId}::uuid and model_auto_upgraded_from is not null
+      and (${workspaceId ?? null}::uuid is null
+           or workspace_id = ${workspaceId ?? null}::uuid)
     returning id
   `;
   return rows.length > 0;
 }
 
 /**
- * Delete a registered agent. The talk_agents → registered_agents FK has
- * `on delete set null` in 0001_init_clawtalk_schema.sql, so we don't need
- * an explicit detach step — the FK cascade handles it.
+ * Delete a custom/default greenfield agent inside the optional workspace
+ * boundary. System agents are never removed through the registered-agent
+ * compatibility route.
  */
-export async function deleteRegisteredAgent(agentId: string): Promise<boolean> {
+export async function deleteRegisteredAgent(
+  agentId: string,
+  workspaceId?: string | null,
+): Promise<boolean> {
+  if (!UUID_REGEX.test(agentId)) return false;
+  if (workspaceId && !UUID_REGEX.test(workspaceId)) return false;
   const db = getDbPg();
   const rows = await db<{ id: string }[]>`
-    delete from public.registered_agents
+    delete from public.agents
     where id = ${agentId}::uuid
+      and is_system = false
+      and (${workspaceId ?? null}::uuid is null
+           or workspace_id = ${workspaceId ?? null}::uuid)
     returning id
   `;
   return rows.length > 0;

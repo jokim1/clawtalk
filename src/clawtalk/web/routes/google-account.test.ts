@@ -3,22 +3,35 @@
 // These tests cover the parts of the route module that don't require a live
 // Postgres connection — the htmlSafeJson helper (D3 XSS regression guard),
 // the bare callback paths (no state → invalid response), and the
-// picker-token error mapping. DB-backed paths (full happy-path callback,
-// auth gate via middleware, rate-limit hits) live in
-// google-oauth-service.test.ts and the existing integration suite.
+// picker-token error mapping. Full happy-path callback, auth gate via
+// middleware, and rate-limit hits live in google-oauth-service.test.ts and the
+// existing integration suite.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+const sqlMock = vi.hoisted(() =>
+  vi.fn<
+    (
+      strings: TemplateStringsArray,
+      ...values: unknown[]
+    ) => Promise<Array<{ workspace_id: string }>>
+  >(async (strings: TemplateStringsArray) => {
+    throw new Error(
+      `Unexpected SQL in google-account.test: ${strings.join('?')}`,
+    );
+  }),
+);
+
 // `withUserContext` from src/db.ts opens a real Postgres transaction. The
-// picker-token route doesn't actually use the DB itself (its only DB touch
-// is inside the mocked `buildGooglePickerSession`), so override
-// withUserContext to pass through. This keeps the test hermetic — no
-// supabase local stack required.
+// picker-token route only uses the DB when resolving an optional Talk-scoped
+// workspace, so mock both the DB handle and withUserContext. This keeps the
+// test hermetic — no supabase local stack required.
 vi.mock('../../../db.js', async () => {
   const actual =
     await vi.importActual<typeof import('../../../db.js')>('../../../db.js');
   return {
     ...actual,
+    getDbPg: () => sqlMock,
     withUserContext: async <T>(_userId: string, fn: () => Promise<T>) => fn(),
   };
 });
@@ -36,10 +49,29 @@ vi.mock('../../identity/google-tools-service.js', async () => {
   };
 });
 
+vi.mock('../../workspaces/bootstrap.js', () => ({
+  ensureWorkspaceBootstrapForUser: vi.fn(async () => 'workspace-1'),
+}));
+
+vi.mock('../../workspaces/accessors.js', () => ({
+  resolveWorkspaceForUser: vi.fn(async () => ({
+    id: '11111111-2222-4222-8222-111111111111',
+    name: 'Test',
+    role: 'owner',
+    initials: 'T',
+    created_at: '2026-05-31T00:00:00Z',
+    updated_at: '2026-05-31T00:00:00Z',
+  })),
+}));
+
 import {
+  disconnectGoogleAccountRoute,
+  expandScopesRoute,
   getGooglePickerTokenRoute,
+  getUserGoogleAccountRoute,
   handleGoogleCallback,
   htmlSafeJson,
+  startConnectRoute,
 } from './google-account.js';
 import { buildGooglePickerSession } from '../../identity/google-tools-service.js';
 import { GoogleToolCredentialError } from '../../identity/google-tools-errors.js';
@@ -51,14 +83,23 @@ const AUTH: AuthContext = {
   role: 'owner',
   authType: 'cookie',
 };
+const WORKSPACE_ID = '11111111-2222-4222-8222-111111111111';
+const TALK_WORKSPACE_ID = '22222222-2222-4222-8222-222222222222';
 
 const mockedBuildPickerSession = vi.mocked(buildGooglePickerSession);
 
 beforeEach(() => {
+  sqlMock.mockReset();
+  sqlMock.mockImplementation(async (strings: TemplateStringsArray) => {
+    throw new Error(
+      `Unexpected SQL in google-account.test: ${strings.join('?')}`,
+    );
+  });
   mockedBuildPickerSession.mockReset();
 });
 
 afterEach(() => {
+  sqlMock.mockReset();
   mockedBuildPickerSession.mockReset();
 });
 
@@ -136,7 +177,7 @@ describe('getGooglePickerTokenRoute', () => {
       developerKey: 'picker-key',
       appId: 'picker-app',
     });
-    const result = await getGooglePickerTokenRoute(AUTH);
+    const result = await getGooglePickerTokenRoute(AUTH, WORKSPACE_ID);
     expect(result.statusCode).toBe(200);
     expect(result.body).toEqual({
       ok: true,
@@ -146,7 +187,73 @@ describe('getGooglePickerTokenRoute', () => {
         appId: 'picker-app',
       },
     });
-    expect(mockedBuildPickerSession).toHaveBeenCalledWith(AUTH.userId);
+    expect(mockedBuildPickerSession).toHaveBeenCalledWith(AUTH.userId, {
+      workspaceId: WORKSPACE_ID,
+    });
+  });
+
+  it.each([
+    ['account read', () => getUserGoogleAccountRoute(AUTH)],
+    ['connect', () => startConnectRoute(AUTH, { scopes: ['drive.readonly'] })],
+    ['expand', () => expandScopesRoute(AUTH, { scopes: ['drive.readonly'] })],
+    ['disconnect', () => disconnectGoogleAccountRoute(AUTH)],
+    ['picker token', () => getGooglePickerTokenRoute(AUTH)],
+  ])(
+    'rejects missing workspace/talk scope for %s',
+    async (_caseName, runRoute) => {
+      const result = await runRoute();
+
+      expect(result.statusCode).toBe(400);
+      expect(result.body.ok).toBe(false);
+      if (!result.body.ok) {
+        expect(result.body.error.code).toBe('workspace_scope_required');
+      }
+      expect(mockedBuildPickerSession).not.toHaveBeenCalled();
+      expect(sqlMock).not.toHaveBeenCalled();
+    },
+  );
+
+  it('uses the talk workspace when a picker session is requested for a Talk', async () => {
+    const talkId = '22222222-2222-4222-8222-222222222222';
+    sqlMock.mockResolvedValueOnce([{ workspace_id: TALK_WORKSPACE_ID }]);
+    mockedBuildPickerSession.mockResolvedValueOnce({
+      oauthToken: 'access-from-talk-workspace',
+      developerKey: 'picker-key',
+      appId: 'picker-app',
+    });
+
+    const result = await getGooglePickerTokenRoute(AUTH, null, talkId);
+
+    expect(result.statusCode).toBe(200);
+    expect(mockedBuildPickerSession).toHaveBeenCalledWith(AUTH.userId, {
+      workspaceId: TALK_WORKSPACE_ID,
+    });
+  });
+
+  it('rejects mismatched workspace and talk picker-session requests', async () => {
+    const talkId = '22222222-2222-4222-8222-222222222222';
+    sqlMock.mockResolvedValueOnce([{ workspace_id: TALK_WORKSPACE_ID }]);
+
+    const result = await getGooglePickerTokenRoute(AUTH, WORKSPACE_ID, talkId);
+
+    expect(result.statusCode).toBe(400);
+    expect(result.body.ok).toBe(false);
+    if (!result.body.ok) {
+      expect(result.body.error.code).toBe('workspace_mismatch');
+    }
+    expect(mockedBuildPickerSession).not.toHaveBeenCalled();
+  });
+
+  it('rejects malformed requested workspace IDs before resolution', async () => {
+    const result = await getGooglePickerTokenRoute(AUTH, 'not-a-uuid');
+
+    expect(result.statusCode).toBe(400);
+    expect(result.body.ok).toBe(false);
+    if (!result.body.ok) {
+      expect(result.body.error.code).toBe('invalid_workspace_id');
+    }
+    expect(mockedBuildPickerSession).not.toHaveBeenCalled();
+    expect(sqlMock).not.toHaveBeenCalled();
   });
 
   it('returns 404 google_account_not_connected when no credential exists', async () => {
@@ -157,7 +264,7 @@ describe('getGooglePickerTokenRoute', () => {
         404,
       ),
     );
-    const result = await getGooglePickerTokenRoute(AUTH);
+    const result = await getGooglePickerTokenRoute(AUTH, WORKSPACE_ID);
     expect(result.statusCode).toBe(404);
     expect(result.body.ok).toBe(false);
     if (!result.body.ok) {
@@ -174,7 +281,7 @@ describe('getGooglePickerTokenRoute', () => {
         { missingScopes: ['drive.readonly'] },
       ),
     );
-    const result = await getGooglePickerTokenRoute(AUTH);
+    const result = await getGooglePickerTokenRoute(AUTH, WORKSPACE_ID);
     expect(result.statusCode).toBe(400);
     expect(result.body.ok).toBe(false);
     if (!result.body.ok) {
@@ -197,7 +304,7 @@ describe('getGooglePickerTokenRoute', () => {
         503,
       ),
     );
-    const result = await getGooglePickerTokenRoute(AUTH);
+    const result = await getGooglePickerTokenRoute(AUTH, WORKSPACE_ID);
     expect(result.statusCode).toBe(503);
     expect(result.body.ok).toBe(false);
     if (!result.body.ok) {
@@ -207,6 +314,8 @@ describe('getGooglePickerTokenRoute', () => {
 
   it('re-throws non-typed errors so they surface as 500 via Hono onError', async () => {
     mockedBuildPickerSession.mockRejectedValueOnce(new Error('boom'));
-    await expect(getGooglePickerTokenRoute(AUTH)).rejects.toThrow('boom');
+    await expect(getGooglePickerTokenRoute(AUTH, WORKSPACE_ID)).rejects.toThrow(
+      'boom',
+    );
   });
 });

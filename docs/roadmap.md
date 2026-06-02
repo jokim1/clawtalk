@@ -22,7 +22,7 @@ This file tracks shipped state vs. the greenfield refactor. It is not the produc
 ## Recent Mainline State
 
 - PR #506 has landed: PDF rasterization Lane C T10 render-pages affordance + capability surfacing.
-- PR #507 has landed: greenfield schema SQL is parked as `docs/canonical-greenfield-migration.sql`; PR #502 was closed because landing the executable schema alone breaks the legacy source/tests.
+- PR #507 landed the greenfield schema SQL as a docs-side draft. That file is now a guarded historical pointer; the active executable baseline lives at `supabase/migrations/0001_clawtalk_greenfield.sql`. PR #502 was closed because landing the executable schema alone breaks the legacy source/tests.
 - Cutover branch `codex/clawtalk-greenfield-cutover` now has the active fresh baseline at `supabase/migrations/0001_clawtalk_greenfield.sql`, role-template seeds, first-signin workspace bootstrap, and focused §11 invariant tests. We are not layering a `0040+` migration over disposable data.
 - Commits `9f72e76`, `ff9b6d8`, and `cac02ff` added greenfield workspace/talk route modules for core APIs, detail/snapshot APIs, and chat enqueue.
 - Commits `55c3d7e`, `3863628`, and `c53df5a` ported the queue consumer, executor, and scheduler sweeps to greenfield `runs` / `messages` / `talk_agent_snapshots`.

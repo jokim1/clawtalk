@@ -46,6 +46,10 @@ import {
   loadGoogleDriveBindings,
 } from './google-drive-tools.js';
 import { extractSourceReferences } from './source-reference-detection.js';
+import {
+  buildAllowedRuntimeToolSet,
+  filterRuntimeToolDefinitions,
+} from './runtime-tool-filter.js';
 
 const WEB_TOOL_DEFINITIONS: LlmToolDefinition[] = [
   {
@@ -749,7 +753,11 @@ export async function loadTalkContext(
   // the Talk actually having an attached doc. One per Talk by schema,
   // so this is at most one row.
   const content = await getContentByTalkId(talkId);
-  const contentOutline = content ? buildContentOutline(content) : null;
+  const contentOutline = content
+    ? buildContentOutline(content, CONTENT_OUTLINE_BUDGET_BYTES, {
+        allowEdits: !options?.jobPolicy,
+      })
+    : null;
 
   // Step 4: Assemble system prompt
   const systemPrompt = assembleSystemPrompt(
@@ -1941,8 +1949,10 @@ function buildHtmlOutlineBlocks(bodyHtml: string): OutlineBlock[] {
 export function buildContentOutline(
   content: Content,
   budgetBytes: number = CONTENT_OUTLINE_BUDGET_BYTES,
+  options?: { allowEdits?: boolean },
 ): string {
   const isHtml = content.contentFormat === 'html';
+  const allowEdits = options?.allowEdits !== false;
 
   const blocks = isHtml
     ? buildHtmlOutlineBlocks(content.bodyHtml ?? '')
@@ -1957,27 +1967,34 @@ export function buildContentOutline(
     'This Talk has exactly one long-form document attached, and the block listing below IS that document — full prose, in order, prefixed with the block kind and anchor ID for each. When the user says "the doc", "the document", "this doc", "summarize the doc", or anything similar, they mean THIS document. The user can also reference it explicitly with the literal token `@doc` in their message — when you see `@doc` anywhere in the latest user turn, treat it as a deterministic reference to THIS section. Do NOT look for a Google Doc binding. Do NOT search [S1]/[S2]/etc. Do NOT inspect chat attachments whose filename happens to match this title (the user often uploads a draft .md before promoting it into the doc — those are stale source material, not the live document). The blocks below are the canonical, current copy.',
   ].join('\n');
 
-  const formatStanza = isHtml
-    ? [
-        '',
-        '**HTML payload required for THIS doc.** This doc is HTML format — the `markdown` field of `apply_content_edit` carries HTML, not markdown. Wrap every block in real tags: paragraphs `<p>...</p>`, headings `<h1>...</h1>`–`<h6>`, lists `<ul><li>...</li></ul>` / `<ol>`, blockquotes `<blockquote>...</blockquote>`, code `<pre><code>...</code></pre>`. Plain text or markdown is rejected.',
-        '',
-        `Allowed tags (server allowlist): ${ALLOWED_TAGS.join(', ')}. Inline \`<style>\` blocks + CSS animations + the sanitized SVG subset are allowed. **Banned**: \`<script>\`, \`<iframe>\`, \`<form>\`, \`on*\` event handlers, \`javascript:\` URLs, \`<foreignObject>\`, \`<animate>\` SVG elements — these are stripped server-side. Use \`data-anchor-id="..."\` on the target block (copied verbatim from the listing above) to address an edit.`,
-      ].join('\n')
-    : '';
+  const formatStanza =
+    isHtml && allowEdits
+      ? [
+          '',
+          '**HTML payload required for THIS doc.** This doc is HTML format — the `markdown` field of `apply_content_edit` carries HTML, not markdown. Wrap every block in real tags: paragraphs `<p>...</p>`, headings `<h1>...</h1>`–`<h6>`, lists `<ul><li>...</li></ul>` / `<ol>`, blockquotes `<blockquote>...</blockquote>`, code `<pre><code>...</code></pre>`. Plain text or markdown is rejected.',
+          '',
+          `Allowed tags (server allowlist): ${ALLOWED_TAGS.join(', ')}. Inline \`<style>\` blocks + CSS animations + the sanitized SVG subset are allowed. **Banned**: \`<script>\`, \`<iframe>\`, \`<form>\`, \`on*\` event handlers, \`javascript:\` URLs, \`<foreignObject>\`, \`<animate>\` SVG elements — these are stripped server-side. Use \`data-anchor-id="..."\` on the target block (copied verbatim from the listing above) to address an edit.`,
+        ].join('\n')
+      : '';
 
-  const footer = [
-    'To change this document, call `apply_content_edit({ kind, anchor?, markdown, rationale? })`. Your edit lands in the doc immediately as a *pending change* the user can Accept or Reject from the doc pane. There is no propose step, no card to wait on — you edit, the user reviews afterward.',
-    '',
-    "Pick `kind`: `'append'` to add new block(s) after `anchor` (omit `anchor` to prepend at top); `'replace'` to overwrite the single block at `anchor`; `'delete'` to remove the block at `anchor`; `'bulk'` to swap the entire body (`markdown` is the COMPLETE new doc, omit `anchor`). Anchors come verbatim from the block listing above.",
-    '',
-    'Call the tool as many times as you need in one turn — every edit you make this turn is grouped into one pending edit run the user accepts or rejects as a single unit. Smaller, targeted edits review better than one giant bulk; reserve bulk for when most of the doc actually changes.',
-    '',
-    'When `@doc` appears in the latest user turn AND the request is to change the document (add, append, extend, draft, continue, rewrite, edit, fix, polish, expand, shorten, delete, etc.), you MUST call `apply_content_edit` — do NOT write substantive new prose into chat as a workaround. Rhetorical questions count as instructions: "Can you add a summary?", "Could you fix the intro?", "Want to rewrite this section?" are all explicit edit requests.',
-    '',
-    'NEVER narrate your capabilities ("I can only modify through tools", "I cannot directly edit @doc", etc.). Your reply in chat for an edit request should be a single short acknowledgement after the call ("Replaced paragraph 2 and added a closing CTA — review in the doc pane.") OR a clarifying question only if the request is genuinely ambiguous.',
-    formatStanza,
-  ]
+  const footer = (
+    allowEdits
+      ? [
+          'To change this document, call `apply_content_edit({ kind, anchor?, markdown, rationale? })`. Your edit lands in the doc immediately as a *pending change* the user can Accept or Reject from the doc pane. There is no propose step, no card to wait on — you edit, the user reviews afterward.',
+          '',
+          "Pick `kind`: `'append'` to add new block(s) after `anchor` (omit `anchor` to prepend at top); `'replace'` to overwrite the single block at `anchor`; `'delete'` to remove the block at `anchor`; `'bulk'` to swap the entire body (`markdown` is the COMPLETE new doc, omit `anchor`). Anchors come verbatim from the block listing above.",
+          '',
+          'Call the tool as many times as you need in one turn — every edit you make this turn is grouped into one pending edit run the user accepts or rejects as a single unit. Smaller, targeted edits review better than one giant bulk; reserve bulk for when most of the doc actually changes.',
+          '',
+          'When `@doc` appears in the latest user turn AND the request is to change the document (add, append, extend, draft, continue, rewrite, edit, fix, polish, expand, shorten, delete, etc.), you MUST call `apply_content_edit` — do NOT write substantive new prose into chat as a workaround. Rhetorical questions count as instructions: "Can you add a summary?", "Could you fix the intro?", "Want to rewrite this section?" are all explicit edit requests.',
+          '',
+          'NEVER narrate your capabilities ("I can only modify through tools", "I cannot directly edit @doc", etc.). Your reply in chat for an edit request should be a single short acknowledgement after the call ("Replaced paragraph 2 and added a closing CTA — review in the doc pane.") OR a clarifying question only if the request is genuinely ambiguous.',
+          formatStanza,
+        ]
+      : [
+          'This scheduled job may read and summarize the document, but scheduled jobs cannot modify the Talk document. If the prompt asks for a document edit, explain that interactive document edits must be made from a normal Talk turn.',
+        ]
+  )
     .filter((s) => s.length > 0)
     .join('\n');
 
@@ -2344,15 +2361,26 @@ function buildContextTools(
       .filter((tool) => tool.enabled)
       .map((tool) => tool.toolFamily),
   );
+  const allowedRuntimeTools = buildAllowedRuntimeToolSet(effectiveTools);
   const webEnabled = !effectiveTools || enabledToolFamilies.has('web');
   const browserEnabled = !effectiveTools || enabledToolFamilies.has('browser');
 
   if ((!jobPolicy || jobPolicy.allowWeb) && webEnabled) {
-    tools.push(...WEB_TOOL_DEFINITIONS);
+    tools.push(
+      ...filterRuntimeToolDefinitions(
+        WEB_TOOL_DEFINITIONS,
+        allowedRuntimeTools,
+      ),
+    );
   }
 
   if ((!jobPolicy || jobPolicy.allowWeb) && browserEnabled) {
-    tools.push(...BROWSER_TOOL_DEFINITIONS);
+    tools.push(
+      ...filterRuntimeToolDefinitions(
+        BROWSER_TOOL_DEFINITIONS,
+        allowedRuntimeTools,
+      ),
+    );
   }
 
   // D4 — always advertise Google Drive/Docs tools when the agent's family
@@ -2365,19 +2393,20 @@ function buildContextTools(
   const googleWriteEnabled =
     !effectiveTools || enabledToolFamilies.has('google_write');
   if (googleReadEnabled || googleWriteEnabled) {
+    const googleTools = buildGoogleDriveContextTools({
+      readEnabled: googleReadEnabled,
+      writeEnabled: googleWriteEnabled,
+      hasAttachedContent: hasContent && !jobPolicy,
+    });
     tools.push(
-      ...buildGoogleDriveContextTools({
-        readEnabled: googleReadEnabled,
-        writeEnabled: googleWriteEnabled,
-        hasAttachedContent: hasContent,
-      }),
+      ...filterRuntimeToolDefinitions(googleTools, allowedRuntimeTools),
     );
   }
 
   // Content document tools — only register when this Talk has an
   // attached doc, so agents in chat-only Talks aren't tempted to call
   // them and fall into "no document" errors.
-  if (hasContent) {
+  if (hasContent && !jobPolicy) {
     tools.push({
       name: 'apply_content_edit',
       description: [

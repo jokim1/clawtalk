@@ -166,8 +166,8 @@ export interface AgentExecutionOptions {
    */
   credentialKindSnapshot?: 'api_key' | 'subscription' | null;
   /**
-   * Explicit credential scope for service-role callers. Authenticated route
-   * callers normally omit this and rely on RLS.
+   * Explicit credential scope for provider secrets. Runtime paths fail closed
+   * for personal/workspace credentials when this is omitted.
    */
   credentialScope?: ExecutionCredentialScope | null;
   /**
@@ -310,7 +310,9 @@ export async function executeWithAgent(
   // for Talk runs (the executor already swapped via resolveTalkAgent, and we
   // re-load the upgraded row here) but makes executeWithAgent correct for any
   // caller that reaches it directly. See runtime-model-guard.ts.
-  await ensureRunnableModel(agent);
+  await ensureRunnableModel(agent, {
+    credentialScope: options.credentialScope ?? null,
+  });
 
   return executeWithResolvedAgent(agent, context, userMessage, options);
 }

@@ -82,7 +82,7 @@ export function TalkToolsPanel({ talkId }: TalkToolsPanelProps): JSX.Element {
       setBusy(true);
       setError(null);
       try {
-        const session = await getGooglePickerSession();
+        const session = await getGooglePickerSession({ talkId });
         const selections = await openGoogleDrivePicker({ session, mode });
         if (selections.length === 0) return;
         // Create bindings serially so a partial failure surfaces the
@@ -129,7 +129,7 @@ export function TalkToolsPanel({ talkId }: TalkToolsPanelProps): JSX.Element {
           <h2>Bound Drive Resources</h2>
           <p className="talk-tools-panel-meta">
             Attach Google Drive folders or Docs so agents in this Talk can read
-            or update them. Each user has their own bindings.
+            or update them. Bindings are shared with editors of this Talk.
           </p>
         </div>
         <div className="talk-tools-panel-actions">

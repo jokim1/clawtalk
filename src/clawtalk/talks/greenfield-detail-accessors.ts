@@ -1,4 +1,4 @@
-import { getDbPg, withTrustedDbWrites } from '../../db.js';
+import { getDbPg, withTrustedDbWrites, type Sql } from '../../db.js';
 
 export interface GreenfieldMessageRecord {
   id: string;
@@ -12,7 +12,6 @@ export interface GreenfieldMessageRecord {
   agent_role_key: string | null;
   run_id: string | null;
   body: string | null;
-  attachments_json: unknown;
   created_at: string;
 }
 
@@ -45,6 +44,17 @@ export interface GreenfieldRunRecord {
   target_agent_name: string | null;
   model_id: string;
   error_json: unknown;
+}
+
+export interface GreenfieldRunContextSnapshotRecord {
+  id: string;
+  talk_id: string;
+  round: number;
+  trigger_message_id: string | null;
+  role_key: string | null;
+  tool_manifest_json: unknown | null;
+  context_manifest_json: unknown | null;
+  prompt_text_redacted: string | null;
 }
 
 export interface GreenfieldDocumentBlockRecord {
@@ -118,6 +128,22 @@ const BLOCK_KINDS = new Set<GreenfieldDocumentBlockKind>([
   'code',
 ]);
 
+async function withExistingOrNewTransaction<T>(
+  db: Sql,
+  fn: (txSql: Sql) => Promise<T>,
+): Promise<T> {
+  const maybeTransaction = db as Sql & { savepoint?: unknown };
+  if (
+    typeof maybeTransaction.savepoint === 'function' ||
+    typeof maybeTransaction.begin !== 'function'
+  ) {
+    return fn(db);
+  }
+  return (await maybeTransaction.begin(async (tx) =>
+    fn(tx as unknown as Sql),
+  )) as T;
+}
+
 export async function listGreenfieldMessages(input: {
   workspaceId: string;
   talkId: string;
@@ -141,7 +167,6 @@ export async function listGreenfieldMessages(input: {
         tas.role_key as agent_role_key,
         m.run_id,
         m.body,
-        m.attachments_json,
         m.created_at
       from public.messages m
       left join public.talk_agent_snapshots tas
@@ -182,7 +207,6 @@ export async function searchGreenfieldMessages(input: {
       tas.role_key as agent_role_key,
       m.run_id,
       m.body,
-      m.attachments_json,
       m.created_at
     from public.messages m
     left join public.talk_agent_snapshots tas
@@ -204,7 +228,7 @@ export async function deleteGreenfieldMessages(input: {
 }): Promise<string[]> {
   if (input.messageIds.length === 0) return [];
   const db = getDbPg();
-  await withTrustedDbWrites(async () => {
+  return withTrustedDbWrites(async () => {
     await db`
       update public.runs
       set trigger_message_id = null
@@ -212,15 +236,15 @@ export async function deleteGreenfieldMessages(input: {
         and talk_id = ${input.talkId}::uuid
         and trigger_message_id in ${db(input.messageIds)}
     `;
+    const rows = await db<{ id: string }[]>`
+      delete from public.messages
+      where workspace_id = ${input.workspaceId}::uuid
+        and talk_id = ${input.talkId}::uuid
+        and id in ${db(input.messageIds)}
+      returning id
+    `;
+    return rows.map((row) => row.id);
   });
-  const rows = await db<{ id: string }[]>`
-    delete from public.messages
-    where workspace_id = ${input.workspaceId}::uuid
-      and talk_id = ${input.talkId}::uuid
-      and id in ${db(input.messageIds)}
-    returning id
-  `;
-  return rows.map((row) => row.id);
 }
 
 export async function getGreenfieldThreadMetrics(input: {
@@ -279,11 +303,45 @@ export async function listGreenfieldRuns(input: {
   `;
 }
 
-export async function getGreenfieldDocumentForTalk(input: {
+export async function getGreenfieldRunContextSnapshotRecord(input: {
   workspaceId: string;
   talkId: string;
-}): Promise<GreenfieldDocumentRecord | undefined> {
+  runId: string;
+}): Promise<GreenfieldRunContextSnapshotRecord | undefined> {
   const db = getDbPg();
+  const rows = await db<GreenfieldRunContextSnapshotRecord[]>`
+    select
+      r.id,
+      r.talk_id,
+      r.round,
+      r.trigger_message_id,
+      tas.role_key,
+      rps.tool_manifest_json,
+      rps.context_manifest_json,
+      rps.prompt_text_redacted
+    from public.runs r
+    join public.talk_agent_snapshots tas
+      on tas.workspace_id = r.workspace_id
+     and tas.talk_id = r.talk_id
+     and tas.id = r.agent_snapshot_id
+    left join public.run_prompt_snapshots rps
+      on rps.workspace_id = r.workspace_id
+     and rps.id = r.prompt_snapshot_id
+    where r.workspace_id = ${input.workspaceId}::uuid
+      and r.talk_id = ${input.talkId}::uuid
+      and r.id = ${input.runId}::uuid
+    limit 1
+  `;
+  return rows[0];
+}
+
+async function selectGreenfieldDocumentForTalk(
+  db: Sql,
+  input: {
+    workspaceId: string;
+    talkId: string;
+  },
+): Promise<GreenfieldDocumentRecord | undefined> {
   const rows = await db<Omit<GreenfieldDocumentRecord, 'blocks'>[]>`
     select
       d.id,
@@ -323,6 +381,14 @@ export async function getGreenfieldDocumentForTalk(input: {
     order by sort_order asc, id asc
   `;
   return { ...document, blocks };
+}
+
+export async function getGreenfieldDocumentForTalk(input: {
+  workspaceId: string;
+  talkId: string;
+}): Promise<GreenfieldDocumentRecord | undefined> {
+  const db = getDbPg();
+  return selectGreenfieldDocumentForTalk(db, input);
 }
 
 export async function getGreenfieldDocumentById(input: {
@@ -377,28 +443,66 @@ export async function createGreenfieldDocumentForTalk(input: {
   title: string;
   format: 'markdown' | 'html';
 }): Promise<GreenfieldDocumentRecord> {
-  const existing = await getGreenfieldDocumentForTalk(input);
-  if (existing) return existing;
-
   const db = getDbPg();
-  const [document] = await db<{ id: string }[]>`
-    insert into public.documents (workspace_id, primary_talk_id, title, format)
-    values (
-      ${input.workspaceId}::uuid,
-      ${input.talkId}::uuid,
-      ${input.title},
-      ${input.format}
-    )
-    returning id
-  `;
-  await db`
-    insert into public.doc_tabs (workspace_id, document_id, title, sort_order)
-    values (${input.workspaceId}::uuid, ${document!.id}::uuid, 'Main', 0)
-  `;
-  const created = await getGreenfieldDocumentForTalk(input);
-  if (!created) {
-    throw new Error(`Created document for talk ${input.talkId} could not load`);
-  }
+  const created = await withTrustedDbWrites(() =>
+    withExistingOrNewTransaction(db, async (tx) => {
+      const existing = await selectGreenfieldDocumentForTalk(tx, input);
+      if (existing) return existing;
+
+      const inserted = await tx<{ id: string }[]>`
+      insert into public.documents (workspace_id, primary_talk_id, title, format)
+      values (
+        ${input.workspaceId}::uuid,
+        ${input.talkId}::uuid,
+        ${input.title},
+        ${input.format}
+      )
+      on conflict (primary_talk_id) where primary_talk_id is not null do nothing
+      returning id
+    `;
+      const documentId =
+        inserted[0]?.id ??
+        (
+          await tx<{ id: string }[]>`
+          select id
+          from public.documents
+          where workspace_id = ${input.workspaceId}::uuid
+            and primary_talk_id = ${input.talkId}::uuid
+          limit 1
+        `
+        )[0]?.id;
+      if (!documentId) {
+        throw new Error(
+          `Document for talk ${input.talkId} could not be created`,
+        );
+      }
+
+      await tx`
+      select id
+      from public.documents
+      where workspace_id = ${input.workspaceId}::uuid
+        and id = ${documentId}::uuid
+      for update
+    `;
+      await tx`
+      insert into public.doc_tabs (workspace_id, document_id, title, sort_order)
+      select ${input.workspaceId}::uuid, ${documentId}::uuid, 'Main', 0
+      where not exists (
+        select 1
+        from public.doc_tabs
+        where workspace_id = ${input.workspaceId}::uuid
+          and document_id = ${documentId}::uuid
+      )
+    `;
+      const document = await selectGreenfieldDocumentForTalk(tx, input);
+      if (!document) {
+        throw new Error(
+          `Created document for talk ${input.talkId} could not load`,
+        );
+      }
+      return document;
+    }),
+  );
   return created;
 }
 
@@ -410,42 +514,45 @@ export async function replaceGreenfieldDocumentBlocks(input: {
   skipListVersionBump?: boolean;
 }): Promise<void> {
   const db = getDbPg();
-  await db`
-    delete from public.doc_blocks
-    where workspace_id = ${input.workspaceId}::uuid
-      and document_id = ${input.documentId}::uuid
-      and tab_id = ${input.tabId}::uuid
-  `;
-  for (const [index, block] of input.blocks.entries()) {
-    await db`
-      insert into public.doc_blocks (
-        workspace_id, document_id, tab_id, sort_order, kind, text
-      )
-      values (
-        ${input.workspaceId}::uuid,
-        ${input.documentId}::uuid,
-        ${input.tabId}::uuid,
-        ${index},
-        ${block.kind},
-        ${block.text}
-      )
-    `;
-  }
-  await db`
-    update public.documents
-    set last_edit_at = now()
-    where workspace_id = ${input.workspaceId}::uuid
-      and id = ${input.documentId}::uuid
-  `;
-  if (input.skipListVersionBump !== true) {
-    await db`
-      update public.doc_tabs
-      set list_version = list_version + 1
+  await withTrustedDbWrites(() =>
+    withExistingOrNewTransaction(db, async (tx) => {
+      await tx`
+      delete from public.doc_blocks
       where workspace_id = ${input.workspaceId}::uuid
         and document_id = ${input.documentId}::uuid
-        and id = ${input.tabId}::uuid
+        and tab_id = ${input.tabId}::uuid
     `;
-  }
+      if (input.blocks.length > 0) {
+        const rows = input.blocks.map((block, index) => ({
+          workspace_id: input.workspaceId,
+          document_id: input.documentId,
+          tab_id: input.tabId,
+          sort_order: index,
+          kind: block.kind,
+          text: block.text,
+        }));
+        await tx`
+        insert into public.doc_blocks
+        ${tx(rows, 'workspace_id', 'document_id', 'tab_id', 'sort_order', 'kind', 'text')}
+      `;
+      }
+      await tx`
+      update public.documents
+      set last_edit_at = now()
+      where workspace_id = ${input.workspaceId}::uuid
+        and id = ${input.documentId}::uuid
+    `;
+      if (input.skipListVersionBump !== true) {
+        await tx`
+        update public.doc_tabs
+        set list_version = list_version + 1
+        where workspace_id = ${input.workspaceId}::uuid
+          and document_id = ${input.documentId}::uuid
+          and id = ${input.tabId}::uuid
+      `;
+      }
+    }),
+  );
 }
 
 export async function bumpGreenfieldDocumentPatchVersion(input: {
@@ -459,15 +566,17 @@ export async function bumpGreenfieldDocumentPatchVersion(input: {
   | { kind: 'not_found' }
 > {
   const db = getDbPg();
-  const bumpedRows = await db<{ list_version: number }[]>`
-    update public.doc_tabs
-    set list_version = list_version + 1
-    where workspace_id = ${input.workspaceId}::uuid
-      and document_id = ${input.documentId}::uuid
-      and id = ${input.tabId}::uuid
-      and list_version = ${input.expectedListVersion}
-    returning list_version
-  `;
+  const bumpedRows = await withTrustedDbWrites(
+    () => db<{ list_version: number }[]>`
+      update public.doc_tabs
+      set list_version = list_version + 1
+      where workspace_id = ${input.workspaceId}::uuid
+        and document_id = ${input.documentId}::uuid
+        and id = ${input.tabId}::uuid
+        and list_version = ${input.expectedListVersion}
+      returning list_version
+    `,
+  );
   const bumped = bumpedRows[0];
   if (bumped) return { kind: 'ok', listVersion: bumped.list_version };
 
@@ -493,12 +602,14 @@ export async function updateGreenfieldDocumentTitle(input: {
   title: string;
 }): Promise<void> {
   const db = getDbPg();
-  await db`
-    update public.documents
-    set title = ${input.title}
-    where workspace_id = ${input.workspaceId}::uuid
-      and id = ${input.documentId}::uuid
-  `;
+  await withTrustedDbWrites(async () => {
+    await db`
+      update public.documents
+      set title = ${input.title}
+      where workspace_id = ${input.workspaceId}::uuid
+        and id = ${input.documentId}::uuid
+    `;
+  });
 }
 
 export async function listPendingGreenfieldDocumentEdits(input: {
@@ -549,33 +660,35 @@ async function loadPendingGreenfieldDocumentEditForUpdate(input: {
   editId: string;
 }): Promise<GreenfieldDocumentEditRecord | undefined> {
   const db = getDbPg();
-  const rows = await db<GreenfieldDocumentEditRecord[]>`
-    select
-      de.id,
-      de.document_id,
-      de.tab_id,
-      de.proposed_by_agent_id,
-      a.name as proposed_by_agent_name,
-      de.proposed_by_run_id,
-      de.op,
-      de.new_kind,
-      de.new_text,
-      de.new_attrs_json,
-      de.block_id,
-      de.after_block_id,
-      de.created_at,
-      de.base_block_version,
-      de.base_list_version
-    from public.document_edits de
-    left join public.agents a
-      on a.workspace_id = de.workspace_id
-     and a.id = de.proposed_by_agent_id
-    where de.workspace_id = ${input.workspaceId}::uuid
-      and de.document_id = ${input.documentId}::uuid
-      and de.id = ${input.editId}::uuid
-      and de.status = 'pending'
-    for update of de
-  `;
+  const rows = await withTrustedDbWrites(
+    () => db<GreenfieldDocumentEditRecord[]>`
+      select
+        de.id,
+        de.document_id,
+        de.tab_id,
+        de.proposed_by_agent_id,
+        a.name as proposed_by_agent_name,
+        de.proposed_by_run_id,
+        de.op,
+        de.new_kind,
+        de.new_text,
+        de.new_attrs_json,
+        de.block_id,
+        de.after_block_id,
+        de.created_at,
+        de.base_block_version,
+        de.base_list_version
+      from public.document_edits de
+      left join public.agents a
+        on a.workspace_id = de.workspace_id
+       and a.id = de.proposed_by_agent_id
+      where de.workspace_id = ${input.workspaceId}::uuid
+        and de.document_id = ${input.documentId}::uuid
+        and de.id = ${input.editId}::uuid
+        and de.status = 'pending'
+      for update of de
+    `,
+  );
   return rows[0];
 }
 
@@ -636,14 +749,16 @@ async function markDocumentEditSuperseded(input: {
   editId: string;
 }): Promise<void> {
   const db = getDbPg();
-  await db`
-    update public.document_edits
-    set status = 'superseded',
-        resolved_at = now()
-    where workspace_id = ${input.workspaceId}::uuid
-      and id = ${input.editId}::uuid
-      and status = 'pending'
-  `;
+  await withTrustedDbWrites(async () => {
+    await db`
+      update public.document_edits
+      set status = 'superseded',
+          resolved_at = now()
+      where workspace_id = ${input.workspaceId}::uuid
+        and id = ${input.editId}::uuid
+        and status = 'pending'
+    `;
+  });
 }
 
 async function touchDocumentAfterEdit(input: {
@@ -651,12 +766,14 @@ async function touchDocumentAfterEdit(input: {
   documentId: string;
 }): Promise<void> {
   const db = getDbPg();
-  await db`
-    update public.documents
-    set last_edit_at = now()
-    where workspace_id = ${input.workspaceId}::uuid
-      and id = ${input.documentId}::uuid
-  `;
+  await withTrustedDbWrites(async () => {
+    await db`
+      update public.documents
+      set last_edit_at = now()
+      where workspace_id = ${input.workspaceId}::uuid
+        and id = ${input.documentId}::uuid
+    `;
+  });
 }
 
 async function validateGreenfieldDocumentEdit(
@@ -934,9 +1051,9 @@ async function applyGreenfieldDocumentEdit(
     }
   }
 
-  const acceptedRows =
+  const acceptedRows = await withTrustedDbWrites(() =>
     options.allowSupersededStatus === true
-      ? await db<{ id: string }[]>`
+      ? db<{ id: string }[]>`
           update public.document_edits
           set status = 'accepted'
           where workspace_id = ${workspaceId}::uuid
@@ -944,14 +1061,15 @@ async function applyGreenfieldDocumentEdit(
             and status in ('pending', 'superseded')
           returning id
         `
-      : await db<{ id: string }[]>`
+      : db<{ id: string }[]>`
           update public.document_edits
           set status = 'accepted'
           where workspace_id = ${workspaceId}::uuid
             and id = ${edit.id}::uuid
             and status = 'pending'
           returning id
-        `;
+        `,
+  );
   if (acceptedRows.length === 0) {
     return { kind: 'anchor_missing', anchorId: edit.id };
   }
@@ -1001,15 +1119,17 @@ async function checkGreenfieldDocumentTabVersionsForUpdate(input: {
   const tabIds = Array.from(new Set(input.tabIds)).sort();
   if (tabIds.length === 0) return { kind: 'not_found' };
   const db = getDbPg();
-  const rows = await db<{ id: string; list_version: number }[]>`
-    select id, list_version
-    from public.doc_tabs
-    where workspace_id = ${input.workspaceId}::uuid
-      and document_id = ${input.documentId}::uuid
-      and id in ${db(tabIds)}
-    order by id asc
-    for update
-  `;
+  const rows = await withTrustedDbWrites(
+    () => db<{ id: string; list_version: number }[]>`
+      select id, list_version
+      from public.doc_tabs
+      where workspace_id = ${input.workspaceId}::uuid
+        and document_id = ${input.documentId}::uuid
+        and id in ${db(tabIds)}
+      order by id asc
+      for update
+    `,
+  );
   if (rows.length !== tabIds.length) return { kind: 'not_found' };
   if (input.expectedContentVersion !== undefined) {
     const conflict = rows.find(
@@ -1058,7 +1178,9 @@ export async function acceptGreenfieldDocumentEdit(input: {
   const edit = await loadPendingGreenfieldDocumentEditForUpdate(input);
   if (!edit) return { kind: 'not_found' };
 
-  const applied = await applyGreenfieldDocumentEdit(edit, input.workspaceId);
+  const applied = await withTrustedDbWrites(() =>
+    applyGreenfieldDocumentEdit(edit, input.workspaceId),
+  );
   if (applied.kind !== 'ok') return applied;
   const updated = await getGreenfieldDocumentById(input);
   if (!updated) return { kind: 'not_found' };
@@ -1113,9 +1235,8 @@ export async function acceptGreenfieldDocumentEdits(input: {
       editId,
     });
     if (!edit) return { kind: 'not_found' };
-    const validation = await validateGreenfieldDocumentEdit(
-      edit,
-      input.workspaceId,
+    const validation = await withTrustedDbWrites(() =>
+      validateGreenfieldDocumentEdit(edit, input.workspaceId),
     );
     if (validation.kind !== 'ok') return validation;
     edits.push(edit);
@@ -1127,15 +1248,13 @@ export async function acceptGreenfieldDocumentEdits(input: {
       const offsetKey = `${edit.tab_id}:${edit.after_block_id ?? ''}`;
       const insertOrderOffset = insertOffsets.get(offsetKey) ?? 0;
       insertOffsets.set(offsetKey, insertOrderOffset + 1);
-      const applied = await applyGreenfieldDocumentEdit(
-        edit,
-        input.workspaceId,
-        {
+      const applied = await withTrustedDbWrites(() =>
+        applyGreenfieldDocumentEdit(edit, input.workspaceId, {
           allowSupersededStatus: true,
           ignoreInsertListVersionConflict: true,
           insertOrderOffset,
           supersedeOnConflict: acceptedEditIds.length > 0,
-        },
+        }),
       );
       if (applied.kind !== 'ok') {
         if (acceptedEditIds.length > 0) continue;
@@ -1151,12 +1270,10 @@ export async function acceptGreenfieldDocumentEdits(input: {
       editId: edit.id,
     });
     if (!pending) continue;
-    const applied = await applyGreenfieldDocumentEdit(
-      pending,
-      input.workspaceId,
-      {
+    const applied = await withTrustedDbWrites(() =>
+      applyGreenfieldDocumentEdit(pending, input.workspaceId, {
         supersedeOnConflict: acceptedEditIds.length > 0,
-      },
+      }),
     );
     if (applied.kind !== 'ok') {
       if (acceptedEditIds.length > 0) continue;
@@ -1202,18 +1319,18 @@ export async function rejectGreenfieldDocumentEdit(input: {
   { kind: 'ok'; editId: string; runId: string | null } | { kind: 'not_found' }
 > {
   const db = getDbPg();
-  const rows = await db<
-    Array<{ id: string; proposed_by_run_id: string | null }>
-  >`
-    update public.document_edits
-    set status = 'rejected',
-        resolved_at = now()
-    where workspace_id = ${input.workspaceId}::uuid
-      and document_id = ${input.documentId}::uuid
-      and id = ${input.editId}::uuid
-      and status = 'pending'
-    returning id, proposed_by_run_id
-  `;
+  const rows = await withTrustedDbWrites(
+    () => db<Array<{ id: string; proposed_by_run_id: string | null }>>`
+      update public.document_edits
+      set status = 'rejected',
+          resolved_at = now()
+      where workspace_id = ${input.workspaceId}::uuid
+        and document_id = ${input.documentId}::uuid
+        and id = ${input.editId}::uuid
+        and status = 'pending'
+      returning id, proposed_by_run_id
+    `,
+  );
   const row = rows[0];
   if (!row) return { kind: 'not_found' };
   return { kind: 'ok', editId: row.id, runId: row.proposed_by_run_id };
@@ -1227,16 +1344,18 @@ export async function rejectGreenfieldDocumentEditRun(input: {
   { kind: 'ok'; runId: string; editIds: string[] } | { kind: 'not_found' }
 > {
   const db = getDbPg();
-  const rows = await db<{ id: string }[]>`
-    update public.document_edits
-    set status = 'rejected',
-        resolved_at = now()
-    where workspace_id = ${input.workspaceId}::uuid
-      and document_id = ${input.documentId}::uuid
-      and proposed_by_run_id = ${input.runId}::uuid
-      and status = 'pending'
-    returning id
-  `;
+  const rows = await withTrustedDbWrites(
+    () => db<{ id: string }[]>`
+      update public.document_edits
+      set status = 'rejected',
+          resolved_at = now()
+      where workspace_id = ${input.workspaceId}::uuid
+        and document_id = ${input.documentId}::uuid
+        and proposed_by_run_id = ${input.runId}::uuid
+        and status = 'pending'
+      returning id
+    `,
+  );
   if (rows.length === 0) return { kind: 'not_found' };
   return {
     kind: 'ok',

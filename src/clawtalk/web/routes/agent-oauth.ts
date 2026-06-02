@@ -12,7 +12,7 @@
 // =user) or workspace_provider_secrets (scope=workspace). The
 // credential resolver then reads + refreshes them lazily.
 
-import { getDbPg, withUserContext } from '../../../db.js';
+import { getDbPg, withTrustedDbWrites, withUserContext } from '../../../db.js';
 import {
   exchangeAnthropicAuthorizationCode,
   initiateAnthropicOauth,
@@ -23,6 +23,11 @@ import {
   requestOpenAiCodexDeviceCode,
 } from '../../llm/openai-codex-oauth.js';
 import { encryptProviderSecret } from '../../llm/provider-secret-store.js';
+import {
+  resolveWorkspaceForUser,
+  type WorkspaceSummaryRecord,
+} from '../../workspaces/accessors.js';
+import { ensureWorkspaceBootstrapForUser } from '../../workspaces/bootstrap.js';
 import type { ApiEnvelope, AuthContext } from '../types.js';
 
 type ProviderCredentialScope = 'user' | 'workspace';
@@ -37,6 +42,13 @@ function isAdminLike(role: string): boolean {
 function parseScope(value: unknown): ProviderCredentialScope {
   return value === 'workspace' ? 'workspace' : 'user';
 }
+
+function readWorkspaceId(value: unknown): string | null {
+  return typeof value === 'string' && value.trim() ? value.trim() : null;
+}
+
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 function forbiddenResponse(message: string): {
   statusCode: number;
@@ -58,6 +70,18 @@ function invalidInputResponse(message: string): {
   };
 }
 
+function requireExplicitWorkspaceForCredentialScope(
+  scope: ProviderCredentialScope,
+  requestedWorkspaceId: string | null,
+): { statusCode: number; body: ApiEnvelope<never> } | null {
+  if (scope === 'workspace' && !requestedWorkspaceId) {
+    return invalidInputResponse(
+      'workspaceId is required for workspace-scoped provider credentials.',
+    );
+  }
+  return null;
+}
+
 function notFoundResponse(message: string): {
   statusCode: number;
   body: ApiEnvelope<never>;
@@ -68,11 +92,40 @@ function notFoundResponse(message: string): {
   };
 }
 
+async function resolveActiveWorkspace(
+  auth: AuthContext,
+  requestedWorkspaceId: string | null | undefined,
+): Promise<
+  | { ok: true; workspace: WorkspaceSummaryRecord }
+  | { ok: false; result: { statusCode: number; body: ApiEnvelope<never> } }
+> {
+  if (requestedWorkspaceId && !UUID_RE.test(requestedWorkspaceId)) {
+    return { ok: false, result: invalidInputResponse('Invalid workspaceId.') };
+  }
+  await ensureWorkspaceBootstrapForUser(auth.userId);
+  const workspace = await withUserContext(auth.userId, () =>
+    resolveWorkspaceForUser({
+      userId: auth.userId,
+      requestedWorkspaceId,
+    }),
+  );
+  if (!workspace) {
+    return {
+      ok: false,
+      result: requestedWorkspaceId
+        ? forbiddenResponse('Workspace is not available for this user.')
+        : notFoundResponse('No workspace exists.'),
+    };
+  }
+  return { ok: true, workspace };
+}
+
 // ─── Subscription-credential storage helpers ──────────────────────
 
 async function persistSubscriptionCredential(input: {
   providerId: string;
   scope: ProviderCredentialScope;
+  workspaceId: string | null;
   userId: string;
   accessToken: string;
   refreshToken: string;
@@ -87,23 +140,29 @@ async function persistSubscriptionCredential(input: {
   });
 
   if (input.scope === 'workspace') {
-    await db`
-      insert into public.workspace_provider_secrets (
-        provider_id, credential_kind, ciphertext,
-        encrypted_refresh_token, expires_at, updated_by
-      )
-      values (
-        ${input.providerId}, 'subscription', ${encryptedAccess},
-        ${encryptedRefresh}, ${input.expiresAtIso}::timestamptz,
-        ${input.userId}::uuid
-      )
-      on conflict (provider_id, credential_kind) do update set
-        ciphertext = excluded.ciphertext,
-        encrypted_refresh_token = excluded.encrypted_refresh_token,
-        expires_at = excluded.expires_at,
-        updated_by = excluded.updated_by,
-        updated_at = now()
-    `;
+    if (!input.workspaceId) {
+      throw new Error('workspaceId is required for workspace credentials');
+    }
+    await withTrustedDbWrites(async () => {
+      await db`
+        insert into public.workspace_provider_secrets (
+          workspace_id, provider_id, credential_kind, ciphertext,
+          encrypted_refresh_token, expires_at, updated_by
+        )
+        values (
+          ${input.workspaceId}::uuid, ${input.providerId}, 'subscription',
+          ${encryptedAccess},
+          ${encryptedRefresh}, ${input.expiresAtIso}::timestamptz,
+          ${input.userId}::uuid
+        )
+        on conflict (workspace_id, provider_id, credential_kind) do update set
+          ciphertext = excluded.ciphertext,
+          encrypted_refresh_token = excluded.encrypted_refresh_token,
+          expires_at = excluded.expires_at,
+          updated_by = excluded.updated_by,
+          updated_at = now()
+      `;
+    });
   } else {
     await db`
       insert into public.llm_provider_secrets (
@@ -129,6 +188,7 @@ async function persistSubscriptionCredential(input: {
 async function insertPkceState(input: {
   providerId: string;
   scope: ProviderCredentialScope;
+  workspaceId: string | null;
   state: string;
   userId: string;
   codeVerifier: string;
@@ -137,12 +197,12 @@ async function insertPkceState(input: {
   const db = getDbPg();
   await db`
     insert into public.provider_oauth_states (
-      provider_id, scope, flow_kind, state, user_id,
+      provider_id, scope, flow_kind, state, user_id, workspace_id,
       code_verifier, expires_at
     )
     values (
       ${input.providerId}, ${input.scope}, 'pkce', ${input.state},
-      ${input.userId}::uuid, ${input.codeVerifier},
+      ${input.userId}::uuid, ${input.workspaceId}::uuid, ${input.codeVerifier},
       ${input.expiresAtIso}::timestamptz
     )
   `;
@@ -151,6 +211,7 @@ async function insertPkceState(input: {
 async function insertDeviceCodeState(input: {
   providerId: string;
   scope: ProviderCredentialScope;
+  workspaceId: string | null;
   state: string;
   userId: string;
   deviceAuthId: string;
@@ -160,12 +221,13 @@ async function insertDeviceCodeState(input: {
   const db = getDbPg();
   await db`
     insert into public.provider_oauth_states (
-      provider_id, scope, flow_kind, state, user_id,
+      provider_id, scope, flow_kind, state, user_id, workspace_id,
       device_auth_id, user_code, expires_at
     )
     values (
       ${input.providerId}, ${input.scope}, 'device_code', ${input.state},
-      ${input.userId}::uuid, ${input.deviceAuthId}, ${input.userCode},
+      ${input.userId}::uuid, ${input.workspaceId}::uuid,
+      ${input.deviceAuthId}, ${input.userCode},
       ${input.expiresAtIso}::timestamptz
     )
   `;
@@ -174,6 +236,8 @@ async function insertDeviceCodeState(input: {
 interface LoadedOauthState {
   id: string;
   scope: ProviderCredentialScope;
+  user_id: string;
+  workspace_id: string | null;
   flow_kind: 'pkce' | 'device_code';
   code_verifier: string | null;
   device_auth_id: string | null;
@@ -188,7 +252,9 @@ async function loadOauthState(input: {
 }): Promise<LoadedOauthState | null> {
   const db = getDbPg();
   const rows = await db<LoadedOauthState[]>`
-    select id, scope, flow_kind, code_verifier, device_auth_id,
+    select id, scope, user_id::text as user_id,
+           workspace_id::text as workspace_id, flow_kind,
+           code_verifier, device_auth_id,
            user_code, expires_at::text as expires_at, consumed_at::text as consumed_at
     from public.provider_oauth_states
     where provider_id = ${input.providerId}
@@ -211,6 +277,7 @@ async function markOauthStateConsumed(id: string): Promise<void> {
 
 export interface AnthropicOauthInitiateBody {
   scope?: unknown;
+  workspaceId?: unknown;
 }
 
 export interface AnthropicOauthCompleteBody {
@@ -226,7 +293,15 @@ export async function initiateAnthropicOauthRoute(
   body: ApiEnvelope<{ authorizationUrl: string; state: string }>;
 }> {
   const scope = parseScope(body.scope);
-  if (scope === 'workspace' && !isAdminLike(auth.role)) {
+  const requestedWorkspaceId = readWorkspaceId(body.workspaceId);
+  const scopeError = requireExplicitWorkspaceForCredentialScope(
+    scope,
+    requestedWorkspaceId,
+  );
+  if (scopeError) return scopeError;
+  const workspace = await resolveActiveWorkspace(auth, requestedWorkspaceId);
+  if (!workspace.ok) return workspace.result;
+  if (scope === 'workspace' && !isAdminLike(workspace.workspace.role)) {
     return forbiddenResponse(
       'Only workspace admins can connect a workspace-shared subscription.',
     );
@@ -236,6 +311,7 @@ export async function initiateAnthropicOauthRoute(
     await insertPkceState({
       providerId: ANTHROPIC_PROVIDER_ID,
       scope,
+      workspaceId: scope === 'workspace' ? workspace.workspace.id : null,
       state: init.state,
       userId: auth.userId,
       codeVerifier: init.codeVerifier,
@@ -285,10 +361,23 @@ export async function completeAnthropicOauthRoute(
     if (existing.flow_kind !== 'pkce' || !existing.code_verifier) {
       return invalidInputResponse('OAuth state is not a PKCE flow.');
     }
-    if (existing.scope === 'workspace' && !isAdminLike(auth.role)) {
-      return forbiddenResponse(
-        'Only workspace admins can complete a workspace-shared subscription.',
+    if (existing.user_id !== auth.userId) {
+      return forbiddenResponse('OAuth state is not available for this user.');
+    }
+    if (existing.scope === 'workspace') {
+      if (!existing.workspace_id) {
+        return invalidInputResponse('OAuth state is missing workspace scope.');
+      }
+      const workspace = await resolveActiveWorkspace(
+        auth,
+        existing.workspace_id,
       );
+      if (!workspace.ok) return workspace.result;
+      if (!isAdminLike(workspace.workspace.role)) {
+        return forbiddenResponse(
+          'Only workspace admins can complete a workspace-shared subscription.',
+        );
+      }
     }
 
     const tokens = await exchangeAnthropicAuthorizationCode({
@@ -300,7 +389,8 @@ export async function completeAnthropicOauthRoute(
     await persistSubscriptionCredential({
       providerId: ANTHROPIC_PROVIDER_ID,
       scope: existing.scope,
-      userId: auth.userId,
+      workspaceId: existing.workspace_id,
+      userId: existing.scope === 'user' ? existing.user_id : auth.userId,
       accessToken: tokens.accessToken,
       refreshToken: tokens.refreshToken,
       expiresAtIso: tokens.expiresAtIso,
@@ -321,6 +411,7 @@ export async function completeAnthropicOauthRoute(
 
 export interface OpenAiCodexOauthInitiateBody {
   scope?: unknown;
+  workspaceId?: unknown;
 }
 
 export interface OpenAiCodexOauthPollBody {
@@ -341,7 +432,15 @@ export async function initiateOpenAiCodexOauthRoute(
   }>;
 }> {
   const scope = parseScope(body.scope);
-  if (scope === 'workspace' && !isAdminLike(auth.role)) {
+  const requestedWorkspaceId = readWorkspaceId(body.workspaceId);
+  const scopeError = requireExplicitWorkspaceForCredentialScope(
+    scope,
+    requestedWorkspaceId,
+  );
+  if (scopeError) return scopeError;
+  const workspace = await resolveActiveWorkspace(auth, requestedWorkspaceId);
+  if (!workspace.ok) return workspace.result;
+  if (scope === 'workspace' && !isAdminLike(workspace.workspace.role)) {
     return forbiddenResponse(
       'Only workspace admins can connect a workspace-shared subscription.',
     );
@@ -352,6 +451,7 @@ export async function initiateOpenAiCodexOauthRoute(
     await insertDeviceCodeState({
       providerId: OPENAI_CODEX_PROVIDER_ID,
       scope,
+      workspaceId: scope === 'workspace' ? workspace.workspace.id : null,
       state,
       userId: auth.userId,
       deviceAuthId: device.deviceAuthId,
@@ -414,10 +514,23 @@ export async function pollOpenAiCodexOauthRoute(
     ) {
       return invalidInputResponse('OAuth state is not a device-code flow.');
     }
-    if (existing.scope === 'workspace' && !isAdminLike(auth.role)) {
-      return forbiddenResponse(
-        'Only workspace admins can complete a workspace-shared subscription.',
+    if (existing.user_id !== auth.userId) {
+      return forbiddenResponse('OAuth state is not available for this user.');
+    }
+    if (existing.scope === 'workspace') {
+      if (!existing.workspace_id) {
+        return invalidInputResponse('OAuth state is missing workspace scope.');
+      }
+      const workspace = await resolveActiveWorkspace(
+        auth,
+        existing.workspace_id,
       );
+      if (!workspace.ok) return workspace.result;
+      if (!isAdminLike(workspace.workspace.role)) {
+        return forbiddenResponse(
+          'Only workspace admins can complete a workspace-shared subscription.',
+        );
+      }
     }
 
     const poll = await pollOpenAiCodexDeviceAuth({
@@ -449,7 +562,8 @@ export async function pollOpenAiCodexOauthRoute(
     await persistSubscriptionCredential({
       providerId: OPENAI_CODEX_PROVIDER_ID,
       scope: existing.scope,
-      userId: auth.userId,
+      workspaceId: existing.workspace_id,
+      userId: existing.scope === 'user' ? existing.user_id : auth.userId,
       accessToken: tokens.accessToken,
       refreshToken: tokens.refreshToken,
       expiresAtIso: tokens.expiresAtIso,

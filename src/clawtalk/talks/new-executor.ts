@@ -61,6 +61,10 @@ import {
   type ContextPdfPageSourceRef,
 } from './context-loader.js';
 import { isImageAttachmentMimeType } from './attachment-extraction.js';
+import {
+  buildAllowedRuntimeToolSet,
+  isRuntimeToolAllowed,
+} from './runtime-tool-filter.js';
 
 const PDF_ATTACHMENT_MIME_TYPE = 'application/pdf';
 
@@ -602,12 +606,36 @@ export function buildToolExecutor(
   agentNickname?: string | null,
   triggerMessageId?: string | null,
 ) {
+  const googleReadToolNames = new Set([
+    'google_drive_search',
+    'google_drive_read',
+    'google_drive_list_folder',
+    'google_docs_read',
+    'google_sheets_read_range',
+  ]);
+  const googleWriteToolNames = new Set([
+    'google_docs_create',
+    'google_docs_batch_update',
+    'google_sheets_batch_update',
+  ]);
   let connectorCache: Map<string, TalkRunConnectorRecord> | null = null;
   const enabledToolFamilies = new Set(
     (effectiveTools ?? [])
       .filter((tool) => tool.enabled)
       .map((tool) => tool.toolFamily),
   );
+  const allowedRuntimeTools = buildAllowedRuntimeToolSet(effectiveTools);
+
+  function runtimeToolDisabled(toolName: string): {
+    result: string;
+    isError: true;
+  } | null {
+    if (isRuntimeToolAllowed(allowedRuntimeTools, toolName)) return null;
+    return {
+      result: `Error: ${toolName} is not enabled for this agent`,
+      isError: true,
+    };
+  }
 
   function loadConnectors(): Map<string, TalkRunConnectorRecord> {
     if (connectorCache) return connectorCache;
@@ -889,6 +917,8 @@ export function buildToolExecutor(
           isError: true,
         };
       }
+      const runtimeDisabled = runtimeToolDisabled(toolName);
+      if (runtimeDisabled) return runtimeDisabled;
       if (jobPolicy && !jobPolicy.allowWeb) {
         return {
           result: 'Error: web_fetch is not available for this scheduled job',
@@ -904,6 +934,8 @@ export function buildToolExecutor(
           isError: true,
         };
       }
+      const runtimeDisabled = runtimeToolDisabled(toolName);
+      if (runtimeDisabled) return runtimeDisabled;
       if (jobPolicy && !jobPolicy.allowWeb) {
         return {
           result: 'Error: web_search is not available for this scheduled job',
@@ -919,6 +951,8 @@ export function buildToolExecutor(
           isError: true,
         };
       }
+      const runtimeDisabled = runtimeToolDisabled(toolName);
+      if (runtimeDisabled) return runtimeDisabled;
       if (jobPolicy && !jobPolicy.allowWeb) {
         return {
           result:
@@ -947,6 +981,23 @@ export function buildToolExecutor(
       toolName === 'google_sheets_read_range' ||
       toolName === 'google_sheets_batch_update'
     ) {
+      const requiredFamily = googleWriteToolNames.has(toolName)
+        ? 'google_write'
+        : googleReadToolNames.has(toolName)
+          ? 'google_read'
+          : null;
+      if (
+        effectiveTools &&
+        requiredFamily &&
+        !enabledToolFamilies.has(requiredFamily)
+      ) {
+        return {
+          result: `Error: ${requiredFamily === 'google_write' ? 'Google write' : 'Google read'} tools are not enabled for this agent`,
+          isError: true,
+        };
+      }
+      const runtimeDisabled = runtimeToolDisabled(toolName);
+      if (runtimeDisabled) return runtimeDisabled;
       return executeGoogleDriveTalkTool({
         talkId,
         userId,
@@ -960,6 +1011,15 @@ export function buildToolExecutor(
     }
 
     if (toolName === 'apply_content_edit') {
+      const runtimeDisabled = runtimeToolDisabled(toolName);
+      if (runtimeDisabled) return runtimeDisabled;
+      if (jobPolicy) {
+        return {
+          result:
+            'Error: apply_content_edit is not available for scheduled job runs',
+          isError: true,
+        };
+      }
       return executeApplyContentEdit({
         talkId,
         userId,
@@ -986,8 +1046,7 @@ async function buildTalkJobExecutionPolicy(
   if (!job) return null;
   return {
     jobId: job.id,
-    allowedConnectorIds: job.sourceScope.connectorIds,
-    allowedChannelBindingIds: job.sourceScope.channelBindingIds,
+    allowedConnectorIds: [],
     allowWeb: job.sourceScope.allowWeb,
     allowStateMutation: false,
     allowExternalMutation: false,
@@ -1249,6 +1308,19 @@ async function getOrderedGroupMaxSequence(
   }
 
   return row.max_sequence_index;
+}
+
+async function resolveTalkWorkspaceIdForExecution(
+  talkId: string,
+): Promise<string | null> {
+  const db = getDbPg();
+  const rows = await db<Array<{ workspace_id: string | null }>>`
+    select workspace_id::text as workspace_id
+    from public.talks
+    where id = ${talkId}::uuid
+    limit 1
+  `;
+  return rows[0]?.workspace_id ?? null;
 }
 
 function estimateTokens(text: string): number {
@@ -2385,6 +2457,9 @@ export class CleanTalkExecutor implements TalkExecutor {
       const runMetadata = { ...existingRunMetadata };
       const browserResumeSection =
         buildBrowserResumeSection(existingRunMetadata);
+      const executionWorkspaceId = await resolveTalkWorkspaceIdForExecution(
+        input.talkId,
+      );
       const channelTriggerContext = await loadChannelTriggerContext({
         triggerMessageId: input.triggerMessageId,
       });
@@ -2401,16 +2476,25 @@ export class CleanTalkExecutor implements TalkExecutor {
       // persisted metadata all read activeAgent.model_id. Fail-open and
       // mutates activeAgent in place (= resolved.agent, so the failure-path
       // metadata reflects the swap too). See runtime-model-guard.ts.
-      await ensureRunnableModel(activeAgent);
+      await ensureRunnableModel(activeAgent, {
+        credentialScope: {
+          principalUserId: input.requestedBy,
+          workspaceId: executionWorkspaceId,
+        },
+      });
       const modelContextWindow = await getModelContextWindow(activeAgent);
       const jobPolicy = await buildTalkJobExecutionPolicy(input.jobId);
       // Prefer the snapshot captured at run-creation (migration 0031) —
       // a multi-agent response group must see the same tool set even if
       // the user toggles a chip mid-stream. Fall back to a live `talkId`
       // read for runs created before the column existed (null snapshot).
-      const planOpts = runRecord?.active_tool_families_snapshot
-        ? { activeFamilies: runRecord.active_tool_families_snapshot }
-        : { talkId: input.talkId };
+      const planOpts = {
+        talkId: input.talkId,
+        workspaceId: executionWorkspaceId,
+        ...(runRecord?.active_tool_families_snapshot
+          ? { activeFamilies: runRecord.active_tool_families_snapshot }
+          : {}),
+      };
       const plan = await planExecution(
         activeAgent,
         input.requestedBy,
@@ -2783,6 +2867,10 @@ export class CleanTalkExecutor implements TalkExecutor {
             executeToolCall: wrappedToolExecutor,
             forceToolUseOnFirstIteration,
             credentialKindSnapshot: runRecord?.credential_kind_snapshot,
+            credentialScope: {
+              principalUserId: input.requestedBy,
+              workspaceId: executionWorkspaceId,
+            },
             // Tools are Talk-scoped: the router builds the model's tool
             // DEFINITIONS from this same effective set the executor uses to
             // gate execution, so shown tools and runnable tools stay aligned.

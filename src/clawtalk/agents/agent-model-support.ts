@@ -12,7 +12,7 @@
  * (curated only), which guarantees their agents are never auto-retired.
  */
 
-import { getDbPg } from '../../db.js';
+import { getDbPg, withTrustedDbWrites } from '../../db.js';
 import { TALK_EXECUTOR_ANTHROPIC_API_KEY } from '../config.js';
 import { decryptProviderSecret } from '../llm/provider-secret-store.js';
 import { discoverAnthropicModels } from './anthropic-model-discovery.js';
@@ -31,25 +31,40 @@ export interface ProviderModelSupport {
   displayNames: Map<string, string>;
 }
 
-/** Anthropic API key for the current context — workspace credential wins,
- *  else personal, else the host env var. Returns null when none is set or
+export interface ProviderModelCredentialScope {
+  principalUserId?: string | null;
+  workspaceId?: string | null;
+}
+
+/** Anthropic API key for the current context — personal credential wins,
+ *  else workspace, else the host env var. Returns null when none is set or
  *  decrypt fails. */
-async function resolveAnthropicApiKey(): Promise<string | null> {
+async function resolveAnthropicApiKey(input?: {
+  principalUserId?: string | null;
+  workspaceId?: string | null;
+}): Promise<string | null> {
   const db = getDbPg();
-  const wsRows = await db<Array<{ ciphertext: string }>>`
-    select ciphertext from public.workspace_provider_secrets
-    where provider_id = ${ANTHROPIC_PROVIDER_ID} and credential_kind = 'api_key'
+  const personalRows = await db<Array<{ ciphertext: string }>>`
+    select ciphertext from public.llm_provider_secrets
+    where provider_id = ${ANTHROPIC_PROVIDER_ID}
+      and credential_kind = 'api_key'
+      and ${input?.principalUserId ?? null}::uuid is not null
+      and owner_id = ${input?.principalUserId ?? null}::uuid
     limit 1
   `;
-  const personalRows = wsRows.length
+  const wsRows = personalRows.length
     ? []
-    : await db<Array<{ ciphertext: string }>>`
-        select ciphertext from public.llm_provider_secrets
-        where provider_id = ${ANTHROPIC_PROVIDER_ID}
-          and credential_kind = 'api_key'
-        limit 1
-      `;
-  const ciphertext = wsRows[0]?.ciphertext ?? personalRows[0]?.ciphertext;
+    : await withTrustedDbWrites(
+        () => db<Array<{ ciphertext: string }>>`
+          select ciphertext from public.workspace_provider_secrets
+          where ${input?.workspaceId ?? null}::uuid is not null
+            and workspace_id = ${input?.workspaceId ?? null}::uuid
+            and provider_id = ${ANTHROPIC_PROVIDER_ID}
+            and credential_kind = 'api_key'
+          limit 1
+        `,
+      );
+  const ciphertext = personalRows[0]?.ciphertext ?? wsRows[0]?.ciphertext;
   if (!ciphertext) {
     // Mirror resolveExecution's env-var fallback: a host-configured Anthropic
     // key can run agents, so discovery must see it too — otherwise the
@@ -102,7 +117,11 @@ async function loadCuratedModels(
  */
 export async function buildProviderModelSupport(
   providerId: string,
-  opts: { cache?: DiscoveryCacheLike | null } = {},
+  opts: {
+    cache?: DiscoveryCacheLike | null;
+    principalUserId?: string | null;
+    workspaceId?: string | null;
+  } = {},
 ): Promise<ProviderModelSupport> {
   const curatedData = await loadCuratedModels(providerId);
   const curated = curatedData.ids;
@@ -122,7 +141,10 @@ export async function buildProviderModelSupport(
 
   if (providerId !== ANTHROPIC_PROVIDER_ID) return incomplete;
 
-  const apiKey = await resolveAnthropicApiKey();
+  const apiKey = await resolveAnthropicApiKey({
+    principalUserId: opts.principalUserId ?? null,
+    workspaceId: opts.workspaceId ?? null,
+  });
   if (!apiKey) return incomplete;
 
   // Lifecycle decisions MUTATE agent config (auto-upgrade). The page-load

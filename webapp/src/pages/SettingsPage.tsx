@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 
 import {
@@ -59,12 +59,14 @@ import { ConnectorStatusPill } from '../components/connectors/StatusPill';
 import { resolveConnectorSubtitle } from '../components/connectors/subtitle';
 import { SlackChannelForm } from '../components/connectors/SlackChannelForm';
 import { SlackChannelPicker } from '../components/connectors/SlackChannelPicker';
-import { TelegramChannelForm } from '../components/connectors/TelegramChannelForm';
-import { PostHogDataConnectorForm } from '../components/connectors/PostHogDataConnectorForm';
 import { GoogleDocsDataConnectorForm } from '../components/connectors/GoogleDocsDataConnectorForm';
 import { GoogleSheetsDataConnectorForm } from '../components/connectors/GoogleSheetsDataConnectorForm';
 
-const REQUIRED_GOOGLE_TOOL_SCOPES = ['drive.readonly', 'documents'];
+const REQUIRED_GOOGLE_TOOL_SCOPES = [
+  'drive.readonly',
+  'documents',
+  'spreadsheets',
+];
 
 function isGoogleToolsEnabled(): boolean {
   return import.meta.env.VITE_GOOGLE_TOOLS_ENABLED === 'true';
@@ -299,15 +301,33 @@ export function SettingsPage({
       ) : null}
 
       {tab === 'api-keys' ? (
-        <ApiKeysTab onUnauthorized={onUnauthorized} userRole={userRole} />
+        <ApiKeysTab
+          onUnauthorized={onUnauthorized}
+          userRole={userRole}
+          workspaceId={user.currentWorkspaceId}
+        />
       ) : null}
 
-      {tab === 'agents' ? <AgentsTab onUnauthorized={onUnauthorized} /> : null}
+      {tab === 'agents' ? (
+        <AgentsTab
+          onUnauthorized={onUnauthorized}
+          workspaceId={user.currentWorkspaceId}
+        />
+      ) : null}
 
-      {tab === 'tools' ? <ToolsTab onUnauthorized={onUnauthorized} /> : null}
+      {tab === 'tools' ? (
+        <ToolsTab
+          onUnauthorized={onUnauthorized}
+          workspaceId={user.currentWorkspaceId}
+        />
+      ) : null}
 
       {tab === 'connectors' ? (
-        <ConnectorsTab onUnauthorized={onUnauthorized} userRole={userRole} />
+        <ConnectorsTab
+          onUnauthorized={onUnauthorized}
+          userRole={userRole}
+          workspaceId={user.currentWorkspaceId}
+        />
       ) : null}
     </section>
   );
@@ -382,6 +402,7 @@ function ProfileTab({
     setNotice(null);
     try {
       const updated = await updateSessionMe({
+        workspaceId: user.currentWorkspaceId,
         displayName: nameDraft.trim(),
       });
       onUserUpdated(updated);
@@ -532,9 +553,11 @@ type ApiKeysSubTab = 'personal' | 'workspace';
 function ApiKeysTab({
   onUnauthorized,
   userRole,
+  workspaceId,
 }: {
   onUnauthorized: () => void;
   userRole: string;
+  workspaceId?: string | null;
 }): JSX.Element {
   const isAdmin = userRole === 'owner' || userRole === 'admin';
   const [data, setData] = useState<AiAgentsPageData | null>(null);
@@ -553,7 +576,7 @@ function ApiKeysTab({
     let cancelled = false;
     const load = async (): Promise<void> => {
       try {
-        const next = await getAiAgents();
+        const next = await getAiAgents({ workspaceId });
         if (cancelled) return;
         setData(next);
         setDrafts(initDrafts(next.additionalProviders));
@@ -577,7 +600,7 @@ function ApiKeysTab({
     return () => {
       cancelled = true;
     };
-  }, [onUnauthorized]);
+  }, [onUnauthorized, workspaceId]);
 
   const updateDraft = (
     scope: ProviderCredentialScope,
@@ -628,7 +651,7 @@ function ApiKeysTab({
     for (const delayMs of PROVIDER_SAVE_POLL_DELAYS_MS) {
       await new Promise((resolve) => setTimeout(resolve, delayMs));
       try {
-        const next = await getAiAgents();
+        const next = await getAiAgents({ workspaceId });
         const provider = next.additionalProviders.find(
           (entry) => entry.id === providerId,
         );
@@ -679,6 +702,7 @@ function ApiKeysTab({
     try {
       const updated = await saveAiProviderCredential({
         providerId,
+        workspaceId,
         apiKey,
         scope,
       });
@@ -712,6 +736,7 @@ function ApiKeysTab({
     try {
       const updated = await saveAiProviderCredential({
         providerId,
+        workspaceId,
         apiKey: null,
         scope,
       });
@@ -736,7 +761,9 @@ function ApiKeysTab({
     setNotice(null);
     setError(null);
     try {
-      const updated = await verifyAiProviderCredential(providerId, scope);
+      const updated = await verifyAiProviderCredential(providerId, scope, {
+        workspaceId,
+      });
       refreshProvider(updated, scope);
       setNotice(`${updated.name} verification updated.`);
     } catch (err) {
@@ -773,7 +800,11 @@ function ApiKeysTab({
         </div>
       ) : null}
 
-      <div className="settings-subtabs" role="tablist" aria-label="API keys scope">
+      <div
+        className="settings-subtabs"
+        role="tablist"
+        aria-label="API keys scope"
+      >
         <button
           type="button"
           role="tab"
@@ -820,6 +851,7 @@ function ApiKeysTab({
                 <ProviderCredentialCard
                   key={`user:${provider.id}`}
                   scope="user"
+                  workspaceId={workspaceId}
                   provider={provider}
                   draft={
                     drafts[draftKey('user', provider.id)] ||
@@ -860,6 +892,7 @@ function ApiKeysTab({
                 <ProviderCredentialCard
                   key={`workspace:${provider.id}`}
                   scope="workspace"
+                  workspaceId={workspaceId}
                   provider={provider}
                   draft={
                     drafts[draftKey('workspace', provider.id)] ||
@@ -888,13 +921,18 @@ function ApiKeysTab({
 
 function ToolsTab({
   onUnauthorized,
+  workspaceId,
 }: {
   onUnauthorized: () => void;
+  workspaceId?: string | null;
 }): JSX.Element {
   return (
     <>
       {isGoogleToolsEnabled() ? (
-        <GoogleAccountSection onUnauthorized={onUnauthorized} />
+        <GoogleAccountSection
+          onUnauthorized={onUnauthorized}
+          workspaceId={workspaceId}
+        />
       ) : null}
       <WebSearchProvidersSection onUnauthorized={onUnauthorized} />
     </>
@@ -907,8 +945,10 @@ function ToolsTab({
 
 function GoogleAccountSection({
   onUnauthorized,
+  workspaceId,
 }: {
   onUnauthorized: () => void;
+  workspaceId?: string | null;
 }): JSX.Element {
   const [account, setAccount] = useState<UserGoogleAccount | null>(null);
   const [loading, setLoading] = useState(true);
@@ -917,12 +957,24 @@ function GoogleAccountSection({
   );
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const scopedWorkspaceId =
+    typeof workspaceId === 'string' && workspaceId.trim()
+      ? workspaceId.trim()
+      : null;
 
   useEffect(() => {
+    if (!scopedWorkspaceId) {
+      setAccount(null);
+      setError(null);
+      setLoading(false);
+      return;
+    }
     let cancelled = false;
     (async () => {
       try {
-        const fresh = await getUserGoogleAccount();
+        const fresh = await getUserGoogleAccount({
+          workspaceId: scopedWorkspaceId,
+        });
         if (cancelled) return;
         setAccount(fresh);
         setError(null);
@@ -942,11 +994,14 @@ function GoogleAccountSection({
     return () => {
       cancelled = true;
     };
-  }, [onUnauthorized]);
+  }, [onUnauthorized, scopedWorkspaceId]);
 
   async function refresh(): Promise<void> {
+    if (!scopedWorkspaceId) return;
     try {
-      const fresh = await getUserGoogleAccount();
+      const fresh = await getUserGoogleAccount({
+        workspaceId: scopedWorkspaceId,
+      });
       setAccount(fresh);
     } catch (err) {
       if (err instanceof UnauthorizedError) {
@@ -960,12 +1015,14 @@ function GoogleAccountSection({
   }
 
   async function handleConnect(): Promise<void> {
+    if (!scopedWorkspaceId) return;
     setBusy('connect');
     setError(null);
     setNotice(null);
     try {
       const launch = await connectUserGoogleAccount({
         scopes: REQUIRED_GOOGLE_TOOL_SCOPES,
+        workspaceId: scopedWorkspaceId,
       });
       await launchGoogleAccountPopup(launch.authorizationUrl);
       await refresh();
@@ -986,12 +1043,14 @@ function GoogleAccountSection({
   }
 
   async function handleExpand(): Promise<void> {
+    if (!scopedWorkspaceId) return;
     setBusy('expand');
     setError(null);
     setNotice(null);
     try {
       const launch = await expandUserGoogleScopes({
         scopes: REQUIRED_GOOGLE_TOOL_SCOPES,
+        workspaceId: scopedWorkspaceId,
       });
       await launchGoogleAccountPopup(launch.authorizationUrl);
       await refresh();
@@ -1008,11 +1067,12 @@ function GoogleAccountSection({
   }
 
   async function handleDisconnect(): Promise<void> {
+    if (!scopedWorkspaceId) return;
     setBusy('disconnect');
     setError(null);
     setNotice(null);
     try {
-      await disconnectUserGoogleAccount();
+      await disconnectUserGoogleAccount({ workspaceId: scopedWorkspaceId });
       await refresh();
       setNotice('Google account disconnected.');
     } catch (err) {
@@ -1045,14 +1105,19 @@ function GoogleAccountSection({
       <header>
         <h2>Google account</h2>
         <p>
-          Connect your Google account to let agents read and write Google Docs.
+          Connect your Google account to let agents read and write Google Docs
+          and Sheets.
         </p>
       </header>
 
       {error ? <p className="settings-error">{error}</p> : null}
       {notice ? <p className="settings-notice">{notice}</p> : null}
 
-      {loading ? (
+      {!scopedWorkspaceId ? (
+        <div className="settings-card">
+          <p>Select a workspace before connecting Google tools.</p>
+        </div>
+      ) : loading ? (
         <p>Loading…</p>
       ) : account?.connected ? (
         <div className="settings-card">
@@ -1066,7 +1131,7 @@ function GoogleAccountSection({
           </p>
           {missingRequired.length > 0 ? (
             <p className="settings-warning">
-              Missing required scopes for Google Docs tools:{' '}
+              Missing required scopes for Google Drive tools:{' '}
               {missingRequired.join(', ')}.{' '}
               <button
                 type="button"
@@ -1474,6 +1539,7 @@ function emptyDraft(
 
 function ProviderCredentialCard({
   scope,
+  workspaceId,
   provider,
   draft,
   canManage,
@@ -1485,6 +1551,7 @@ function ProviderCredentialCard({
   onVerify,
 }: {
   scope: ProviderCredentialScope;
+  workspaceId?: string | null;
   provider: AgentProviderCard;
   draft: ProviderDraft;
   canManage: boolean;
@@ -1652,6 +1719,7 @@ function ProviderCredentialCard({
       {provider.id === 'provider.anthropic' ? (
         <AnthropicSubscriptionSection
           scope={scope}
+          workspaceId={workspaceId}
           provider={provider}
           canManage={canManage}
         />
@@ -1659,6 +1727,7 @@ function ProviderCredentialCard({
       {provider.id === 'provider.openai_codex' ? (
         <OpenAiCodexSubscriptionSection
           scope={scope}
+          workspaceId={workspaceId}
           provider={provider}
           canManage={canManage}
         />
@@ -1671,10 +1740,12 @@ function ProviderCredentialCard({
 
 function AnthropicSubscriptionSection({
   scope,
+  workspaceId,
   provider,
   canManage,
 }: {
   scope: ProviderCredentialScope;
+  workspaceId?: string | null;
   provider: AgentProviderCard;
   canManage: boolean;
 }): JSX.Element {
@@ -1698,7 +1769,9 @@ function AnthropicSubscriptionSection({
     setBusy(true);
     setError(null);
     try {
-      const init = await initiateAnthropicSubscriptionOauth(scope);
+      const init = await initiateAnthropicSubscriptionOauth(scope, {
+        workspaceId,
+      });
       setAuthorizeUrl(init.authorizationUrl);
       setState(init.state);
       window.open(init.authorizationUrl, '_blank', 'noopener,noreferrer');
@@ -1840,10 +1913,12 @@ function AnthropicSubscriptionSection({
 
 function OpenAiCodexSubscriptionSection({
   scope,
+  workspaceId,
   provider,
   canManage,
 }: {
   scope: ProviderCredentialScope;
+  workspaceId?: string | null;
   provider: AgentProviderCard;
   canManage: boolean;
 }): JSX.Element {
@@ -1911,7 +1986,9 @@ function OpenAiCodexSubscriptionSection({
     setBusy(true);
     setError(null);
     try {
-      const init = await initiateOpenAiCodexSubscriptionOauth(scope);
+      const init = await initiateOpenAiCodexSubscriptionOauth(scope, {
+        workspaceId,
+      });
       setPending({
         state: init.state,
         userCode: init.userCode,
@@ -2029,11 +2106,13 @@ function OpenAiCodexSubscriptionSection({
 
 function AgentsTab({
   onUnauthorized,
+  workspaceId,
 }: {
   onUnauthorized: () => void;
+  workspaceId?: string | null;
 }): JSX.Element {
-  // `registered_agents` is per-user via RLS, so every authenticated
-  // user manages their own list — no admin gate here.
+  // Registered agents are scoped to the active workspace; route-level
+  // permissions decide whether this user can mutate them.
   const canManage = true;
   const [data, setData] = useState<AiAgentsPageData | null>(null);
   const [agents, setAgents] = useState<RegisteredAgent[]>([]);
@@ -2049,9 +2128,9 @@ function AgentsTab({
     const load = async (): Promise<void> => {
       try {
         const [nextData, nextAgents, mainAgent] = await Promise.all([
-          getAiAgents(),
-          listRegisteredAgents(),
-          getMainRegisteredAgent().catch(() => null),
+          getAiAgents({ workspaceId }),
+          listRegisteredAgents({ workspaceId }),
+          getMainRegisteredAgent({ workspaceId }).catch(() => null),
         ]);
         if (cancelled) return;
         setData(nextData);
@@ -2081,7 +2160,7 @@ function AgentsTab({
     return () => {
       cancelled = true;
     };
-  }, [onUnauthorized]);
+  }, [onUnauthorized, workspaceId]);
 
   const executorSettings = useMemo(
     () => deriveExecutorSettings(data?.additionalProviders ?? []),
@@ -2094,7 +2173,9 @@ function AgentsTab({
     setError(null);
     setNotice(null);
     try {
-      const updated = await updateMainRegisteredAgent(mainAgentDraft);
+      const updated = await updateMainRegisteredAgent(mainAgentDraft, {
+        workspaceId,
+      });
       setMainAgentId(updated.id);
       setMainAgentDraft(updated.id);
       setNotice('Main agent updated.');
@@ -2146,6 +2227,7 @@ function AgentsTab({
           onUnauthorized={onUnauthorized}
           canManage={canManage}
           mainAgentId={mainAgentId}
+          workspaceId={workspaceId}
           onAgentsChanged={setAgents}
         />
       </section>
@@ -2208,14 +2290,23 @@ function AgentsTab({
 
 const CHANNEL_KIND_LABELS: Record<ChannelKind, string> = {
   slack: 'Slack',
-  telegram: 'Telegram',
 };
 
 const DATA_CONNECTOR_KIND_LABELS: Record<DataConnectorKind, string> = {
-  posthog: 'PostHog',
   google_docs: 'Google Docs',
   google_sheets: 'Google Sheets',
 };
+
+function channelKindLabel(kind: string): string {
+  return CHANNEL_KIND_LABELS[kind as ChannelKind] ?? 'Unsupported channel';
+}
+
+function dataConnectorKindLabel(kind: string): string {
+  return (
+    DATA_CONNECTOR_KIND_LABELS[kind as DataConnectorKind] ??
+    'Unsupported data source'
+  );
+}
 
 type ConnectorModalState =
   | { kind: 'closed' }
@@ -2237,9 +2328,11 @@ type ConnectorListStatus =
 function ConnectorsTab({
   onUnauthorized,
   userRole,
+  workspaceId,
 }: {
   onUnauthorized: () => void;
   userRole: string;
+  workspaceId?: string | null;
 }): JSX.Element {
   const isAdmin = userRole === 'owner' || userRole === 'admin';
   const [status, setStatus] = useState<ConnectorListStatus>({
@@ -2265,15 +2358,20 @@ function ConnectorsTab({
   >(null);
   const [slackNotice, setSlackNotice] = useState<string | null>(null);
   const [slackError, setSlackError] = useState<string | null>(null);
+  const refreshSeq = useRef(0);
 
-  const refresh = async () => {
+  const refresh = useCallback(async () => {
+    const seq = refreshSeq.current + 1;
+    refreshSeq.current = seq;
+    setStatus({ kind: 'loading' });
     try {
       const [nextChannels, nextDataConnectors, nextSlackInstalls] =
         await Promise.all([
-          listWorkspaceChannels(),
-          listWorkspaceDataConnectors(),
-          listWorkspaceSlackInstalls(),
+          listWorkspaceChannels({ workspaceId }),
+          listWorkspaceDataConnectors({ workspaceId }),
+          listWorkspaceSlackInstalls({ workspaceId }),
         ]);
+      if (seq !== refreshSeq.current) return;
       const byName = (
         a: { displayName: string },
         b: { displayName: string },
@@ -2287,6 +2385,7 @@ function ConnectorsTab({
       );
       setStatus({ kind: 'ready' });
     } catch (err) {
+      if (seq !== refreshSeq.current) return;
       if (err instanceof UnauthorizedError) {
         onUnauthorized();
         return;
@@ -2297,14 +2396,14 @@ function ConnectorsTab({
           err instanceof Error ? err.message : 'Failed to load connectors.',
       });
     }
-  };
+  }, [onUnauthorized, workspaceId]);
 
   const handleConnectSlackWorkspace = async () => {
     setSlackBusy('connect');
     setSlackError(null);
     setSlackNotice(null);
     try {
-      const launch = await connectWorkspaceSlackInstall();
+      const launch = await connectWorkspaceSlackInstall({ workspaceId });
       const result = await launchSlackInstallPopup(launch.authorizationUrl);
       await refresh();
       setSlackNotice(
@@ -2327,7 +2426,9 @@ function ConnectorsTab({
     }
   };
 
-  const handleDisconnectSlackWorkspace = async (install: WorkspaceSlackInstall) => {
+  const handleDisconnectSlackWorkspace = async (
+    install: WorkspaceSlackInstall,
+  ) => {
     if (install.boundChannelCount > 0) {
       const confirmed = window.confirm(
         `Disconnecting ${install.teamName} will leave ${install.boundChannelCount} channel${install.boundChannelCount === 1 ? '' : 's'} without a credential. Continue?`,
@@ -2338,7 +2439,7 @@ function ConnectorsTab({
     setSlackError(null);
     setSlackNotice(null);
     try {
-      await deleteWorkspaceSlackInstall(install.teamId);
+      await deleteWorkspaceSlackInstall(install.teamId, { workspaceId });
       await refresh();
       setSlackNotice(`Disconnected Slack workspace ${install.teamName}.`);
     } catch (err) {
@@ -2358,8 +2459,7 @@ function ConnectorsTab({
 
   useEffect(() => {
     void refresh();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [refresh]);
 
   const closeModal = () => {
     setModal({ kind: 'closed' });
@@ -2390,12 +2490,14 @@ function ConnectorsTab({
     setFormError(null);
     try {
       const created = await createWorkspaceChannel({
+        workspaceId,
         kind,
         displayName: input.displayName,
         config: input.config,
       });
       if (input.rotateCredential && input.apiKey !== undefined) {
         await setWorkspaceChannelCredential({
+          workspaceId,
           channelId: created.id,
           apiKey: input.apiKey,
         });
@@ -2428,12 +2530,13 @@ function ConnectorsTab({
     setFormError(null);
     try {
       await updateWorkspaceChannel({
+        workspaceId,
         channelId: channel.id,
         displayName: input.displayName,
-        config: input.config,
       });
       if (input.rotateCredential && input.apiKey !== undefined) {
         await setWorkspaceChannelCredential({
+          workspaceId,
           channelId: channel.id,
           apiKey: input.apiKey,
         });
@@ -2466,12 +2569,14 @@ function ConnectorsTab({
     setFormError(null);
     try {
       const created = await createWorkspaceDataConnector({
+        workspaceId,
         kind,
         displayName: input.displayName,
         config: input.config,
       });
       if (input.rotateCredential && input.apiKey !== undefined) {
         await setWorkspaceDataConnectorCredential({
+          workspaceId,
           connectorId: created.id,
           apiKey: input.apiKey,
         });
@@ -2504,12 +2609,14 @@ function ConnectorsTab({
     setFormError(null);
     try {
       await updateWorkspaceDataConnector({
+        workspaceId,
         connectorId: dataConnector.id,
         displayName: input.displayName,
         config: input.config,
       });
       if (input.rotateCredential && input.apiKey !== undefined) {
         await setWorkspaceDataConnectorCredential({
+          workspaceId,
           connectorId: dataConnector.id,
           apiKey: input.apiKey,
         });
@@ -2534,9 +2641,11 @@ function ConnectorsTab({
     setDeleteSubmitting(true);
     try {
       if (deleteState.kind === 'channel') {
-        await deleteWorkspaceChannel(deleteState.channel.id);
+        await deleteWorkspaceChannel(deleteState.channel.id, { workspaceId });
       } else {
-        await deleteWorkspaceDataConnector(deleteState.dataConnector.id);
+        await deleteWorkspaceDataConnector(deleteState.dataConnector.id, {
+          workspaceId,
+        });
       }
       setDeleteState({ kind: 'closed' });
       await refresh();
@@ -2636,7 +2745,9 @@ function ConnectorsTab({
                           ? '1 channel'
                           : `${install.boundChannelCount} channels`}
                     </td>
-                    <td>{new Date(install.installedAt).toLocaleDateString()}</td>
+                    <td>
+                      {new Date(install.installedAt).toLocaleDateString()}
+                    </td>
                     <td className="connector-row-actions">
                       {isAdmin ? (
                         <button
@@ -2697,44 +2808,30 @@ function ConnectorsTab({
         {channels.length === 0 ? (
           <p className="page-state">
             {isAdmin
-              ? 'No channels yet. Add Slack or Telegram to make them available across all your talks.'
+              ? 'No channels yet. Add Slack to make them available across all your talks.'
               : 'No channels available. Ask your workspace admin to add one in Settings → Connectors.'}
           </p>
         ) : (
           <ConnectorTable
             rows={channels.map((channel) => {
-              // Slack channel credentials live on the workspace install
-              // (workspace_slack_installs.ciphertext), not the per-channel
-              // row. A slack channel has a credential iff its workspace_id
-              // matches a connected install. Non-slack kinds keep the
-              // row-level hasCredential check.
-              const installedTeamIds = new Set(
-                slackInstalls.map((i) => i.teamId),
-              );
-              const channelWorkspaceId =
-                typeof channel.config.workspace_id === 'string'
-                  ? channel.config.workspace_id
-                  : null;
-              const hasCredential =
-                channel.kind === 'slack'
-                  ? channelWorkspaceId !== null &&
-                    installedTeamIds.has(channelWorkspaceId)
-                  : channel.hasCredential;
               return {
                 id: channel.id,
-                kindLabel: CHANNEL_KIND_LABELS[channel.kind],
+                kindLabel: channelKindLabel(channel.kind),
                 displayName: channel.displayName,
-                subtitle: resolveConnectorSubtitle(channel.kind, channel.config),
+                subtitle: resolveConnectorSubtitle(
+                  channel.kind,
+                  channel.config,
+                ),
                 boundTalkCount: channel.boundTalkCount,
                 enabled: channel.enabled,
-                hasCredential,
+                hasCredential: channel.hasCredential,
                 onEdit: isAdmin
                   ? () => setModal({ kind: 'edit-channel', channel })
                   : undefined,
                 onDelete: isAdmin
                   ? () => setDeleteState({ kind: 'channel', channel })
                   : undefined,
-                labelNoun: 'Slack/Telegram channel',
+                labelNoun: 'Slack channel',
               };
             })}
           />
@@ -2752,7 +2849,7 @@ function ConnectorsTab({
               type="button"
               className="btn btn-primary btn-sm"
               onClick={() => {
-                setCreateKind('posthog');
+                setCreateKind('google_docs');
                 setModal({ kind: 'create-data-connector' });
               }}
             >
@@ -2763,14 +2860,14 @@ function ConnectorsTab({
         {dataConnectors.length === 0 ? (
           <p className="page-state">
             {isAdmin
-              ? 'No data sources yet. Add PostHog or Google Docs/Sheets to make them available across all your talks.'
+              ? 'No data sources yet. Add Google Docs or Sheets to make them available across all your talks.'
               : 'No data sources available. Ask your workspace admin to add one.'}
           </p>
         ) : (
           <ConnectorTable
             rows={dataConnectors.map((dc) => ({
               id: dc.id,
-              kindLabel: DATA_CONNECTOR_KIND_LABELS[dc.kind],
+              kindLabel: dataConnectorKindLabel(dc.kind),
               displayName: dc.displayName,
               subtitle: resolveConnectorSubtitle(dc.kind, dc.config),
               boundTalkCount: dc.boundTalkCount,
@@ -2818,6 +2915,7 @@ function ConnectorsTab({
               submitting={formSubmitting}
               error={formError}
               slackInstalls={slackInstalls}
+              workspaceId={workspaceId}
               onCancel={closeModal}
               onCreateChannel={handleCreateChannelSubmit}
               onEditChannel={handleEditChannelSubmit}
@@ -2966,6 +3064,7 @@ function ConnectorModalContent({
   submitting,
   error,
   slackInstalls,
+  workspaceId,
   onCancel,
   onCreateChannel,
   onEditChannel,
@@ -2979,6 +3078,7 @@ function ConnectorModalContent({
   submitting: boolean;
   error: string | null;
   slackInstalls: WorkspaceSlackInstall[];
+  workspaceId?: string | null;
   onCancel: () => void;
   onCreateChannel: (
     kind: ChannelKind,
@@ -3022,62 +3122,48 @@ function ConnectorModalContent({
     return (
       <>
         <h3>Add channel</h3>
-        <label className="form-field">
-          <span className="form-field-label">Channel kind</span>
-          <select
-            value={createKind}
-            onChange={(event) => setCreateKind(event.target.value)}
-            disabled={submitting}
-          >
-            <option value="slack">Slack</option>
-            <option value="telegram">Telegram</option>
-          </select>
-        </label>
-        {createKind === 'slack' ? (
-          <SlackChannelPicker
-            installs={slackInstalls}
-            onAdded={(count) => {
-              void onSlackChannelsAdded(count);
-            }}
-            onCancel={onCancel}
-          />
-        ) : (
-          <TelegramChannelForm
-            mode="create"
-            submitting={submitting}
-            error={error}
-            onSubmit={(input) => onCreateChannel('telegram', input)}
-            onCancel={onCancel}
-          />
-        )}
+        <SlackChannelPicker
+          installs={slackInstalls}
+          workspaceId={workspaceId}
+          onAdded={(count) => {
+            void onSlackChannelsAdded(count);
+          }}
+          onCancel={onCancel}
+        />
       </>
     );
   }
   if (modal.kind === 'edit-channel') {
     const channel = modal.channel;
+    if (channel.kind !== 'slack') {
+      return (
+        <>
+          <h3>Edit channel</h3>
+          <p className="page-state">
+            This channel kind is no longer supported.
+          </p>
+          <button
+            type="button"
+            className="btn btn-secondary"
+            onClick={onCancel}
+          >
+            Close
+          </button>
+        </>
+      );
+    }
     return (
       <>
         <h3>Edit channel</h3>
-        {channel.kind === 'slack' ? (
-          <SlackChannelForm
-            mode="edit"
-            initial={channel}
-            submitting={submitting}
-            error={error}
-            installs={slackInstalls}
-            onSubmit={(input) => onEditChannel(channel, input)}
-            onCancel={onCancel}
-          />
-        ) : (
-          <TelegramChannelForm
-            mode="edit"
-            initial={channel}
-            submitting={submitting}
-            error={error}
-            onSubmit={(input) => onEditChannel(channel, input)}
-            onCancel={onCancel}
-          />
-        )}
+        <SlackChannelForm
+          mode="edit"
+          initial={channel}
+          submitting={submitting}
+          error={error}
+          installs={slackInstalls}
+          onSubmit={(input) => onEditChannel(channel, input)}
+          onCancel={onCancel}
+        />
       </>
     );
   }
@@ -3092,20 +3178,11 @@ function ConnectorModalContent({
             onChange={(event) => setCreateKind(event.target.value)}
             disabled={submitting}
           >
-            <option value="posthog">PostHog</option>
             <option value="google_docs">Google Docs</option>
             <option value="google_sheets">Google Sheets</option>
           </select>
         </label>
-        {createKind === 'posthog' ? (
-          <PostHogDataConnectorForm
-            mode="create"
-            submitting={submitting}
-            error={error}
-            onSubmit={(input) => onCreateDataConnector('posthog', input)}
-            onCancel={onCancel}
-          />
-        ) : createKind === 'google_docs' ? (
+        {createKind === 'google_docs' ? (
           <GoogleDocsDataConnectorForm
             mode="create"
             submitting={submitting}
@@ -3126,19 +3203,23 @@ function ConnectorModalContent({
     );
   }
   const dc = modal.dataConnector;
+  if (dc.kind !== 'google_docs' && dc.kind !== 'google_sheets') {
+    return (
+      <>
+        <h3>Edit data source</h3>
+        <p className="page-state">
+          This data source kind is no longer supported.
+        </p>
+        <button type="button" className="btn btn-secondary" onClick={onCancel}>
+          Close
+        </button>
+      </>
+    );
+  }
   return (
     <>
       <h3>Edit data source</h3>
-      {dc.kind === 'posthog' ? (
-        <PostHogDataConnectorForm
-          mode="edit"
-          initial={dc}
-          submitting={submitting}
-          error={error}
-          onSubmit={(input) => onEditDataConnector(dc, input)}
-          onCancel={onCancel}
-        />
-      ) : dc.kind === 'google_docs' ? (
+      {dc.kind === 'google_docs' ? (
         <GoogleDocsDataConnectorForm
           mode="edit"
           initial={dc}
