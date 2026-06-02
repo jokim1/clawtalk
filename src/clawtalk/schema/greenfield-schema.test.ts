@@ -114,6 +114,186 @@ describe('greenfield schema invariants', () => {
     expect(writePolicies).toEqual([]);
   });
 
+  it('keeps provider replay blobs private from authenticated clients', async () => {
+    const db = getDbPg();
+    const tableRows = await db<{ exists: boolean }[]>`
+      select to_regclass('public.message_provider_replay') is not null as exists
+    `;
+    expect(tableRows[0]?.exists).toBe(true);
+
+    const directGrants = await db<
+      Array<{ table_name: string; privilege_type: string }>
+    >`
+      select table_name, privilege_type
+      from information_schema.role_table_grants
+      where table_schema = 'public'
+        and grantee = 'authenticated'
+        and table_name = 'message_provider_replay'
+      order by privilege_type asc
+    `;
+    expect(directGrants).toEqual([]);
+
+    const policies = await db<Array<{ tablename: string; cmd: string }>>`
+      select tablename, cmd
+      from pg_policies
+      where schemaname = 'public'
+        and tablename = 'message_provider_replay'
+      order by cmd asc
+    `;
+    expect(policies).toEqual([]);
+  });
+
+  it('indexes provider replay rows by run for cascade maintenance', async () => {
+    const db = getDbPg();
+    const indexes = await db<Array<{ indexdef: string }>>`
+      select indexdef
+      from pg_indexes
+      where schemaname = 'public'
+        and tablename = 'message_provider_replay'
+        and indexname = 'message_provider_replay_run_idx'
+    `;
+    expect(indexes).toHaveLength(1);
+    expect(indexes[0]!.indexdef.toLowerCase()).toContain(
+      '(workspace_id, talk_id, run_id)',
+    );
+  });
+
+  it('indexes prompt-visible context source lookups', async () => {
+    const db = getDbPg();
+    const indexes = await db<Array<{ indexdef: string }>>`
+      select indexdef
+      from pg_indexes
+      where schemaname = 'public'
+        and tablename = 'context_sources'
+        and indexname = 'context_sources_prompt_lookup_idx'
+    `;
+    expect(indexes).toHaveLength(1);
+    const indexDef = indexes[0]!.indexdef.toLowerCase();
+    expect(indexDef).toContain('(talk_id, sort_order, created_at, id)');
+    expect(indexDef).toContain("kind <> 'rule'::text");
+    expect(indexDef).toContain('include_in_prompt = true');
+  });
+
+  it('keeps legacy source aliases unique under case-insensitive runtime lookup', async () => {
+    const { workspaceId } = await seedUserAndWorkspace();
+    const db = getDbPg();
+    const [talk] = await db<{ id: string }[]>`
+      insert into public.talks (workspace_id, sort_order, title, created_by)
+      values (${workspaceId}::uuid, 0, 'Alias uniqueness', ${USER_ID}::uuid)
+      returning id
+    `;
+
+    await db`
+      insert into public.context_sources (
+        workspace_id, talk_id, kind, name, extracted_text, meta_json,
+        include_in_prompt, sort_order, added_by_user_id
+      )
+      values (
+        ${workspaceId}::uuid,
+        ${talk.id}::uuid,
+        'file',
+        'Upper legacy alias',
+        'Upper body',
+        ${db.json({ compatKind: 'source', sourceRef: 'S1' } as never)},
+        true,
+        0,
+        ${USER_ID}::uuid
+      )
+    `;
+
+    await expect(
+      db`
+        insert into public.context_sources (
+          workspace_id, talk_id, kind, name, extracted_text, meta_json,
+          include_in_prompt, sort_order, added_by_user_id
+        )
+        values (
+          ${workspaceId}::uuid,
+          ${talk.id}::uuid,
+          'file',
+          'Lower legacy alias',
+          'Lower body',
+          ${db.json({ compatKind: 'source', sourceRef: 's1' } as never)},
+          true,
+          1,
+          ${USER_ID}::uuid
+        )
+      `,
+    ).rejects.toMatchObject({ code: '23505' });
+  });
+
+  it('guarantees each run model resolves to one frozen provider/model pair', async () => {
+    const db = getDbPg();
+    const uniqueIndexes = await db<Array<{ indexname: string }>>`
+      select indexname
+      from pg_indexes
+      where schemaname = 'public'
+        and tablename = 'llm_provider_models'
+        and indexname = 'llm_provider_models_model_id_unique'
+        and indexdef ilike '%unique%'
+        and indexdef ilike '%(model_id)%'
+    `;
+    expect(uniqueIndexes).toHaveLength(1);
+
+    const runModelFks = await db<
+      Array<{ target_table: string; target_column: string }>
+    >`
+      select
+        confrelid::regclass::text as target_table,
+        a2.attname as target_column
+      from pg_constraint c
+      join pg_attribute a1
+        on a1.attrelid = c.conrelid
+       and a1.attnum = any(c.conkey)
+      join pg_attribute a2
+        on a2.attrelid = c.confrelid
+       and a2.attnum = any(c.confkey)
+      where c.conrelid = 'public.runs'::regclass
+        and c.contype = 'f'
+        and a1.attname = 'model_id'
+    `;
+    expect(runModelFks).toEqual([
+      {
+        target_table: 'llm_provider_models',
+        target_column: 'model_id',
+      },
+    ]);
+
+    const snapshotProviderModelFks = await db<
+      Array<{
+        target_table: string;
+        source_columns: string[];
+        target_columns: string[];
+      }>
+    >`
+      select
+        c.confrelid::regclass::text as target_table,
+        array_agg(a1.attname order by cols.ordinality)::text[] as source_columns,
+        array_agg(a2.attname order by cols.ordinality)::text[] as target_columns
+      from pg_constraint c
+      join unnest(c.conkey, c.confkey) with ordinality as cols(conkey, confkey, ordinality)
+        on true
+      join pg_attribute a1
+        on a1.attrelid = c.conrelid
+       and a1.attnum = cols.conkey
+      join pg_attribute a2
+        on a2.attrelid = c.confrelid
+       and a2.attnum = cols.confkey
+      where c.conrelid = 'public.talk_agent_snapshots'::regclass
+        and c.contype = 'f'
+      group by c.oid, c.confrelid
+      having array_agg(a1.attname order by cols.ordinality)::text[] =
+        array['provider_id', 'model_id']::text[]
+    `;
+    expect(snapshotProviderModelFks).toEqual([
+      {
+        target_table: 'llm_provider_models',
+        source_columns: ['provider_id', 'model_id'],
+        target_columns: ['provider_id', 'model_id'],
+      },
+    ]);
+  });
+
   it('keeps nested trusted writes elevated until the outer scope finishes', async () => {
     await seedUserAndWorkspace();
     await withUserContext(USER_ID, async () => {
@@ -231,12 +411,17 @@ describe('greenfield schema invariants', () => {
       }[]
     >`
       with chosen_agent as (
-        select id, role_key, name, handle, initials, accent, accent_dark, model_id, temperature
-        from public.agents
-        where workspace_id = ${workspaceId}::uuid
-          and role_key = 'strategist'
-          and is_default = true
-          and is_system = false
+        select
+          a.id, a.role_key, a.name, a.handle, a.initials, a.accent,
+          a.accent_dark, a.model_id, a.temperature, lpm.provider_id
+        from public.agents a
+        join public.llm_provider_models lpm
+          on lpm.model_id = a.model_id
+        where a.workspace_id = ${workspaceId}::uuid
+          and a.role_key = 'strategist'
+          and a.is_default = true
+          and a.is_system = false
+        order by lpm.provider_id asc
         limit 1
       ),
       talk as (
@@ -250,14 +435,15 @@ describe('greenfield schema invariants', () => {
       snapshot as (
         insert into public.talk_agent_snapshots (
           workspace_id, talk_id, snapshot_group_id, source_agent_id, role_key,
-          name, handle, initials, accent, accent_dark, model_id, temperature,
-          sort_order, role_template_version
+          name, handle, initials, accent, accent_dark, provider_id, model_id,
+          temperature, sort_order, role_template_version
         )
         select
           ${workspaceId}::uuid, talk.id, snapshot_group.id, chosen_agent.id,
           chosen_agent.role_key, chosen_agent.name, chosen_agent.handle,
           chosen_agent.initials, chosen_agent.accent, chosen_agent.accent_dark,
-          chosen_agent.model_id, chosen_agent.temperature, 0, 1
+          chosen_agent.provider_id, chosen_agent.model_id,
+          chosen_agent.temperature, 0, 1
         from talk, chosen_agent, snapshot_group
         returning id, talk_id, snapshot_group_id, model_id
       )
@@ -343,14 +529,15 @@ describe('greenfield schema invariants', () => {
       snapshot as (
         insert into public.talk_agent_snapshots (
           workspace_id, talk_id, snapshot_group_id, source_agent_id, role_key,
-          name, handle, initials, accent, accent_dark, model_id, temperature,
-          sort_order, role_template_version
+          name, handle, initials, accent, accent_dark, provider_id, model_id,
+          temperature, sort_order, role_template_version
         )
         select
           ${workspaceId}::uuid, talk.id, snapshot_group.id, chosen_agent.id,
           chosen_agent.role_key, chosen_agent.name, chosen_agent.handle,
           chosen_agent.initials, chosen_agent.accent, chosen_agent.accent_dark,
-          chosen_agent.model_id, chosen_agent.temperature, 0, 1
+          chosen_agent.provider_id, chosen_agent.model_id,
+          chosen_agent.temperature, 0, 1
         from talk, chosen_agent, snapshot_group
         returning id, talk_id, snapshot_group_id
       ),
@@ -385,12 +572,12 @@ describe('greenfield schema invariants', () => {
         await scopedDb`
           insert into public.talk_agent_snapshots (
             workspace_id, talk_id, snapshot_group_id, source_agent_id, role_key,
-            model_id, temperature, sort_order
+            provider_id, model_id, temperature, sort_order
           )
           values (
             ${workspaceId}::uuid, ${fixture.talk_id}::uuid,
             ${randomUUID()}::uuid, ${fixture.agent_id}::uuid, 'strategist',
-            ${fixture.model_id}, 0.5, 0
+            ${fixture.provider_id}, ${fixture.model_id}, 0.5, 0
           )
         `;
       }),

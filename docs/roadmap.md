@@ -1,4 +1,4 @@
-> **Status:** live implementation tracker · **Last updated:** 2026-05-31
+> **Status:** live implementation tracker · **Last updated:** 2026-06-02
 > Orientation: [REFACTOR-OVERVIEW.md](./REFACTOR-OVERVIEW.md) · readiness: [IMPLEMENTATION-READINESS.md](./IMPLEMENTATION-READINESS.md)
 
 # ClawTalk Roadmap
@@ -14,9 +14,9 @@ This file tracks shipped state vs. the greenfield refactor. It is not the produc
 | LLM providers     | Provider/model discovery, provider secrets, runtime model guard, and model lifecycle logic exist. Keep and adapt to `llm_models` view over `llm_provider_models`.                                                                                                                                                    |
 | Event streaming   | `event_outbox` + `UserEventHub` DO exists. Keep and adapt event payloads to the greenfield API.                                                                                                                                                                                                                      |
 | Schema baseline   | Active cutover branch has replaced the legacy migration stream with `supabase/migrations/0001_clawtalk_greenfield.sql`; legacy migrations are archived under `docs/archive/legacy-supabase-migrations/`.                                                                                                             |
-| Talk execution    | Greenfield core/detail/chat routes, roster read/write, their Hono mount layer, chat enqueue, queue consumer, executor, scheduler sweeps, and run-state hardening are committed against `messages`, `runs`, `agents`, and `talk_agent_snapshots`. Retire remaining legacy API collisions before frontend replacement. |
+| Talk execution    | Greenfield core/detail/chat routes, roster read/write, their Hono mount layer, chat enqueue, queue consumer, executor, scheduler sweeps, and run-state hardening are committed against `messages`, `runs`, `agents`, and `talk_agent_snapshots`. The staged runtime-retirement slice removes the remaining legacy context/executor path and must pass GStack Review rerun before commit. |
 | Content/Documents | Legacy `contents` + `content_edits` flow exists, plus recent PDF page rasterization work. Rewrite as `documents` + `doc_tabs` + `doc_blocks` + `document_edits`; preserve rasterization capability in `context_source_pages`.                                                                                        |
-| Jobs              | Greenfield scheduler safety sweeps exist; job firing still needs the `12-jobs.md` rewrite so jobs fire normal runs, with slot identity and output through `document_edits`.                                                                                                                                          |
+| Jobs              | Greenfield job CRUD, manual run-now, scheduler Path A, prompt snapshots, source-scoped tool manifests, blocked-dependency handling, and queue execution are in place. The staged slice fixes job snapshot creation so disabled non-target roster agents do not abort otherwise valid scheduled/run-now jobs. Jobs UI and document-append output remain. |
 | Frontend          | Vite/React app works but is centered around legacy Talk/content/thread surfaces. Rewrite large surfaces into greenfield modules.                                                                                                                                                                                     |
 
 ## Recent Mainline State
@@ -31,6 +31,7 @@ This file tracks shipped state vs. the greenfield refactor. It is not the produc
 - The roster mutation cleanup slice moves `PUT /api/v1/talks/:talkId/agents` to greenfield `talk_agents` / workspace `agents` and removes that legacy route collision.
 - The talk policy cleanup slice moves `GET/PUT /api/v1/talks/:talkId/policy` to a greenfield compatibility facade derived from `talk_agents`, keeps the old no-op `PUT` name-normalization leniency, reports the greenfield 5-agent roster cap, and does not reintroduce a policy mirror.
 - The tools cleanup slice moves `GET/PATCH /api/v1/talks/:talkId/tools` to greenfield `talk_tools`, materializes the existing light-family frontend contract into canonical per-tool rows, freezes active families plus resolved effective tool permissions into greenfield run prompt snapshots for execution, emits `talk_tools_changed`, and removes the legacy `active_tool_families_json` route collision.
+- The context/jobs/runtime-retirement slice is staged but not committed. Local verification passed, Claude Review is clean, and the only blocker is the required GStack Review rerun after Codex CLI quota resets. See [IMPLEMENTATION-HANDOFF.md](./IMPLEMENTATION-HANDOFF.md).
 
 ## Refactor Roadmap
 
@@ -39,7 +40,7 @@ This file tracks shipped state vs. the greenfield refactor. It is not the produc
 | 1    | Cutover foundation: fresh Supabase baseline, role-template seed, first-signin workspace bootstrap, §11 verification tests. | ✅ Applies on empty/reset DB; workspace + default agents seed; first invariant tests pass.                                                  |
 | 2    | Greenfield route/accessor spine: workspace/talk core APIs, detail/snapshot APIs, chat enqueue.                             | ✅ Focused greenfield core/detail/chat route tests pass.                                                                                    |
 | 3    | Greenfield execution backend: queue consumer, executor, scheduler sweeps, run-state hardening.                             | ✅ Atomic outbox/state transitions, notify timing, ordered/parallel behavior, scheduler sweeps, and DLQ retry tests pass.                   |
-| 4    | API shell/resource decomposition cleanup.                                                                                  | 🔄 Greenfield mount glue, roster mutation, policy facade, tools routes/tool-gating snapshot, and document edit compatibility extracted; next retire context/resources and jobs one family at a time. |
+| 4    | API shell/resource decomposition cleanup.                                                                                  | ⏸️ Backend compatibility/runtime cleanup is staged through context, connectors, jobs, and legacy executor retirement; commit blocked only by GStack Review rerun. |
 | 5    | Frontend shell + Talk rewrite.                                                                                             | New shell and Talk page use greenfield APIs; `TalkDetailPage.tsx` legacy surface is retired.                                                |
 | 6    | Documents.                                                                                                                 | Primary document, tabs/blocks, pending edit accept/reject, PDF/page context path work against new schema.                                   |
 | 7    | Agents, tools, connectors, context.                                                                                        | Agent editing, prompt snapshots, tool gating, connector binding, and context sources are greenfield.                                        |
@@ -49,4 +50,4 @@ This file tracks shipped state vs. the greenfield refactor. It is not the produc
 
 ## Active Decision
 
-Proceed with the **big-bang cutover branch** from [IMPLEMENTATION-READINESS.md](./IMPLEMENTATION-READINESS.md). A dual-path feature flag is not recommended unless Joseph explicitly needs the legacy dogfood app to remain usable throughout the rewrite.
+Proceed with the **big-bang cutover branch** from [IMPLEMENTATION-READINESS.md](./IMPLEMENTATION-READINESS.md). A dual-path feature flag is not recommended unless Joseph explicitly needs the legacy dogfood app to remain usable throughout the rewrite. Current action is not more implementation: finish the staged runtime-retirement slice's review gate, commit it, then start the frontend/Talk rewrite.

@@ -159,10 +159,13 @@ async function seedMessages(input: {
   `;
   const [agentMessage] = await db<{ id: string; run_id: string }[]>`
     with source_agent as (
-      select *
-      from public.agents
-      where workspace_id = ${input.workspaceId}::uuid
-        and id = ${input.agentId}::uuid
+      select a.*, lpm.provider_id
+      from public.agents a
+      join public.llm_provider_models lpm
+        on lpm.model_id = a.model_id
+      where a.workspace_id = ${input.workspaceId}::uuid
+        and a.id = ${input.agentId}::uuid
+      order by lpm.provider_id asc
       limit 1
     ),
     snapshot_group as (
@@ -171,7 +174,7 @@ async function seedMessages(input: {
     snapshot as (
       insert into public.talk_agent_snapshots (
         workspace_id, talk_id, snapshot_group_id, source_agent_id, role_key,
-        name, handle, initials, accent, accent_dark, model_id, temperature,
+        name, handle, initials, accent, accent_dark, provider_id, model_id, temperature,
         persona, focus, method, sort_order, role_template_version
       )
       select
@@ -185,6 +188,7 @@ async function seedMessages(input: {
         source_agent.initials,
         source_agent.accent,
         source_agent.accent_dark,
+        source_agent.provider_id,
         source_agent.model_id,
         source_agent.temperature,
         source_agent.persona,
@@ -408,6 +412,7 @@ describe('greenfield detail routes', () => {
             status: 'completed',
             threadId: talkId,
             targetAgentId: agentIds[0],
+            providerId: expect.any(String),
           },
         ],
       },
@@ -550,7 +555,15 @@ describe('greenfield detail routes', () => {
     expect(runs.statusCode).toBe(200);
     expect(runs.body).toMatchObject({
       ok: true,
-      data: { runs: [{ id: seeded.runId, threadId: talkId }] },
+      data: {
+        runs: [
+          {
+            id: seeded.runId,
+            threadId: talkId,
+            providerId: expect.any(String),
+          },
+        ],
+      },
     });
 
     const createdContent = await createGreenfieldTalkContentRoute({

@@ -248,6 +248,59 @@ async function setWebTools(input: {
   `;
 }
 
+async function assignDisabledModelToAgent(input: {
+  workspaceId: string;
+  agentId: string;
+}): Promise<void> {
+  const db = getDbPg();
+  const modelId = `disabled-job-snapshot-${input.agentId.slice(0, 8)}`;
+  await db`
+    insert into public.llm_provider_models (
+      provider_id, model_id, display_name, context_window_tokens,
+      default_max_output_tokens, default_ttft_timeout_ms, enabled,
+      capabilities_json
+    )
+    values (
+      'provider.openai',
+      ${modelId},
+      'Disabled job snapshot regression model',
+      128000,
+      4096,
+      30000,
+      false,
+      '{}'::jsonb
+    )
+    on conflict (provider_id, model_id) do update set
+      enabled = false,
+      display_name = excluded.display_name
+  `;
+  await db`
+    update public.agents
+    set model_id = ${modelId}
+    where workspace_id = ${input.workspaceId}::uuid
+      and id = ${input.agentId}::uuid
+  `;
+}
+
+async function listRunSnapshotAgentIds(input: {
+  workspaceId: string;
+  runId: string;
+}): Promise<string[]> {
+  const db = getDbPg();
+  const rows = await db<Array<{ source_agent_id: string }>>`
+    select tas.source_agent_id
+    from public.runs r
+    join public.talk_agent_snapshots tas
+      on tas.workspace_id = r.workspace_id
+     and tas.talk_id = r.talk_id
+     and tas.snapshot_group_id = r.snapshot_group_id
+    where r.workspace_id = ${input.workspaceId}::uuid
+      and r.id = ${input.runId}::uuid
+    order by tas.source_agent_id
+  `;
+  return rows.map((row) => row.source_agent_id);
+}
+
 describe('greenfield jobs compatibility routes', () => {
   beforeAll(async () => {
     await initPgDatabase({ url: TEST_DB_URL });
@@ -530,6 +583,7 @@ describe('greenfield jobs compatibility routes', () => {
       status: 'completed',
       responseExcerpt: 'Job response: Use this frozen job prompt.',
       triggerMessageId: null,
+      providerId: expect.any(String),
     });
 
     const job = await getGreenfieldTalkJobRoute({
@@ -542,6 +596,46 @@ describe('greenfield jobs compatibility routes', () => {
       runCount: 1,
       lastRunStatus: 'completed',
     });
+  });
+
+  it('runs manual jobs when a non-target roster agent has a disabled model', async () => {
+    const { workspaceId, talkId, agentIds } = await createTalkFixture();
+    const targetAgentId = agentIds[0]!;
+    const disabledRosterAgentId = agentIds[1]!;
+    await assignDisabledModelToAgent({
+      workspaceId,
+      agentId: disabledRosterAgentId,
+    });
+
+    const created = await createGreenfieldTalkJobRoute({
+      auth: auth(),
+      workspaceId,
+      talkId,
+      title: 'Run with disabled non-target',
+      prompt: 'Target remains valid.',
+      targetAgentId,
+      schedule: { kind: 'hourly_interval', everyHours: 1 },
+      timezone: 'UTC',
+    });
+    if (!created.body.ok) {
+      throw new Error(JSON.stringify(created.body.error));
+    }
+
+    const runNow = await runGreenfieldTalkJobNowRoute({
+      auth: auth(),
+      workspaceId,
+      talkId,
+      jobId: created.body.data.job.id,
+    });
+
+    expect(runNow.statusCode).toBe(202);
+    if (!runNow.body.ok) throw new Error('Expected run-now to succeed');
+    const snapshotAgentIds = await listRunSnapshotAgentIds({
+      workspaceId,
+      runId: runNow.body.data.runId,
+    });
+    expect(snapshotAgentIds).toContain(targetAgentId);
+    expect(snapshotAgentIds).not.toContain(disabledRosterAgentId);
   });
 
   it('fans out manual job queue notifications to all workspace members', async () => {
@@ -634,6 +728,159 @@ describe('greenfield jobs compatibility routes', () => {
     expect(new Set(notifiedOwnerIds)).toEqual(
       new Set([USER_ID, OTHER_USER_ID]),
     );
+  });
+
+  it('claims scheduled jobs when a non-target roster agent has a disabled model', async () => {
+    const { workspaceId, talkId, agentIds } = await createTalkFixture();
+    const targetAgentId = agentIds[0]!;
+    const disabledRosterAgentId = agentIds[1]!;
+    await assignDisabledModelToAgent({
+      workspaceId,
+      agentId: disabledRosterAgentId,
+    });
+    const db = getDbPg();
+    const created = await createGreenfieldTalkJobRoute({
+      auth: auth(),
+      workspaceId,
+      talkId,
+      title: 'Scheduled with disabled non-target',
+      prompt: 'Scheduled target remains valid.',
+      targetAgentId,
+      schedule: { kind: 'hourly_interval', everyHours: 1 },
+      timezone: 'UTC',
+    });
+    if (!created.body.ok) {
+      throw new Error(JSON.stringify(created.body.error));
+    }
+    const jobId = created.body.data.job.id;
+    await db`
+      update public.jobs
+      set next_due_at = now() - interval '30 seconds'
+      where workspace_id = ${workspaceId}::uuid
+        and talk_id = ${talkId}::uuid
+        and id = ${jobId}::uuid
+    `;
+
+    const { ctx, drain } = makeMockCtx();
+    const { env } = makeMockEventHub();
+    let runId: string | undefined;
+    await withRequestScopedDb(TEST_DB_URL, ctx, env, async () => {
+      const result = await withNotifyQueueScope(env, ctx, () =>
+        claimDueGreenfieldJobRuns({ limit: 1 }),
+      );
+      runId = result.enqueuedRunIds[0];
+    });
+    await drain();
+
+    expect(runId).toBeTruthy();
+    const snapshotAgentIds = await listRunSnapshotAgentIds({
+      workspaceId,
+      runId: runId!,
+    });
+    expect(snapshotAgentIds).toContain(targetAgentId);
+    expect(snapshotAgentIds).not.toContain(disabledRosterAgentId);
+  });
+
+  it('blocks manual jobs when the target agent model is disabled', async () => {
+    const { workspaceId, talkId, agentIds } = await createTalkFixture();
+    const targetAgentId = agentIds[0]!;
+
+    const created = await createGreenfieldTalkJobRoute({
+      auth: auth(),
+      workspaceId,
+      talkId,
+      title: 'Run with disabled target',
+      prompt: 'Target model gets retired after creation.',
+      targetAgentId,
+      schedule: { kind: 'hourly_interval', everyHours: 1 },
+      timezone: 'UTC',
+    });
+    if (!created.body.ok) {
+      throw new Error(JSON.stringify(created.body.error));
+    }
+
+    // Disable the TARGET agent's model only AFTER creation, so the job passes
+    // creation validation and must be caught by the fire-time dependency guard.
+    await assignDisabledModelToAgent({ workspaceId, agentId: targetAgentId });
+
+    const blocked = await runGreenfieldTalkJobNowRoute({
+      auth: auth(),
+      workspaceId,
+      talkId,
+      jobId: created.body.data.job.id,
+    });
+    expect(blocked.statusCode).toBe(409);
+    expect(blocked.body.ok ? null : blocked.body.error).toMatchObject({
+      code: 'job_blocked',
+    });
+
+    const detail = await getGreenfieldTalkJobRoute({
+      auth: auth(),
+      workspaceId,
+      talkId,
+      jobId: created.body.data.job.id,
+    });
+    expect(detail.body.ok && detail.body.data.job).toMatchObject({
+      status: 'blocked',
+      blockReason: 'model_disabled',
+      nextDueAt: null,
+    });
+  });
+
+  it('blocks scheduled claims when the target agent model is disabled', async () => {
+    const { workspaceId, talkId, agentIds } = await createTalkFixture();
+    const targetAgentId = agentIds[0]!;
+    const db = getDbPg();
+
+    const created = await createGreenfieldTalkJobRoute({
+      auth: auth(),
+      workspaceId,
+      talkId,
+      title: 'Scheduled with disabled target',
+      prompt: 'Target model gets retired before the slot fires.',
+      targetAgentId,
+      schedule: { kind: 'hourly_interval', everyHours: 1 },
+      timezone: 'UTC',
+    });
+    if (!created.body.ok) {
+      throw new Error(JSON.stringify(created.body.error));
+    }
+    const jobId = created.body.data.job.id;
+
+    // Disable the TARGET agent's model and mark the slot due. The fire-time
+    // claim guard must block instead of enqueuing a run on a disabled model.
+    await assignDisabledModelToAgent({ workspaceId, agentId: targetAgentId });
+    await db`
+      update public.jobs
+      set next_due_at = now() - interval '30 seconds'
+      where workspace_id = ${workspaceId}::uuid
+        and talk_id = ${talkId}::uuid
+        and id = ${jobId}::uuid
+    `;
+
+    const { ctx, drain } = makeMockCtx();
+    const { env } = makeMockEventHub();
+    let enqueuedRunIds: string[] = [];
+    await withRequestScopedDb(TEST_DB_URL, ctx, env, async () => {
+      const result = await withNotifyQueueScope(env, ctx, () =>
+        claimDueGreenfieldJobRuns({ limit: 1 }),
+      );
+      enqueuedRunIds = result.enqueuedRunIds;
+    });
+    await drain();
+
+    expect(enqueuedRunIds).toEqual([]);
+
+    const detail = await getGreenfieldTalkJobRoute({
+      auth: auth(),
+      workspaceId,
+      talkId,
+      jobId,
+    });
+    expect(detail.body.ok && detail.body.data.job).toMatchObject({
+      status: 'blocked',
+      blockReason: 'model_disabled',
+    });
   });
 
   it('cancelled manual job runs update terminal job bookkeeping', async () => {

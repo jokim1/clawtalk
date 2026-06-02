@@ -1,630 +1,131 @@
-// content_edits accessor + apply handler — postgres + RLS tests.
-//
-// Runs against the local Supabase Postgres started by `npm run db:start`.
-// Migration 0028 (commit 8 of the direct-edit redesign) created the
-// `content_edits` table the suite exercises.
-
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import {
   closePgDatabase,
   getDbPg,
   initPgDatabase,
   withUserContext,
-} from '../../db.js';
-import { createContent, updateContentBody } from './content-accessors.js';
+} from './test-helpers.js';
 import {
   acceptPendingEdit,
   acceptPendingRun,
+  deletePendingEdit,
+  deletePendingEditsByRun,
+  getPendingEditById,
   getPendingEditsByContent,
   insertPendingEdit,
   rejectPendingEdit,
   rejectPendingRun,
+  updatePendingEdit,
 } from './content-edits-accessors.js';
 import { executeApplyContentEdit } from '../talks/content-apply-handler.js';
 
-const USER_A_ID = '0c888888-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
-const USER_B_ID = '0c888888-bbbb-bbbb-bbbb-bbbbbbbbbbbb';
-const TALK_A_ID = '0c888888-cccc-cccc-cccc-ccccccccc0a1';
-const TALK_B_ID = '0c888888-cccc-cccc-cccc-ccccccccc0b1';
+const USER_ID = '0c888888-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
+const TALK_ID = '0c888888-bbbb-bbbb-bbbb-bbbbbbbbbbbb';
+const CONTENT_ID = '0c888888-cccc-cccc-cccc-cccccccccccc';
+const EDIT_ID = '0c888888-dddd-dddd-dddd-dddddddddddd';
+const RUN_ID = 'legacy-run';
 
-async function seedAuthUser(
-  id: string,
-  email: string,
-  displayName: string,
-): Promise<void> {
-  const db = getDbPg();
-  await db`
-    insert into auth.users (id, email, raw_user_meta_data)
-    values (${id}::uuid, ${email}::text,
-            jsonb_build_object('full_name', ${displayName}::text))
-    on conflict (id) do nothing
-  `;
-}
-
-async function seedTalk(talkId: string, ownerId: string): Promise<void> {
-  const db = getDbPg();
-  await db`
-    insert into public.talks (id, owner_id, topic_title)
-    values (${talkId}::uuid, ${ownerId}::uuid, 'Content Edits Test Talk')
-    on conflict (id) do nothing
-  `;
-}
-
-async function purge(): Promise<void> {
-  const db = getDbPg();
-  await db`
-    delete from public.talks where id in (${TALK_A_ID}::uuid, ${TALK_B_ID}::uuid)
-  `;
-  await seedTalk(TALK_A_ID, USER_A_ID);
-  await seedTalk(TALK_B_ID, USER_B_ID);
-}
-
-async function seedDoc(
-  ownerId: string,
-  talkId: string,
-): Promise<{
-  contentId: string;
-  bodyVersion: number;
-  anchors: { h1: string; p1: string; p2: string };
-}> {
-  return await withUserContext(ownerId, async () => {
-    // Resolve / lazily create the default thread so the new thread-
-    // scoped contents schema is satisfied.
-    const db = getDbPg();
-    const existing = await db<{ id: string }[]>`
-      select id from public.talk_threads
-      where talk_id = ${talkId}::uuid and is_default = true
-      limit 1
-    `;
-    const threadId =
-      existing[0]?.id ??
-      (
-        await db<{ id: string }[]>`
-          insert into public.talk_threads
-            (talk_id, owner_id, title, is_default, is_internal)
-          values
-            (${talkId}::uuid, ${ownerId}::uuid, null, true, false)
-          returning id
-        `
-      )[0].id;
-    const created = await createContent({
-      ownerId,
-      talkId,
-      threadId,
-      title: 'Edit Doc',
-      createdByUserId: ownerId,
-    });
-    const updated = await updateContentBody({
-      contentId: created.id,
-      ownerId,
-      expectedVersion: created.bodyVersion,
-      bodyMarkdown:
-        '<!-- anchor:h1 -->\n# Title\n\n<!-- anchor:p1 -->\nFirst paragraph.\n\n<!-- anchor:p2 -->\nSecond paragraph.',
-      updatedByUserId: ownerId,
-    });
-    if (updated.kind !== 'ok') throw new Error('expected ok updateContentBody');
-    return {
-      contentId: created.id,
-      bodyVersion: updated.content.bodyVersion,
-      anchors: { h1: 'h1', p1: 'p1', p2: 'p2' },
-    };
-  });
-}
-
-describe('content-edits-accessors (postgres + RLS)', () => {
+describe('legacy content-edits accessors against the greenfield baseline', () => {
   beforeAll(async () => {
     await initPgDatabase();
-    await seedAuthUser(USER_A_ID, 'edits-a@clawtalk.local', 'Edits A');
-    await seedAuthUser(USER_B_ID, 'edits-b@clawtalk.local', 'Edits B');
-    await seedTalk(TALK_A_ID, USER_A_ID);
-    await seedTalk(TALK_B_ID, USER_B_ID);
   });
 
   afterAll(async () => {
-    const db = getDbPg();
-    await db`
-      delete from auth.users where id in (${USER_A_ID}::uuid, ${USER_B_ID}::uuid)
-    `;
     await closePgDatabase();
   });
 
-  beforeEach(async () => {
-    await purge();
+  it('runs against a baseline that no longer creates public.content_edits', async () => {
+    await expect(
+      getDbPg()<Array<{ exists: boolean }>>`
+        select to_regclass('public.content_edits') is not null as exists
+      `,
+    ).resolves.toEqual([{ exists: false }]);
   });
 
-  it('insertPendingEdit + getPendingEditsByContent: round-trip basics', async () => {
-    const { contentId, bodyVersion, anchors } = await seedDoc(
-      USER_A_ID,
-      TALK_A_ID,
-    );
-    await withUserContext(USER_A_ID, async () => {
-      await insertPendingEdit({
-        contentId,
-        runId: 'run-1',
-        agentId: null,
-        agentNickname: 'Tester',
-        messageId: null,
-        kind: 'insert',
-        baseContentVersion: bodyVersion,
-        targetAnchorId: anchors.p1,
-        newMarkdown: 'Inserted block.',
-        rationale: 'first thought',
-      });
-      const list = await getPendingEditsByContent(contentId);
-      expect(list.length).toBe(1);
-      expect(list[0].kind).toBe('insert');
-      expect(list[0].targetAnchorId).toBe(anchors.p1);
-      expect(list[0].newMarkdown).toBe('Inserted block.');
-      expect(list[0].agentNickname).toBe('Tester');
+  it('degrades retired pending-edit reads to empty results', async () => {
+    await withUserContext(USER_ID, async () => {
+      await expect(getPendingEditsByContent(CONTENT_ID)).resolves.toEqual([]);
+      await expect(getPendingEditById(EDIT_ID)).resolves.toBeNull();
     });
   });
 
-  it('acceptPendingEdit materializes the edit and CAS-bumps body_version', async () => {
-    const { contentId, bodyVersion, anchors } = await seedDoc(
-      USER_A_ID,
-      TALK_A_ID,
-    );
-    await withUserContext(USER_A_ID, async () => {
-      const inserted = await insertPendingEdit({
-        contentId,
-        runId: 'run-1',
-        agentId: null,
-        agentNickname: null,
-        messageId: null,
-        kind: 'replace',
-        baseContentVersion: bodyVersion,
-        targetAnchorId: anchors.p1,
-        newMarkdown: 'Replaced.',
-        rationale: null,
-      });
-      const accepted = await acceptPendingEdit({
-        editId: inserted.id,
-        userId: USER_A_ID,
-        expectedContentVersion: bodyVersion,
-      });
-      expect(accepted.kind).toBe('ok');
-      if (accepted.kind !== 'ok') throw new Error('unreachable');
-      expect(accepted.content.bodyVersion).toBe(bodyVersion + 1);
-      expect(accepted.content.bodyMarkdown).toContain('Replaced.');
-      expect(accepted.content.bodyMarkdown).not.toContain('First paragraph.');
-      const remaining = await getPendingEditsByContent(contentId);
-      expect(remaining.length).toBe(0);
-    });
-  });
-
-  it('rejectPendingEdit deletes the row without touching body', async () => {
-    const { contentId, bodyVersion, anchors } = await seedDoc(
-      USER_A_ID,
-      TALK_A_ID,
-    );
-    await withUserContext(USER_A_ID, async () => {
-      const inserted = await insertPendingEdit({
-        contentId,
-        runId: 'run-1',
-        agentId: null,
-        agentNickname: null,
-        messageId: null,
-        kind: 'insert',
-        baseContentVersion: bodyVersion,
-        targetAnchorId: anchors.p1,
-        newMarkdown: 'Insert me.',
-        rationale: null,
-      });
-      const rejected = await rejectPendingEdit({
-        editId: inserted.id,
-        userId: USER_A_ID,
-      });
-      expect(rejected.kind).toBe('ok');
-      const remaining = await getPendingEditsByContent(contentId);
-      expect(remaining.length).toBe(0);
-      const sql = getDbPg();
-      const refreshed = await sql<{ body_version: number }[]>`
-        select body_version from public.contents where id = ${contentId}::uuid
-      `;
-      expect(refreshed[0].body_version).toBe(bodyVersion);
-    });
-  });
-
-  it('acceptPendingRun materializes all run edits in created_at order', async () => {
-    const { contentId, bodyVersion, anchors } = await seedDoc(
-      USER_A_ID,
-      TALK_A_ID,
-    );
-    await withUserContext(USER_A_ID, async () => {
-      await insertPendingEdit({
-        contentId,
-        runId: 'run-1',
-        agentId: null,
-        agentNickname: null,
-        messageId: null,
-        kind: 'insert',
-        baseContentVersion: bodyVersion,
-        targetAnchorId: anchors.p1,
-        newMarkdown: 'First insert.',
-        rationale: null,
-      });
-      await insertPendingEdit({
-        contentId,
-        runId: 'run-1',
-        agentId: null,
-        agentNickname: null,
-        messageId: null,
-        kind: 'replace',
-        baseContentVersion: bodyVersion,
-        targetAnchorId: anchors.p2,
-        newMarkdown: 'Replaced second.',
-        rationale: null,
-      });
-      const accepted = await acceptPendingRun({
-        contentId,
-        runId: 'run-1',
-        userId: USER_A_ID,
-        expectedContentVersion: bodyVersion,
-      });
-      expect(accepted.kind).toBe('ok');
-      if (accepted.kind !== 'ok') throw new Error('unreachable');
-      expect(accepted.content.bodyVersion).toBe(bodyVersion + 1);
-      expect(accepted.content.bodyMarkdown).toContain('First insert.');
-      expect(accepted.content.bodyMarkdown).toContain('Replaced second.');
-      expect(accepted.content.bodyMarkdown).not.toContain('Second paragraph.');
-      const remaining = await getPendingEditsByContent(contentId);
-      expect(remaining.length).toBe(0);
-    });
-  });
-
-  it('rejectPendingRun deletes all run rows without touching body', async () => {
-    const { contentId, bodyVersion, anchors } = await seedDoc(
-      USER_A_ID,
-      TALK_A_ID,
-    );
-    await withUserContext(USER_A_ID, async () => {
-      for (let i = 0; i < 3; i++) {
-        await insertPendingEdit({
-          contentId,
-          runId: 'run-1',
+  it('fails closed for retired pending-edit writes and resolutions', async () => {
+    await withUserContext(USER_ID, async () => {
+      await expect(
+        insertPendingEdit({
+          contentId: CONTENT_ID,
+          runId: RUN_ID,
           agentId: null,
           agentNickname: null,
           messageId: null,
           kind: 'insert',
-          baseContentVersion: bodyVersion,
-          targetAnchorId: anchors.p1,
-          newMarkdown: `Block ${i}.`,
+          baseContentVersion: 1,
+          targetAnchorId: null,
+          newMarkdown: 'legacy edit',
           rationale: null,
-        });
-      }
-      const rejected = await rejectPendingRun({
-        contentId,
-        runId: 'run-1',
-        userId: USER_A_ID,
-      });
-      expect(rejected.kind).toBe('ok');
-      if (rejected.kind !== 'ok') throw new Error('unreachable');
-      expect(rejected.editIds.length).toBe(3);
-      const remaining = await getPendingEditsByContent(contentId);
-      expect(remaining.length).toBe(0);
-    });
-  });
+        }),
+      ).rejects.toThrow('legacy_content_edits_not_available');
 
-  it('acceptPendingEdit returns version_conflict when expectedContentVersion is stale', async () => {
-    const { contentId, bodyVersion, anchors } = await seedDoc(
-      USER_A_ID,
-      TALK_A_ID,
-    );
-    await withUserContext(USER_A_ID, async () => {
-      const inserted = await insertPendingEdit({
-        contentId,
-        runId: 'run-1',
-        agentId: null,
-        agentNickname: null,
-        messageId: null,
-        kind: 'insert',
-        baseContentVersion: bodyVersion,
-        targetAnchorId: anchors.p1,
-        newMarkdown: 'X',
-        rationale: null,
-      });
-      const conflict = await acceptPendingEdit({
-        editId: inserted.id,
-        userId: USER_A_ID,
-        expectedContentVersion: bodyVersion - 1,
-      });
-      expect(conflict.kind).toBe('version_conflict');
-    });
-  });
-
-  it('acceptPendingEdit returns not_found when the row is already gone', async () => {
-    await withUserContext(USER_A_ID, async () => {
-      const result = await acceptPendingEdit({
-        editId: '00000000-0000-0000-0000-000000000000',
-        userId: USER_A_ID,
-      });
-      expect(result.kind).toBe('not_found');
-    });
-  });
-
-  it('executeApplyContentEdit: auto-accept-prior on a different runId materializes + inserts new in one shot', async () => {
-    const { contentId, bodyVersion, anchors } = await seedDoc(
-      USER_A_ID,
-      TALK_A_ID,
-    );
-    await withUserContext(USER_A_ID, async () => {
-      // Prior pending run.
-      await insertPendingEdit({
-        contentId,
-        runId: 'run-1',
-        agentId: null,
-        agentNickname: null,
-        messageId: null,
-        kind: 'replace',
-        baseContentVersion: bodyVersion,
-        targetAnchorId: anchors.p1,
-        newMarkdown: 'Prior replace.',
-        rationale: null,
-      });
-      // New run lands; the handler auto-accepts run-1 then inserts run-2.
-      const result = await executeApplyContentEdit({
-        talkId: TALK_A_ID,
-        userId: USER_A_ID,
-        runId: 'run-2',
-        agentId: null,
-        agentNickname: 'Agent',
-        messageId: null,
-        args: {
-          kind: 'append',
-          anchor: anchors.p2,
-          markdown: 'Run 2 inserts.',
-        },
-      });
-      expect(result.isError).toBeUndefined();
-      const pending = await getPendingEditsByContent(contentId);
-      // Only run-2 should remain pending; run-1 was materialized.
-      expect(pending.length).toBe(1);
-      expect(pending[0].runId).toBe('run-2');
-      const sql = getDbPg();
-      const fetched = await sql<
-        { body_markdown: string; body_version: number }[]
-      >`
-        select body_markdown, body_version
-        from public.contents where id = ${contentId}::uuid
-      `;
-      expect(fetched[0].body_markdown).toContain('Prior replace.');
-      expect(fetched[0].body_version).toBe(bodyVersion + 1);
-    });
-  });
-
-  it('executeApplyContentEdit: same-run repeat replace collapses into one row', async () => {
-    const { contentId, anchors } = await seedDoc(USER_A_ID, TALK_A_ID);
-    await withUserContext(USER_A_ID, async () => {
-      await executeApplyContentEdit({
-        talkId: TALK_A_ID,
-        userId: USER_A_ID,
-        runId: 'run-1',
-        agentId: null,
-        agentNickname: null,
-        messageId: null,
-        args: { kind: 'replace', anchor: anchors.p1, markdown: 'v1' },
-      });
-      await executeApplyContentEdit({
-        talkId: TALK_A_ID,
-        userId: USER_A_ID,
-        runId: 'run-1',
-        agentId: null,
-        agentNickname: null,
-        messageId: null,
-        args: { kind: 'replace', anchor: anchors.p1, markdown: 'v2' },
-      });
-      const pending = await getPendingEditsByContent(contentId);
-      expect(pending.length).toBe(1);
-      expect(pending[0].kind).toBe('replace');
-      expect(pending[0].newMarkdown).toBe('v2');
-    });
-  });
-
-  it('executeApplyContentEdit: anchor_missing on replace/delete returns isError', async () => {
-    await seedDoc(USER_A_ID, TALK_A_ID);
-    await withUserContext(USER_A_ID, async () => {
-      const result = await executeApplyContentEdit({
-        talkId: TALK_A_ID,
-        userId: USER_A_ID,
-        runId: 'run-1',
-        agentId: null,
-        agentNickname: null,
-        messageId: null,
-        args: {
+      await expect(
+        updatePendingEdit({
+          editId: EDIT_ID,
           kind: 'replace',
-          anchor: 'nope',
-          markdown: 'never lands',
-        },
-      });
-      expect(result.isError).toBe(true);
-      expect(result.result).toContain('anchor');
+          targetAnchorId: null,
+          newMarkdown: 'legacy edit',
+          rationale: null,
+        }),
+      ).rejects.toThrow('legacy_content_edits_not_available');
+
+      await expect(deletePendingEdit(EDIT_ID)).rejects.toThrow(
+        'legacy_content_edits_not_available',
+      );
+      await expect(
+        deletePendingEditsByRun({ contentId: CONTENT_ID, runId: RUN_ID }),
+      ).rejects.toThrow('legacy_content_edits_not_available');
+      await expect(
+        acceptPendingEdit({ editId: EDIT_ID, userId: USER_ID }),
+      ).rejects.toThrow('legacy_content_edits_not_available');
+      await expect(
+        rejectPendingEdit({ editId: EDIT_ID, userId: USER_ID }),
+      ).rejects.toThrow('legacy_content_edits_not_available');
+      await expect(
+        acceptPendingRun({
+          contentId: CONTENT_ID,
+          runId: RUN_ID,
+          userId: USER_ID,
+        }),
+      ).rejects.toThrow('legacy_content_edits_not_available');
+      await expect(
+        rejectPendingRun({
+          contentId: CONTENT_ID,
+          runId: RUN_ID,
+          userId: USER_ID,
+        }),
+      ).rejects.toThrow('legacy_content_edits_not_available');
     });
   });
 
-  it('executeApplyContentEdit: bulk -> non-bulk in same run is rejected', async () => {
-    await seedDoc(USER_A_ID, TALK_A_ID);
-    await withUserContext(USER_A_ID, async () => {
-      await executeApplyContentEdit({
-        talkId: TALK_A_ID,
-        userId: USER_A_ID,
-        runId: 'run-1',
-        agentId: null,
-        agentNickname: null,
-        messageId: null,
-        args: { kind: 'bulk', markdown: '# Bulk\n\nNew body.' },
+  it('keeps the retired apply_content_edit handler from touching missing legacy tables', async () => {
+    await withUserContext(USER_ID, async () => {
+      await expect(
+        executeApplyContentEdit({
+          talkId: TALK_ID,
+          userId: USER_ID,
+          runId: RUN_ID,
+          agentId: null,
+          agentNickname: null,
+          messageId: null,
+          args: {
+            kind: 'append',
+            markdown: 'legacy edit',
+          },
+        }),
+      ).resolves.toEqual({
+        result:
+          'Error: this Talk has no attached document. Cannot apply an edit.',
+        isError: true,
       });
-      const result = await executeApplyContentEdit({
-        talkId: TALK_A_ID,
-        userId: USER_A_ID,
-        runId: 'run-1',
-        agentId: null,
-        agentNickname: null,
-        messageId: null,
-        args: { kind: 'replace', anchor: 'p1', markdown: 'fails' },
-      });
-      expect(result.isError).toBe(true);
-    });
-  });
-
-  // ── HTML format integration (PR B) ─────────────────────────────────
-
-  async function seedHtmlDoc(
-    ownerId: string,
-    talkId: string,
-  ): Promise<{
-    contentId: string;
-    bodyVersion: number;
-    anchors: Record<string, string>;
-  }> {
-    return await withUserContext(ownerId, async () => {
-      const db = getDbPg();
-      const existing = await db<{ id: string }[]>`
-        select id from public.talk_threads
-        where talk_id = ${talkId}::uuid and is_default = true
-        limit 1
-      `;
-      const threadId =
-        existing[0]?.id ??
-        (
-          await db<{ id: string }[]>`
-            insert into public.talk_threads
-              (talk_id, owner_id, title, is_default, is_internal)
-            values
-              (${talkId}::uuid, ${ownerId}::uuid, null, true, false)
-            returning id
-          `
-        )[0].id;
-      const created = await createContent({
-        ownerId,
-        talkId,
-        threadId,
-        title: 'HTML Doc',
-        format: 'html',
-        createdByUserId: ownerId,
-      });
-      const updated = await updateContentBody({
-        contentId: created.id,
-        ownerId,
-        expectedVersion: created.bodyVersion,
-        bodyHtml:
-          '<h1>Heading</h1><p>First paragraph.</p><p>Second paragraph.</p>',
-        updatedByUserId: ownerId,
-      });
-      if (updated.kind !== 'ok') {
-        throw new Error('expected ok updateContentBody (html)');
-      }
-      const anchorIds = Object.keys(updated.content.anchorMap);
-      const anchors: Record<string, string> = {};
-      const sorted = anchorIds
-        .map((id) => ({ id, entry: updated.content.anchorMap[id] }))
-        .sort((a, b) => a.entry.sort_order - b.entry.sort_order);
-      anchors.h1 = sorted[0].id;
-      anchors.p1 = sorted[1].id;
-      anchors.p2 = sorted[2].id;
-      return {
-        contentId: created.id,
-        bodyVersion: updated.content.bodyVersion,
-        anchors,
-      };
-    });
-  }
-
-  it('executeApplyContentEdit (html): inserts a pending edit with newHtml + null newMarkdown', async () => {
-    const { contentId, anchors } = await seedHtmlDoc(USER_A_ID, TALK_A_ID);
-    await withUserContext(USER_A_ID, async () => {
-      const result = await executeApplyContentEdit({
-        talkId: TALK_A_ID,
-        userId: USER_A_ID,
-        runId: 'html-run-1',
-        agentId: null,
-        agentNickname: 'HtmlAgent',
-        messageId: null,
-        args: {
-          kind: 'replace',
-          anchor: anchors.p1,
-          markdown: '<p>Replaced via HTML payload.</p>',
-        },
-      });
-      expect(result.isError).not.toBe(true);
-      const edits = await getPendingEditsByContent(contentId);
-      expect(edits.length).toBe(1);
-      const edit = edits[0];
-      expect(edit.kind).toBe('replace');
-      expect(edit.targetAnchorId).toBe(anchors.p1);
-      expect(edit.newMarkdown).toBeNull();
-      expect(edit.newHtml).not.toBeNull();
-      expect(edit.newHtml).toContain('Replaced via HTML payload.');
-    });
-  });
-
-  it('executeApplyContentEdit (html) guard: rejects payload that looks like plain text', async () => {
-    const { anchors } = await seedHtmlDoc(USER_A_ID, TALK_A_ID);
-    await withUserContext(USER_A_ID, async () => {
-      const result = await executeApplyContentEdit({
-        talkId: TALK_A_ID,
-        userId: USER_A_ID,
-        runId: 'html-bad-1',
-        agentId: null,
-        agentNickname: null,
-        messageId: null,
-        args: {
-          kind: 'replace',
-          anchor: anchors.p1,
-          markdown: 'this is plain text with no tags',
-        },
-      });
-      expect(result.isError).toBe(true);
-      expect(result.result.toLowerCase()).toContain('html');
-      expect(result.result.toLowerCase()).toContain('allowed tags');
-    });
-  });
-
-  it('executeApplyContentEdit (html) guard: rejects when sanitizer strips every tag', async () => {
-    const { anchors } = await seedHtmlDoc(USER_A_ID, TALK_A_ID);
-    await withUserContext(USER_A_ID, async () => {
-      const result = await executeApplyContentEdit({
-        talkId: TALK_A_ID,
-        userId: USER_A_ID,
-        runId: 'html-bad-2',
-        agentId: null,
-        agentNickname: null,
-        messageId: null,
-        args: {
-          kind: 'replace',
-          anchor: anchors.p1,
-          // <script> is the only "tag" in the payload; sanitize-html
-          // strips it entirely, leaving an empty clean string.
-          markdown: '<script>alert(1)</script>',
-        },
-      });
-      expect(result.isError).toBe(true);
-      expect(result.result.toLowerCase()).toContain('stripped');
-    });
-  });
-
-  it('RLS: user B cannot read user A pending edits', async () => {
-    const { contentId, bodyVersion, anchors } = await seedDoc(
-      USER_A_ID,
-      TALK_A_ID,
-    );
-    await withUserContext(USER_A_ID, async () => {
-      await insertPendingEdit({
-        contentId,
-        runId: 'run-1',
-        agentId: null,
-        agentNickname: null,
-        messageId: null,
-        kind: 'insert',
-        baseContentVersion: bodyVersion,
-        targetAnchorId: anchors.p1,
-        newMarkdown: 'Private.',
-        rationale: null,
-      });
-    });
-    await withUserContext(USER_B_ID, async () => {
-      const fromOther = await getPendingEditsByContent(contentId);
-      expect(fromOther.length).toBe(0);
     });
   });
 });

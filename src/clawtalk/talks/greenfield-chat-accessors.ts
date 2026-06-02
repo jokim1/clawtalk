@@ -32,6 +32,7 @@ export interface GreenfieldChatRunRecord {
   trigger_message_id: string | null;
   target_agent_id: string | null;
   target_agent_name: string | null;
+  provider_id: string;
   model_id: string;
   error_json: unknown;
 }
@@ -341,6 +342,8 @@ export async function enqueueGreenfieldChatTurn(input: {
 
     await withTrustedDbWrites(async () => {
       for (const [index, agent] of selectedAgents.entries()) {
+        const providerId = agent.provider_id;
+        if (!providerId) throw new Error('agent_provider_missing');
         const promptSnapshotId = randomUUID();
         const snapshots = await txSql<{ id: string; model_id: string }[]>`
         insert into public.talk_agent_snapshots (
@@ -354,6 +357,7 @@ export async function enqueueGreenfieldChatTurn(input: {
           initials,
           accent,
           accent_dark,
+          provider_id,
           model_id,
           temperature,
           persona,
@@ -373,6 +377,7 @@ export async function enqueueGreenfieldChatTurn(input: {
           ${agent.initials},
           ${agent.accent},
           ${agent.accent_dark},
+          ${providerId},
           ${agent.model_id},
           ${agent.temperature},
           ${agent.persona},
@@ -456,7 +461,7 @@ export async function enqueueGreenfieldChatTurn(input: {
           ${input.talkId}::uuid,
           ${snapshot.id}::uuid,
           ${snapshot.model_id},
-          ${agent.provider_id},
+          ${providerId},
           ${agent.created_from_template_version},
           1,
           ${txSql.json({
@@ -469,6 +474,7 @@ export async function enqueueGreenfieldChatTurn(input: {
           ...run,
           target_agent_id: agent.id,
           target_agent_name: agent.name,
+          provider_id: providerId,
         });
       }
     });
@@ -526,6 +532,7 @@ export async function enqueueGreenfieldChatTurn(input: {
           status: 'queued',
           executorAlias: run.target_agent_name,
           executorModel: run.model_id,
+          providerId: run.provider_id,
         },
         ownerIds,
       });

@@ -1,4 +1,4 @@
-import { getDbPg, withUserContext } from '../../db.js';
+import { getDbPg, withTrustedDbWrites, withUserContext } from '../../db.js';
 import { logger } from '../../logger.js';
 import {
   executeWithResolvedAgent,
@@ -39,6 +39,11 @@ import {
   filterRuntimeToolDefinitions,
   isRuntimeToolAllowed,
 } from './runtime-tool-filter.js';
+import { CONTEXT_SOURCE_STATUS_SQL } from './context-source-status-sql.js';
+import {
+  extractAssistantProviderData,
+  selectProviderReplayMessageIds,
+} from './provider-replay-scope.js';
 import {
   executeGreenfieldApplyContentEdit,
   GREENFIELD_APPLY_CONTENT_EDIT_TOOL,
@@ -47,6 +52,8 @@ import {
 } from './greenfield-document-tools.js';
 import { buildToolExecutor } from './new-executor.js';
 import { emitOutboxEvent } from './outbox-emit.js';
+
+const PDF_ATTACHMENT_MIME_TYPE = 'application/pdf';
 
 type GreenfieldExecutorRunRow = {
   id: string;
@@ -81,6 +88,12 @@ type GreenfieldHistoryMessageRow = {
   author_kind: 'user' | 'agent';
   body: string | null;
   agent_name: string | null;
+  source_agent_id: string | null;
+  snapshot_provider_id: string | null;
+  snapshot_model_id: string | null;
+  replay_provider_id: string | null;
+  replay_model_id: string | null;
+  provider_data_json: Record<string, unknown> | null;
 };
 
 type GreenfieldContextSourceRow = {
@@ -89,6 +102,7 @@ type GreenfieldContextSourceRow = {
   name: string;
   extracted_text: string | null;
   summary: string | null;
+  status: string;
   mime_type: string | null;
   expected_page_count: number | null;
   page_image_count: number;
@@ -133,6 +147,7 @@ type PriorOrderedGap = {
 
 const CHARS_TO_TOKENS = 0.25;
 const MAX_HISTORY_MESSAGES = 24;
+const EMPTY_HISTORY_MESSAGE_CONTENT = '[No text content in this turn]';
 const MAX_SOURCE_CHARS = 12_000;
 const MAX_ORDERED_PRIOR_OUTPUT_CHARS = 24_000;
 const ESTIMATED_IMAGE_BLOCK_TOKENS = 3_000;
@@ -170,45 +185,16 @@ const GREENFIELD_CONTEXT_TOOL_DEFINITIONS: LlmToolDefinition[] = [
   {
     name: 'read_source',
     description:
-      'Read the full extracted text of a saved Talk source by its stable ref (for example S1, S2) or source id.',
+      'Read the full extracted text of a saved Talk source by its source id. Legacy S-number aliases are accepted only when an imported source still has one.',
     inputSchema: {
       type: 'object',
       properties: {
         sourceRef: {
           type: 'string',
-          description: 'Stable source ref like S1, or the source id.',
+          description: 'The source id, or a legacy S-number alias if present.',
         },
       },
       required: ['sourceRef'],
-    },
-  },
-  {
-    name: 'list_state',
-    description:
-      'List Talk state entries. Greenfield Talks do not have mutable state yet, so this currently returns an empty list.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        prefix: {
-          type: 'string',
-          description: 'Optional key prefix filter.',
-        },
-      },
-    },
-  },
-  {
-    name: 'read_state',
-    description:
-      'Read a single Talk state entry by key. Greenfield Talks do not have mutable state yet, so missing keys return an error.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        key: {
-          type: 'string',
-          description: 'State entry key to read.',
-        },
-      },
-      required: ['key'],
     },
   },
 ];
@@ -300,8 +286,8 @@ async function getGreenfieldExecutorRun(
       t.mode as talk_mode,
       r.round,
       r.status,
-      r.model_id,
-      lpm.provider_id,
+      tas.model_id,
+      tas.provider_id,
       lpm.context_window_tokens,
       r.requested_by,
       r.response_group_id,
@@ -324,7 +310,8 @@ async function getGreenfieldExecutorRun(
      and tas.talk_id = r.talk_id
      and tas.id = r.agent_snapshot_id
     join public.llm_provider_models lpm
-      on lpm.model_id = r.model_id
+      on lpm.provider_id = tas.provider_id
+     and lpm.model_id = tas.model_id
     left join public.run_prompt_snapshots rps
       on rps.workspace_id = r.workspace_id
      and rps.id = r.prompt_snapshot_id
@@ -393,45 +380,73 @@ async function loadGreenfieldHistory(
   run: GreenfieldExecutorRunRow,
 ): Promise<LlmMessage[]> {
   const db = getDbPg();
-  const rows = await db<GreenfieldHistoryMessageRow[]>`
-    select
-      m.id,
-      m.author_kind,
-      m.body,
-      tas.name as agent_name
-    from public.messages m
-    left join public.talk_agent_snapshots tas
-      on tas.workspace_id = m.workspace_id
-     and tas.talk_id = m.talk_id
-     and tas.id = m.agent_snapshot_id
-    where m.workspace_id = ${run.workspace_id}::uuid
-      and m.talk_id = ${run.talk_id}::uuid
-      and m.round < ${run.round}
-    order by m.round desc, m.created_at desc, m.id desc
-    limit ${MAX_HISTORY_MESSAGES}
-  `;
+  const rows = await withTrustedDbWrites(
+    () => db<GreenfieldHistoryMessageRow[]>`
+      select
+        m.id,
+        m.author_kind,
+        m.body,
+        tas.source_agent_id::text as source_agent_id,
+        tas.name as agent_name,
+        tas.provider_id as snapshot_provider_id,
+        tas.model_id as snapshot_model_id,
+        mpr.provider_id as replay_provider_id,
+        mpr.model_id as replay_model_id,
+        mpr.provider_data_json
+      from public.messages m
+      left join public.talk_agent_snapshots tas
+        on tas.workspace_id = m.workspace_id
+       and tas.talk_id = m.talk_id
+       and tas.id = m.agent_snapshot_id
+      left join public.message_provider_replay mpr
+        on mpr.workspace_id = m.workspace_id
+       and mpr.talk_id = m.talk_id
+       and mpr.message_id = m.id
+      where m.workspace_id = ${run.workspace_id}::uuid
+        and m.talk_id = ${run.talk_id}::uuid
+        and m.round < ${run.round}
+      order by m.round desc, m.created_at desc, m.id desc
+      limit ${MAX_HISTORY_MESSAGES}
+    `,
+  );
 
-  return rows.reverse().map((row) => {
+  const rowsChronological = [...rows].reverse();
+  const providerReplayMessageIds = selectProviderReplayMessageIds(
+    rowsChronological,
+    {
+      sourceAgentId: run.source_agent_id,
+      providerId: run.provider_id,
+      modelId: run.model_id,
+    },
+  );
+  return rowsChronological.map((row): LlmMessage => {
+    const body =
+      row.body && row.body.length > 0
+        ? row.body
+        : EMPTY_HISTORY_MESSAGE_CONTENT;
     if (row.author_kind === 'user') {
-      return { role: 'user', content: row.body ?? '' };
+      return { role: 'user', content: body };
     }
     const label = row.agent_name?.trim();
-    return {
+    const includeProviderData = providerReplayMessageIds.has(row.id);
+    const message: LlmMessage = {
       role: 'assistant',
-      content: label ? `[${label}]\n${row.body ?? ''}` : (row.body ?? ''),
+      content: label ? `[${label}]\n${body}` : body,
     };
+    if (includeProviderData) {
+      const providerData = extractAssistantProviderData(row.provider_data_json);
+      if (providerData) message.providerData = providerData;
+    }
+    return message;
   });
 }
 
 function annotateGreenfieldContextSources(
   rows: GreenfieldContextSourceRow[],
 ): GreenfieldContextSourceView[] {
-  let sourceIndex = 0;
   return rows.map((source) => {
-    const sourceOnlyIndex = source.kind === 'rule' ? null : sourceIndex++;
-    const fallbackSourceRef =
-      source.kind === 'rule' ? null : `S${(sourceOnlyIndex ?? 0) + 1}`;
-    const displayRef = source.source_ref || fallbackSourceRef;
+    const displayRef =
+      source.kind === 'rule' ? null : source.source_ref || source.id;
     const displayLabel =
       source.kind === 'rule'
         ? source.compat_kind === 'goal'
@@ -444,8 +459,10 @@ function annotateGreenfieldContextSources(
 
 async function loadGreenfieldContextSources(
   run: GreenfieldExecutorRunRow,
+  options: { includeUnreadySources?: boolean } = {},
 ): Promise<GreenfieldContextSourceView[]> {
   const db = getDbPg();
+  const includeUnreadySources = options.includeUnreadySources === true;
   const rows = await db<GreenfieldContextSourceRow[]>`
     select
       s.id,
@@ -453,31 +470,112 @@ async function loadGreenfieldContextSources(
       s.name,
       s.extracted_text,
       s.summary,
+      ${db.unsafe(CONTEXT_SOURCE_STATUS_SQL)} as status,
       s.meta_json->>'mimeType' as mime_type,
       s.expected_page_count,
       coalesce(p.page_count, 0) as page_image_count,
       coalesce(p.page_indices, '{}'::int[]) as page_indices,
       coalesce(p.page_byte_sizes, '{}'::int[]) as page_byte_sizes,
       s.sort_order,
-      s.meta_json->>'sourceRef' as source_ref,
+      s.id::text as source_ref,
       s.meta_json->>'compatKind' as compat_kind
     from public.context_sources s
-    left join (
+    left join lateral (
       select source_id,
              count(*)::int as page_count,
              array_agg(page_index order by page_index) as page_indices,
              array_agg(byte_size order by page_index) as page_byte_sizes
       from public.context_source_pages
-      where workspace_id = ${run.workspace_id}::uuid
+      where source_id = s.id
       group by source_id
-    ) p on p.source_id = s.id
+    ) p on true
     where s.workspace_id = ${run.workspace_id}::uuid
       and s.talk_id = ${run.talk_id}::uuid
       and s.include_in_prompt = true
+      and (
+        ${includeUnreadySources}
+        or
+        s.kind = 'rule'
+        or (
+          ${db.unsafe(CONTEXT_SOURCE_STATUS_SQL)} = 'ready'
+          or (
+            s.meta_json->>'mimeType' = ${PDF_ATTACHMENT_MIME_TYPE}
+            and s.expected_page_count is not null
+            and s.expected_page_count > 0
+            and coalesce(p.page_count, 0) = s.expected_page_count
+          )
+        )
+      )
     order by s.sort_order asc nulls last, s.created_at asc, s.id asc
     limit 20
   `;
   return annotateGreenfieldContextSources(rows);
+}
+
+async function loadGreenfieldContextSourceForRead(input: {
+  run: GreenfieldExecutorRunRow;
+  ref: string;
+}): Promise<GreenfieldContextSourceView | null> {
+  const db = getDbPg();
+  const normalizedRef = input.ref.toUpperCase();
+  const normalizedIdRef = input.ref.toLowerCase();
+  const rows = await db<GreenfieldContextSourceRow[]>`
+    select
+      s.id,
+      s.kind,
+      s.name,
+      s.extracted_text,
+      s.summary,
+      ${db.unsafe(CONTEXT_SOURCE_STATUS_SQL)} as status,
+      s.meta_json->>'mimeType' as mime_type,
+      s.expected_page_count,
+      coalesce(p.page_count, 0) as page_image_count,
+      coalesce(p.page_indices, '{}'::int[]) as page_indices,
+      coalesce(p.page_byte_sizes, '{}'::int[]) as page_byte_sizes,
+      s.sort_order,
+      s.id::text as source_ref,
+      s.meta_json->>'compatKind' as compat_kind
+    from public.context_sources s
+    left join lateral (
+      select source_id,
+             count(*)::int as page_count,
+             array_agg(page_index order by page_index) as page_indices,
+             array_agg(byte_size order by page_index) as page_byte_sizes
+      from public.context_source_pages
+      where source_id = s.id
+      group by source_id
+    ) p on true
+    where s.workspace_id = ${input.run.workspace_id}::uuid
+      and s.talk_id = ${input.run.talk_id}::uuid
+      and s.kind <> 'rule'
+      and s.include_in_prompt = true
+      and (
+        s.id::text = ${normalizedIdRef}
+        or upper(s.meta_json->>'sourceRef') = ${normalizedRef}
+      )
+    order by
+      case
+        when s.id::text = ${normalizedIdRef} then 0
+        when upper(s.meta_json->>'sourceRef') = ${normalizedRef} then 1
+        else 2
+      end,
+      s.sort_order asc nulls last,
+      s.created_at asc,
+      s.id asc
+    limit 1
+  `;
+  return annotateGreenfieldContextSources(rows)[0] ?? null;
+}
+
+function hasCompleteGreenfieldPdfPages(
+  source: GreenfieldContextSourceView,
+): boolean {
+  return (
+    source.mime_type === PDF_ATTACHMENT_MIME_TYPE &&
+    source.expected_page_count !== null &&
+    source.expected_page_count > 0 &&
+    source.page_image_count === source.expected_page_count
+  );
 }
 
 function buildGreenfieldSourceSection(
@@ -490,7 +588,10 @@ function buildGreenfieldSourceSection(
     Math.floor(MAX_SOURCE_CHARS / rows.length),
   );
   const entries = rows.map((source) => {
-    const body = source.summary?.trim() || source.extracted_text?.trim() || '';
+    const body =
+      source.summary?.trim() ||
+      source.extracted_text?.trim() ||
+      (source.kind === 'rule' ? source.name.trim() : '');
     return [
       source.displayLabel,
       truncateText(body || 'No extracted text is available.', perSourceBudget),
@@ -775,18 +876,34 @@ async function readGreenfieldSourceTool(input: {
     return { result: 'Error: sourceRef parameter required', isError: true };
   }
   const ref = rawRef.trim();
-  const sources = await loadGreenfieldContextSources(input.run);
-  const source = sources.find(
-    (candidate) =>
-      candidate.id === ref ||
-      candidate.displayRef?.toLowerCase() === ref.toLowerCase(),
-  );
+  const source = await loadGreenfieldContextSourceForRead({
+    run: input.run,
+    ref,
+  });
   if (!source) return { result: `Source ${ref} not found`, isError: true };
+  const hasCompletePdfPages = hasCompleteGreenfieldPdfPages(source);
+  if (source.status !== 'ready') {
+    if (hasCompletePdfPages) {
+      return {
+        result: `Source ${ref} has no extracted text. This PDF is available as page images in the current context; read_source only returns extracted text.`,
+        isError: true,
+      };
+    }
+    return {
+      result:
+        source.status === 'pending'
+          ? `Source ${ref} is pending; extracted text is not available yet.`
+          : `Source ${ref} is ${source.status}; extracted text is not available.`,
+      isError: true,
+    };
+  }
+  const body = source.extracted_text?.trim() || source.summary?.trim();
+  if (body) return { result: body };
   return {
-    result:
-      source.extracted_text?.trim() ||
-      source.summary?.trim() ||
-      'No extracted text is available for this source.',
+    result: hasCompletePdfPages
+      ? `Source ${ref} has no extracted text. This PDF is available as page images in the current context; read_source only returns extracted text.`
+      : `Source ${ref} has no extracted text available.`,
+    isError: true,
   };
 }
 
@@ -832,15 +949,15 @@ function buildGreenfieldToolExecutor(input: {
     if (toolName === 'read_source') {
       return readGreenfieldSourceTool({ run: input.run, args });
     }
-    if (toolName === 'list_state') {
-      return { result: JSON.stringify({ entries: [] }) };
-    }
-    if (toolName === 'read_state') {
-      const key = typeof args.key === 'string' ? args.key.trim() : '';
+    if (
+      toolName === 'list_state' ||
+      toolName === 'read_state' ||
+      toolName === 'update_state' ||
+      toolName === 'delete_state'
+    ) {
       return {
-        result: key
-          ? `State entry "${key}" does not exist.`
-          : 'Error: key parameter required',
+        result:
+          'Error: state_not_available: Greenfield Talks do not have mutable state in this runtime.',
         isError: true,
       };
     }
@@ -901,6 +1018,7 @@ function buildGreenfieldToolExecutor(input: {
 
 export async function buildGreenfieldStepUserMessageText(input: {
   workspaceId: string;
+  talkId: string;
   triggerContent: string;
   talkMode?: 'ordered' | 'parallel' | null;
   responseGroupId?: string | null;
@@ -923,6 +1041,7 @@ export async function buildGreenfieldStepUserMessageText(input: {
         string_agg(body, E'\n\n' order by created_at asc, id asc) as content
       from public.messages
       where workspace_id = ${input.workspaceId}::uuid
+        and talk_id = ${input.talkId}::uuid
         and author_kind = 'agent'
         and run_id is not null
       group by run_id
@@ -939,6 +1058,7 @@ export async function buildGreenfieldStepUserMessageText(input: {
      and tas.talk_id = r.talk_id
      and tas.id = r.agent_snapshot_id
     where r.workspace_id = ${input.workspaceId}::uuid
+      and r.talk_id = ${input.talkId}::uuid
       and r.response_group_id = ${input.responseGroupId}
       and r.sequence_index < ${input.sequenceIndex}
       and r.status = 'completed'
@@ -956,6 +1076,7 @@ export async function buildGreenfieldStepUserMessageText(input: {
      and tas.talk_id = r.talk_id
      and tas.id = r.agent_snapshot_id
     where r.workspace_id = ${input.workspaceId}::uuid
+      and r.talk_id = ${input.talkId}::uuid
       and r.response_group_id = ${input.responseGroupId}
       and r.sequence_index < ${input.sequenceIndex}
       and r.status <> 'completed'
@@ -969,6 +1090,7 @@ export async function buildGreenfieldStepUserMessageText(input: {
     select max(sequence_index) as max_sequence_index
     from public.runs
     where workspace_id = ${input.workspaceId}::uuid
+      and talk_id = ${input.talkId}::uuid
       and response_group_id = ${input.responseGroupId}
   `;
   const maxSequenceIndex = maxRows[0]?.max_sequence_index ?? null;
@@ -1043,8 +1165,6 @@ function mapExecutionEvent(
       return {
         type: 'talk_response_started',
         ...shared,
-        providerId: event.providerId,
-        modelId: event.modelId,
       };
     case 'text_delta':
       return { type: 'talk_response_delta', ...shared, deltaText: event.text };
@@ -1092,11 +1212,25 @@ function buildResponseMetadataJson(input: {
   estimatedContextTokens: number;
   isSynthesis: boolean;
   output: TalkExecutorOutput;
+  providerData?: {
+    codexReasoningItems?: Array<Record<string, unknown>>;
+    codexMessageItems?: Array<Record<string, unknown>>;
+  };
 }): string {
+  const codexReasoning =
+    input.providerData?.codexReasoningItems &&
+    input.providerData.codexReasoningItems.length > 0
+      ? input.providerData.codexReasoningItems
+      : undefined;
+  const codexMessages =
+    input.providerData?.codexMessageItems &&
+    input.providerData.codexMessageItems.length > 0
+      ? input.providerData.codexMessageItems
+      : undefined;
   return JSON.stringify({
     runId: input.run.id,
-    providerId: input.output.providerId ?? input.run.provider_id,
-    modelId: input.output.modelId ?? input.run.model_id,
+    providerId: input.run.provider_id,
+    modelId: input.run.model_id,
     contextTokens: input.estimatedContextTokens,
     responseGroupId: input.run.response_group_id,
     sequenceIndex: input.run.sequence_index,
@@ -1106,6 +1240,8 @@ function buildResponseMetadataJson(input: {
     completedCleanly:
       input.output.completion?.completionStatus !== 'incomplete',
     ...(input.isSynthesis ? { isSynthesis: true } : {}),
+    ...(codexReasoning ? { codexReasoningItems: codexReasoning } : {}),
+    ...(codexMessages ? { codexMessageItems: codexMessages } : {}),
   });
 }
 
@@ -1136,6 +1272,7 @@ export class GreenfieldTalkExecutor implements TalkExecutor {
         loadGreenfieldSourceSection(run),
         buildGreenfieldStepUserMessageText({
           workspaceId: run.workspace_id,
+          talkId: run.talk_id,
           triggerContent: input.triggerContent,
           talkMode: run.talk_mode,
           responseGroupId: input.responseGroupId,
@@ -1276,6 +1413,7 @@ export class GreenfieldTalkExecutor implements TalkExecutor {
         estimatedContextTokens,
         isSynthesis: stepUserMessage.isSynthesis,
         output,
+        providerData: result.providerData,
       }),
     };
   }

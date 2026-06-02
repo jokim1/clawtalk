@@ -2,6 +2,7 @@ import { getDbPg, type Sql, withTrustedDbWrites } from '../../db.js';
 import { logger } from '../../logger.js';
 import { emitOutboxEventOnSql, enqueueOutboxNotify } from './outbox-emit.js';
 import type { TalkExecutionUsage } from './executor.js';
+import { fitsProviderReplayBudget } from './provider-replay-budget.js';
 
 export type GreenfieldRunStatus =
   | 'queued'
@@ -21,6 +22,7 @@ export interface GreenfieldQueueRunRecord {
   snapshot_group_id: string;
   agent_snapshot_id: string;
   status: GreenfieldRunStatus;
+  provider_id: string;
   model_id: string;
   requested_by: string;
   trigger_message_id: string | null;
@@ -94,6 +96,45 @@ function errorJson(input: {
   };
 }
 
+function messageAppendedMetadata(
+  metadata: Record<string, unknown> | null | undefined,
+  identity: { providerId: string; modelId: string },
+): Record<string, unknown> {
+  const source = metadata ?? {};
+  const {
+    codexReasoningItems: _codexReasoningItems,
+    codexMessageItems: _codexMessageItems,
+    providerId: _providerId,
+    modelId: _modelId,
+    ...clientMetadata
+  } = source;
+  return {
+    ...clientMetadata,
+    providerId: identity.providerId,
+    modelId: identity.modelId,
+  };
+}
+
+function messageProviderReplayData(
+  metadata: Record<string, unknown> | null | undefined,
+): Record<string, unknown> | null {
+  if (!metadata) return null;
+  const replay: Record<string, unknown> = {};
+  if (
+    Array.isArray(metadata.codexReasoningItems) &&
+    metadata.codexReasoningItems.length > 0
+  ) {
+    replay.codexReasoningItems = metadata.codexReasoningItems;
+  }
+  if (
+    Array.isArray(metadata.codexMessageItems) &&
+    metadata.codexMessageItems.length > 0
+  ) {
+    replay.codexMessageItems = metadata.codexMessageItems;
+  }
+  return Object.keys(replay).length > 0 ? replay : null;
+}
+
 export async function getGreenfieldQueueRunById(
   runId: string,
 ): Promise<GreenfieldQueueRunRecord | null> {
@@ -109,7 +150,8 @@ export async function getGreenfieldQueueRunById(
       r.snapshot_group_id,
       r.agent_snapshot_id,
       r.status,
-      r.model_id,
+      tas.provider_id,
+      tas.model_id,
       r.requested_by,
       r.trigger_message_id,
       r.job_id,
@@ -139,7 +181,7 @@ export async function getGreenfieldQueueRunById(
     left join public.workspace_members wm
       on wm.workspace_id = r.workspace_id
     where r.id = ${runId}::uuid
-    group by r.id, t.mode, tas.source_agent_id, tas.name
+    group by r.id, t.mode, tas.source_agent_id, tas.name, tas.provider_id, tas.model_id
     limit 1
   `;
   return rows[0] ?? null;
@@ -229,6 +271,7 @@ export async function markGreenfieldRunRunning(
           status: 'running',
           executorAlias: existing.target_agent_name,
           executorModel: existing.model_id,
+          providerId: existing.provider_id,
         },
         ownerIds: existing.owner_ids,
       });
@@ -283,6 +326,10 @@ export async function completeGreenfieldRun(input: {
     `;
       if (updated.length !== 1) return null;
 
+      const clientMetadata = messageAppendedMetadata(input.responseMetadata, {
+        providerId: run.provider_id,
+        modelId: run.model_id,
+      });
       const messages = await txSql<Array<{ id: string; created_at: string }>>`
       insert into public.messages (
         id,
@@ -292,7 +339,8 @@ export async function completeGreenfieldRun(input: {
         author_kind,
         agent_snapshot_id,
         run_id,
-        body
+        body,
+        metadata_json
       )
       values (
         ${input.responseMessageId}::uuid,
@@ -302,11 +350,48 @@ export async function completeGreenfieldRun(input: {
         'agent',
         ${run.agent_snapshot_id}::uuid,
         ${run.id}::uuid,
-        ${input.responseContent}
+        ${input.responseContent},
+        ${txSql.json(clientMetadata as never)}
       )
       returning id, created_at
     `;
       const responseMessage = messages[0]!;
+      const providerReplay = messageProviderReplayData(input.responseMetadata);
+      const replaySourceAgentId = run.target_agent_id;
+      if (
+        providerReplay &&
+        replaySourceAgentId &&
+        fitsProviderReplayBudget(providerReplay)
+      ) {
+        await txSql`
+          insert into public.message_provider_replay (
+            workspace_id,
+            talk_id,
+            message_id,
+            run_id,
+            source_agent_id,
+            provider_id,
+            model_id,
+            provider_data_json
+          )
+          values (
+            ${run.workspace_id}::uuid,
+            ${run.talk_id}::uuid,
+            ${responseMessage.id}::uuid,
+            ${run.id}::uuid,
+            ${replaySourceAgentId}::uuid,
+            ${run.provider_id},
+            ${run.model_id},
+            ${txSql.json(providerReplay as never)}
+          )
+          on conflict (workspace_id, message_id) do update set
+            run_id = excluded.run_id,
+            source_agent_id = excluded.source_agent_id,
+            provider_id = excluded.provider_id,
+            model_id = excluded.model_id,
+            provider_data_json = excluded.provider_data_json
+        `;
+      }
 
       await txSql`
       update public.talks
@@ -329,7 +414,7 @@ export async function completeGreenfieldRun(input: {
           agentNickname: input.agentNickname ?? run.target_agent_name,
           content: input.responseContent,
           createdAt: responseMessage.created_at,
-          metadata: input.responseMetadata ?? null,
+          metadata: clientMetadata,
         },
         ownerIds: run.owner_ids,
       });
@@ -347,8 +432,8 @@ export async function completeGreenfieldRun(input: {
           responseGroupId: run.response_group_id,
           sequenceIndex: run.sequence_index,
           executorAlias: input.agentNickname ?? run.target_agent_name,
-          executorModel: input.modelId ?? run.model_id,
-          providerId: input.providerId ?? null,
+          executorModel: run.model_id,
+          providerId: run.provider_id,
         },
         ownerIds: run.owner_ids,
       });
@@ -424,6 +509,7 @@ export async function failGreenfieldRun(input: {
             errorMessage: input.errorMessage,
             executorAlias: run.target_agent_name,
             executorModel: run.model_id,
+            providerId: run.provider_id,
           },
           ownerIds: run.owner_ids,
         });
@@ -539,6 +625,7 @@ export async function failGreenfieldDlqRun(input: {
           errorMessage: 'Queue retries exhausted; run failed.',
           executorAlias: run.target_agent_name,
           executorModel: run.model_id,
+          providerId: run.provider_id,
         },
         ownerIds: run.owner_ids,
       });

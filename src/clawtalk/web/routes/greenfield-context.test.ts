@@ -328,6 +328,30 @@ describe('greenfield context compatibility routes', () => {
       { kind: 'rule', compat_kind: 'rule', include_in_prompt: false },
     ]);
 
+    await getDbPg()`
+      update public.context_sources
+      set name = case
+            when meta_json->>'compatKind' = 'goal' then 'Goal name fallback'
+            else 'Rule name fallback'
+          end,
+          extracted_text = '   '
+      where workspace_id = ${workspaceId}::uuid
+        and talk_id = ${talkId}::uuid
+        and kind = 'rule'
+    `;
+    const whitespaceFallback = await getGreenfieldTalkContextRoute({
+      auth: auth(),
+      workspaceId,
+      talkId,
+    });
+    expect(
+      whitespaceFallback.body.ok && whitespaceFallback.body.data.goal?.goalText,
+    ).toBe('Goal name fallback');
+    expect(
+      whitespaceFallback.body.ok &&
+        whitespaceFallback.body.data.rules[0]?.ruleText,
+    ).toBe('Rule name fallback');
+
     const cleared = await setGreenfieldTalkGoalRoute({
       auth: auth(),
       workspaceId,
@@ -356,8 +380,8 @@ describe('greenfield context compatibility routes', () => {
     });
     expect(text.statusCode).toBe(201);
     if (!text.body.ok) throw new Error('Expected text source to succeed');
+    expect(text.body.data.source.sourceRef).toBe(text.body.data.source.id);
     expect(text.body.data.source).toMatchObject({
-      sourceRef: 'S1',
       sourceType: 'text',
       status: 'ready',
       extractedTextLength: 22,
@@ -401,8 +425,8 @@ describe('greenfield context compatibility routes', () => {
     expect(url.statusCode).toBe(201);
     if (!url.body.ok) throw new Error('Expected url source to succeed');
     const urlSourceId = url.body.data.source.id;
+    expect(url.body.data.source.sourceRef).toBe(urlSourceId);
     expect(url.body.data.source).toMatchObject({
-      sourceRef: 'S2',
       sourceType: 'url',
       status: 'pending',
       sourceUrl: 'https://example.com/brief',
@@ -536,15 +560,73 @@ describe('greenfield context compatibility routes', () => {
     ]);
   });
 
-  it('allocates source refs after fallback-only greenfield sources', async () => {
+  it('serves summary-only ready sources from the content route', async () => {
     const { workspaceId, talkId } = await createTalkFixture();
     const db = getDbPg();
+    const sourceId = '0c949494-1111-4111-8111-000000000001';
+    const summary = 'Summary-only source body.';
     await db`
       insert into public.context_sources (
-        workspace_id, talk_id, kind, name, extracted_text, meta_json,
+        id, workspace_id, talk_id, kind, name, payload_ref, extracted_text,
+        summary, meta_json, include_in_prompt, sort_order, added_by_user_id
+      )
+      values (
+        ${sourceId}::uuid,
+        ${workspaceId}::uuid,
+        ${talkId}::uuid,
+        'url',
+        'Summary URL',
+        'https://example.com/summary',
+        null,
+        ${summary},
+        ${db.json({
+          compatKind: 'source',
+          sourceType: 'url',
+          sourceUrl: 'https://example.com/summary',
+        } as never)},
+        true,
+        0,
+        ${USER_ID}::uuid
+      )
+    `;
+
+    const context = await getGreenfieldTalkContextRoute({
+      auth: auth(),
+      workspaceId,
+      talkId,
+    });
+    expect(
+      context.body.ok &&
+        context.body.data.sources.find((source) => source.id === sourceId),
+    ).toMatchObject({
+      status: 'ready',
+      extractedTextLength: summary.length,
+    });
+
+    const content = await getGreenfieldTalkContextSourceContentRoute({
+      auth: auth(),
+      workspaceId,
+      talkId,
+      sourceId,
+    });
+    expect(content.statusCode).toBe(200);
+    expect('headers' in content).toBe(true);
+    if (!('headers' in content)) throw new Error('Expected text response');
+    expect(content.headers['content-type']).toBe('text/plain; charset=utf-8');
+    expect(content.body).toBe(summary);
+  });
+
+  it('uses raw source ids after fallback-only greenfield sources', async () => {
+    const { workspaceId, talkId } = await createTalkFixture();
+    const db = getDbPg();
+    const preCompatSourceId = '0c787878-7777-4777-8777-000000000001';
+    await db`
+      insert into public.context_sources (
+        id, workspace_id, talk_id, kind, name, extracted_text, meta_json,
         include_in_prompt, sort_order, added_by_user_id
       )
       values (
+        ${preCompatSourceId}::uuid,
         ${workspaceId}::uuid,
         ${talkId}::uuid,
         'file',
@@ -566,7 +648,9 @@ describe('greenfield context compatibility routes', () => {
       extractedText: 'New content',
     });
     expect(created.statusCode).toBe(201);
-    expect(created.body.ok && created.body.data.source.sourceRef).toBe('S2');
+    if (!created.body.ok) throw new Error('Expected source create to succeed');
+    const createdSourceId = created.body.data.source.id;
+    expect(created.body.data.source.sourceRef).toBe(createdSourceId);
 
     const context = await getGreenfieldTalkContextRoute({
       auth: auth(),
@@ -576,7 +660,7 @@ describe('greenfield context compatibility routes', () => {
     expect(
       context.body.ok &&
         context.body.data.sources.map((source) => source.sourceRef),
-    ).toEqual(['S1', 'S2']);
+    ).toEqual([preCompatSourceId, createdSourceId]);
   });
 
   it('resolves context routes by talk id when the workspace header is omitted', async () => {
@@ -599,8 +683,10 @@ describe('greenfield context compatibility routes', () => {
     });
     expect(created.statusCode).toBe(201);
     if (!created.body.ok) throw new Error('Expected source create to succeed');
+    expect(created.body.data.source.sourceRef).toBe(
+      created.body.data.source.id,
+    );
     expect(created.body.data.source).toMatchObject({
-      sourceRef: 'S1',
       title: 'Second workspace note',
     });
 

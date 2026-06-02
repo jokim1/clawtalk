@@ -720,6 +720,7 @@ export async function getFallbackSteps(
   agentId: string,
 ): Promise<AgentFallbackStep[]> {
   const db = getDbPg();
+  if (!(await hasAgentFallbackStepsTable(db))) return [];
   const rows = await db<AgentFallbackStepRecord[]>`
     select agent_id, position, provider_id, model_id, owner_id
     from public.agent_fallback_steps
@@ -739,6 +740,9 @@ export async function setFallbackSteps(params: {
   steps: Array<{ providerId: string; modelId: string }>;
 }): Promise<void> {
   const db = getDbPg();
+  if (!(await hasAgentFallbackStepsTable(db))) {
+    throw new Error('legacy_agent_fallback_steps_not_available');
+  }
   await db`
     delete from public.agent_fallback_steps
     where agent_id = ${params.agentId}::uuid
@@ -1019,25 +1023,45 @@ async function resolveActiveFamilies(opts?: {
 
 let greenfieldTalkToolsTableExists: boolean | null = null;
 let userToolPermissionsTableExists: boolean | null = null;
+let agentFallbackStepsTableExists: boolean | null = null;
 
 async function hasUserToolPermissionsTable(db: Sql): Promise<boolean> {
-  if (userToolPermissionsTableExists === true) return true;
+  if (userToolPermissionsTableExists !== null) {
+    return userToolPermissionsTableExists;
+  }
   const rows = await db<{ exists: boolean }[]>`
     select to_regclass('public.user_tool_permissions') is not null as exists
   `;
   const exists = rows[0]?.exists === true;
-  if (exists) userToolPermissionsTableExists = true;
+  if (exists) {
+    userToolPermissionsTableExists = true;
+  }
   return exists;
 }
 
 async function hasGreenfieldTalkToolsTable(db: Sql): Promise<boolean> {
-  if (greenfieldTalkToolsTableExists === true) return true;
+  if (greenfieldTalkToolsTableExists !== null) {
+    return greenfieldTalkToolsTableExists;
+  }
   const rows = await db<{ exists: boolean }[]>`
     select to_regclass('public.talk_tools') is not null as exists
   `;
   const exists = rows[0]?.exists === true;
-  if (exists) greenfieldTalkToolsTableExists = true;
+  if (exists) {
+    greenfieldTalkToolsTableExists = true;
+  }
   return exists;
+}
+
+async function hasAgentFallbackStepsTable(db: Sql): Promise<boolean> {
+  if (agentFallbackStepsTableExists !== null) {
+    return agentFallbackStepsTableExists;
+  }
+  const rows = await db<{ exists: boolean }[]>`
+    select to_regclass('public.agent_fallback_steps') is not null as exists
+  `;
+  agentFallbackStepsTableExists = rows[0]?.exists === true;
+  return agentFallbackStepsTableExists;
 }
 
 // ---------------------------------------------------------------------------

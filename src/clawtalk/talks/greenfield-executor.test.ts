@@ -27,7 +27,7 @@ import {
   initPgDatabase,
 } from '../../db.js';
 import { executeWithResolvedAgent } from '../agents/agent-router.js';
-import type { LlmContentBlock } from '../agents/llm-client.js';
+import type { LlmContentBlock, LlmMessage } from '../agents/llm-client.js';
 import { ensureWorkspaceBootstrapForUser } from '../workspaces/bootstrap.js';
 import { loadPageImage } from './attachment-storage.js';
 import {
@@ -44,6 +44,7 @@ import {
   createGreenfieldJob,
   createGreenfieldJobRunNow,
 } from './greenfield-job-accessors.js';
+import { buildGreenfieldStepUserMessageText } from './greenfield-executor.js';
 import { processTalkRunMessage } from './queue-consumer.js';
 
 const USER_ID = '0c787878-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
@@ -122,6 +123,14 @@ function mockResolvedExecution(
         Parameters<typeof executeWithResolvedAgent>[3]['executeToolCall']
       >,
     ) => Promise<void>;
+    providerData?: {
+      codexReasoningItems?: Array<Record<string, unknown>>;
+      codexMessageItems?: Array<Record<string, unknown>>;
+    };
+    providerId?: string;
+    modelId?: string;
+    startedProviderId?: string;
+    startedModelId?: string;
   },
 ): {
   calls: Array<{
@@ -136,6 +145,7 @@ function mockResolvedExecution(
       contextToolNames: string[];
       connectorToolNames: string[];
     };
+    history: LlmMessage[];
     userMessage: string | LlmContentBlock[];
     effectiveTools: Array<{
       toolFamily: string;
@@ -169,6 +179,7 @@ function mockResolvedExecution(
           connectorToolNames:
             context?.connectorTools.map((tool) => tool.name) ?? [],
         },
+        history: context?.history ?? [],
         userMessage,
         effectiveTools: options.effectiveTools ?? [],
         hasExecuteToolCall: typeof options.executeToolCall === 'function',
@@ -183,8 +194,8 @@ function mockResolvedExecution(
         type: 'started',
         runId: options.runId,
         agentId: agent.id,
-        providerId: agent.provider_id,
-        modelId: agent.model_id,
+        providerId: mockOptions?.startedProviderId ?? agent.provider_id,
+        modelId: mockOptions?.startedModelId ?? agent.model_id,
       });
       options.emit?.({ type: 'text_delta', text: content });
       options.emit?.({
@@ -195,10 +206,11 @@ function mockResolvedExecution(
       return {
         content,
         agentId: agent.id,
-        providerId: agent.provider_id,
-        modelId: agent.model_id,
+        providerId: mockOptions?.providerId ?? agent.provider_id,
+        modelId: mockOptions?.modelId ?? agent.model_id,
         usage: { inputTokens: 11, outputTokens: 7, estimatedCostUsd: 0 },
         completion: { completionStatus: 'complete' },
+        providerData: mockOptions?.providerData,
       };
     },
   );
@@ -232,6 +244,28 @@ describe('GreenfieldTalkExecutor queue integration', () => {
         include_in_prompt, sort_order, added_by_user_id
       )
       values
+        (
+          ${workspaceId}::uuid,
+          ${talkId}::uuid,
+          'rule',
+          'Active whitespace goal',
+          '   ',
+          ${db.json({ compatKind: 'goal' } as never)},
+          true,
+          -3,
+          ${USER_ID}::uuid
+        ),
+        (
+          ${workspaceId}::uuid,
+          ${talkId}::uuid,
+          'rule',
+          'Active whitespace rule',
+          '   ',
+          ${db.json({ compatKind: 'rule' } as never)},
+          true,
+          -2,
+          ${USER_ID}::uuid
+        ),
         (
           ${workspaceId}::uuid,
           ${talkId}::uuid,
@@ -275,7 +309,18 @@ describe('GreenfieldTalkExecutor queue integration', () => {
     });
     if (!enqueued.ok) throw new Error(`enqueue failed: ${enqueued.reason}`);
 
-    const { calls } = mockResolvedExecution('Greenfield answer');
+    const { calls } = mockResolvedExecution('Greenfield answer', {
+      providerData: {
+        codexReasoningItems: [{ encrypted_content: 'greenfield-ciphertext' }],
+        codexMessageItems: [
+          {
+            type: 'message',
+            role: 'assistant',
+            content: [{ type: 'output_text', text: 'Greenfield answer' }],
+          },
+        ],
+      },
+    });
     await processTalkRunMessage({
       runId: enqueued.runs[0]!.id,
       dispatch: async () => {},
@@ -285,18 +330,40 @@ describe('GreenfieldTalkExecutor queue integration', () => {
     expect(calls).toHaveLength(1);
     expect(calls[0]!.agent.id).toBe(agentIds[0]);
     expect(calls[0]!.agent.system_prompt).toContain('Role:');
+    expect(calls[0]!.context.systemPrompt).toContain(
+      'Goal\nActive whitespace goal',
+    );
+    expect(calls[0]!.context.systemPrompt).toContain(
+      'Rule: Active whitespace rule\nActive whitespace rule',
+    );
     expect(calls[0]!.context.systemPrompt).toContain('Rule: Launch rules');
     expect(calls[0]!.context.systemPrompt).toContain('Launch rules');
     expect(calls[0]!.context.systemPrompt).toContain('Use clear milestones.');
+    const sourceRows = await db<Array<{ id: string; name: string }>>`
+      select id::text as id, name
+      from public.context_sources
+      where workspace_id = ${workspaceId}::uuid
+        and talk_id = ${talkId}::uuid
+        and kind <> 'rule'
+    `;
+    const fallbackSourceId = sourceRows.find(
+      (row) => row.name === 'Fallback notes',
+    )?.id;
+    const launchSourceId = sourceRows.find(
+      (row) => row.name === 'Launch notes',
+    )?.id;
+    expect(fallbackSourceId).toBeTruthy();
+    expect(launchSourceId).toBeTruthy();
     expect(calls[0]!.context.systemPrompt).toContain(
-      'Source S1: Fallback notes (file)',
+      `Source ${fallbackSourceId}: Fallback notes (file)`,
     );
     expect(calls[0]!.context.systemPrompt).toContain(
       'Source fallback should ignore preceding rules.',
     );
     expect(calls[0]!.context.systemPrompt).toContain(
-      'Source S9: Launch notes (file)',
+      `Source ${launchSourceId}: Launch notes (file)`,
     );
+    expect(calls[0]!.context.systemPrompt).not.toContain('Source S9:');
     expect(calls[0]!.context.systemPrompt).toContain('Budget is tight.');
     expect(calls[0]!.userMessage).toBe('Plan the launch.');
     expect(calls[0]!.credentialScope).toEqual({
@@ -310,15 +377,23 @@ describe('GreenfieldTalkExecutor queue integration', () => {
         tokens_in: number | null;
         tokens_out: number | null;
         message_body: string | null;
+        message_metadata: Record<string, unknown>;
+        provider_data: Record<string, unknown> | null;
       }>
     >`
       select
         r.status,
         r.tokens_in,
         r.tokens_out,
-        m.body as message_body
+        m.body as message_body,
+        m.metadata_json as message_metadata,
+        mpr.provider_data_json as provider_data
       from public.runs r
       left join public.messages m on m.run_id = r.id
+      left join public.message_provider_replay mpr
+        on mpr.workspace_id = m.workspace_id
+       and mpr.talk_id = m.talk_id
+       and mpr.message_id = m.id
       where r.id = ${enqueued.runs[0]!.id}::uuid
     `;
     expect(rows[0]).toMatchObject({
@@ -326,7 +401,1248 @@ describe('GreenfieldTalkExecutor queue integration', () => {
       tokens_in: 11,
       tokens_out: 7,
       message_body: 'Greenfield answer',
+      message_metadata: {
+        providerId: 'provider.anthropic',
+        modelId: expect.any(String),
+      },
+      provider_data: {
+        codexReasoningItems: [{ encrypted_content: 'greenfield-ciphertext' }],
+        codexMessageItems: [
+          {
+            type: 'message',
+            role: 'assistant',
+            content: [{ type: 'output_text', text: 'Greenfield answer' }],
+          },
+        ],
+      },
     });
+    expect(rows[0]!.message_metadata).not.toHaveProperty('codexReasoningItems');
+    expect(rows[0]!.message_metadata).not.toHaveProperty('codexMessageItems');
+
+    const appendedEvents = await db<
+      Array<{ payload: { metadata?: Record<string, unknown> | null } }>
+    >`
+      select payload
+      from public.event_outbox
+      where topic = ${`talk:${talkId}`}
+        and event_type = 'message_appended'
+        and payload->>'runId' = ${enqueued.runs[0]!.id}
+      order by event_id desc
+      limit 1
+    `;
+    expect(appendedEvents).toHaveLength(1);
+    expect(appendedEvents[0]!.payload.metadata).toMatchObject({
+      providerId: 'provider.anthropic',
+      modelId: expect.any(String),
+    });
+    expect(appendedEvents[0]!.payload.metadata).not.toHaveProperty(
+      'codexReasoningItems',
+    );
+    expect(appendedEvents[0]!.payload.metadata).not.toHaveProperty(
+      'codexMessageItems',
+    );
+  });
+
+  it('reads greenfield sources by uppercase raw id when a stored sourceRef exists', async () => {
+    const { workspaceId, talkId, agentIds } = await createTalkFixture();
+    const sourceId = '0c787878-7777-4777-8777-0000000000a1';
+    const db = getDbPg();
+    await db`
+      insert into public.context_sources (
+        id, workspace_id, talk_id, kind, name, extracted_text, meta_json,
+        include_in_prompt, sort_order, added_by_user_id
+      )
+      values (
+        ${sourceId}::uuid,
+        ${workspaceId}::uuid,
+        ${talkId}::uuid,
+        'file',
+        'Stored ref source',
+        'Stored ref source body',
+        ${db.json({ compatKind: 'source', sourceRef: 'S10', sourceType: 'text' } as never)},
+        true,
+        0,
+        ${USER_ID}::uuid
+      )
+    `;
+    const enqueued = await enqueueGreenfieldChatTurn({
+      workspaceId,
+      talkId,
+      userId: USER_ID,
+      content: 'Read the source.',
+      targetAgentIds: agentIds,
+    });
+    if (!enqueued.ok) throw new Error(`enqueue failed: ${enqueued.reason}`);
+
+    const { calls } = mockResolvedExecution('Source read answer', {
+      onExecute: async (executeToolCall) => {
+        await expect(
+          executeToolCall('read_source', {
+            sourceRef: sourceId.toUpperCase(),
+          }),
+        ).resolves.toEqual({ result: 'Stored ref source body' });
+        await expect(
+          executeToolCall('read_source', { sourceRef: 's10' }),
+        ).resolves.toEqual({ result: 'Stored ref source body' });
+      },
+    });
+    await processTalkRunMessage({
+      runId: enqueued.runs[0]!.id,
+      dispatch: async () => {},
+      cancelPollIntervalMs: 10_000,
+    });
+
+    expect(calls).toHaveLength(1);
+  });
+
+  it('does not read greenfield rules through read_source by raw id', async () => {
+    const { workspaceId, talkId, agentIds } = await createTalkFixture();
+    const ruleId = '0c787878-7777-4777-8777-0000000000a2';
+    const db = getDbPg();
+    await db`
+      insert into public.context_sources (
+        id, workspace_id, talk_id, kind, name, extracted_text, meta_json,
+        include_in_prompt, sort_order, added_by_user_id
+      )
+      values (
+        ${ruleId}::uuid,
+        ${workspaceId}::uuid,
+        ${talkId}::uuid,
+        'rule',
+        'Private rule body',
+        'Rules stay in the system prompt, not read_source.',
+        ${db.json({ compatKind: 'rule' } as never)},
+        true,
+        -1,
+        ${USER_ID}::uuid
+      )
+    `;
+    const enqueued = await enqueueGreenfieldChatTurn({
+      workspaceId,
+      talkId,
+      userId: USER_ID,
+      content: 'Read the rule as a source.',
+      targetAgentIds: agentIds,
+    });
+    if (!enqueued.ok) throw new Error(`enqueue failed: ${enqueued.reason}`);
+
+    const { calls } = mockResolvedExecution('Rule read unavailable', {
+      onExecute: async (executeToolCall) => {
+        await expect(
+          executeToolCall('read_source', { sourceRef: ruleId }),
+        ).resolves.toEqual({
+          result: `Source ${ruleId} not found`,
+          isError: true,
+        });
+      },
+    });
+    await processTalkRunMessage({
+      runId: enqueued.runs[0]!.id,
+      dispatch: async () => {},
+      cancelPollIntervalMs: 10_000,
+    });
+
+    expect(calls).toHaveLength(1);
+  });
+
+  it('does not put pending or unprocessed context sources into the prompt but direct reads report status', async () => {
+    const { workspaceId, talkId, agentIds } = await createTalkFixture();
+    const db = getDbPg();
+    await db`
+      insert into public.context_sources (
+        workspace_id, talk_id, kind, name, extracted_text, meta_json,
+        include_in_prompt, sort_order, added_by_user_id
+      )
+      values (
+        ${workspaceId}::uuid,
+        ${talkId}::uuid,
+        'url',
+        'Pending stale URL',
+        'Stale URL body',
+        ${db.json({
+          compatKind: 'source',
+          sourceRef: 'S11',
+          sourceType: 'url',
+          sourceUrl: 'https://example.test/stale',
+          mimeType: 'text/plain',
+          status: 'pending',
+        } as never)},
+        true,
+        10,
+        ${USER_ID}::uuid
+      )
+    `;
+    await db`
+      insert into public.context_sources (
+        workspace_id, talk_id, kind, name, extracted_text, meta_json,
+        include_in_prompt, sort_order, added_by_user_id
+      )
+      values (
+        ${workspaceId}::uuid,
+        ${talkId}::uuid,
+        'file',
+        'No status unprocessed file',
+        null,
+        ${db.json({
+          compatKind: 'source',
+          sourceRef: 'S12',
+          sourceType: 'file',
+          mimeType: 'text/plain',
+        } as never)},
+        true,
+        11,
+        ${USER_ID}::uuid
+      )
+    `;
+    const enqueued = await enqueueGreenfieldChatTurn({
+      workspaceId,
+      talkId,
+      userId: USER_ID,
+      content: 'Read the pending source.',
+      targetAgentIds: agentIds,
+    });
+    if (!enqueued.ok) throw new Error(`enqueue failed: ${enqueued.reason}`);
+
+    const { calls } = mockResolvedExecution('Pending source unavailable', {
+      onExecute: async (executeToolCall) => {
+        await expect(
+          executeToolCall('read_source', { sourceRef: 'S11' }),
+        ).resolves.toEqual({
+          result: 'Source S11 is pending; extracted text is not available yet.',
+          isError: true,
+        });
+        await expect(
+          executeToolCall('read_source', { sourceRef: 'S12' }),
+        ).resolves.toEqual({
+          result: 'Source S12 is pending; extracted text is not available yet.',
+          isError: true,
+        });
+      },
+    });
+    await processTalkRunMessage({
+      runId: enqueued.runs[0]!.id,
+      dispatch: async () => {},
+      cancelPollIntervalMs: 10_000,
+    });
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.context.systemPrompt).not.toContain('Pending stale URL');
+    expect(calls[0]!.context.systemPrompt).not.toContain('Stale URL body');
+    expect(calls[0]!.context.systemPrompt).not.toContain(
+      'No status unprocessed file',
+    );
+    expect(calls[0]!.context.systemPrompt).not.toContain('S12');
+  });
+
+  it('reads prompt-visible sources even when earlier unready sources exceed the source cap', async () => {
+    const { workspaceId, talkId, agentIds } = await createTalkFixture();
+    const db = getDbPg();
+    await db`
+      insert into public.context_sources (
+        workspace_id, talk_id, kind, name, extracted_text, meta_json,
+        include_in_prompt, sort_order, added_by_user_id
+      )
+      select
+        ${workspaceId}::uuid,
+        ${talkId}::uuid,
+        'url',
+        'Pending early source ' || n::text,
+        'Stale early body ' || n::text,
+        jsonb_build_object(
+          'compatKind', 'source',
+          'sourceRef', 'P' || n::text,
+          'sourceType', 'url',
+          'mimeType', 'text/plain',
+          'status', 'pending'
+        ),
+        true,
+        n,
+        ${USER_ID}::uuid
+      from generate_series(0, 24) as g(n)
+    `;
+    await db`
+      insert into public.context_sources (
+        workspace_id, talk_id, kind, name, extracted_text, meta_json,
+        include_in_prompt, sort_order, added_by_user_id
+      )
+      values (
+        ${workspaceId}::uuid,
+        ${talkId}::uuid,
+        'file',
+        'Late ready source',
+        'Late ready body',
+        ${db.json({
+          compatKind: 'source',
+          sourceRef: 'S77',
+          sourceType: 'file',
+          mimeType: 'text/plain',
+          status: 'ready',
+        } as never)},
+        true,
+        100,
+        ${USER_ID}::uuid
+      )
+    `;
+    const lateSources = await db<Array<{ id: string }>>`
+      select id::text as id
+      from public.context_sources
+      where workspace_id = ${workspaceId}::uuid
+        and talk_id = ${talkId}::uuid
+        and name = 'Late ready source'
+      limit 1
+    `;
+    const lateSourceId = lateSources[0]!.id;
+    const enqueued = await enqueueGreenfieldChatTurn({
+      workspaceId,
+      talkId,
+      userId: USER_ID,
+      content: 'Read the late source.',
+      targetAgentIds: agentIds,
+    });
+    if (!enqueued.ok) throw new Error(`enqueue failed: ${enqueued.reason}`);
+
+    const { calls } = mockResolvedExecution('Late source answer', {
+      onExecute: async (executeToolCall) => {
+        await expect(
+          executeToolCall('read_source', { sourceRef: 'S77' }),
+        ).resolves.toEqual({ result: 'Late ready body' });
+      },
+    });
+    await processTalkRunMessage({
+      runId: enqueued.runs[0]!.id,
+      dispatch: async () => {},
+      cancelPollIntervalMs: 10_000,
+    });
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.context.systemPrompt).toContain(
+      `Source ${lateSourceId}: Late ready source`,
+    );
+  });
+
+  it('replays persisted Codex provider data from prior greenfield agent messages', async () => {
+    const { workspaceId, talkId, agentIds } = await createTalkFixture();
+    const first = await enqueueGreenfieldChatTurn({
+      workspaceId,
+      talkId,
+      userId: USER_ID,
+      content: 'Start the thread.',
+      targetAgentIds: agentIds,
+    });
+    if (!first.ok) throw new Error(`enqueue failed: ${first.reason}`);
+
+    mockResolvedExecution('First answer', {
+      providerData: {
+        codexReasoningItems: [
+          { encrypted_content: 'first-turn-ciphertext', summary: [] },
+        ],
+      },
+    });
+    await processTalkRunMessage({
+      runId: first.runs[0]!.id,
+      dispatch: async () => {},
+      cancelPollIntervalMs: 10_000,
+    });
+
+    const second = await enqueueGreenfieldChatTurn({
+      workspaceId,
+      talkId,
+      userId: USER_ID,
+      content: 'Continue.',
+      targetAgentIds: agentIds,
+    });
+    if (!second.ok) throw new Error(`enqueue failed: ${second.reason}`);
+
+    const { calls } = mockResolvedExecution('Second answer');
+    await processTalkRunMessage({
+      runId: second.runs[0]!.id,
+      dispatch: async () => {},
+      cancelPollIntervalMs: 10_000,
+    });
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.history).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          role: 'assistant',
+          providerData: {
+            codexReasoningItems: [
+              { encrypted_content: 'first-turn-ciphertext', summary: [] },
+            ],
+          },
+        }),
+      ]),
+    );
+  });
+
+  it('persists and emits greenfield provider identity from the frozen snapshot', async () => {
+    const { workspaceId, talkId, agentIds } = await createTalkFixture();
+    const enqueued = await enqueueGreenfieldChatTurn({
+      workspaceId,
+      talkId,
+      userId: USER_ID,
+      content: 'Return mismatched provider metadata.',
+      targetAgentIds: agentIds,
+    });
+    if (!enqueued.ok) throw new Error(`enqueue failed: ${enqueued.reason}`);
+
+    mockResolvedExecution('Mismatched replay answer', {
+      providerId: 'provider.mismatched',
+      modelId: 'mismatched-model',
+      startedProviderId: 'provider.started-mismatch',
+      startedModelId: 'started-mismatched-model',
+      providerData: {
+        codexReasoningItems: [
+          { encrypted_content: 'snapshot-provider-ciphertext', summary: [] },
+        ],
+      },
+    });
+    await processTalkRunMessage({
+      runId: enqueued.runs[0]!.id,
+      dispatch: async () => {},
+      cancelPollIntervalMs: 10_000,
+    });
+
+    const rows = await getDbPg()<
+      Array<{
+        replay_provider_id: string;
+        replay_model_id: string;
+        message_metadata: Record<string, unknown>;
+        snapshot_provider_id: string;
+        snapshot_model_id: string;
+      }>
+    >`
+      select
+        mpr.provider_id as replay_provider_id,
+        mpr.model_id as replay_model_id,
+        m.metadata_json as message_metadata,
+        tas.provider_id as snapshot_provider_id,
+        tas.model_id as snapshot_model_id
+      from public.message_provider_replay mpr
+      join public.messages m on m.id = mpr.message_id
+      join public.runs r on r.id = mpr.run_id
+      join public.talk_agent_snapshots tas
+        on tas.workspace_id = r.workspace_id
+       and tas.talk_id = r.talk_id
+       and tas.id = r.agent_snapshot_id
+      where mpr.run_id = ${enqueued.runs[0]!.id}::uuid
+    `;
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      replay_provider_id: rows[0]!.snapshot_provider_id,
+      replay_model_id: rows[0]!.snapshot_model_id,
+    });
+    expect(rows[0]!.message_metadata).toMatchObject({
+      providerId: rows[0]!.snapshot_provider_id,
+      modelId: rows[0]!.snapshot_model_id,
+    });
+    expect(rows[0]!.replay_provider_id).not.toBe('provider.mismatched');
+    expect(rows[0]!.replay_model_id).not.toBe('mismatched-model');
+    expect(rows[0]!.message_metadata).not.toMatchObject({
+      providerId: 'provider.mismatched',
+      modelId: 'mismatched-model',
+    });
+
+    const events = await getDbPg()<
+      Array<{
+        event_type: string;
+        payload: {
+          metadata?: Record<string, unknown> | null;
+          providerId?: string | null;
+          modelId?: string | null;
+          executorModel?: string | null;
+        };
+      }>
+    >`
+      select event_type, payload
+      from public.event_outbox
+      where topic = ${`talk:${talkId}`}
+        and event_type in (
+          'talk_response_started',
+          'message_appended',
+          'talk_run_completed'
+        )
+        and payload->>'runId' = ${enqueued.runs[0]!.id}
+      order by event_id asc
+    `;
+    const startedEvent = events.find(
+      (event) => event.event_type === 'talk_response_started',
+    );
+    expect(startedEvent?.payload).toMatchObject({
+      providerId: rows[0]!.snapshot_provider_id,
+      modelId: rows[0]!.snapshot_model_id,
+    });
+    expect(startedEvent?.payload).not.toMatchObject({
+      providerId: 'provider.started-mismatch',
+      modelId: 'started-mismatched-model',
+    });
+    const appendedEvent = events.find(
+      (event) => event.event_type === 'message_appended',
+    );
+    expect(appendedEvent?.payload.metadata).toMatchObject({
+      providerId: rows[0]!.snapshot_provider_id,
+      modelId: rows[0]!.snapshot_model_id,
+    });
+    const completedEvent = events.find(
+      (event) => event.event_type === 'talk_run_completed',
+    );
+    expect(completedEvent?.payload).toMatchObject({
+      providerId: rows[0]!.snapshot_provider_id,
+      executorModel: rows[0]!.snapshot_model_id,
+    });
+  });
+
+  it('uses the frozen snapshot model when the denormalized run model drifts', async () => {
+    const { workspaceId, talkId, agentIds } = await createTalkFixture();
+    const enqueued = await enqueueGreenfieldChatTurn({
+      workspaceId,
+      talkId,
+      userId: USER_ID,
+      content: 'Run from the snapshot model.',
+      targetAgentIds: agentIds,
+    });
+    if (!enqueued.ok) throw new Error(`enqueue failed: ${enqueued.reason}`);
+
+    const db = getDbPg();
+    const [snapshot] = await db<
+      Array<{
+        snapshot_provider_id: string;
+        snapshot_model_id: string;
+      }>
+    >`
+      select
+        tas.provider_id as snapshot_provider_id,
+        tas.model_id as snapshot_model_id
+      from public.runs r
+      join public.talk_agent_snapshots tas
+        on tas.workspace_id = r.workspace_id
+       and tas.talk_id = r.talk_id
+       and tas.id = r.agent_snapshot_id
+      where r.id = ${enqueued.runs[0]!.id}::uuid
+    `;
+    if (!snapshot) throw new Error('snapshot row missing for test run');
+    const [otherModel] = await db<Array<{ model_id: string }>>`
+      select model_id
+      from public.llm_provider_models
+      where provider_id = ${snapshot.snapshot_provider_id}
+        and model_id <> ${snapshot.snapshot_model_id}
+      order by model_id asc
+      limit 1
+    `;
+    if (!otherModel) throw new Error('same-provider alternate model missing');
+    await db`
+      update public.runs
+      set model_id = ${otherModel.model_id}
+      where id = ${enqueued.runs[0]!.id}::uuid
+    `;
+
+    const { calls } = mockResolvedExecution('Snapshot model answer', {
+      providerData: {
+        codexReasoningItems: [
+          { encrypted_content: 'snapshot-model-ciphertext', summary: [] },
+        ],
+      },
+    });
+    await processTalkRunMessage({
+      runId: enqueued.runs[0]!.id,
+      dispatch: async () => {},
+      cancelPollIntervalMs: 10_000,
+    });
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.agent.model_id).toBe(snapshot.snapshot_model_id);
+    expect(calls[0]!.agent.model_id).not.toBe(otherModel.model_id);
+
+    const replayRows = await db<Array<{ model_id: string }>>`
+      select model_id
+      from public.message_provider_replay
+      where run_id = ${enqueued.runs[0]!.id}::uuid
+    `;
+    expect(replayRows).toEqual([{ model_id: snapshot.snapshot_model_id }]);
+  });
+
+  it('completes snapshot-only greenfield runs without writing provider replay provenance', async () => {
+    const { workspaceId, talkId, agentIds } = await createTalkFixture();
+    const enqueued = await enqueueGreenfieldChatTurn({
+      workspaceId,
+      talkId,
+      userId: USER_ID,
+      content: 'Run from a snapshot without a live source agent.',
+      targetAgentIds: agentIds,
+    });
+    if (!enqueued.ok) throw new Error(`enqueue failed: ${enqueued.reason}`);
+
+    const db = getDbPg();
+    await db`
+      update public.talk_agent_snapshots tas
+      set source_agent_id = null
+      from public.runs r
+      where r.workspace_id = tas.workspace_id
+        and r.talk_id = tas.talk_id
+        and r.agent_snapshot_id = tas.id
+        and r.id = ${enqueued.runs[0]!.id}::uuid
+    `;
+
+    const { calls } = mockResolvedExecution('Snapshot-only answer', {
+      providerData: {
+        codexReasoningItems: [
+          { encrypted_content: 'snapshot-only-ciphertext', summary: [] },
+        ],
+      },
+    });
+    await processTalkRunMessage({
+      runId: enqueued.runs[0]!.id,
+      dispatch: async () => {},
+      cancelPollIntervalMs: 10_000,
+    });
+
+    expect(calls).toHaveLength(1);
+    const rows = await db<
+      Array<{
+        status: string;
+        message_body: string | null;
+        replay_count: string;
+      }>
+    >`
+      select
+        r.status,
+        m.body as message_body,
+        (
+          select count(*)::text
+          from public.message_provider_replay mpr
+          where mpr.run_id = r.id
+        ) as replay_count
+      from public.runs r
+      left join public.messages m
+        on m.workspace_id = r.workspace_id
+       and m.talk_id = r.talk_id
+       and m.run_id = r.id
+      where r.id = ${enqueued.runs[0]!.id}::uuid
+    `;
+    expect(rows[0]).toEqual({
+      status: 'completed',
+      message_body: 'Snapshot-only answer',
+      replay_count: '0',
+    });
+  });
+
+  it('replays multiple same-agent Codex provider data turns within budget', async () => {
+    const { workspaceId, talkId, agentIds } = await createTalkFixture();
+    const first = await enqueueGreenfieldChatTurn({
+      workspaceId,
+      talkId,
+      userId: USER_ID,
+      content: 'Start the thread.',
+      targetAgentIds: agentIds,
+    });
+    if (!first.ok) throw new Error(`enqueue failed: ${first.reason}`);
+
+    mockResolvedExecution('First answer', {
+      providerData: {
+        codexReasoningItems: [
+          { encrypted_content: 'first-turn-ciphertext', summary: [] },
+        ],
+      },
+    });
+    await processTalkRunMessage({
+      runId: first.runs[0]!.id,
+      dispatch: async () => {},
+      cancelPollIntervalMs: 10_000,
+    });
+
+    const second = await enqueueGreenfieldChatTurn({
+      workspaceId,
+      talkId,
+      userId: USER_ID,
+      content: 'Continue.',
+      targetAgentIds: agentIds,
+    });
+    if (!second.ok) throw new Error(`enqueue failed: ${second.reason}`);
+
+    mockResolvedExecution('Second answer', {
+      providerData: {
+        codexReasoningItems: [
+          { encrypted_content: 'second-turn-ciphertext', summary: [] },
+        ],
+      },
+    });
+    await processTalkRunMessage({
+      runId: second.runs[0]!.id,
+      dispatch: async () => {},
+      cancelPollIntervalMs: 10_000,
+    });
+
+    const third = await enqueueGreenfieldChatTurn({
+      workspaceId,
+      talkId,
+      userId: USER_ID,
+      content: 'Continue again.',
+      targetAgentIds: agentIds,
+    });
+    if (!third.ok) throw new Error(`enqueue failed: ${third.reason}`);
+
+    const { calls } = mockResolvedExecution('Third answer');
+    await processTalkRunMessage({
+      runId: third.runs[0]!.id,
+      dispatch: async () => {},
+      cancelPollIntervalMs: 10_000,
+    });
+
+    expect(calls).toHaveLength(1);
+    const encryptedItems = calls[0]!.history.flatMap(
+      (message) =>
+        message.providerData?.codexReasoningItems?.map(
+          (item) => item.encrypted_content,
+        ) ?? [],
+    );
+    expect(encryptedItems).toEqual([
+      'first-turn-ciphertext',
+      'second-turn-ciphertext',
+    ]);
+  });
+
+  it('keeps greenfield provider replay as a contiguous newest tail when the budget fills', async () => {
+    const { workspaceId, talkId, agentIds } = await createTalkFixture();
+    const first = await enqueueGreenfieldChatTurn({
+      workspaceId,
+      talkId,
+      userId: USER_ID,
+      content: 'Start the replay budget thread.',
+      targetAgentIds: agentIds,
+    });
+    if (!first.ok) throw new Error(`enqueue failed: ${first.reason}`);
+
+    mockResolvedExecution('First budget answer', {
+      providerData: {
+        codexReasoningItems: [
+          { encrypted_content: 'first-budget-ciphertext', summary: [] },
+        ],
+      },
+    });
+    await processTalkRunMessage({
+      runId: first.runs[0]!.id,
+      dispatch: async () => {},
+      cancelPollIntervalMs: 10_000,
+    });
+
+    const second = await enqueueGreenfieldChatTurn({
+      workspaceId,
+      talkId,
+      userId: USER_ID,
+      content: 'Add a large middle replay payload.',
+      targetAgentIds: agentIds,
+    });
+    if (!second.ok) throw new Error(`enqueue failed: ${second.reason}`);
+
+    mockResolvedExecution('Middle budget answer', {
+      providerData: {
+        codexReasoningItems: [
+          { encrypted_content: 'm'.repeat(60_000), summary: [] },
+        ],
+      },
+    });
+    await processTalkRunMessage({
+      runId: second.runs[0]!.id,
+      dispatch: async () => {},
+      cancelPollIntervalMs: 10_000,
+    });
+
+    const third = await enqueueGreenfieldChatTurn({
+      workspaceId,
+      talkId,
+      userId: USER_ID,
+      content: 'Add the newest replay payload.',
+      targetAgentIds: agentIds,
+    });
+    if (!third.ok) throw new Error(`enqueue failed: ${third.reason}`);
+
+    mockResolvedExecution('Newest budget answer', {
+      providerData: {
+        codexReasoningItems: [
+          { encrypted_content: 'n'.repeat(10_000), summary: [] },
+        ],
+      },
+    });
+    await processTalkRunMessage({
+      runId: third.runs[0]!.id,
+      dispatch: async () => {},
+      cancelPollIntervalMs: 10_000,
+    });
+
+    const fourth = await enqueueGreenfieldChatTurn({
+      workspaceId,
+      talkId,
+      userId: USER_ID,
+      content: 'Continue after the budget fills.',
+      targetAgentIds: agentIds,
+    });
+    if (!fourth.ok) throw new Error(`enqueue failed: ${fourth.reason}`);
+
+    const { calls } = mockResolvedExecution('After budget answer');
+    await processTalkRunMessage({
+      runId: fourth.runs[0]!.id,
+      dispatch: async () => {},
+      cancelPollIntervalMs: 10_000,
+    });
+
+    expect(calls).toHaveLength(1);
+    const encryptedItems = calls[0]!.history.flatMap(
+      (message) =>
+        message.providerData?.codexReasoningItems?.map(
+          (item) => item.encrypted_content,
+        ) ?? [],
+    );
+    expect(encryptedItems).toEqual(['n'.repeat(10_000)]);
+    expect(calls[0]!.history).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          role: 'assistant',
+          content: expect.stringContaining('First budget answer'),
+        }),
+        expect.objectContaining({
+          role: 'assistant',
+          content: expect.stringContaining('Middle budget answer'),
+        }),
+        expect.objectContaining({
+          role: 'assistant',
+          content: expect.stringContaining('Newest budget answer'),
+        }),
+      ]),
+    );
+  });
+
+  it('preserves nullable-body greenfield history turns', async () => {
+    const { workspaceId, talkId, agentIds } = await createTalkFixture();
+    const first = await enqueueGreenfieldChatTurn({
+      workspaceId,
+      talkId,
+      userId: USER_ID,
+      content: 'Start the thread.',
+      targetAgentIds: agentIds,
+    });
+    if (!first.ok) throw new Error(`enqueue failed: ${first.reason}`);
+
+    mockResolvedExecution('First answer');
+    await processTalkRunMessage({
+      runId: first.runs[0]!.id,
+      dispatch: async () => {},
+      cancelPollIntervalMs: 10_000,
+    });
+
+    const db = getDbPg();
+    await db`
+      update public.messages
+      set created_at = '2026-05-26T09:59:00Z'::timestamptz
+      where workspace_id = ${workspaceId}::uuid
+        and talk_id = ${talkId}::uuid
+        and round = 1
+        and author_kind = 'user'
+    `;
+    await db`
+      update public.messages
+      set created_at = '2026-05-26T10:00:00Z'::timestamptz
+      where workspace_id = ${workspaceId}::uuid
+        and talk_id = ${talkId}::uuid
+        and run_id = ${first.runs[0]!.id}::uuid
+        and author_kind = 'agent'
+    `;
+    await db`
+      insert into public.messages (
+        workspace_id, talk_id, round, author_kind, author_user_id, body,
+        metadata_json, created_at
+      )
+      values (
+        ${workspaceId}::uuid,
+        ${talkId}::uuid,
+        1,
+        'user',
+        ${USER_ID}::uuid,
+        null,
+        '{}'::jsonb,
+        '2026-05-26T10:01:00Z'::timestamptz
+      )
+    `;
+    await db`
+      insert into public.messages (
+        workspace_id, talk_id, round, author_kind, agent_snapshot_id, run_id,
+        body, metadata_json, created_at
+      )
+      select
+        workspace_id,
+        talk_id,
+        round,
+        'agent',
+        agent_snapshot_id,
+        id,
+        '',
+        '{}'::jsonb,
+        '2026-05-26T10:02:00Z'::timestamptz
+      from public.runs
+      where id = ${first.runs[0]!.id}::uuid
+    `;
+
+    const second = await enqueueGreenfieldChatTurn({
+      workspaceId,
+      talkId,
+      userId: USER_ID,
+      content: 'Continue.',
+      targetAgentIds: agentIds,
+    });
+    if (!second.ok) throw new Error(`enqueue failed: ${second.reason}`);
+
+    const { calls } = mockResolvedExecution('Second answer');
+    await processTalkRunMessage({
+      runId: second.runs[0]!.id,
+      dispatch: async () => {},
+      cancelPollIntervalMs: 10_000,
+    });
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.history.map((message) => message.role)).toEqual([
+      'user',
+      'assistant',
+      'user',
+      'assistant',
+    ]);
+    expect(calls[0]!.history.map((message) => message.content)).toEqual([
+      'Start the thread.',
+      expect.stringContaining('First answer'),
+      '[No text content in this turn]',
+      expect.stringContaining('[No text content in this turn]'),
+    ]);
+  });
+
+  it('does not replay persisted Codex provider data across greenfield agents', async () => {
+    const { workspaceId, talkId, agentIds } = await createTalkFixture({
+      agentCount: 2,
+    });
+    if (agentIds.length < 2) throw new Error('Expected two default agents');
+
+    const first = await enqueueGreenfieldChatTurn({
+      workspaceId,
+      talkId,
+      userId: USER_ID,
+      content: 'First agent, start.',
+      targetAgentIds: [agentIds[0]!],
+    });
+    if (!first.ok) throw new Error(`enqueue failed: ${first.reason}`);
+
+    mockResolvedExecution('First agent answer', {
+      providerData: {
+        codexReasoningItems: [
+          { encrypted_content: 'agent-a-ciphertext', summary: [] },
+        ],
+      },
+    });
+    await processTalkRunMessage({
+      runId: first.runs[0]!.id,
+      dispatch: async () => {},
+      cancelPollIntervalMs: 10_000,
+    });
+
+    const second = await enqueueGreenfieldChatTurn({
+      workspaceId,
+      talkId,
+      userId: USER_ID,
+      content: 'Second agent, continue.',
+      targetAgentIds: [agentIds[1]!],
+    });
+    if (!second.ok) throw new Error(`enqueue failed: ${second.reason}`);
+
+    const { calls } = mockResolvedExecution('Second agent answer');
+    await processTalkRunMessage({
+      runId: second.runs[0]!.id,
+      dispatch: async () => {},
+      cancelPollIntervalMs: 10_000,
+    });
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.history).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          role: 'assistant',
+          content: expect.stringContaining('First agent answer'),
+        }),
+      ]),
+    );
+    expect(calls[0]!.history.filter((message) => message.providerData)).toEqual(
+      [],
+    );
+  });
+
+  it('does not replay persisted Codex provider data across model boundaries', async () => {
+    const { workspaceId, talkId, agentIds } = await createTalkFixture();
+    const first = await enqueueGreenfieldChatTurn({
+      workspaceId,
+      talkId,
+      userId: USER_ID,
+      content: 'Start with this model.',
+      targetAgentIds: agentIds,
+    });
+    if (!first.ok) throw new Error(`enqueue failed: ${first.reason}`);
+
+    mockResolvedExecution('First model answer', {
+      providerData: {
+        codexReasoningItems: [
+          { encrypted_content: 'model-a-ciphertext', summary: [] },
+        ],
+      },
+    });
+    await processTalkRunMessage({
+      runId: first.runs[0]!.id,
+      dispatch: async () => {},
+      cancelPollIntervalMs: 10_000,
+    });
+
+    await getDbPg()`
+      update public.message_provider_replay
+      set model_id = 'different-model'
+      where run_id = ${first.runs[0]!.id}::uuid
+    `;
+
+    const second = await enqueueGreenfieldChatTurn({
+      workspaceId,
+      talkId,
+      userId: USER_ID,
+      content: 'Continue on the same agent.',
+      targetAgentIds: agentIds,
+    });
+    if (!second.ok) throw new Error(`enqueue failed: ${second.reason}`);
+
+    const { calls } = mockResolvedExecution('Second model answer');
+    await processTalkRunMessage({
+      runId: second.runs[0]!.id,
+      dispatch: async () => {},
+      cancelPollIntervalMs: 10_000,
+    });
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.history).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          role: 'assistant',
+          content: expect.stringContaining('First model answer'),
+        }),
+      ]),
+    );
+    expect(calls[0]!.history.filter((message) => message.providerData)).toEqual(
+      [],
+    );
+  });
+
+  it('does not replay persisted Codex provider data across provider boundaries', async () => {
+    const { workspaceId, talkId, agentIds } = await createTalkFixture();
+    const first = await enqueueGreenfieldChatTurn({
+      workspaceId,
+      talkId,
+      userId: USER_ID,
+      content: 'Start with this provider.',
+      targetAgentIds: agentIds,
+    });
+    if (!first.ok) throw new Error(`enqueue failed: ${first.reason}`);
+
+    mockResolvedExecution('First provider answer', {
+      providerData: {
+        codexReasoningItems: [
+          { encrypted_content: 'provider-a-ciphertext', summary: [] },
+        ],
+      },
+    });
+    await processTalkRunMessage({
+      runId: first.runs[0]!.id,
+      dispatch: async () => {},
+      cancelPollIntervalMs: 10_000,
+    });
+
+    await getDbPg()`
+      update public.message_provider_replay
+      set provider_id = 'provider.openai'
+      where run_id = ${first.runs[0]!.id}::uuid
+    `;
+
+    const second = await enqueueGreenfieldChatTurn({
+      workspaceId,
+      talkId,
+      userId: USER_ID,
+      content: 'Continue on the same agent.',
+      targetAgentIds: agentIds,
+    });
+    if (!second.ok) throw new Error(`enqueue failed: ${second.reason}`);
+
+    const { calls } = mockResolvedExecution('Second provider answer');
+    await processTalkRunMessage({
+      runId: second.runs[0]!.id,
+      dispatch: async () => {},
+      cancelPollIntervalMs: 10_000,
+    });
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.history).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          role: 'assistant',
+          content: expect.stringContaining('First provider answer'),
+        }),
+      ]),
+    );
+    expect(calls[0]!.history.filter((message) => message.providerData)).toEqual(
+      [],
+    );
+  });
+
+  it('does not replay persisted Codex provider data when the message snapshot identity drifts', async () => {
+    const { workspaceId, talkId, agentIds } = await createTalkFixture();
+    const first = await enqueueGreenfieldChatTurn({
+      workspaceId,
+      talkId,
+      userId: USER_ID,
+      content: 'Start with the original snapshot.',
+      targetAgentIds: agentIds,
+    });
+    if (!first.ok) throw new Error(`enqueue failed: ${first.reason}`);
+
+    mockResolvedExecution('Original snapshot answer', {
+      providerData: {
+        codexReasoningItems: [
+          { encrypted_content: 'snapshot-drift-ciphertext', summary: [] },
+        ],
+      },
+    });
+    await processTalkRunMessage({
+      runId: first.runs[0]!.id,
+      dispatch: async () => {},
+      cancelPollIntervalMs: 10_000,
+    });
+
+    const db = getDbPg();
+    const [historyMessage] = await db<
+      Array<{
+        agent_snapshot_id: string;
+        replay_provider_id: string;
+        replay_model_id: string;
+      }>
+    >`
+      select
+        m.agent_snapshot_id::text as agent_snapshot_id,
+        mpr.provider_id as replay_provider_id,
+        mpr.model_id as replay_model_id
+      from public.messages m
+      join public.message_provider_replay mpr
+        on mpr.workspace_id = m.workspace_id
+       and mpr.talk_id = m.talk_id
+       and mpr.message_id = m.id
+      where m.run_id = ${first.runs[0]!.id}::uuid
+      limit 1
+    `;
+    if (!historyMessage) throw new Error('history replay row missing');
+    const [alternateModel] = await db<
+      Array<{ provider_id: string; model_id: string }>
+    >`
+      select provider_id, model_id
+      from public.llm_provider_models
+      where (provider_id, model_id) <> (
+        ${historyMessage.replay_provider_id},
+        ${historyMessage.replay_model_id}
+      )
+      order by provider_id asc, model_id asc
+      limit 1
+    `;
+    if (!alternateModel) throw new Error('alternate provider model missing');
+    await db`
+      update public.talk_agent_snapshots
+      set provider_id = ${alternateModel.provider_id},
+          model_id = ${alternateModel.model_id}
+      where id = ${historyMessage.agent_snapshot_id}::uuid
+    `;
+
+    const second = await enqueueGreenfieldChatTurn({
+      workspaceId,
+      talkId,
+      userId: USER_ID,
+      content: 'Continue on the same live agent.',
+      targetAgentIds: agentIds,
+    });
+    if (!second.ok) throw new Error(`enqueue failed: ${second.reason}`);
+
+    const { calls } = mockResolvedExecution('After snapshot drift answer');
+    await processTalkRunMessage({
+      runId: second.runs[0]!.id,
+      dispatch: async () => {},
+      cancelPollIntervalMs: 10_000,
+    });
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.history).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          role: 'assistant',
+          content: expect.stringContaining('Original snapshot answer'),
+        }),
+      ]),
+    );
+    expect(calls[0]!.history.filter((message) => message.providerData)).toEqual(
+      [],
+    );
+  });
+
+  it('drops oversized Codex provider replay data from greenfield history', async () => {
+    const { workspaceId, talkId, agentIds } = await createTalkFixture();
+    const first = await enqueueGreenfieldChatTurn({
+      workspaceId,
+      talkId,
+      userId: USER_ID,
+      content: 'Produce a large replay payload.',
+      targetAgentIds: agentIds,
+    });
+    if (!first.ok) throw new Error(`enqueue failed: ${first.reason}`);
+
+    mockResolvedExecution('Large replay answer', {
+      providerData: {
+        codexReasoningItems: [
+          { encrypted_content: 'x'.repeat(70_000), summary: [] },
+        ],
+      },
+    });
+    await processTalkRunMessage({
+      runId: first.runs[0]!.id,
+      dispatch: async () => {},
+      cancelPollIntervalMs: 10_000,
+    });
+    const oversizedReplayRows = await getDbPg()<Array<{ count: string }>>`
+      select count(*)::text as count
+      from public.message_provider_replay
+      where run_id = ${first.runs[0]!.id}::uuid
+    `;
+    expect(oversizedReplayRows[0]?.count).toBe('0');
+
+    const second = await enqueueGreenfieldChatTurn({
+      workspaceId,
+      talkId,
+      userId: USER_ID,
+      content: 'Continue after the large payload.',
+      targetAgentIds: agentIds,
+    });
+    if (!second.ok) throw new Error(`enqueue failed: ${second.reason}`);
+
+    const { calls } = mockResolvedExecution('After large replay answer');
+    await processTalkRunMessage({
+      runId: second.runs[0]!.id,
+      dispatch: async () => {},
+      cancelPollIntervalMs: 10_000,
+    });
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.history).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          role: 'assistant',
+          content: expect.stringContaining('Large replay answer'),
+        }),
+      ]),
+    );
+    expect(calls[0]!.history.filter((message) => message.providerData)).toEqual(
+      [],
+    );
   });
 
   it('attaches complete greenfield PDF page images to the user turn', async () => {
@@ -388,7 +1704,7 @@ describe('GreenfieldTalkExecutor queue integration', () => {
 
     expect(calls).toHaveLength(1);
     expect(calls[0]!.context.systemPrompt).toContain(
-      'Source S7: Scanned PDF (file)',
+      `Source ${sourceId}: Scanned PDF (file)`,
     );
     expect(calls[0]!.context.systemPrompt).toContain(
       'No extracted text is available.',
@@ -409,8 +1725,12 @@ describe('GreenfieldTalkExecutor queue integration', () => {
       (block): block is Extract<LlmContentBlock, { type: 'image' }> =>
         block.type === 'image',
     );
-    expect(texts.join('\n')).toContain('PDF [S7] "Scanned PDF" - page 1 of 2:');
-    expect(texts.join('\n')).toContain('PDF [S7] "Scanned PDF" - page 2 of 2:');
+    expect(texts.join('\n')).toContain(
+      `PDF [${sourceId}] "Scanned PDF" - page 1 of 2:`,
+    );
+    expect(texts.join('\n')).toContain(
+      `PDF [${sourceId}] "Scanned PDF" - page 2 of 2:`,
+    );
     expect(texts.at(-1)).toBe('Summarize the scanned PDF.');
     expect(images).toHaveLength(2);
     expect(images[0]).toMatchObject({
@@ -544,6 +1864,57 @@ describe('GreenfieldTalkExecutor queue integration', () => {
     );
   });
 
+  it('keeps disabled web tools out of execution even when live tools are re-enabled', async () => {
+    const { workspaceId, talkId, agentIds } = await createTalkFixture();
+    const db = getDbPg();
+    await db`
+      insert into public.talk_tools (workspace_id, talk_id, tool_id, enabled)
+      values
+        (${workspaceId}::uuid, ${talkId}::uuid, 'web-search', false),
+        (${workspaceId}::uuid, ${talkId}::uuid, 'web-fetch', false),
+        (${workspaceId}::uuid, ${talkId}::uuid, 'news-monitor', false)
+      on conflict (talk_id, tool_id) do update
+        set enabled = excluded.enabled
+    `;
+
+    const enqueued = await enqueueGreenfieldChatTurn({
+      workspaceId,
+      talkId,
+      userId: USER_ID,
+      content: 'Answer without web.',
+      targetAgentIds: agentIds,
+    });
+    if (!enqueued.ok) throw new Error(`enqueue failed: ${enqueued.reason}`);
+
+    await db`
+      update public.talk_tools
+      set enabled = true
+      where workspace_id = ${workspaceId}::uuid
+        and talk_id = ${talkId}::uuid
+        and tool_id in ('web-search', 'web-fetch', 'news-monitor')
+    `;
+
+    const { calls } = mockResolvedExecution('No-web answer');
+    await processTalkRunMessage({
+      runId: enqueued.runs[0]!.id,
+      dispatch: async () => {},
+      cancelPollIntervalMs: 10_000,
+    });
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.context.contextToolNames).not.toContain('web_search');
+    expect(calls[0]!.context.contextToolNames).not.toContain('web_fetch');
+    expect(calls[0]!.effectiveTools).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          toolFamily: 'web',
+          enabled: false,
+          runtimeTools: [],
+        }),
+      ]),
+    );
+  });
+
   it('executes web_search inside the requester user context', async () => {
     const { workspaceId, talkId, agentIds } = await createTalkFixture();
     const db = getDbPg();
@@ -596,7 +1967,7 @@ describe('GreenfieldTalkExecutor queue integration', () => {
     );
   });
 
-  it('rejects deferred read_attachment tool calls before legacy execution', async () => {
+  it('rejects deferred retired context tool calls before legacy execution', async () => {
     const { workspaceId, talkId, agentIds } = await createTalkFixture();
     const enqueued = await enqueueGreenfieldChatTurn({
       workspaceId,
@@ -616,6 +1987,16 @@ describe('GreenfieldTalkExecutor queue integration', () => {
           isError: true,
           result:
             'Error: attachments_not_available: Message attachments are not available on the greenfield chat route yet.',
+        });
+        await expect(
+          executeToolCall('update_state', {
+            key: 'scratch',
+            value: 'legacy write',
+          }),
+        ).resolves.toEqual({
+          isError: true,
+          result:
+            'Error: state_not_available: Greenfield Talks do not have mutable state in this runtime.',
         });
       },
     });
@@ -988,8 +2369,6 @@ describe('GreenfieldTalkExecutor queue integration', () => {
     expect(calls[0]!.hasExecuteToolCall).toBe(true);
     expect(calls[0]!.context.contextToolNames).toEqual([
       'read_source',
-      'list_state',
-      'read_state',
       'web_search',
       'google_drive_search',
       'google_docs_create',
@@ -1032,7 +2411,7 @@ describe('GreenfieldTalkExecutor queue integration', () => {
     expect(calls[0]!.forceToolUseOnFirstIteration).toBe(true);
     expect(calls[0]!.context.contextToolNames).toContain('apply_content_edit');
     expect(calls[0]!.context.contextToolNames).toContain('read_source');
-    expect(calls[0]!.context.contextToolNames).toContain('read_state');
+    expect(calls[0]!.context.contextToolNames).not.toContain('read_state');
     expect(calls[0]!.context.systemPrompt).toContain('The Doc');
     expect(calls[0]!.context.systemPrompt).toContain('Old intro paragraph.');
 
@@ -1461,6 +2840,195 @@ describe('GreenfieldTalkExecutor queue integration', () => {
       order by event_id asc
     `;
     expect(events).toEqual([]);
+  });
+
+  it('builds a downstream greenfield ordered prompt from prior completed outputs', async () => {
+    const { workspaceId, talkId, agentIds } = await createTalkFixture({
+      agentCount: 3,
+    });
+    const enqueued = await enqueueGreenfieldChatTurn({
+      workspaceId,
+      talkId,
+      userId: USER_ID,
+      content: 'Evaluate the doc.',
+      targetAgentIds: agentIds,
+    });
+    if (!enqueued.ok) throw new Error(`enqueue failed: ${enqueued.reason}`);
+    const firstRun = enqueued.runs[0]!;
+    const secondRun = enqueued.runs[1]!;
+    if (!firstRun.response_group_id || secondRun.sequence_index === null) {
+      throw new Error('ordered run fixture missing response group metadata');
+    }
+
+    const db = getDbPg();
+    await db`
+      update public.runs
+      set status = 'completed', started_at = now(), finished_at = now()
+      where id = ${firstRun.id}::uuid
+    `;
+    await db`
+      insert into public.messages (
+        workspace_id, talk_id, round, author_kind, agent_snapshot_id, run_id, body
+      )
+      select workspace_id, talk_id, round, 'agent', agent_snapshot_id, id,
+             'PRIOR_AGENT_ANALYSIS_XYZ'
+      from public.runs
+      where id = ${firstRun.id}::uuid
+    `;
+
+    const result = await buildGreenfieldStepUserMessageText({
+      workspaceId,
+      talkId,
+      triggerContent: 'evaluate the doc',
+      talkMode: 'ordered',
+      responseGroupId: firstRun.response_group_id,
+      sequenceIndex: secondRun.sequence_index,
+    });
+
+    expect(result.userMessageText).toContain('evaluate the doc');
+    expect(result.userMessageText).toContain('PRIOR_AGENT_ANALYSIS_XYZ');
+    expect(result.isSynthesis).toBe(false);
+  });
+
+  it('does not inject prior ordered outputs from another talk with the same response group id', async () => {
+    const firstFixture = await createTalkFixture({
+      agentCount: 2,
+    });
+    const secondFixture = await createTalkFixture({
+      agentCount: 2,
+    });
+    const firstEnqueued = await enqueueGreenfieldChatTurn({
+      workspaceId: firstFixture.workspaceId,
+      talkId: firstFixture.talkId,
+      userId: USER_ID,
+      content: 'Analyze the first talk.',
+      targetAgentIds: firstFixture.agentIds,
+    });
+    if (!firstEnqueued.ok) {
+      throw new Error(`enqueue failed: ${firstEnqueued.reason}`);
+    }
+    const secondEnqueued = await enqueueGreenfieldChatTurn({
+      workspaceId: secondFixture.workspaceId,
+      talkId: secondFixture.talkId,
+      userId: USER_ID,
+      content: 'Analyze the second talk.',
+      targetAgentIds: secondFixture.agentIds,
+    });
+    if (!secondEnqueued.ok) {
+      throw new Error(`enqueue failed: ${secondEnqueued.reason}`);
+    }
+    const foreignFirstRun = firstEnqueued.runs[0]!;
+    const secondTalkSecondRun = secondEnqueued.runs[1]!;
+    if (
+      !foreignFirstRun.response_group_id ||
+      secondTalkSecondRun.sequence_index === null
+    ) {
+      throw new Error('ordered run fixture missing response group metadata');
+    }
+
+    const db = getDbPg();
+    await db`
+      update public.runs
+      set status = 'completed', started_at = now(), finished_at = now()
+      where id = ${foreignFirstRun.id}::uuid
+    `;
+    await db`
+      insert into public.messages (
+        workspace_id, talk_id, round, author_kind, agent_snapshot_id, run_id, body
+      )
+      select workspace_id, talk_id, round, 'agent', agent_snapshot_id, id,
+             'FOREIGN_TALK_PRIOR_OUTPUT'
+      from public.runs
+      where id = ${foreignFirstRun.id}::uuid
+    `;
+    await db`
+      update public.runs
+      set response_group_id = ${foreignFirstRun.response_group_id}
+      where id = ${secondTalkSecondRun.id}::uuid
+    `;
+
+    const result = await buildGreenfieldStepUserMessageText({
+      workspaceId: secondFixture.workspaceId,
+      talkId: secondFixture.talkId,
+      triggerContent: 'evaluate the second talk',
+      talkMode: 'ordered',
+      responseGroupId: foreignFirstRun.response_group_id,
+      sequenceIndex: secondTalkSecondRun.sequence_index,
+    });
+
+    expect(result.userMessageText).toBe('evaluate the second talk');
+    expect(result.userMessageText).not.toContain('FOREIGN_TALK_PRIOR_OUTPUT');
+    expect(result.isSynthesis).toBe(false);
+  });
+
+  it('marks the final greenfield ordered step as synthesis and surfaces gaps', async () => {
+    const { workspaceId, talkId, agentIds } = await createTalkFixture({
+      agentCount: 3,
+    });
+    const enqueued = await enqueueGreenfieldChatTurn({
+      workspaceId,
+      talkId,
+      userId: USER_ID,
+      content: 'Synthesize the round.',
+      targetAgentIds: agentIds,
+    });
+    if (!enqueued.ok) throw new Error(`enqueue failed: ${enqueued.reason}`);
+    const firstRun = enqueued.runs[0]!;
+    const secondRun = enqueued.runs[1]!;
+    const thirdRun = enqueued.runs[2]!;
+    if (!thirdRun.response_group_id || thirdRun.sequence_index === null) {
+      throw new Error('ordered run fixture missing response group metadata');
+    }
+
+    const db = getDbPg();
+    await db`
+      update public.runs
+      set status = 'failed', finished_at = now()
+      where id = ${firstRun.id}::uuid
+    `;
+    await db`
+      update public.runs
+      set status = 'completed', started_at = now(), finished_at = now()
+      where id = ${secondRun.id}::uuid
+    `;
+    await db`
+      insert into public.messages (
+        workspace_id, talk_id, round, author_kind, agent_snapshot_id, run_id, body
+      )
+      select workspace_id, talk_id, round, 'agent', agent_snapshot_id, id,
+             'SECOND_AGENT_TAKE'
+      from public.runs
+      where id = ${secondRun.id}::uuid
+    `;
+
+    const result = await buildGreenfieldStepUserMessageText({
+      workspaceId,
+      talkId,
+      triggerContent: 'synthesize the round',
+      talkMode: 'ordered',
+      responseGroupId: thirdRun.response_group_id,
+      sequenceIndex: thirdRun.sequence_index,
+    });
+
+    expect(result.isSynthesis).toBe(true);
+    expect(result.userMessageText).toContain('SECOND_AGENT_TAKE');
+    expect(result.userMessageText).toContain(
+      'Unavailable earlier ordered steps',
+    );
+  });
+
+  it('returns the bare trigger for the first greenfield ordered step', async () => {
+    const result = await buildGreenfieldStepUserMessageText({
+      workspaceId: '00000000-0000-4000-8000-000000000000',
+      talkId: '00000000-0000-4000-8000-000000000001',
+      triggerContent: 'first step content',
+      talkMode: 'ordered',
+      responseGroupId: 'text-response-group',
+      sequenceIndex: 0,
+    });
+
+    expect(result.userMessageText).toBe('first step content');
+    expect(result.isSynthesis).toBe(false);
   });
 
   it('injects prior ordered outputs before running a downstream synthesis step', async () => {

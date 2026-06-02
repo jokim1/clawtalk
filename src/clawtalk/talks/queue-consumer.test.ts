@@ -37,6 +37,7 @@ import {
   processDlqMessage,
   processTalkRunMessage,
 } from './queue-consumer.js';
+import { MAX_PROVIDER_REPLAY_BYTES } from './provider-replay-budget.js';
 import { ensureWorkspaceBootstrapForUser } from '../workspaces/bootstrap.js';
 
 const TEST_DB_URL = 'postgresql://postgres:postgres@127.0.0.1:54432/postgres';
@@ -294,6 +295,10 @@ describe('markGreenfieldRunRunning', () => {
     const events = await getOutboxEventsForTopics([`talk:${talkId}`], 0);
     const started = events.find((e) => e.event_type === 'talk_run_started');
     expect(started).toBeTruthy();
+    expect(started?.payload).toMatchObject({
+      providerId: result.run.provider_id,
+      executorModel: result.run.model_id,
+    });
   });
 
   it('returns terminal for completed runs', async () => {
@@ -393,7 +398,18 @@ describe('processTalkRunMessage', () => {
       await withNotifyQueueScope(env, ctx, () =>
         processTalkRunMessage({
           runId: runIds[0]!,
-          executor: makeMockExecutor({ output: { content: 'all done' } }),
+          executor: makeMockExecutor({
+            output: {
+              content: 'all done',
+              metadataJson: JSON.stringify({
+                providerId: 'provider.mismatched',
+                modelId: 'mismatched-model',
+                codexReasoningItems: [{ encrypted_content: 'ciphertext' }],
+              }),
+              providerId: 'provider.mismatched',
+              modelId: 'mismatched-model',
+            },
+          }),
           cancelPollIntervalMs: 50_000,
         }),
       );
@@ -404,28 +420,144 @@ describe('processTalkRunMessage', () => {
     expect(run?.status).toBe('completed');
 
     const db = getDbPg();
-    const messages = await db<{ author_kind: string; body: string | null }[]>`
-      select author_kind, body
-      from public.messages
-      where talk_id = ${talkId}::uuid
-      order by created_at asc
+    const messages = await db<
+      Array<{
+        author_kind: string;
+        body: string | null;
+        metadata_json: Record<string, unknown>;
+        provider_data: Record<string, unknown> | null;
+      }>
+    >`
+      select
+        m.author_kind,
+        m.body,
+        m.metadata_json,
+        mpr.provider_data_json as provider_data
+      from public.messages m
+      left join public.message_provider_replay mpr
+        on mpr.workspace_id = m.workspace_id
+       and mpr.talk_id = m.talk_id
+       and mpr.message_id = m.id
+      where m.talk_id = ${talkId}::uuid
+      order by m.created_at asc
     `;
     expect(messages).toMatchObject([
       { author_kind: 'user', body: 'trigger me' },
       { author_kind: 'agent', body: 'all done' },
     ]);
+    expect(messages[1]?.metadata_json).not.toHaveProperty(
+      'codexReasoningItems',
+    );
+    expect(messages[1]?.metadata_json).toMatchObject({
+      providerId: run!.provider_id,
+      modelId: run!.model_id,
+    });
+    expect(messages[1]?.metadata_json).not.toMatchObject({
+      providerId: 'provider.mismatched',
+      modelId: 'mismatched-model',
+    });
+    expect(messages[1]?.provider_data).toMatchObject({
+      codexReasoningItems: [{ encrypted_content: 'ciphertext' }],
+    });
 
     const events = await getOutboxEventsForTopics([`talk:${talkId}`], 0);
     const types = events.map((e) => e.event_type);
     expect(types).toContain('talk_run_started');
     expect(types).toContain('message_appended');
     expect(types).toContain('talk_run_completed');
+    const appended = events.find(
+      (event) =>
+        event.event_type === 'message_appended' &&
+        event.payload.runId === run!.id,
+    );
+    const appendedMetadata = appended?.payload.metadata;
+    expect(
+      Boolean(
+        appendedMetadata &&
+        typeof appendedMetadata === 'object' &&
+        'codexReasoningItems' in appendedMetadata,
+      ),
+    ).toBe(false);
+    expect(appendedMetadata).toMatchObject({
+      providerId: run!.provider_id,
+      modelId: run!.model_id,
+    });
+    const started = events.find(
+      (event) => event.event_type === 'talk_run_started',
+    );
+    expect(started?.payload).toMatchObject({
+      providerId: run!.provider_id,
+      executorModel: run!.model_id,
+    });
+    const completed = events.find(
+      (event) => event.event_type === 'talk_run_completed',
+    );
+    expect(completed?.payload).toMatchObject({
+      providerId: run!.provider_id,
+      executorModel: run!.model_id,
+    });
 
     expect(fetchCalls).toHaveLength(2);
     const startEntries = JSON.parse(fetchCalls[0]!.body).entries;
     const completionEntries = JSON.parse(fetchCalls[1]!.body).entries;
     expect(startEntries).toHaveLength(1);
     expect(completionEntries).toHaveLength(2);
+  });
+
+  it('drops over-budget provider replay while keeping the completed message client-safe', async () => {
+    const { runIds, talkId } = await setupRun();
+    const { ctx, drain } = makeMockCtx();
+    const { env } = makeMockEventHub();
+
+    await withRequestScopedDb(TEST_DB_URL, ctx, env, async () => {
+      await withNotifyQueueScope(env, ctx, () =>
+        processTalkRunMessage({
+          runId: runIds[0]!,
+          executor: makeMockExecutor({
+            output: {
+              content: 'large replay response',
+              metadataJson: JSON.stringify({
+                codexReasoningItems: [
+                  { encrypted_content: 'x'.repeat(MAX_PROVIDER_REPLAY_BYTES) },
+                ],
+              }),
+            },
+          }),
+          cancelPollIntervalMs: 50_000,
+        }),
+      );
+    });
+    await drain();
+
+    const db = getDbPg();
+    const messages = await db<
+      Array<{
+        body: string | null;
+        metadata_json: Record<string, unknown>;
+        provider_data: Record<string, unknown> | null;
+      }>
+    >`
+      select
+        m.body,
+        m.metadata_json,
+        mpr.provider_data_json as provider_data
+      from public.messages m
+      left join public.message_provider_replay mpr
+        on mpr.workspace_id = m.workspace_id
+       and mpr.talk_id = m.talk_id
+       and mpr.message_id = m.id
+      where m.talk_id = ${talkId}::uuid
+        and m.author_kind = 'agent'
+      order by m.created_at asc
+    `;
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toMatchObject({
+      body: 'large replay response',
+      provider_data: null,
+    });
+    expect(messages[0]?.metadata_json).not.toHaveProperty(
+      'codexReasoningItems',
+    );
   });
 
   it('flushes talk_run_started before executor completion', async () => {
@@ -710,6 +842,10 @@ describe('processDlqMessage', () => {
     expect((failed?.payload as { errorCode?: string }).errorCode).toBe(
       'dlq_exhausted',
     );
+    expect(failed?.payload).toMatchObject({
+      providerId: run!.provider_id,
+      executorModel: run!.model_id,
+    });
   });
 
   it('throws and preserves the run when DLQ outbox finalization fails', async () => {

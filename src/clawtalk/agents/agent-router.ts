@@ -128,11 +128,10 @@ export interface AgentExecutionResult {
     incompleteReason?: 'truncated' | 'empty' | 'unknown' | null;
   };
   /**
-   * Provider-specific blobs to persist on the assistant message
-   * (talk_messages.metadata_json) so the next turn can replay them.
-   * Currently used by the codex_responses path to carry forward
-   * encrypted reasoning items + assistant message items for
-   * prefix-cache + chain-of-thought continuity.
+   * Provider-specific blobs to persist in the trusted replay store so
+   * the next turn can replay them. Currently used by the codex_responses
+   * path to carry forward encrypted reasoning items + assistant message
+   * items for prefix-cache + chain-of-thought continuity.
    */
   providerData?: {
     codexReasoningItems?: Array<Record<string, unknown>>;
@@ -178,16 +177,12 @@ export interface AgentExecutionOptions {
 }
 
 export const ALWAYS_ALLOWED_CONTEXT_TOOLS = new Set([
-  'list_state',
   'read_source',
-  'read_attachment',
-  'read_state',
   // Content-feature edit tool — registered by context-loader only when
   // the Talk has an attached Content doc (`hasContent === true`). Never
   // appears in any tool family, so
   // without this allowlist it gets silently filtered out for every
-  // agent. Talk-internal context tools by category — always allowed
-  // alongside read_state / list_state.
+  // agent.
   'apply_content_edit',
 ]);
 
@@ -486,7 +481,7 @@ export async function executeWithResolvedAgent(
   let lastProviderStopReason: string | null = null;
   let usedToolIterationFallback = false;
   // Track the most recent turn's provider_data so the executor can
-  // persist it on the assistant talk_message. Only the FINAL turn's
+  // persist it in the trusted replay store. Only the FINAL turn's
   // codex items are kept (mid-loop tool-call turns get their reasoning
   // replaced on the next iteration anyway).
   let latestProviderData: AgentExecutionResult['providerData'] | undefined;

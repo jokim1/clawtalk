@@ -44,6 +44,17 @@ describe('extractSourceReferences', () => {
       expect(result.refs.sort()).toEqual(['S1', 'S10', 'S2']);
       expect(result.slugs).toEqual([]);
     });
+
+    it('matches raw UUID fallback refs and normalizes to lowercase', () => {
+      expect(
+        extractSourceReferences(
+          'read @0C333355-DDDD-DDDD-DDDD-DDDDDDDDD011 please',
+        ),
+      ).toEqual({
+        refs: ['0c333355-dddd-dddd-dddd-ddddddddd011'],
+        slugs: [],
+      });
+    });
   });
 
   describe('slug form (@<slug>)', () => {

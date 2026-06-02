@@ -359,6 +359,7 @@ function toRunApi(run: GreenfieldRunRecord): {
   cancelReason: string | null;
   executorAlias: string | null;
   executorModel: string | null;
+  providerId: string | null;
 } {
   const errorInfo =
     run.error_json && typeof run.error_json === 'object'
@@ -385,6 +386,7 @@ function toRunApi(run: GreenfieldRunRecord): {
     cancelReason: null,
     executorAlias: run.target_agent_name,
     executorModel: run.model_id,
+    providerId: run.provider_id,
   };
 }
 
@@ -401,6 +403,7 @@ function toSnapshotRunApi(run: GreenfieldRunRecord): {
   targetAgentId: string | null;
   executorAlias: string | null;
   executorModel: string | null;
+  providerId: string | null;
 } {
   return {
     id: run.id,
@@ -415,6 +418,7 @@ function toSnapshotRunApi(run: GreenfieldRunRecord): {
     targetAgentId: run.target_agent_id,
     executorAlias: run.target_agent_name,
     executorModel: run.model_id,
+    providerId: run.provider_id,
   };
 }
 

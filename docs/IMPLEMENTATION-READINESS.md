@@ -1,4 +1,4 @@
-> **Status:** live implementation bridge · **Date:** 2026-05-31
+> **Status:** live implementation bridge · **Date:** 2026-06-02
 > Orientation: [REFACTOR-OVERVIEW.md](./REFACTOR-OVERVIEW.md) · sequence: [05-build-plan.md](./05-build-plan.md) · schema: [11-data-model.md](./11-data-model.md)
 
 # ClawTalk Implementation Readiness
@@ -7,7 +7,7 @@ This is the live bridge between the greenfield docs and the codebase as it exist
 
 ## Verdict
 
-**Implementation is underway.** The cutover branch has committed the Phase 1 foundation plus the first backend greenfield runtime stack: workspace/talk route modules (`9f72e76`, `ff9b6d8`, `cac02ff`), queue consumer (`55c3d7e`), executor (`3863628`), scheduler sweeps (`c53df5a`), and the run-state hardening slice (`2363ee1`). The latest hardening slice keeps status updates, outbox rows, and notify delivery ownership aligned across queue, scheduler, DLQ, and in-process dispatch paths. The correct path remains a **greenfield application cutover on the existing Cloudflare/Supabase runtime**, not a dual-path incremental migration or a long chain of compatibility migrations.
+**Implementation is underway and currently paused at a review gate.** The cutover branch has committed the Phase 1 foundation plus the first backend greenfield runtime stack: workspace/talk route modules (`9f72e76`, `ff9b6d8`, `cac02ff`), queue consumer (`55c3d7e`), executor (`3863628`), scheduler sweeps (`c53df5a`), and the run-state hardening slice (`2363ee1`). The current uncommitted staged slice retires the remaining legacy context/runtime execution surface: provider replay moves to a private trusted table, runtime identity comes from `talk_agent_snapshots.provider_id/model_id`, source references use final `context_sources.id` with compatibility alias fallback, and the old `CleanTalkExecutor` fails closed. Local code verification is clean; the slice should not be committed until GStack Review is rerun after the Codex CLI quota resets. The correct path remains a **greenfield application cutover on the existing Cloudflare/Supabase runtime**, not a dual-path incremental migration or a long chain of compatibility migrations.
 
 That means:
 
@@ -54,6 +54,14 @@ Commands run from `/Users/josephkim/.codex/worktrees/381b/clawtalk`:
 | bundled Node 24 `scripts/run-vitest.mjs run src/clawtalk/workspaces/bootstrap.test.ts src/clawtalk/schema/greenfield-schema.test.ts` | Pass              | 2 files, 5 tests. Covers workspace bootstrap, role/team seed idempotency, legacy table absence, last-tab guard, run trigger shape, and home inbox dedup.                                                                                 |
 | bundled Node 24 `scripts/run-vitest.mjs run ...greenfield slice tests...`                                                            | Pass              | 14 files, 107 tests after `2363ee1`. Covers atomic outbox rollback, notify timing, ordered/parallel state-machine behavior, scheduler sweeps, bootstrap idempotency, executor prompt semantics, and worker DLQ ack/retry behavior.       |
 | bundled Node 24 `scripts/run-vitest.mjs run src/clawtalk/web/worker-app.test.ts src/clawtalk/web/routes/greenfield-*.test.ts`        | Pass              | 4 files, 20 tests after the greenfield API mount extraction. Confirms worker auth mounts and core/detail/chat route behavior still pass.                                                                                                 |
+| `CLAWTALK_ALLOW_UNSUPPORTED_NODE=1 npm run test -- src/clawtalk/web/routes/greenfield-jobs.test.ts`                                  | Pass              | 28 tests after the disabled non-target job-roster snapshot regression fix.                                                                                                                                                                |
+| `CLAWTALK_ALLOW_UNSUPPORTED_NODE=1 npm run test -- ...current staged slice suite...`                                                  | Pass              | 12 files, 199 tests. Covers provider replay scope/budget, fail-closed retired executor gate, queue consumer persistence privacy, greenfield executor replay/history behavior, context readiness, schema invariants, and route contracts.  |
+| `npm run typecheck`                                                                                                                  | Pass              | After the current staged runtime-retirement slice.                                                                                                                                                                                        |
+| `npm run build`                                                                                                                      | Pass              | After the current staged runtime-retirement slice.                                                                                                                                                                                        |
+| `git diff --cached --check`                                                                                                          | Pass              | Current staged slice has no whitespace diff errors.                                                                                                                                                                                       |
+| Claude Review                                                                                                                       | Pass              | Clean on 2026-06-02 compact staged-slice artifact.                                                                                                                                                                                       |
+| Karpathy diff review                                                                                                                | Partial pass      | Local Karpathy traceability review found no scope issue. The Codex CLI-backed attempt was blocked by usage quota.                                                                                                                        |
+| GStack Review                                                                                                                       | Blocked           | First run found one P2 in job snapshot creation; the code was fixed and verified. Required rerun is blocked by Codex CLI usage quota until 2026-06-07 08:23 America/Los_Angeles.                                                          |
 
 The backend test failure is useful audit evidence: the code and tests are already straddling incompatible schema worlds. This confirms the docs' cutover warning and argues against a prolonged dual-path migration.
 
@@ -95,6 +103,7 @@ Start with a refactor branch and proceed in this order:
    - Queue consumer keeps the proven atomic-claim shape but targets `runs`.
    - Committed hardening (`2363ee1`) already makes the run state machine safer: claim/complete/fail/DLQ transitions write outbox rows in the same transaction, notify fan-out happens post-commit, ordered/parallel sequencing is separated, and scheduler sweeps avoid promoting parallel siblings.
    - Executor reads prompt snapshots, `talk_tools`, connector authorization, and context through the new schema.
+   - Current staged slice retires legacy runtime/context leftovers: `new-executor.ts` keeps only shared tool/image helpers plus a fail-closed `CleanTalkExecutor`, message provider replay is private/server-only, and replay/historical context selection is scoped to the acting source agent + frozen provider/model.
 
 5. **Frontend shell and Talk rewrite**
    - Replace `TalkDetailPage.tsx` with feature modules: shell, roster/composer, run stream, context panel, tools/connectors panels, document pane.
@@ -129,11 +138,21 @@ These are documentation/project hygiene tasks, not product blockers:
 - Keep `docs/roadmap.md` focused on current implementation state.
 - Use the bundled Node 24 runtime or switch local shell to `.nvmrc` before backend tests.
 
+## Current Pause Point
+
+The active staged slice is **ready for final review, not implementation continuation**. It should be committed only after the required review loop completes:
+
+- Re-run GStack Review on the staged diff after the Codex CLI quota resets.
+- If GStack returns clean, commit the staged slice as `refactor: retire legacy context runtime`.
+- If GStack finds an issue, patch only that finding, rerun focused tests + `npm run typecheck` + `npm run build` + `git diff --cached --check`, then rerun Claude/GStack/Karpathy review gates before committing.
+
+Do not start frontend rewrite or the next backend slice until this staged slice is committed.
+
 ## Next Ready Signal
 
-The next implementation slice should retire the next set of legacy API collisions. It is ready to commit when:
+After the staged runtime-retirement slice is committed, the next implementation slice should begin the webapp/Talk rewrite against final greenfield APIs. It is ready to commit when:
 
-- One remaining collision family moves off legacy route/accessor contracts without widening the slice.
+- One UI/resource family moves off legacy route/accessor contracts without widening the slice.
 - Focused route/accessor tests cover auth/RLS behavior and happy/error paths for that resource family.
 - `worker-app.ts` continues shrinking or stays as mount-only glue for that family.
 - Node 24 typecheck, focused backend tests, gstack review, Karpathy diff review, and Claude review pass.

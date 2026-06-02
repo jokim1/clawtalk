@@ -403,6 +403,7 @@ describe('greenfield chat routes', () => {
     expect(result.body.data.runs[0]).toMatchObject({
       targetAgentId: agentIds[1],
       sequenceIndex: 0,
+      providerId: expect.any(String),
     });
   });
 

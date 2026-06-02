@@ -248,6 +248,7 @@ export interface GreenfieldJobRunSummary {
   cancelReason: string | null;
   executorAlias: string | null;
   executorModel: string | null;
+  providerId: string | null;
 }
 
 export type GreenfieldJobDependencyIssue = {
@@ -1633,6 +1634,7 @@ export async function listGreenfieldJobRuns(input: {
       finished_at: string | null;
       trigger_message_id: string | null;
       error_json: unknown;
+      provider_id: string;
       model_id: string;
       agent_name: string | null;
       response_content: string | null;
@@ -1646,7 +1648,8 @@ export async function listGreenfieldJobRuns(input: {
       r.finished_at,
       r.trigger_message_id,
       r.error_json,
-      r.model_id,
+      tas.provider_id,
+      tas.model_id,
       tas.name as agent_name,
       (
         select m.body
@@ -1687,6 +1690,7 @@ export async function listGreenfieldJobRuns(input: {
       cancelReason: null,
       executorAlias: row.agent_name,
       executorModel: row.model_id,
+      providerId: row.provider_id,
     };
   });
 }
@@ -2145,6 +2149,7 @@ async function claimDueGreenfieldJobRun(input: {
     await withTrustedDbWrites(async () => {
       const snapshotIds = new Map<string, string>();
       for (const agent of roster) {
+        if (!agent.provider_id) continue;
         const snapshotId = randomUUID();
         snapshotIds.set(agent.id, snapshotId);
         await txSql`
@@ -2160,6 +2165,7 @@ async function claimDueGreenfieldJobRun(input: {
           initials,
           accent,
           accent_dark,
+          provider_id,
           model_id,
           temperature,
           persona,
@@ -2180,6 +2186,7 @@ async function claimDueGreenfieldJobRun(input: {
           ${agent.initials},
           ${agent.accent},
           ${agent.accent_dark},
+          ${agent.provider_id},
           ${agent.model_id},
           ${agent.temperature},
           ${agent.persona},
@@ -2190,7 +2197,8 @@ async function claimDueGreenfieldJobRun(input: {
         )
       `;
       }
-      const targetSnapshotId = snapshotIds.get(target.id)!;
+      const targetSnapshotId = snapshotIds.get(target.id);
+      if (!targetSnapshotId) throw new Error('target_snapshot_missing');
       await txSql`
       insert into public.runs (
         id,
@@ -2299,6 +2307,7 @@ async function claimDueGreenfieldJobRun(input: {
         status: 'queued',
         executorAlias: target.name,
         executorModel: target.model_id,
+        providerId: target.provider_id,
         jobId: input.jobId,
       },
       ownerIds,
@@ -2555,6 +2564,7 @@ export async function createGreenfieldJobRunNow(input: {
       await withTrustedDbWrites(async () => {
         const snapshotIds = new Map<string, string>();
         for (const agent of roster) {
+          if (!agent.provider_id) continue;
           const snapshotId = randomUUID();
           snapshotIds.set(agent.id, snapshotId);
           await txSql`
@@ -2570,6 +2580,7 @@ export async function createGreenfieldJobRunNow(input: {
           initials,
           accent,
           accent_dark,
+          provider_id,
           model_id,
           temperature,
           persona,
@@ -2590,6 +2601,7 @@ export async function createGreenfieldJobRunNow(input: {
           ${agent.initials},
           ${agent.accent},
           ${agent.accent_dark},
+          ${agent.provider_id},
           ${agent.model_id},
           ${agent.temperature},
           ${agent.persona},
@@ -2600,7 +2612,8 @@ export async function createGreenfieldJobRunNow(input: {
         )
       `;
         }
-        const targetSnapshotId = snapshotIds.get(target.id)!;
+        const targetSnapshotId = snapshotIds.get(target.id);
+        if (!targetSnapshotId) throw new Error('target_snapshot_missing');
         await txSql`
       insert into public.runs (
         id,
@@ -2698,6 +2711,7 @@ export async function createGreenfieldJobRunNow(input: {
           status: 'queued',
           executorAlias: target.name,
           executorModel: target.model_id,
+          providerId: target.provider_id,
           jobId: input.jobId,
         },
         ownerIds,

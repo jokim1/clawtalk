@@ -42,6 +42,7 @@ export interface GreenfieldRunRecord {
   trigger_message_id: string | null;
   target_agent_id: string | null;
   target_agent_name: string | null;
+  provider_id: string;
   model_id: string;
   error_json: unknown;
 }
@@ -290,7 +291,8 @@ export async function listGreenfieldRuns(input: {
       r.trigger_message_id,
       tas.source_agent_id as target_agent_id,
       tas.name as target_agent_name,
-      r.model_id,
+      tas.provider_id,
+      tas.model_id,
       r.error_json
     from public.runs r
     join public.talk_agent_snapshots tas

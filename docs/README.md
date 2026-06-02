@@ -15,6 +15,7 @@ You're reading this because you're an AI coding agent (or engineer) about to wor
 | **[GLOSSARY.md](./GLOSSARY.md)** | Canonical terms + the shipped-DB-name ↔ spec-name mapping. Read it to avoid the vocabulary forks. |
 | **[SPEC-READINESS.md](./SPEC-READINESS.md)** | Gap-closure punch list with stable IDs (G-XX.PY.Z). Verdict + history. |
 | **[IMPLEMENTATION-READINESS.md](./IMPLEMENTATION-READINESS.md)** | Current audit of docs vs. source, verification results, and the cutover recommendation. Read this before starting code. |
+| **[IMPLEMENTATION-HANDOFF.md](./IMPLEMENTATION-HANDOFF.md)** | Current pause point, staged-slice verification, remaining review gate, and resume prompt. Read this before resuming implementation. |
 | **[DOC-AUDIT.md](./DOC-AUDIT.md)** | Historical 2026-05-28 audit behind the cleanup. Superseded for live readiness by IMPLEMENTATION-READINESS. |
 | **[roadmap.md](./roadmap.md)** | Live shipped/in-flight tracker for the refactor. |
 | **[engineering-notes.md](./engineering-notes.md)** | Durable engineering knowledge (architectural commitments, latency hotspots, eval gate). |

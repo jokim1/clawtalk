@@ -1,28 +1,17 @@
-// clawtalk Phase 5 (PR 2) — end-to-end test for agent-accessors-pg.
-//
-// Runs against a live local supabase stack (DB on 127.0.0.1:54432 — see
-// supabase/config.toml + reference_deploy.md). The schema must already be
-// applied via `supabase start` or `supabase db reset`.
-//
-// Test goal: prove the new postgres + RLS pattern works end-to-end before
-// the broader PR 2 fan-out (porting the other 5 accessor files +
-// rewiring every call site). The cross-user assertion at the bottom is
-// the load-bearing security gate — RLS must filter user B out of user A's
-// rows, even with the same Hyperdrive-pooled connection underneath.
-//
-// Setup mirrors editorialroom's rls-multi-user.test.ts pattern: seed two
-// auth.users (postgres role bypasses RLS), use distinct UUIDs that won't
-// collide with the dev fixture (00000000-...), and CASCADE-delete in
-// afterAll so consecutive runs start clean.
-
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
 import {
   closePgDatabase,
+  deleteAuthUsers,
   getDbPg,
   initPgDatabase,
+  purgeUserData,
+  seedAuthUser,
+  seedLlmProvider,
+  seedTalk,
   withUserContext,
-} from '../../db.js';
+} from './test-helpers.js';
+import { ensureWorkspaceBootstrapForUser } from '../workspaces/bootstrap.js';
 import {
   autoUpgradeAgentModel,
   autoUpgradeAgentModelOutsideTx,
@@ -43,78 +32,37 @@ import {
   upsertUserToolPermission,
 } from './agent-accessors.js';
 
-const USER_A_ID = '0c111111-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
-const USER_B_ID = '0c111111-bbbb-bbbb-bbbb-bbbbbbbbbbbb';
+const USER_ID = '0c111111-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
+const OTHER_USER_ID = '0c111111-bbbb-bbbb-bbbb-bbbbbbbbbbbb';
+const TALK_ID = '0c111111-cccc-cccc-cccc-cccccccccccc';
 const FALLBACK_PROVIDER_ID = 'test.fallback-provider';
 const FALLBACK_MODEL_ID = 'test.fallback-model';
 
-async function seedAuthUser(
-  id: string,
-  email: string,
-  displayName: string,
-): Promise<void> {
-  const db = getDbPg();
-  await db`
-    insert into auth.users (id, email, raw_user_meta_data)
-    values (
-      ${id}::uuid,
-      ${email}::text,
-      jsonb_build_object('full_name', ${displayName}::text)
-    )
-    on conflict (id) do nothing
-  `;
-}
-
-async function seedFallbackProvider(): Promise<void> {
-  const db = getDbPg();
-  // agent_fallback_steps.provider_id has FK to llm_providers(id) and the
-  // (provider_id, model_id) pair has FK to llm_provider_models. Both rows
-  // must exist before setFallbackSteps can insert.
-  await db`
-    insert into public.llm_providers (id, name, provider_kind, api_format, base_url, auth_scheme)
-    values (${FALLBACK_PROVIDER_ID}, 'Test Fallback Provider', 'custom', 'openai_chat_completions', 'mock://fallback', 'bearer')
-    on conflict (id) do nothing
-  `;
-  await db`
-    insert into public.llm_provider_models
-      (provider_id, model_id, display_name, context_window_tokens, default_max_output_tokens)
-    values
-      (${FALLBACK_PROVIDER_ID}, ${FALLBACK_MODEL_ID}, 'Test Fallback Model', 32000, 2048)
-    on conflict (provider_id, model_id) do nothing
-  `;
-}
-
-async function purgeOwnerRows(): Promise<void> {
-  // Cleanup runs as postgres role (BYPASSRLS). Deletes cascade from
-  // registered_agents → agent_fallback_steps and talk_agents (set null).
-  const db = getDbPg();
-  await db`
-    delete from public.registered_agents
-    where owner_id in (${USER_A_ID}::uuid, ${USER_B_ID}::uuid)
-  `;
-  await db`
-    delete from public.user_tool_permissions
-    where user_id in (${USER_A_ID}::uuid, ${USER_B_ID}::uuid)
-  `;
-}
-
-describe('agent-accessors-pg (postgres + RLS)', () => {
+describe('agent-accessors greenfield compatibility', () => {
   beforeAll(async () => {
     await initPgDatabase();
-    await seedAuthUser(USER_A_ID, 'rls-a@clawtalk.local', 'RLS User A');
-    await seedAuthUser(USER_B_ID, 'rls-b@clawtalk.local', 'RLS User B');
-    await seedFallbackProvider();
+    await seedAuthUser({
+      id: USER_ID,
+      email: 'agent-accessors@clawtalk.local',
+    });
+    await seedAuthUser({
+      id: OTHER_USER_ID,
+      email: 'agent-accessors-other@clawtalk.local',
+    });
+    await seedLlmProvider({
+      id: FALLBACK_PROVIDER_ID,
+      modelId: FALLBACK_MODEL_ID,
+      displayName: 'Test Fallback Provider',
+    });
+  });
+
+  beforeEach(async () => {
+    await purgeUserData([USER_ID, OTHER_USER_ID]);
   });
 
   afterAll(async () => {
     const db = getDbPg();
-    // Drop test users + provider so consecutive runs start clean. Users
-    // cascade to public.users → registered_agents → agent_fallback_steps,
-    // talk_*, etc.
-    await db`
-      delete from auth.users
-      where id in (${USER_A_ID}::uuid, ${USER_B_ID}::uuid)
-    `;
+    await purgeUserData([USER_ID, OTHER_USER_ID]);
     await db`
       delete from public.llm_provider_models
       where provider_id = ${FALLBACK_PROVIDER_ID}
@@ -123,99 +71,108 @@ describe('agent-accessors-pg (postgres + RLS)', () => {
       delete from public.llm_providers
       where id = ${FALLBACK_PROVIDER_ID}
     `;
+    await deleteAuthUsers([USER_ID, OTHER_USER_ID]);
     await closePgDatabase();
   });
 
-  beforeEach(async () => {
-    await purgeOwnerRows();
-  });
+  it('creates workspace agents in final public.agents while preserving the compatibility record shape', async () => {
+    const workspaceId = await ensureWorkspaceBootstrapForUser(USER_ID);
 
-  it('schema preconditions: RLS enabled + policies present on agent tables', async () => {
-    const db = getDbPg();
-    const rows = await db<{ relname: string; relrowsecurity: boolean }[]>`
-      select c.relname, c.relrowsecurity
-      from pg_class c
-      join pg_namespace n on n.oid = c.relnamespace
-      where n.nspname = 'public'
-        and c.relname in ('registered_agents', 'agent_fallback_steps', 'user_tool_permissions')
-    `;
-    expect(rows.length).toBe(3);
-    for (const row of rows) {
-      expect(row.relrowsecurity).toBe(true);
-    }
-    const policies = await db<{ tablename: string; policyname: string }[]>`
-      select tablename, policyname
-      from pg_policies
-      where schemaname = 'public'
-        and tablename in ('registered_agents', 'agent_fallback_steps', 'user_tool_permissions')
-    `;
-    const tablesWithPolicy = new Set(policies.map((p) => p.tablename));
-    expect(tablesWithPolicy.has('registered_agents')).toBe(true);
-    expect(tablesWithPolicy.has('agent_fallback_steps')).toBe(true);
-    expect(tablesWithPolicy.has('user_tool_permissions')).toBe(true);
-  });
-
-  it('createRegisteredAgent stamps owner_id and returns the inserted row', async () => {
-    const agent = await withUserContext(USER_A_ID, async () => {
-      return await createRegisteredAgent({
-        ownerId: USER_A_ID,
-        name: 'Growth Analyst',
+    const agent = await withUserContext(USER_ID, () =>
+      createRegisteredAgent({
+        ownerId: USER_ID,
+        workspaceId,
+        name: 'Research Analyst',
         providerId: 'provider.anthropic',
         modelId: 'claude-opus-4-7',
-        systemPrompt: 'Analyze trends.',
-      });
+        personaRole: 'researcher',
+      }),
+    );
+
+    expect(agent).toMatchObject({
+      owner_id: USER_ID,
+      name: 'Research Analyst',
+      provider_id: 'provider.anthropic',
+      model_id: 'claude-opus-4-7',
+      persona_role: 'researcher',
+      enabled: true,
     });
-    expect(agent.owner_id).toBe(USER_A_ID);
-    expect(agent.name).toBe('Growth Analyst');
-    expect(agent.enabled).toBe(true);
+
+    const rows = await getDbPg()<
+      Array<{ workspace_id: string; role_key: string; is_custom: boolean }>
+    >`
+      select workspace_id::text as workspace_id, role_key, is_custom
+      from public.agents
+      where id = ${agent.id}::uuid
+    `;
+    expect(rows[0]).toEqual({
+      workspace_id: workspaceId,
+      role_key: 'researcher',
+      is_custom: true,
+    });
   });
 
-  it('round-trips create → get → list → updates → delete inside withUserContext', async () => {
-    const created = await withUserContext(USER_A_ID, async () => {
+  it('round-trips active CRUD, list, snapshot, and delete accessors', async () => {
+    const workspaceId = await ensureWorkspaceBootstrapForUser(USER_ID);
+
+    await withUserContext(USER_ID, async () => {
       const agent = await createRegisteredAgent({
-        ownerId: USER_A_ID,
-        name: 'Researcher',
+        ownerId: USER_ID,
+        workspaceId,
+        name: 'Lifecycle Analyst',
         providerId: 'provider.anthropic',
-        modelId: 'claude-haiku-4-5',
+        modelId: 'claude-opus-4-7',
         personaRole: 'researcher',
+        systemPrompt: 'Analyze trends.',
         description: 'Cites sources for every claim.',
       });
 
-      const fetched = await getRegisteredAgent(agent.id);
-      expect(fetched?.id).toBe(agent.id);
+      expect((await getRegisteredAgent(agent.id, workspaceId))?.id).toBe(
+        agent.id,
+      );
+      expect((await getRegisteredAgentSnapshot(agent.id))?.personaRole).toBe(
+        'researcher',
+      );
+      expect(
+        (await listRegisteredAgents(workspaceId)).map((item) => item.id),
+      ).toContain(agent.id);
+      expect((await listEnabledAgents()).map((item) => item.id)).toContain(
+        agent.id,
+      );
 
-      const snapshot = await getRegisteredAgentSnapshot(agent.id);
-      expect(snapshot?.personaRole).toBe('researcher');
-
-      const list = await listRegisteredAgents();
-      expect(list.map((a) => a.id)).toContain(agent.id);
-
-      const enabled = await listEnabledAgents();
-      expect(enabled.map((a) => a.id)).toContain(agent.id);
-
-      const updated = await updateRegisteredAgent(agent.id, {
-        name: 'Researcher (renamed)',
+      const updated = await updateRegisteredAgent(
+        agent.id,
+        {
+          name: 'Lifecycle Analyst Renamed',
+          description: null,
+          enabled: false,
+        },
+        workspaceId,
+      );
+      expect(updated).toMatchObject({
+        id: agent.id,
+        name: 'Lifecycle Analyst Renamed',
         description: null,
+        enabled: false,
       });
-      expect(updated?.name).toBe('Researcher (renamed)');
-      expect(updated?.description).toBeNull();
+      expect((await listEnabledAgents()).map((item) => item.id)).not.toContain(
+        agent.id,
+      );
 
-      return agent;
-    });
-
-    await withUserContext(USER_A_ID, async () => {
-      const deleted = await deleteRegisteredAgent(created.id);
-      expect(deleted).toBe(true);
-      const after = await getRegisteredAgent(created.id);
-      expect(after).toBeUndefined();
+      expect(await deleteRegisteredAgent(agent.id, workspaceId)).toBe(true);
+      expect(await getRegisteredAgent(agent.id, workspaceId)).toBeUndefined();
+      expect(await deleteRegisteredAgent(agent.id, workspaceId)).toBe(false);
     });
   });
 
-  it('autoUpgradeAgentModel swaps the model, records the trail, and is guarded on the old model', async () => {
-    await withUserContext(USER_A_ID, async () => {
+  it('tracks and clears model auto-upgrade notices', async () => {
+    const workspaceId = await ensureWorkspaceBootstrapForUser(USER_ID);
+
+    await withUserContext(USER_ID, async () => {
       const agent = await createRegisteredAgent({
-        ownerId: USER_A_ID,
-        name: 'Lifecycle',
+        ownerId: USER_ID,
+        workspaceId,
+        name: 'Upgrade Analyst',
         providerId: 'provider.anthropic',
         modelId: 'claude-opus-4-7',
       });
@@ -225,50 +182,54 @@ describe('agent-accessors-pg (postgres + RLS)', () => {
         'claude-opus-4-7',
         'claude-opus-4-8',
       );
-      expect(upgraded?.model_id).toBe('claude-opus-4-8');
-      expect(upgraded?.model_auto_upgraded_from).toBe('claude-opus-4-7');
+      expect(upgraded).toMatchObject({
+        id: agent.id,
+        model_id: 'claude-opus-4-8',
+        model_auto_upgraded_from: 'claude-opus-4-7',
+      });
       expect(upgraded?.model_auto_upgraded_at).toBeTruthy();
 
-      // Guard: a stale fromModel (model already moved on) is a no-op.
-      const noop = await autoUpgradeAgentModel(
-        agent.id,
-        'claude-opus-4-7',
-        'claude-opus-4-8',
+      expect(
+        await autoUpgradeAgentModel(
+          agent.id,
+          'claude-opus-4-7',
+          'claude-opus-4-8',
+        ),
+      ).toBeUndefined();
+      expect(await clearAgentModelUpgradeNotice(agent.id, workspaceId)).toBe(
+        true,
       );
-      expect(noop).toBeUndefined();
-
-      // A deliberate model change clears the auto-upgrade badge.
-      const manual = await updateRegisteredAgent(agent.id, {
-        modelId: 'claude-sonnet-4-6',
-      });
-      expect(manual?.model_auto_upgraded_from).toBeNull();
-      expect(manual?.model_auto_upgraded_at).toBeNull();
+      expect(
+        (await getRegisteredAgent(agent.id, workspaceId))
+          ?.model_auto_upgraded_from,
+      ).toBeNull();
+      expect(await clearAgentModelUpgradeNotice(agent.id, workspaceId)).toBe(
+        false,
+      );
     });
   });
 
-  it('autoUpgradeAgentModelOutsideTx swaps + records the trail on a committed agent, guarded on the old model', async () => {
-    // Create + COMMIT the agent in its own user-context tx first: the
-    // out-of-band path runs on a separate auto-commit connection, so it must
-    // not depend on an open transaction's uncommitted rows.
-    const agentId = await withUserContext(USER_A_ID, async () => {
+  it('auto-upgrades committed agents outside the request transaction', async () => {
+    const workspaceId = await ensureWorkspaceBootstrapForUser(USER_ID);
+    const agentId = await withUserContext(USER_ID, async () => {
       const agent = await createRegisteredAgent({
-        ownerId: USER_A_ID,
-        name: 'OOB Lifecycle',
+        ownerId: USER_ID,
+        workspaceId,
+        name: 'Out-of-band Upgrade Analyst',
         providerId: 'provider.anthropic',
         modelId: 'claude-opus-4-7',
       });
       return agent.id;
     });
 
-    // A provider that no longer matches (concurrent provider switch) is a
-    // no-op — never clobber a Claude model onto a repointed agent.
-    const wrongProvider = await autoUpgradeAgentModelOutsideTx(
-      agentId,
-      'provider.openai',
-      'claude-opus-4-7',
-      'claude-opus-4-8',
-    );
-    expect(wrongProvider).toBeUndefined();
+    expect(
+      await autoUpgradeAgentModelOutsideTx(
+        agentId,
+        'provider.openai',
+        'claude-opus-4-7',
+        'claude-opus-4-8',
+      ),
+    ).toBeUndefined();
 
     const upgraded = await autoUpgradeAgentModelOutsideTx(
       agentId,
@@ -276,404 +237,259 @@ describe('agent-accessors-pg (postgres + RLS)', () => {
       'claude-opus-4-7',
       'claude-opus-4-8',
     );
-    expect(upgraded?.model_id).toBe('claude-opus-4-8');
-    expect(upgraded?.model_auto_upgraded_from).toBe('claude-opus-4-7');
+    expect(upgraded).toMatchObject({
+      id: agentId,
+      model_id: 'claude-opus-4-8',
+      model_auto_upgraded_from: 'claude-opus-4-7',
+    });
     expect(upgraded?.model_auto_upgraded_at).toBeTruthy();
 
-    // Guard: a stale fromModel (lost the race) is a no-op, returns undefined.
-    const noop = await autoUpgradeAgentModelOutsideTx(
-      agentId,
-      'provider.anthropic',
-      'claude-opus-4-7',
-      'claude-opus-4-8',
-    );
-    expect(noop).toBeUndefined();
+    expect(
+      await autoUpgradeAgentModelOutsideTx(
+        agentId,
+        'provider.anthropic',
+        'claude-opus-4-7',
+        'claude-opus-4-8',
+      ),
+    ).toBeUndefined();
 
-    // The swap is visible to a normal RLS-scoped read.
-    const persisted = await withUserContext(USER_A_ID, () =>
-      getRegisteredAgent(agentId),
+    const persisted = await withUserContext(USER_ID, () =>
+      getRegisteredAgent(agentId, workspaceId),
     );
     expect(persisted?.model_id).toBe('claude-opus-4-8');
   });
 
-  it('clearAgentModelUpgradeNotice dismisses the badge without touching the model', async () => {
-    await withUserContext(USER_A_ID, async () => {
-      const agent = await createRegisteredAgent({
-        ownerId: USER_A_ID,
-        name: 'Dismiss',
+  it('treats retired fallback-step reads as empty and writes as unavailable', async () => {
+    const workspaceId = await ensureWorkspaceBootstrapForUser(USER_ID);
+    const agent = await withUserContext(USER_ID, () =>
+      createRegisteredAgent({
+        ownerId: USER_ID,
+        workspaceId,
+        name: 'Fallback Analyst',
         providerId: 'provider.anthropic',
         modelId: 'claude-opus-4-7',
-      });
-      await autoUpgradeAgentModel(
-        agent.id,
-        'claude-opus-4-7',
-        'claude-opus-4-8',
-      );
+      }),
+    );
 
-      expect(await clearAgentModelUpgradeNotice(agent.id)).toBe(true);
-      const after = await getRegisteredAgent(agent.id);
-      expect(after?.model_id).toBe('claude-opus-4-8'); // model untouched
-      expect(after?.model_auto_upgraded_from).toBeNull();
-      // Nothing left to clear → no-op.
-      expect(await clearAgentModelUpgradeNotice(agent.id)).toBe(false);
+    await withUserContext(USER_ID, async () => {
+      expect(await getFallbackSteps(agent.id)).toEqual([]);
+      await expect(
+        setFallbackSteps({
+          ownerId: USER_ID,
+          agentId: agent.id,
+          steps: [
+            { providerId: FALLBACK_PROVIDER_ID, modelId: FALLBACK_MODEL_ID },
+          ],
+        }),
+      ).rejects.toThrow('legacy_agent_fallback_steps_not_available');
+      expect(await getFallbackSteps(agent.id)).toEqual([]);
     });
   });
 
-  it('fallback steps round-trip per agent', async () => {
-    await withUserContext(USER_A_ID, async () => {
-      const agent = await createRegisteredAgent({
-        ownerId: USER_A_ID,
-        name: 'With Fallbacks',
-        providerId: 'provider.anthropic',
-        modelId: 'claude-opus-4-7',
+  it('upserts and lists user tool permissions under caller RLS', async () => {
+    await withUserContext(USER_ID, async () => {
+      await upsertUserToolPermission({
+        userId: USER_ID,
+        toolId: 'web_search',
+        allowed: false,
+        requiresApproval: true,
       });
-      expect(await getFallbackSteps(agent.id)).toEqual([]);
+      expect(await getUserToolPermission('web_search')).toEqual({
+        toolId: 'web_search',
+        allowed: false,
+        requiresApproval: true,
+      });
 
-      await setFallbackSteps({
-        ownerId: USER_A_ID,
-        agentId: agent.id,
-        steps: [
-          { providerId: FALLBACK_PROVIDER_ID, modelId: FALLBACK_MODEL_ID },
-        ],
+      await upsertUserToolPermission({
+        userId: USER_ID,
+        toolId: 'web_search',
+        allowed: true,
+        requiresApproval: false,
       });
-      const steps = await getFallbackSteps(agent.id);
-      expect(steps).toEqual([
+      expect(await listUserToolPermissions()).toEqual([
         {
-          position: 1,
-          providerId: FALLBACK_PROVIDER_ID,
-          modelId: FALLBACK_MODEL_ID,
+          toolId: 'web_search',
+          allowed: true,
+          requiresApproval: false,
         },
       ]);
+    });
 
-      // Replacement: setFallbackSteps([]) clears.
-      await setFallbackSteps({
-        ownerId: USER_A_ID,
-        agentId: agent.id,
-        steps: [],
+    await withUserContext(OTHER_USER_ID, async () => {
+      await upsertUserToolPermission({
+        userId: OTHER_USER_ID,
+        toolId: 'gmail_read',
+        allowed: false,
+        requiresApproval: false,
       });
-      expect(await getFallbackSteps(agent.id)).toEqual([]);
+      expect(
+        (await listUserToolPermissions()).map((item) => item.toolId),
+      ).toEqual(['gmail_read']);
+    });
+
+    await withUserContext(USER_ID, async () => {
+      expect(
+        (await listUserToolPermissions()).map((item) => item.toolId),
+      ).toEqual(['web_search']);
     });
   });
 
-  it('user_tool_permissions upsert + read', async () => {
-    await withUserContext(USER_A_ID, async () => {
-      await upsertUserToolPermission({
-        userId: USER_A_ID,
-        toolId: 'Bash',
-        allowed: false,
-        requiresApproval: true,
-      });
-      const got = await getUserToolPermission('Bash');
-      expect(got).toEqual({
-        toolId: 'Bash',
-        allowed: false,
-        requiresApproval: true,
-      });
-
-      // Upsert again — should overwrite, not duplicate.
-      await upsertUserToolPermission({
-        userId: USER_A_ID,
-        toolId: 'Bash',
-        allowed: true,
-        requiresApproval: false,
-      });
-      const all = await listUserToolPermissions();
-      expect(all.length).toBe(1);
-      expect(all[0]).toEqual({
-        toolId: 'Bash',
-        allowed: true,
-        requiresApproval: false,
-      });
-    });
-  });
-
-  it('getEffectiveToolsForAgent: light families on, user denial wins, heavy off', async () => {
-    await withUserContext(USER_A_ID, async () => {
-      const agent = await createRegisteredAgent({
-        ownerId: USER_A_ID,
-        name: 'Tool Composer',
+  it('enforces cross-user RLS isolation for greenfield public.agents', async () => {
+    const workspaceId = await ensureWorkspaceBootstrapForUser(USER_ID);
+    const otherWorkspaceId =
+      await ensureWorkspaceBootstrapForUser(OTHER_USER_ID);
+    const agent = await withUserContext(USER_ID, () =>
+      createRegisteredAgent({
+        ownerId: USER_ID,
+        workspaceId,
+        name: 'Private Analyst',
         providerId: 'provider.anthropic',
         modelId: 'claude-opus-4-7',
-      });
-      await upsertUserToolPermission({
-        userId: USER_A_ID,
-        toolId: 'web_fetch',
-        allowed: false,
-        requiresApproval: false,
-      });
+      }),
+    );
 
-      // No talkId → settings-side view: light families resolve to the
-      // user-permission gate only (no per-agent layer anymore).
-      const eff = await getEffectiveToolsForAgent(agent.id);
-      // Sanity: every family in the catalog shows up.
-      expect(eff.length).toBe(Object.keys(TOOL_FAMILY_MAP).length);
+    await withUserContext(OTHER_USER_ID, async () => {
+      expect(await getRegisteredAgent(agent.id, workspaceId)).toBeUndefined();
+      expect(
+        (await listRegisteredAgents(workspaceId)).map((item) => item.id),
+      ).not.toContain(agent.id);
 
-      const web = eff.find((e) => e.toolFamily === 'web');
-      // Light family, but the user denies web_fetch — overall disabled.
-      expect(web?.enabled).toBe(false);
+      const visibleRows = await getDbPg()<Array<{ id: string }>>`
+        select id::text as id
+        from public.agents
+        where id = ${agent.id}::uuid
+      `;
+      expect(visibleRows).toEqual([]);
 
-      const gmailRead = eff.find((e) => e.toolFamily === 'gmail_read');
-      expect(gmailRead?.enabled).toBe(true);
-      expect(gmailRead?.runtimeTools).toContain('gmail_read');
-
-      const shell = eff.find((e) => e.toolFamily === 'shell');
-      expect(shell?.enabled).toBe(false); // heavy family — never enabled
-    });
-  });
-
-  it('RLS gate: user B cannot see user A registered_agents', async () => {
-    const agentA = await withUserContext(USER_A_ID, async () => {
-      return await createRegisteredAgent({
-        ownerId: USER_A_ID,
-        name: 'A-only',
-        providerId: 'provider.anthropic',
-        modelId: 'claude-opus-4-7',
-      });
+      const updated = await updateRegisteredAgent(
+        agent.id,
+        { name: 'Cross-user overwrite' },
+        workspaceId,
+      );
+      expect(updated).toBeUndefined();
     });
 
-    await withUserContext(USER_B_ID, async () => {
-      const list = await listRegisteredAgents();
-      expect(list.find((a) => a.id === agentA.id)).toBeUndefined();
-      const direct = await getRegisteredAgent(agentA.id);
-      expect(direct).toBeUndefined();
-    });
-
-    // Sanity: user A still sees their own row.
-    await withUserContext(USER_A_ID, async () => {
-      const direct = await getRegisteredAgent(agentA.id);
-      expect(direct?.id).toBe(agentA.id);
-    });
-  });
-
-  it('RLS gate: user B INSERT with ownerId=USER_A is rejected by WITH CHECK', async () => {
     await expect(
-      withUserContext(USER_B_ID, async () => {
-        await createRegisteredAgent({
-          ownerId: USER_A_ID,
-          name: 'attempted cross-user',
+      withUserContext(OTHER_USER_ID, () =>
+        createRegisteredAgent({
+          ownerId: USER_ID,
+          workspaceId,
+          name: 'Foreign Workspace Agent',
           providerId: 'provider.anthropic',
           modelId: 'claude-opus-4-7',
-        });
-      }),
+        }),
+      ),
     ).rejects.toThrow();
-  });
 
-  it('RLS gate: user B UPDATE on user A row reports zero affected (USING filter)', async () => {
-    const agentA = await withUserContext(USER_A_ID, async () => {
-      return await createRegisteredAgent({
-        ownerId: USER_A_ID,
-        name: 'A-only-update-target',
-        providerId: 'provider.anthropic',
-        modelId: 'claude-opus-4-7',
-      });
-    });
-
-    // updateRegisteredAgent inside user B's context — RLS USING filters
-    // out the row, so the UPDATE matches zero rows and returns undefined.
-    const updated = await withUserContext(USER_B_ID, async () => {
-      return await updateRegisteredAgent(agentA.id, { name: 'hijack' });
-    });
-    expect(updated).toBeUndefined();
-
-    // Verify A's row is unchanged.
-    await withUserContext(USER_A_ID, async () => {
-      const refetched = await getRegisteredAgent(agentA.id);
-      expect(refetched?.name).toBe('A-only-update-target');
-    });
-  });
-});
-
-// ----------------------------------------------------------------------------
-// getEffectiveToolsForAgent — talk-aware behavior
-//
-// Tools are a property of the Talk only. The effective set is
-// talk_active ∩ (family is light) ∩ user_permission — there is no per-agent
-// layer. The ALWAYS_ALLOWED bypass (agent-router.ts) is applied DOWNSTREAM of
-// the family-level enabled flag this function returns — never inside this fn.
-// ----------------------------------------------------------------------------
-
-const TALK_A_ID_AGENT = '0c111111-cccc-cccc-cccc-ccccccccc001';
-
-describe('getEffectiveToolsForAgent talk-aware (migration 0031)', () => {
-  beforeAll(async () => {
-    await initPgDatabase();
-    await seedAuthUser(USER_A_ID, 'rls-a@clawtalk.local', 'RLS User A');
-  });
-
-  afterAll(async () => {
-    const db = getDbPg();
-    await db`delete from public.talks where id = ${TALK_A_ID_AGENT}::uuid`;
-    await db`delete from auth.users where id = ${USER_A_ID}::uuid`;
-    await closePgDatabase();
-  });
-
-  beforeEach(async () => {
-    const db = getDbPg();
-    await purgeOwnerRows();
-    await db`delete from public.talks where id = ${TALK_A_ID_AGENT}::uuid`;
-    await db`
-      insert into public.talks (id, owner_id, topic_title, active_tool_families_json)
-      values (${TALK_A_ID_AGENT}::uuid, ${USER_A_ID}::uuid, 'Talk for tool-filter',
-              '{}'::jsonb)
-    `;
-  });
-
-  async function setActive(active: Record<string, boolean>): Promise<void> {
-    const db = getDbPg();
-    await db`
-      update public.talks
-      set active_tool_families_json = ${db.json(active as never)}
-      where id = ${TALK_A_ID_AGENT}::uuid
-    `;
-  }
-
-  it('no opts (settings-side) → light families on, heavy off', async () => {
-    await withUserContext(USER_A_ID, async () => {
-      const agent = await createRegisteredAgent({
-        ownerId: USER_A_ID,
-        name: 'Researcher',
-        providerId: 'provider.anthropic',
-        modelId: 'claude-opus-4-7',
-      });
-
-      // Omitting talkId leaves the talk intersection inactive, so light
-      // families resolve to the user-permission gate (here: all allowed).
-      const eff = await getEffectiveToolsForAgent(agent.id);
-      expect(eff.find((e) => e.toolFamily === 'web')?.enabled).toBe(true);
-      expect(eff.find((e) => e.toolFamily === 'gmail_read')?.enabled).toBe(
-        true,
-      );
-      // Heavy families are never enabled, even settings-side.
-      expect(eff.find((e) => e.toolFamily === 'shell')?.enabled).toBe(false);
+    await expect(
+      withUserContext(OTHER_USER_ID, () =>
+        createRegisteredAgent({
+          ownerId: OTHER_USER_ID,
+          workspaceId: otherWorkspaceId,
+          name: 'Own Workspace Agent',
+          providerId: 'provider.anthropic',
+          modelId: 'claude-opus-4-7',
+        }),
+      ),
+    ).resolves.toMatchObject({
+      owner_id: OTHER_USER_ID,
+      name: 'Own Workspace Agent',
     });
   });
 
-  it('talk-active {web:true} enables web for a non-Claude provider (provider-agnostic)', async () => {
-    await withUserContext(USER_A_ID, async () => {
-      const agent = await createRegisteredAgent({
-        ownerId: USER_A_ID,
-        name: 'NVIDIA agent',
+  it('resolves effective tools from greenfield talk_tools rows', async () => {
+    const workspaceId = await ensureWorkspaceBootstrapForUser(USER_ID);
+    await seedTalk({ ownerId: USER_ID, talkId: TALK_ID });
+    const agent = await withUserContext(USER_ID, () =>
+      createRegisteredAgent({
+        ownerId: USER_ID,
+        workspaceId,
+        name: 'Tool Agent',
         providerId: 'provider.nvidia',
-        modelId: 'moonshotai/kimi-k2-instruct',
-      });
-      await setActive({ web: true });
+        modelId: 'moonshotai/kimi-k2.6',
+      }),
+    );
 
-      const eff = await getEffectiveToolsForAgent(agent.id, {
-        talkId: TALK_A_ID_AGENT,
-      });
-      expect(eff.find((e) => e.toolFamily === 'web')?.enabled).toBe(true);
+    await getDbPg()`
+      insert into public.talk_tools (workspace_id, talk_id, tool_id, enabled)
+      values
+        (${workspaceId}::uuid, ${TALK_ID}::uuid, 'web-search', true),
+        (${workspaceId}::uuid, ${TALK_ID}::uuid, 'web-fetch', true),
+        (${workspaceId}::uuid, ${TALK_ID}::uuid, 'gdrive-read', false),
+        (${workspaceId}::uuid, ${TALK_ID}::uuid, 'messaging', true),
+        (${workspaceId}::uuid, ${TALK_ID}::uuid, 'shell', true),
+        (${workspaceId}::uuid, ${TALK_ID}::uuid, 'filesystem', true),
+        (${workspaceId}::uuid, ${TALK_ID}::uuid, 'browser', true)
+      on conflict (talk_id, tool_id) do update
+        set enabled = excluded.enabled
+    `;
+
+    const effective = await withUserContext(USER_ID, () =>
+      getEffectiveToolsForAgent(agent.id, { talkId: TALK_ID }),
+    );
+
+    expect(effective.map((tool) => tool.toolFamily).sort()).toEqual(
+      Object.keys(TOOL_FAMILY_MAP).sort(),
+    );
+    expect(effective.find((tool) => tool.toolFamily === 'web')).toMatchObject({
+      enabled: true,
+      runtimeTools: expect.arrayContaining(['web_search']),
     });
-  });
-
-  it('heavy family forced on in the Talk set is still never enabled', async () => {
-    await withUserContext(USER_A_ID, async () => {
-      const agent = await createRegisteredAgent({
-        ownerId: USER_A_ID,
-        name: 'Researcher',
-        providerId: 'provider.anthropic',
-        modelId: 'claude-opus-4-7',
-      });
-      await setActive({
-        shell: true,
-        filesystem: true,
-        browser: true,
-        web: true,
-      });
-
-      const eff = await getEffectiveToolsForAgent(agent.id, {
-        talkId: TALK_A_ID_AGENT,
-      });
-      expect(eff.find((e) => e.toolFamily === 'shell')?.enabled).toBe(false);
-      expect(eff.find((e) => e.toolFamily === 'filesystem')?.enabled).toBe(
+    expect(
+      effective.find((tool) => tool.toolFamily === 'google_read'),
+    ).toMatchObject({ enabled: false });
+    expect(
+      effective.find((tool) => tool.toolFamily === 'messaging'),
+    ).toMatchObject({ enabled: true });
+    for (const heavy of ['shell', 'filesystem', 'browser']) {
+      expect(effective.find((tool) => tool.toolFamily === heavy)?.enabled).toBe(
         false,
       );
-      expect(eff.find((e) => e.toolFamily === 'browser')?.enabled).toBe(false);
-      // A light family in the same set still resolves normally.
-      expect(eff.find((e) => e.toolFamily === 'web')?.enabled).toBe(true);
-    });
+    }
   });
 
-  it('talkId with {web:false} → web off, gmail_read on (talk-driven)', async () => {
-    await withUserContext(USER_A_ID, async () => {
-      const agent = await createRegisteredAgent({
-        ownerId: USER_A_ID,
-        name: 'Researcher',
+  it('uses activeFamilies snapshots over live talk rows for queued runs', async () => {
+    const workspaceId = await ensureWorkspaceBootstrapForUser(USER_ID);
+    await seedTalk({ ownerId: USER_ID, talkId: TALK_ID });
+    const agent = await withUserContext(USER_ID, () =>
+      createRegisteredAgent({
+        ownerId: USER_ID,
+        workspaceId,
+        name: 'Snapshot Agent',
         providerId: 'provider.anthropic',
         modelId: 'claude-opus-4-7',
-      });
-      await setActive({ web: false, gmail_read: true });
+      }),
+    );
+    await getDbPg()`
+      insert into public.talk_tools (workspace_id, talk_id, tool_id, enabled)
+      values (${workspaceId}::uuid, ${TALK_ID}::uuid, 'web-search', true)
+      on conflict (talk_id, tool_id) do update
+        set enabled = excluded.enabled
+    `;
 
-      const eff = await getEffectiveToolsForAgent(agent.id, {
-        talkId: TALK_A_ID_AGENT,
-      });
-      expect(eff.find((e) => e.toolFamily === 'web')?.enabled).toBe(false);
-      expect(eff.find((e) => e.toolFamily === 'gmail_read')?.enabled).toBe(
-        true,
-      );
-    });
-  });
+    const effective = await withUserContext(USER_ID, () =>
+      getEffectiveToolsForAgent(agent.id, {
+        talkId: TALK_ID,
+        activeFamilies: {
+          web: false,
+          google_read: true,
+          shell: true,
+          filesystem: true,
+          browser: true,
+        },
+      }),
+    );
 
-  it('activeFamilies snapshot wins over live talkId', async () => {
-    await withUserContext(USER_A_ID, async () => {
-      const agent = await createRegisteredAgent({
-        ownerId: USER_A_ID,
-        name: 'Researcher',
-        providerId: 'provider.anthropic',
-        modelId: 'claude-opus-4-7',
-      });
-      // Live state has web on, snapshot has it off → snapshot wins.
-      await setActive({ web: true });
-
-      const eff = await getEffectiveToolsForAgent(agent.id, {
-        talkId: TALK_A_ID_AGENT,
-        activeFamilies: { web: false },
-      });
-      expect(eff.find((e) => e.toolFamily === 'web')?.enabled).toBe(false);
-    });
-  });
-
-  it('talkId missing in DB → empty active set disables every family', async () => {
-    await withUserContext(USER_A_ID, async () => {
-      const agent = await createRegisteredAgent({
-        ownerId: USER_A_ID,
-        name: 'Researcher',
-        providerId: 'provider.anthropic',
-        modelId: 'claude-opus-4-7',
-      });
-
-      const eff = await getEffectiveToolsForAgent(agent.id, {
-        talkId: '0c111111-9999-9999-9999-999999999999',
-      });
-      // Missing Talk resolves to {} active set — every family disabled.
-      for (const family of eff) {
-        expect(family.enabled).toBe(false);
-      }
-    });
-  });
-
-  it('connectors: gated only on talk-active (no per-tool user check exists)', async () => {
-    await withUserContext(USER_A_ID, async () => {
-      const agent = await createRegisteredAgent({
-        ownerId: USER_A_ID,
-        name: 'Connectors agent',
-        providerId: 'provider.anthropic',
-        modelId: 'claude-opus-4-7',
-      });
-      await setActive({ connectors: true });
-
-      const eff = await getEffectiveToolsForAgent(agent.id, {
-        talkId: TALK_A_ID_AGENT,
-      });
-      const connectors = eff.find((e) => e.toolFamily === 'connectors');
-      expect(connectors?.enabled).toBe(true);
-      // Toggling Talk-active off for connectors disables the family.
-      await setActive({ connectors: false });
-      const eff2 = await getEffectiveToolsForAgent(agent.id, {
-        talkId: TALK_A_ID_AGENT,
-      });
-      expect(eff2.find((e) => e.toolFamily === 'connectors')?.enabled).toBe(
+    expect(effective.find((tool) => tool.toolFamily === 'web')?.enabled).toBe(
+      false,
+    );
+    expect(
+      effective.find((tool) => tool.toolFamily === 'google_read')?.enabled,
+    ).toBe(true);
+    for (const heavy of ['shell', 'filesystem', 'browser']) {
+      expect(effective.find((tool) => tool.toolFamily === heavy)?.enabled).toBe(
         false,
       );
-    });
+    }
   });
 });

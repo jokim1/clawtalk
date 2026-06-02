@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 
 import { getDbPg, withTrustedDbWrites, type Sql } from '../../db.js';
+import { CONTEXT_SOURCE_TITLE_SLUG_SQL } from './context-source-status-sql.js';
 
 export type GreenfieldContextSourceKind =
   | 'document'
@@ -88,6 +89,7 @@ export interface GreenfieldContextSourceRow {
   added_by_user_id: string | null;
   created_at: string;
   updated_at: string;
+  title_slug?: string | null;
   page_image_count?: number;
 }
 
@@ -146,8 +148,11 @@ function metaBoolean(
 function normalizeStatus(
   value: string | null,
 ): GreenfieldContextSourceStatus | null {
-  return value === 'pending' || value === 'ready' || value === 'failed'
-    ? value
+  const normalized = value?.trim().toLowerCase();
+  return normalized === 'pending' ||
+    normalized === 'ready' ||
+    normalized === 'failed'
+    ? normalized
     : null;
 }
 
@@ -169,14 +174,6 @@ function normalizeSourceType(
   if (row.kind === 'url') return 'url';
   if (row.kind === 'file') return 'file';
   return 'text';
-}
-
-function slugify(title: string): string | null {
-  const slug = title
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '');
-  return slug.length > 0 ? slug : null;
 }
 
 function truncatableText(input: string | null | undefined): {
@@ -202,16 +199,29 @@ function sourceStatus(row: GreenfieldContextSourceRow) {
   const explicit = normalizeStatus(metaString(row, 'status'));
   if (explicit) return explicit;
   const extractionError = metaString(row, 'extractionError');
-  if (extractionError && !row.extracted_text) return 'failed';
-  if (row.kind === 'url' && !row.extracted_text) return 'pending';
+  const hasText = !!(row.extracted_text?.trim() || row.summary?.trim());
+  if (extractionError && !hasText) return 'failed';
+  if (
+    !hasText &&
+    ['url', 'file', 'document', 'past_talk', 'news'].includes(row.kind)
+  ) {
+    return 'pending';
+  }
   return 'ready';
 }
 
-function sourceRef(row: GreenfieldContextSourceRow, index = 0): string {
-  return (
-    metaString(row, 'sourceRef') ??
-    (row.sort_order !== null ? `S${row.sort_order + 1}` : `S${index + 1}`)
-  );
+function sourceText(row: GreenfieldContextSourceRow): string | null {
+  if (row.extracted_text?.trim()) return row.extracted_text;
+  if (row.summary?.trim()) return row.summary;
+  return null;
+}
+
+function sourceRef(row: GreenfieldContextSourceRow): string {
+  return row.id;
+}
+
+function ruleText(row: GreenfieldContextSourceRow): string {
+  return row.extracted_text?.trim() ? row.extracted_text : row.name;
 }
 
 function toRuleSnapshot(
@@ -219,7 +229,7 @@ function toRuleSnapshot(
 ): GreenfieldContextRuleSnapshot {
   return {
     id: row.id,
-    ruleText: row.extracted_text ?? row.name,
+    ruleText: ruleText(row),
     sortOrder: row.sort_order ?? 0,
     isActive: row.include_in_prompt,
     createdAt: row.created_at,
@@ -246,10 +256,10 @@ function toSourceSnapshot(
 
   return {
     id: row.id,
-    sourceRef: sourceRef(row, index),
+    sourceRef: sourceRef(row),
     sourceType,
     title: row.name,
-    titleSlug: slugify(row.name),
+    titleSlug: row.title_slug ?? null,
     note: metaString(row, 'note'),
     sortOrder: row.sort_order ?? index,
     status: sourceStatus(row),
@@ -257,7 +267,7 @@ function toSourceSnapshot(
     fileName,
     fileSize: metaNumber(row, 'fileSize'),
     mimeType: metaString(row, 'mimeType'),
-    extractedTextLength: row.extracted_text?.length ?? null,
+    extractedTextLength: sourceText(row)?.length ?? null,
     extractedAt: metaString(row, 'extractedAt'),
     lastFetchedAt: metaString(row, 'lastFetchedAt'),
     extractionError: metaString(row, 'extractionError'),
@@ -291,6 +301,7 @@ function rowSelectSql() {
     cs.added_by_user_id,
     cs.created_at,
     cs.updated_at,
+    ${CONTEXT_SOURCE_TITLE_SLUG_SQL.replaceAll('s.', 'cs.')} as title_slug,
     coalesce(count(csp.source_id), 0)::int as page_image_count
   `;
 }
@@ -325,29 +336,6 @@ async function nextSortOrder(input: {
 }): Promise<number> {
   const db = getDbPg();
   return nextSortOrderOnSql(db, input);
-}
-
-async function nextSourceRefOnSql(
-  sql: Sql,
-  input: {
-    workspaceId: string;
-    talkId: string;
-  },
-): Promise<string> {
-  const rows = await sql<{ max_ref: number }[]>`
-    select greatest(
-      coalesce(
-        max((substring(meta_json->>'sourceRef' from '^S([0-9]+)$'))::int),
-        0
-      ),
-      count(*)
-    )::int as max_ref
-    from public.context_sources
-    where workspace_id = ${input.workspaceId}::uuid
-      and talk_id = ${input.talkId}::uuid
-      and kind <> 'rule'
-  `;
-  return `S${(rows[0]?.max_ref ?? 0) + 1}`;
 }
 
 async function lockGreenfieldTalkContextOnSql(
@@ -421,7 +409,7 @@ export async function getGreenfieldContextGoal(input: {
   const row = rows[0];
   if (!row) return null;
   return {
-    goalText: row.extracted_text ?? '',
+    goalText: ruleText(row),
     updatedAt: row.updated_at,
     updatedBy: metaString(row, 'updatedBy'),
   };
@@ -705,7 +693,7 @@ export async function getGreenfieldContextSourceById(input: {
   if (!row) return undefined;
   return {
     ...toSourceSnapshot(row),
-    extractedText: row.extracted_text,
+    extractedText: sourceText(row),
     storageKey: normalizeSourceType(row) === 'file' ? row.payload_ref : null,
   };
 }
@@ -787,13 +775,8 @@ export async function createGreenfieldContextSource(input: {
         talkId: input.talkId,
         kind: 'source',
       });
-      const sourceRef = await nextSourceRefOnSql(txSql, {
-        workspaceId: input.workspaceId,
-        talkId: input.talkId,
-      });
       const metaJson = {
         compatKind: 'source',
-        sourceRef,
         sourceType: input.sourceType,
         note: input.note?.trim() || null,
         sourceUrl:
@@ -831,7 +814,14 @@ export async function createGreenfieldContextSource(input: {
       `;
     }),
   );
-  return toSourceSnapshot(rows[0]!);
+  if (!rows[0]) throw new Error('created context source missing');
+  const created = await getGreenfieldContextSourceById({
+    workspaceId: input.workspaceId,
+    talkId: input.talkId,
+    sourceId,
+  });
+  if (!created) throw new Error('created context source missing');
+  return created;
 }
 
 export async function patchGreenfieldContextSource(input: {

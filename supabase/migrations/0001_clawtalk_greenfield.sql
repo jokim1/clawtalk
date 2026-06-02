@@ -646,6 +646,7 @@ create table public.talk_agent_snapshots (
   initials text,
   accent text,
   accent_dark text,
+  provider_id text not null references public.llm_providers(id) on delete restrict,
   model_id text not null references public.llm_provider_models(model_id),
   temperature numeric not null,
   persona text,
@@ -659,6 +660,8 @@ create table public.talk_agent_snapshots (
   unique (workspace_id, talk_id, id),
   unique (workspace_id, talk_id, snapshot_group_id, id),
   unique (snapshot_group_id, source_agent_id),
+  foreign key (provider_id, model_id)
+    references public.llm_provider_models(provider_id, model_id) on delete restrict,
   foreign key (workspace_id, talk_id) references public.talks(workspace_id, id) on delete cascade,
   foreign key (workspace_id, source_agent_id) references public.agents(workspace_id, id) on delete set null (source_agent_id)
 );
@@ -678,6 +681,7 @@ create table public.messages (
   agent_snapshot_id uuid,
   run_id uuid,                                                       -- back-edge; FK added later deferrable
   body text,
+  metadata_json jsonb not null default '{}',
   created_at timestamptz not null default now(),
   unique (workspace_id, id),
   unique (workspace_id, talk_id, id),
@@ -754,6 +758,26 @@ alter table public.runs
   foreign key (workspace_id, talk_id, trigger_message_id)
   references public.messages(workspace_id, talk_id, id)
   deferrable initially deferred;
+
+create table public.message_provider_replay (
+  workspace_id uuid not null,
+  talk_id uuid not null,
+  message_id uuid not null,
+  run_id uuid not null,
+  -- Denormalized audit metadata. Replay reads load by message_id and scope via
+  -- the message's agent snapshot, so this intentionally has no secondary index.
+  source_agent_id uuid,
+  provider_id text not null,
+  model_id text not null,
+  provider_data_json jsonb not null,
+  created_at timestamptz not null default now(),
+  primary key (workspace_id, message_id),
+  foreign key (workspace_id, talk_id, message_id) references public.messages(workspace_id, talk_id, id) on delete cascade,
+  foreign key (workspace_id, talk_id, run_id) references public.runs(workspace_id, talk_id, id) on delete cascade,
+  foreign key (workspace_id, source_agent_id) references public.agents(workspace_id, id) on delete set null (source_agent_id)
+);
+create index message_provider_replay_run_idx
+  on public.message_provider_replay (workspace_id, talk_id, run_id);
 
 -- ---------------------------------------------------------------------------
 -- §4 run_prompt_snapshots (one per run); back-edge to runs.prompt_snapshot_id deferred
@@ -968,9 +992,14 @@ create table public.context_sources (
   foreign key (workspace_id, source_talk_id) references public.talks(workspace_id, id) on delete cascade,
   unique (workspace_id, id)
 );
-create unique index context_sources_source_ref_unique
-  on public.context_sources (workspace_id, talk_id, (meta_json->>'sourceRef'))
+-- Optional compatibility aliases only. Active greenfield source refs are
+-- context_sources.id::text; creation paths do not write meta_json.sourceRef.
+create unique index context_sources_legacy_source_ref_unique
+  on public.context_sources (workspace_id, talk_id, (upper(meta_json->>'sourceRef')))
   where kind <> 'rule' and meta_json ? 'sourceRef';
+create index context_sources_prompt_lookup_idx
+  on public.context_sources (talk_id, sort_order, created_at, id)
+  where kind <> 'rule' and include_in_prompt = true;
 create unique index context_sources_goal_unique
   on public.context_sources (workspace_id, talk_id)
   where kind = 'rule' and meta_json->>'compatKind' = 'goal';
@@ -2029,6 +2058,10 @@ alter table public.jobs enable row level security;
 create policy jobs_read on public.jobs
   for select using (public.is_workspace_member(workspace_id));
 
+-- Provider replay blobs can contain opaque encrypted reasoning/message items.
+-- They are trusted execution inputs only, not client-readable message metadata.
+alter table public.message_provider_replay enable row level security;
+
 -- Runtime/snapshot tables are trusted execution inputs. Members can read them.
 -- Runtime row materialization and cancellation are service/trusted-app only so
 -- direct authenticated clients cannot forge prompts, snapshots, tools, audit
@@ -2237,6 +2270,7 @@ grant usage, select on all sequences in schema public to authenticated;
 revoke all on public.event_outbox from authenticated;
 revoke all on sequence public.event_outbox_event_id_seq from authenticated;
 revoke all on public.workspace_provider_secrets from authenticated;
+revoke all on public.message_provider_replay from authenticated;
 revoke insert, update, delete on public.llm_providers from authenticated;
 revoke insert, update, delete on public.llm_provider_models from authenticated;
 revoke insert, update, delete on public.web_search_providers from authenticated;

@@ -80,8 +80,8 @@ export interface LlmMessage {
    *
    * For the codex_responses path: encrypted reasoning items and
    * message items captured from the prior turn's `response.output`,
-   * stashed in `talk_messages.metadata_json` and re-threaded into
-   * subsequent requests. See agents/codex-responses-adapter.ts.
+   * stored in a trusted replay table and re-threaded into subsequent
+   * requests. See agents/codex-responses-adapter.ts.
    */
   providerData?: {
     codexReasoningItems?: Array<Record<string, unknown>>;
@@ -146,11 +146,11 @@ export interface LlmStreamEvent {
   stopReason?: string;
   error?: string;
   /**
-   * Provider-specific blobs the executor should persist on the
-   * assistant message (talk_messages.metadata_json) so the next turn
-   * can replay them. Currently used by the codex_responses path to
-   * carry forward encrypted reasoning items + assistant message
-   * items for prefix-cache + chain-of-thought continuity.
+   * Provider-specific blobs the executor should persist in the trusted
+   * replay store so the next turn can replay them. Currently used by
+   * the codex_responses path to carry forward encrypted reasoning
+   * items + assistant message items for prefix-cache + chain-of-thought
+   * continuity.
    */
   providerData?: {
     codexReasoningItems?: Array<Record<string, unknown>>;

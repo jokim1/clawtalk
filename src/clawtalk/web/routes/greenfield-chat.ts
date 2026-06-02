@@ -229,6 +229,7 @@ function toRunApi(run: GreenfieldChatRunRecord): {
   cancelReason: string | null;
   executorAlias: string | null;
   executorModel: string | null;
+  providerId: string | null;
 } {
   const errorInfo =
     run.error_json && typeof run.error_json === 'object'
@@ -255,6 +256,7 @@ function toRunApi(run: GreenfieldChatRunRecord): {
     cancelReason: null,
     executorAlias: run.target_agent_name,
     executorModel: run.model_id,
+    providerId: run.provider_id,
   };
 }
 

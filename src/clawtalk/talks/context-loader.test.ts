@@ -10,6 +10,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   buildAtRefForcedInjectionFromRows,
+  buildContextTools,
   buildContentOutline,
   buildSourceManifest,
   buildSourcePreview,
@@ -17,6 +18,7 @@ import {
   isPageSetComplete,
   renderForcedInjectionResolutions,
   resolveAtRefRequestsForRender,
+  shouldIncludeWebFreshnessStanza,
   MAX_TOTAL_PDF_PAYLOAD_BYTES,
   type AtRefCandidateRow,
   type ForcedInjectionResolution,
@@ -278,6 +280,52 @@ describe('buildContentOutline', () => {
   });
 });
 
+describe('compatibility context tool gates', () => {
+  it('omits web tools and freshness stanza when effective web access is disabled', () => {
+    const effectiveTools = [
+      {
+        toolFamily: 'web',
+        runtimeTools: ['web_search', 'web_fetch'],
+        enabled: false,
+        requiresApproval: false,
+      },
+      {
+        toolFamily: 'google_read',
+        runtimeTools: ['google_drive_search'],
+        enabled: true,
+        requiresApproval: false,
+      },
+    ];
+
+    const toolNames = buildContextTools(
+      '33333333-3333-3333-3333-333333333333',
+      null,
+      null,
+      effectiveTools,
+      false,
+    ).map((tool) => tool.name);
+
+    expect(toolNames).not.toContain('web_search');
+    expect(toolNames).not.toContain('web_fetch');
+    expect(toolNames).not.toContain('read_attachment');
+    expect(toolNames).toContain('google_drive_search');
+    expect(shouldIncludeWebFreshnessStanza(effectiveTools, null)).toBe(false);
+    expect(
+      shouldIncludeWebFreshnessStanza(
+        [
+          {
+            toolFamily: 'web',
+            runtimeTools: ['web_search'],
+            enabled: true,
+            requiresApproval: false,
+          },
+        ],
+        { jobId: 'job', allowWeb: false } as never,
+      ),
+    ).toBe(false);
+  });
+});
+
 describe('buildSourcePreview', () => {
   it('returns null for empty/null input', () => {
     expect(buildSourcePreview(null)).toBeNull();
@@ -419,6 +467,7 @@ describe('buildAtRefForcedInjectionFromRows', () => {
     return {
       id: input.id ?? `id-${input.source_ref}`,
       source_ref: input.source_ref,
+      legacy_source_ref: input.legacy_source_ref ?? null,
       title: input.title,
       title_slug: input.title_slug ?? null,
       status: input.status ?? 'ready',
@@ -456,6 +505,25 @@ describe('buildAtRefForcedInjectionFromRows', () => {
     expect(text).toContain('<<<source');
     expect(text).toContain('The opportunity is large.');
     expect(text).toContain('source>>>');
+  });
+
+  it('resolves a raw source id even when the row has a stored S-ref display label', () => {
+    const sourceId = '0c787878-7777-4777-8777-0000000000b2';
+    const rows = [
+      makeRow({
+        id: sourceId,
+        source_ref: 'S2',
+        title: 'Stored Ref Memo',
+        extracted_text: 'Resolved through raw id.',
+      }),
+    ];
+    const { text } = buildAtRefForcedInjectionFromRows(
+      rows,
+      [sourceId.toUpperCase()],
+      [],
+    );
+    expect(text).toContain('[S2] Stored Ref Memo');
+    expect(text).toContain('Resolved through raw id.');
   });
 
   it('resolves @<slug> when a unique ready row matches', () => {
@@ -531,7 +599,7 @@ describe('buildAtRefForcedInjectionFromRows', () => {
     expect(text).toContain('[@notes] (ambiguous slug');
     expect(text).toContain('S1');
     expect(text).toContain('S2');
-    expect(text).toContain('Use the @S<n> form instead');
+    expect(text).toContain('Use one of the listed source ids instead');
     expect(text).not.toContain('<<<source');
   });
 
@@ -559,7 +627,7 @@ describe('buildAtRefForcedInjectionFromRows', () => {
   });
 
   it('sanitizes control characters and backticks in source content', () => {
-    const dirty = `safe body \`code\` here\nmore`;
+    const dirty = `safe\0body \`code\` here\nmore`;
     const rows = [
       makeRow({
         source_ref: 'S8',
@@ -570,7 +638,7 @@ describe('buildAtRefForcedInjectionFromRows', () => {
     const { text } = buildAtRefForcedInjectionFromRows(rows, ['S8'], []);
     expect(text).not.toBeNull();
     // Null byte stripped.
-    expect(text).not.toContain(' ');
+    expect(text).not.toContain('\0');
     // Newline preserved (sanitizeBlockForPrompt keeps \n).
     expect(text).toContain('more');
     // Backticks pass through sanitizeBlockForPrompt unchanged but
@@ -708,6 +776,7 @@ describe('cumulative-payload guard (resolveAtRefRequestsForRender + render)', ()
     return {
       id: `id-${input.source_ref}`,
       source_ref: input.source_ref,
+      legacy_source_ref: null,
       title: input.title,
       title_slug: null,
       status: 'ready',
@@ -841,6 +910,7 @@ function makeRasterRow(
   return {
     id: input.id ?? `id-${input.source_ref}`,
     source_ref: input.source_ref,
+    legacy_source_ref: input.legacy_source_ref ?? null,
     title: input.title,
     title_slug: input.title_slug ?? null,
     status: input.status ?? 'ready',
