@@ -20,6 +20,16 @@ main = "src/worker.ts"
 compatibility_date = "2026-05-12"
 compatibility_flags = ["nodejs_compat"]
 
+# ─── Local dev ────────────────────────────────────────────────────────
+#
+# Pin `wrangler dev` to :8788 so the local target is deterministic.
+# Bare `wrangler dev` defaults to :8787, but the webapp dev proxy
+# (webapp/vite.config.ts) and APP_ORIGIN both target :8788 — without
+# this pin the proxy points at a port nothing is listening on. Dev-only;
+# ignored by `wrangler deploy`.
+[dev]
+port = 8788
+
 # ─── Static Assets ────────────────────────────────────────────────────
 #
 # `run_worker_first = true` is load-bearing for OAuth callback flows. Without
