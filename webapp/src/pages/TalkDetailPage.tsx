@@ -2014,14 +2014,6 @@ function buildTalkAgentExecutionGuardrail(
   };
 }
 
-function formatJsonForStateEditor(value: unknown): string {
-  try {
-    return JSON.stringify(value, null, 2);
-  } catch {
-    return 'null';
-  }
-}
-
 function serializeTalkAgentForDraftCompare(agent: TalkAgent): string {
   return JSON.stringify({
     id: agent.id,
