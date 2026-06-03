@@ -160,16 +160,6 @@ export type TalkContext = {
   sources: ContextSource[];
 };
 
-export type TalkStateEntry = {
-  id: string;
-  key: string;
-  value: unknown;
-  version: number;
-  updatedAt: string;
-  updatedByUserId: string | null;
-  updatedByRunId: string | null;
-};
-
 export type TalkJobWeekday =
   | 'sun'
   | 'mon'
@@ -2212,23 +2202,6 @@ export async function deleteTalkContextRule(input: {
 }): Promise<void> {
   await apiMutationRequest<{ deleted: true }>(
     `/api/v1/talks/${encodeURIComponent(input.talkId)}/context/rules/${encodeURIComponent(input.ruleId)}`,
-    { method: 'DELETE' },
-  );
-}
-
-export async function getTalkState(talkId: string): Promise<TalkStateEntry[]> {
-  const envelope = await apiRequest<{ entries: TalkStateEntry[] }>(
-    `/api/v1/talks/${encodeURIComponent(talkId)}/state`,
-  );
-  return envelope.entries;
-}
-
-export async function deleteTalkStateEntry(
-  talkId: string,
-  key: string,
-): Promise<void> {
-  await apiMutationRequest<{ deleted: true }>(
-    `/api/v1/talks/${encodeURIComponent(talkId)}/state/${encodeURIComponent(key)}`,
     { method: 'DELETE' },
   );
 }

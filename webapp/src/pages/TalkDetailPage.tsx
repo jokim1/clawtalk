@@ -49,13 +49,11 @@ import {
   deleteTalkThread,
   deleteTalkContextRule,
   deleteTalkJob,
-  deleteTalkStateEntry,
   getAiAgents,
   getTalk,
   getTalkAgents,
   getTalkContent,
   getTalkJob,
-  getTalkState,
   getTalkContext,
   getTalkTools,
   getTalkRunContext,
@@ -83,7 +81,6 @@ import {
   TalkRun,
   TalkSnapshot,
   TalkRunContextSnapshot,
-  TalkStateEntry,
   TalkThread,
   TalkToolsState,
   uploadTalkAttachment,
@@ -1611,64 +1608,6 @@ function formatDateTime(value: string | null): string {
   return parsed.toLocaleString();
 }
 
-const STATE_JSON_TRUNCATE_LENGTH = 2000;
-
-function TalkStateCard({
-  entry,
-  canDelete,
-  onDelete,
-}: {
-  entry: TalkStateEntry;
-  canDelete: boolean;
-  onDelete: () => void;
-}) {
-  const [expanded, setExpanded] = useState(false);
-  const jsonText = JSON.stringify(entry.value, null, 2);
-  const isTruncated = jsonText.length > STATE_JSON_TRUNCATE_LENGTH;
-  const displayText =
-    isTruncated && !expanded
-      ? jsonText.slice(0, STATE_JSON_TRUNCATE_LENGTH)
-      : jsonText;
-
-  return (
-    <article className="talk-llm-card talk-state-card">
-      <div className="connector-card-header">
-        <div>
-          <h3>{entry.key}</h3>
-          <p className="talk-llm-meta">
-            Version {entry.version} · Updated {formatDateTime(entry.updatedAt)}
-          </p>
-        </div>
-        {canDelete ? (
-          <button
-            className="btn btn-sm btn-danger"
-            onClick={onDelete}
-            title="Delete state entry"
-          >
-            &times;
-          </button>
-        ) : null}
-      </div>
-      {entry.updatedByRunId ? (
-        <p className="talk-llm-meta">
-          Updated by run <code>{entry.updatedByRunId}</code>
-        </p>
-      ) : null}
-      {entry.updatedByUserId ? (
-        <p className="talk-llm-meta">
-          Updated by user <code>{entry.updatedByUserId}</code>
-        </p>
-      ) : null}
-      <pre className="talk-state-json">{displayText}</pre>
-      {isTruncated ? (
-        <button className="btn btn-sm" onClick={() => setExpanded(!expanded)}>
-          {expanded ? 'Show less' : 'Show full value'}
-        </button>
-      ) : null}
-    </article>
-  );
-}
-
 function sortThreads(threads: TalkThread[]): TalkThread[] {
   return [...threads].sort((left, right) => {
     if (left.isPinned !== right.isPinned) {
@@ -2552,14 +2491,6 @@ export function TalkDetailPage({
     status: 'idle' | 'loading' | 'saving' | 'error' | 'success';
     message?: string;
   }>({ status: 'idle' });
-  const [talkStateEntries, setTalkStateEntries] = useState<TalkStateEntry[]>(
-    [],
-  );
-  const [talkStateLoaded, setTalkStateLoaded] = useState(false);
-  const [talkStateStatus, setTalkStateStatus] = useState<{
-    status: 'idle' | 'loading' | 'error';
-    message?: string;
-  }>({ status: 'idle' });
   const [talkJobs, setTalkJobs] = useState<TalkJob[]>([]);
   const [talkJobsLoaded, setTalkJobsLoaded] = useState(false);
   const [talkJobsStatus, setTalkJobsStatus] = useState<{
@@ -3393,30 +3324,6 @@ export function TalkDetailPage({
     [talkId],
   );
 
-  const refreshTalkStateEntries = useCallback(
-    async (options?: { showLoading?: boolean }) => {
-      if (options?.showLoading) {
-        setTalkStateStatus({ status: 'loading' });
-      }
-      try {
-        const entries = await getTalkState(talkId);
-        setTalkStateEntries(entries);
-        setTalkStateLoaded(true);
-        setTalkStateStatus({ status: 'idle' });
-      } catch (err) {
-        if (err instanceof UnauthorizedError) {
-          handleUnauthorized();
-          return;
-        }
-        setTalkStateStatus({
-          status: 'error',
-          message: err instanceof Error ? err.message : 'Failed to load state.',
-        });
-      }
-    },
-    [handleUnauthorized, talkId],
-  );
-
   const loadSelectedJobRuns = useCallback(
     async (jobId: string, options?: { showLoading?: boolean }) => {
       if (options?.showLoading) {
@@ -3568,9 +3475,6 @@ export function TalkDetailPage({
     setContextSources([]);
     setRuleDrafts({});
     setContextStatus({ status: 'idle' });
-    setTalkStateEntries([]);
-    setTalkStateLoaded(false);
-    setTalkStateStatus({ status: 'idle' });
     setTalkJobs([]);
     setTalkJobsLoaded(false);
     setTalkJobsStatus({ status: 'idle' });
@@ -5025,14 +4929,6 @@ export function TalkDetailPage({
       cancelled = true;
     };
   }, [contextLoaded, currentTab, handleUnauthorized, refreshContext, pageKind]);
-
-  useEffect(() => {
-    if (pageKind !== 'ready' || currentTab !== 'context') {
-      return;
-    }
-
-    void refreshTalkStateEntries({ showLoading: !talkStateLoaded });
-  }, [currentTab, refreshTalkStateEntries, pageKind, talkStateLoaded]);
 
   useEffect(() => {
     if (pageKind !== 'ready' || currentTab !== 'jobs') {
@@ -7615,73 +7511,6 @@ export function TalkDetailPage({
                     )}
                     onUnauthorized={handleUnauthorized}
                   />
-
-                  {/* State */}
-                  <div className="talk-llm-card">
-                    <div className="connector-card-header">
-                      <div>
-                        <h3>State</h3>
-                        <p className="talk-llm-meta">
-                          Structured Talk state entries. Agents read and write
-                          these via compare-and-swap updates.
-                        </p>
-                      </div>
-                      <button
-                        className="btn btn-sm"
-                        onClick={() => {
-                          void refreshTalkStateEntries({ showLoading: false });
-                        }}
-                      >
-                        Refresh
-                      </button>
-                    </div>
-                    {talkStateStatus.status === 'error' ? (
-                      <p className="page-state error">
-                        {talkStateStatus.message}
-                      </p>
-                    ) : null}
-                    {talkStateStatus.status === 'loading' &&
-                    !talkStateLoaded ? (
-                      <p className="page-state">Loading state…</p>
-                    ) : talkStateEntries.length > 0 ? (
-                      <div className="talk-state-list">
-                        {talkStateEntries.map((entry) => (
-                          <TalkStateCard
-                            key={entry.id}
-                            entry={entry}
-                            canDelete={canEditAgents}
-                            onDelete={async () => {
-                              const confirmed = window.confirm(
-                                `Delete state entry "${entry.key}"? This cannot be undone.`,
-                              );
-                              if (!confirmed) return;
-                              try {
-                                await deleteTalkStateEntry(talkId, entry.key);
-                                setTalkStateStatus({ status: 'idle' });
-                                setTalkStateEntries((prev) =>
-                                  prev.filter((e) => e.id !== entry.id),
-                                );
-                              } catch (err) {
-                                if (err instanceof UnauthorizedError) {
-                                  handleUnauthorized();
-                                  return;
-                                }
-                                setTalkStateStatus({
-                                  status: 'error',
-                                  message:
-                                    err instanceof Error
-                                      ? err.message
-                                      : 'Failed to delete state entry.',
-                                });
-                              }
-                            }}
-                          />
-                        ))}
-                      </div>
-                    ) : (
-                      <p className="page-state">No state entries yet.</p>
-                    )}
-                  </div>
 
                   {/* Drive Resources */}
                   <TalkToolsPanel talkId={talkId} />

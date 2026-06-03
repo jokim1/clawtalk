@@ -2336,27 +2336,6 @@ a {
   margin-top: 0.75rem;
 }
 
-.talk-state-list {
-  display: grid;
-  gap: 0.75rem;
-}
-
-.talk-state-card {
-  margin: 0;
-}
-
-.talk-state-json {
-  margin: 0;
-  padding: 0.85rem;
-  border-radius: 10px;
-  background: #0f172a;
-  color: #e2e8f0;
-  overflow-x: auto;
-  overflow-y: auto;
-  max-height: 20rem;
-  font-size: 0.85rem;
-}
-
 .talk-outputs-layout {
   display: grid;
   grid-template-columns: minmax(240px, 320px) minmax(0, 1fr);
