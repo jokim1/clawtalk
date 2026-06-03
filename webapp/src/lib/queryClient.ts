@@ -69,3 +69,43 @@ export async function clearPersistedQueryCache(): Promise<void> {
     // ignore
   }
 }
+
+const ACTIVE_WORKSPACE_STORAGE_KEY = 'clawtalk.active-workspace';
+
+// Record the active workspace so persistedCacheBuster() can fold it into the
+// persist buster. Called on every session load and on workspace switch.
+export function rememberActiveWorkspace(workspaceId: string | null): void {
+  try {
+    if (workspaceId) {
+      localStorage.setItem(ACTIVE_WORKSPACE_STORAGE_KEY, workspaceId);
+    } else {
+      localStorage.removeItem(ACTIVE_WORKSPACE_STORAGE_KEY);
+    }
+  } catch {
+    // ignore (storage unavailable, e.g. private mode)
+  }
+}
+
+// The persisted snapshot key is user-scoped, not workspace-scoped, so a stale
+// cache from a previous workspace could otherwise rehydrate after a switch.
+// Folding the active workspace into the buster makes PersistQueryClientProvider
+// drop the prior workspace's cache on hydration — the robust cross-tenant
+// boundary, independent of the best-effort IDB wipe. Read synchronously at
+// provider setup, before the session loads.
+// Read the active workspace marker. The api client sends it as the
+// `x-workspace-id` header so the backend (which has no persisted active
+// workspace) scopes each request to the workspace the user last selected.
+export function getActiveWorkspaceId(): string | null {
+  try {
+    return localStorage.getItem(ACTIVE_WORKSPACE_STORAGE_KEY) || null;
+  } catch {
+    return null;
+  }
+}
+
+export function persistedCacheBuster(): string {
+  const workspaceId = getActiveWorkspaceId();
+  return workspaceId
+    ? `${QUERY_CACHE_BUSTER}:${workspaceId}`
+    : QUERY_CACHE_BUSTER;
+}

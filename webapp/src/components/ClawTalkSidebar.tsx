@@ -24,6 +24,7 @@ import { createPortal } from 'react-dom';
 import { NavLink, useLocation } from 'react-router-dom';
 
 import { SidebarProfileMenu } from './SidebarProfileMenu';
+import { WorkspaceSwitcher } from './WorkspaceSwitcher';
 import type {
   ContentSidebarItem,
   SessionUser,
@@ -62,6 +63,7 @@ type Props = {
   error: string | null;
   user: SessionUser;
   mainTalkId: string | null;
+  onSwitchWorkspace: (workspaceId: string) => void | Promise<void>;
   onSignOut: () => void;
   signOutBusy: boolean;
   onCreateTalk: () => Promise<Talk>;
@@ -205,6 +207,7 @@ export function ClawTalkSidebar({
   error,
   user,
   mainTalkId,
+  onSwitchWorkspace,
   onSignOut,
   signOutBusy,
   onCreateTalk,
@@ -772,6 +775,12 @@ export function ClawTalkSidebar({
 
   return (
     <aside className="clawtalk-sidebar" aria-label="Primary navigation">
+      <WorkspaceSwitcher
+        workspaces={user.workspaces ?? []}
+        currentWorkspaceId={user.currentWorkspaceId}
+        onSwitchWorkspace={onSwitchWorkspace}
+      />
+
       <nav className="clawtalk-sidebar-nav" aria-label="App sections">
         <NavLink
           to="/app/talks"

@@ -1,4 +1,5 @@
 import { getSupabaseClient, isSupabaseConfigured } from './supabase-client';
+import { getActiveWorkspaceId, rememberActiveWorkspace } from './queryClient';
 
 export class UnauthorizedError extends Error {
   constructor(message = 'Authentication is required') {
@@ -848,9 +849,23 @@ function sessionUserFromPayload(envelope: SessionMePayload): SessionUser {
 }
 
 export async function getSessionMe(): Promise<SessionUser> {
-  return sessionUserFromPayload(
-    await apiRequest<SessionMePayload>('/api/v1/session/me'),
-  );
+  try {
+    return sessionUserFromPayload(
+      await apiRequest<SessionMePayload>('/api/v1/session/me'),
+    );
+  } catch (err) {
+    // The active-workspace marker may point at a workspace this session can no
+    // longer access (e.g. after sign-out on a shared device, or losing
+    // membership). Drop it and retry so the backend falls back to the default
+    // workspace instead of locking the user out.
+    if (err instanceof ApiError && err.code === 'workspace_forbidden') {
+      rememberActiveWorkspace(null);
+      return sessionUserFromPayload(
+        await apiRequest<SessionMePayload>('/api/v1/session/me'),
+      );
+    }
+    throw err;
+  }
 }
 
 export async function updateSessionMe(input: {
@@ -866,6 +881,19 @@ export async function updateSessionMe(input: {
     },
   );
   return sessionUserFromPayload(envelope);
+}
+
+export async function switchWorkspace(
+  workspaceId: string,
+): Promise<{ currentWorkspaceId: string }> {
+  return apiMutationRequest<{ currentWorkspaceId: string }>(
+    '/api/v1/workspaces/switch',
+    {
+      method: 'POST',
+      includeJson: true,
+      body: JSON.stringify({ workspaceId }),
+    },
+  );
 }
 
 export async function startGoogleAuth(input?: {
@@ -2912,6 +2940,7 @@ async function apiRequestWithRefresh<T>(
     credentials: 'include',
     headers: {
       accept: 'application/json',
+      ...activeWorkspaceHeaders(path, init?.headers),
       ...(init?.headers || {}),
     },
   });
@@ -2950,6 +2979,7 @@ async function apiMutationRequestWithRefresh<T>(
       includeJson: init?.includeJson === true,
       explicitHeaders: init?.headers,
       idempotencyKey: retryState.idempotencyKey,
+      path,
     }),
   });
 
@@ -3074,10 +3104,32 @@ async function refreshViaServerEndpoint(): Promise<boolean> {
   }
 }
 
+// Default each workspace-scoped request to the user's active workspace via the
+// `x-workspace-id` header. The backend has no persisted active workspace, so
+// the client carries it per request. Never overrides an explicit per-call
+// workspace (a `?workspaceId=` query param or an x-workspace-id header), so
+// calls that target a specific workspace keep working.
+function activeWorkspaceHeaders(
+  path: string,
+  explicitHeaders?: HeadersInit,
+): Record<string, string> {
+  const existing = new Headers(explicitHeaders);
+  if (
+    existing.has('x-workspace-id') ||
+    existing.has('x-clawtalk-workspace-id') ||
+    /[?&]workspaceId=/.test(path)
+  ) {
+    return {};
+  }
+  const workspaceId = getActiveWorkspaceId();
+  return workspaceId ? { 'x-workspace-id': workspaceId } : {};
+}
+
 function buildMutationAttemptHeaders(input: {
   includeJson: boolean;
   explicitHeaders?: HeadersInit;
   idempotencyKey: string;
+  path: string;
 }): HeadersInit {
   const headers = new Headers();
   headers.set('accept', 'application/json');
@@ -3091,6 +3143,14 @@ function buildMutationAttemptHeaders(input: {
 
   if (input.includeJson && !headers.has('content-type')) {
     headers.set('content-type', 'application/json');
+  }
+
+  const workspaceHeaders = activeWorkspaceHeaders(
+    input.path,
+    input.explicitHeaders,
+  );
+  if (workspaceHeaders['x-workspace-id']) {
+    headers.set('x-workspace-id', workspaceHeaders['x-workspace-id']);
   }
 
   // Caller headers may supply generic metadata, but CSRF and idempotency are

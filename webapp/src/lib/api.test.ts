@@ -882,6 +882,189 @@ describe('uploadContentImage', () => {
   });
 });
 
+describe('switchWorkspace', () => {
+  beforeEach(() => {
+    vi.unstubAllGlobals();
+    Object.defineProperty(document, 'cookie', {
+      configurable: true,
+      get() {
+        return cookieValue;
+      },
+      set(value: string) {
+        cookieValue = value;
+      },
+    });
+    cookieValue = 'cr_csrf_token=test-csrf-token';
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it('POSTs the workspace id with the CSRF header and returns the new id', async () => {
+    const captured: { path: string; init?: RequestInit }[] = [];
+    vi.stubGlobal(
+      'fetch',
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        captured.push({ path: normalizePath(input), init });
+        return jsonResponse(200, {
+          ok: true,
+          data: { currentWorkspaceId: 'ws-2' },
+        });
+      },
+    );
+
+    const api = await loadApiModule();
+    const result = await api.switchWorkspace('ws-2');
+
+    expect(result).toEqual({ currentWorkspaceId: 'ws-2' });
+    expect(captured).toHaveLength(1);
+    expect(captured[0].path).toBe('/api/v1/workspaces/switch');
+    expect(captured[0].init?.method).toBe('POST');
+    expect(captured[0].init?.body).toBe(JSON.stringify({ workspaceId: 'ws-2' }));
+    const headers = readHeaders(captured[0].init);
+    expect(headers['content-type']).toBe('application/json');
+    expect(headers['x-csrf-token']).toBe('test-csrf-token');
+  });
+
+  it('throws ApiError with the upstream code when the workspace is forbidden', async () => {
+    vi.stubGlobal('fetch', async () =>
+      jsonResponse(403, {
+        ok: false,
+        error: {
+          code: 'workspace_forbidden',
+          message: 'Workspace is not available to this user.',
+        },
+      }),
+    );
+
+    const api = await loadApiModule();
+    await expect(api.switchWorkspace('ws-x')).rejects.toMatchObject({
+      name: 'ApiError',
+      status: 403,
+      code: 'workspace_forbidden',
+    });
+  });
+});
+
+describe('active workspace header', () => {
+  beforeEach(() => {
+    vi.unstubAllGlobals();
+    localStorage.clear();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+    localStorage.clear();
+  });
+
+  it('sends the active workspace as x-workspace-id on workspace-scoped requests', async () => {
+    localStorage.setItem('clawtalk.active-workspace', 'ws-7');
+    const captured: { path: string; init?: RequestInit }[] = [];
+    vi.stubGlobal(
+      'fetch',
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        captured.push({ path: normalizePath(input), init });
+        return jsonResponse(200, {
+          ok: true,
+          data: { items: [], mainTalkId: null, contents: [] },
+        });
+      },
+    );
+
+    const api = await loadApiModule();
+    await api.getTalkSidebar().catch(() => undefined);
+
+    expect(readHeaders(captured[0].init)['x-workspace-id']).toBe('ws-7');
+  });
+
+  it('omits x-workspace-id when no workspace is active', async () => {
+    const captured: { path: string; init?: RequestInit }[] = [];
+    vi.stubGlobal(
+      'fetch',
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        captured.push({ path: normalizePath(input), init });
+        return jsonResponse(200, {
+          ok: true,
+          data: { items: [], mainTalkId: null, contents: [] },
+        });
+      },
+    );
+
+    const api = await loadApiModule();
+    await api.getTalkSidebar().catch(() => undefined);
+
+    expect(readHeaders(captured[0].init)['x-workspace-id']).toBeUndefined();
+  });
+
+  it('does not override an explicit ?workspaceId= query param', async () => {
+    localStorage.setItem('clawtalk.active-workspace', 'ws-7');
+    const captured: { path: string; init?: RequestInit }[] = [];
+    vi.stubGlobal(
+      'fetch',
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        captured.push({ path: String(input), init });
+        return jsonResponse(200, { ok: true, data: { pickerToken: 'x' } });
+      },
+    );
+
+    const api = await loadApiModule();
+    await api
+      .getGooglePickerSession({ workspaceId: 'ws-explicit' })
+      .catch(() => undefined);
+
+    expect(readHeaders(captured[0].init)['x-workspace-id']).toBeUndefined();
+    expect(captured[0].path).toContain('workspaceId=ws-explicit');
+  });
+
+  it('drops a stale active workspace and retries when /session/me is forbidden', async () => {
+    localStorage.setItem('clawtalk.active-workspace', 'ws-stale');
+    const captured: { path: string; init?: RequestInit }[] = [];
+    vi.stubGlobal(
+      'fetch',
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        captured.push({ path: normalizePath(input), init });
+        if (captured.length === 1) {
+          return jsonResponse(403, {
+            ok: false,
+            error: { code: 'workspace_forbidden', message: 'no access' },
+          });
+        }
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            user: {
+              id: 'u1',
+              email: 'a@b.c',
+              name: 'A',
+              displayName: 'A',
+              avatarColor: null,
+              initials: 'A',
+              role: 'owner',
+              createdAt: '',
+            },
+            workspaces: [
+              { id: 'ws-default', name: 'Default', role: 'owner', initials: 'DE' },
+            ],
+            currentWorkspaceId: 'ws-default',
+          },
+        });
+      },
+    );
+
+    const api = await loadApiModule();
+    const me = await api.getSessionMe();
+
+    expect(captured).toHaveLength(2);
+    expect(readHeaders(captured[0].init)['x-workspace-id']).toBe('ws-stale');
+    expect(readHeaders(captured[1].init)['x-workspace-id']).toBeUndefined();
+    expect(me.currentWorkspaceId).toBe('ws-default');
+    expect(localStorage.getItem('clawtalk.active-workspace')).toBeNull();
+  });
+});
+
 async function loadApiModule() {
   vi.resetModules();
   return import('./api');
