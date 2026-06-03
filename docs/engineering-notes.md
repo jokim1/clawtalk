@@ -59,9 +59,9 @@ The archived doc has the full `query()` options table and message-type reference
 
 ---
 
-## 6. Current cutover memory — staged runtime-retirement slice
+## 6. Cutover invariants — committed backend/runtime slice
 
-As of 2026-06-02, the greenfield cutover branch has a fully staged but uncommitted backend/runtime slice. Keep these invariants in mind before resuming:
+As of 2026-06-02, the greenfield cutover branch has **committed** the backend/runtime cutover (legacy context runtime retired in `951ab34`, disabled-model fail-closed enqueue in `6c40fb7`). Keep these invariants in mind while building on it:
 
 - Fresh Supabase baseline only. Keep editing `supabase/migrations/0001_clawtalk_greenfield.sql` for final-state schema while the DB is disposable; do not introduce compatibility/backfill migrations for old data.
 - `message_provider_replay` is the only storage surface for Codex encrypted provider replay blobs. `messages.metadata_json` is member-readable and must stay client-safe.
@@ -70,4 +70,4 @@ As of 2026-06-02, the greenfield cutover branch has a fully staged but uncommitt
 - Active source references are `context_sources.id::text`; legacy `meta_json.sourceRef` is only a compatibility alias.
 - The retired `CleanTalkExecutor` must fail closed. Do not restore the old legacy executor as a fallback.
 - Scheduled/run-now job snapshots should skip non-target roster agents whose provider/model is disabled, while still blocking if the target agent/provider is unavailable.
-- Per-slice review loop is mandatory before commit: focused tests, typecheck/build, GStack Review, Karpathy diff review, Claude Review. The current slice is blocked only because the required GStack Review rerun hit Codex CLI usage quota.
+- Per-slice review gate is mandatory before commit: focused tests, typecheck/build, then exactly two passes — gstack `/review` (bundles a Codex cross-model adversarial pass; honor its `block` verdicts) and `/karpathy-audit diff`. No third standalone Claude review.

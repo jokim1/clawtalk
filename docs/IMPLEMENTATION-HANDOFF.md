@@ -7,78 +7,59 @@
 
 Worktree: `/Users/josephkim/.codex/worktrees/381b/clawtalk`
 
-Branch: `codex/clawtalk-greenfield-cutover`
+Branch: `codex/clawtalk-greenfield-cutover` (22 commits ahead of `main`).
 
-Current state: one large backend/runtime slice is staged and uncommitted. Do not start the next implementation phase until this slice passes its required review gate and is committed.
+**The backend/runtime cutover is committed.** The legacy context/runtime execution surface is retired, disabled models fail closed at chat enqueue, and the webapp shell now drives the greenfield per-request workspace model. We are in **Phase 5 (frontend rewrite)**: the workspace switcher has landed; the large remaining piece is decomposing `webapp/src/pages/TalkDetailPage.tsx` (~9.5k LOC on this branch) into greenfield feature modules.
 
-The staged slice retires the remaining legacy context/runtime execution surface:
+There is **no staged/uncommitted slice**. Each slice below was committed only after passing the review gate.
 
-- Fresh baseline schema adds `talk_agent_snapshots.provider_id`, `messages.metadata_json`, and private `message_provider_replay`.
-- Provider replay blobs are stripped from member-readable message metadata and persisted only in `message_provider_replay`.
-- Replay read/write scope is source-agent + frozen snapshot provider/model, with a shared byte budget.
-- Runtime events/API identity use frozen `talk_agent_snapshots.provider_id/model_id`.
-- Active source refs are raw `context_sources.id::text`; legacy `meta_json.sourceRef` remains only as a compatibility alias.
-- `new-executor.ts` keeps shared tool/image helpers and makes `CleanTalkExecutor` fail closed with `LEGACY_EXECUTOR_RETIRED`.
-- Scheduled/run-now job snapshot creation skips non-target roster agents whose provider is unavailable, while still blocking if the target provider is unavailable.
+## Review Gate (per slice)
 
-## Verification Already Done
+Exactly two passes, run against the staged diff (`git diff --cached`):
 
-After the latest job-snapshot fix:
+1. **gstack `/review`** — bundles a Claude adversarial subagent **and** a Codex (cross-model) adversarial pass. Honor a Codex `block`: adjudicate it (real? in-scope? introduced by this slice?), don't dismiss. The Codex pass repeatedly catches behavioral defects Claude's pass misses (e.g. the in-flight cross-workspace last-write-wins race on the switcher slice).
+2. **`/karpathy-audit diff`** — Karpathy's four principles on the diff (style/traceability).
 
-- `CLAWTALK_ALLOW_UNSUPPORTED_NODE=1 npm run test -- src/clawtalk/web/routes/greenfield-jobs.test.ts`
-  - Pass: 28 tests.
-- Broad staged-slice suite:
-  - Pass: 12 files, 199 tests.
-  - Covered provider replay scope/budget, fail-closed retired executor gate, queue consumer provider replay privacy, greenfield executor history/replay behavior, context readiness, schema invariants, and route contracts.
-- `npm run typecheck`
-  - Pass.
-- `npm run build`
-  - Pass.
-- `git diff --cached --check`
-  - Pass.
-- Claude Review
-  - Clean on compact staged-slice artifact.
-- Karpathy diff review
-  - Local traceability review clean.
-  - Codex CLI-backed attempt could not complete because Codex CLI usage quota was exhausted.
-- GStack Review
-  - First review found one P2: job snapshot creation could insert a null provider for a disabled non-target roster agent.
-  - Finding was fixed and covered with manual run-now + scheduled claim regression tests.
-  - Required rerun is blocked by Codex CLI usage quota until 2026-06-07 08:23 America/Los_Angeles.
+No third standalone "Claude review" — `/review` already contains it. Commit only when both gates are clean or findings are fixed/justified. (Set by Joseph 2026-06-02.)
 
-## What Is Left Before Continuing Implementation
+## Slices committed this session
 
-1. Re-run GStack Review on the staged diff after the Codex CLI quota resets.
-2. If GStack is clean, commit the staged slice:
+| Commit    | Slice                                                                                                                                                                                                                                |
+| --------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `951ab34` | **refactor: retire legacy context runtime.** Fresh-baseline `talk_agent_snapshots.provider_id` / `messages.metadata_json` / private `message_provider_replay`; replay blobs stripped from member-readable metadata and persisted only in `message_provider_replay` with source-agent + frozen-snapshot scope and a shared byte budget; runtime/API identity reads frozen snapshot `provider_id`/`model_id`; active source refs are raw `context_sources.id::text`; `CleanTalkExecutor` fails closed with `LEGACY_EXECUTOR_RETIRED` (`new-executor.ts` keeps only the shared tool/image helpers); job snapshot creation skips non-target roster agents whose provider is unavailable while still blocking if the target provider is unavailable. |
+| `6c40fb7` | **fix: gate disabled models at chat enqueue (fail closed like jobs).** Chat roster resolution filters `llm_provider_models.enabled = true`, so a disabled/retired model yields a null `provider_id` and the existing guard returns `agent_model_not_found` — matching the job path's `loadRoster`. Gated at snapshot creation (not the executor) to preserve frozen identity. |
+| `5bb6712` | **feat(webapp): workspace switcher + per-request workspace scoping.** Sidebar switcher backed by the greenfield per-request model: no persisted active workspace; the client tracks it in a localStorage marker and sends `x-workspace-id` on every workspace-scoped request (without overriding an explicit `?workspaceId=`). Switching validates via POST, records the marker, and does a clean reload that discards in-flight old-workspace requests. Persist buster is workspace-scoped; `getSessionMe` self-heals a stale marker (`workspace_forbidden` → clear + retry); sign-out clears it. |
 
-   ```bash
-   git commit -m "refactor: retire legacy context runtime"
-   ```
+## Next steps (in order)
 
-3. If GStack finds an issue:
-   - Patch only that issue.
-   - Rerun the focused relevant tests.
-   - Rerun `npm run typecheck`, `npm run build`, and `git diff --cached --check`.
-   - Rerun Claude Review, Karpathy diff review, and GStack Review.
-   - Commit only after the review loop is clean.
+1. **Backend cleanup nits** (own slice, autonomous): dedupe the `PDF_ATTACHMENT_MIME_TYPE` constant (declared in both `new-executor.ts` and `greenfield-executor.ts`), delete the now-dead `prependImageBlocks` helper + its test (greenfield uses `prependGreenfieldPdfPageImages`), and align `context_sources_prompt_lookup_idx` to the live executor query (see Open follow-ups).
+2. **Human visual verification of the shell** (blocking before more frontend). Joseph runs the dev stack and confirms the shell renders and the workspace name shows top-left. Exercising the *switcher* needs a second workspace; bootstrap creates a single workspace and there is intentionally **no create-workspace flow** (it would only exist to demo the switcher — out of scope for a solo dogfooder).
+3. **Decompose `TalkDetailPage.tsx`** — one isolated extraction at a time (context/sources panel or composer first), each verified visually, with per-resource React Query keys. Do **not** big-bang it; the switcher slice ballooned to 6 Codex review rounds.
 
-After the commit, the next implementation phase should begin the webapp/Talk rewrite against final greenfield APIs. Do not start frontend implementation before the staged backend/runtime slice is committed.
+## Open follow-ups
+
+- **webapp raw-UUID source refs.** `SavedSourcesPanel.tsx` (~553) and `SourceMentionPicker.tsx` (~172) now render raw UUIDs because `sourceRef = context_sources.id`. Needs a human-readable display.
+- **`selectProviderReplayMessageIds` budget/break unit test.** The shared byte-budget walk lacks a focused unit test for the budget-exceeded break.
+- **Provider-level disablement.** Neither chat enqueue nor the job path checks `llm_providers.enabled` (only `llm_provider_models.enabled`). Gate at both roster joins **only if** provider-level disablement becomes real.
+- **Dead legacy context loader.** `context-loader.ts`'s `loadTalkContext` / `fetchSources` / `buildContextTools` are now referenced only by tests — the live runtime uses `greenfield-executor.ts`'s `loadGreenfieldContextSources` / `loadGreenfieldContextSourceForRead`. Candidate for a dedicated retirement slice (large file + two big test files; not a drive-by).
 
 ## Resume Prompt
 
-Use this prompt to resume implementation:
-
 ```text
-Continue the ClawTalk greenfield refactor from /Users/josephkim/.codex/worktrees/381b/clawtalk on branch codex/clawtalk-greenfield-cutover.
+Continue the ClawTalk greenfield cutover from /Users/josephkim/.codex/worktrees/381b/clawtalk on branch
+codex/clawtalk-greenfield-cutover — NOT the main checkout.
 
-First read docs/IMPLEMENTATION-HANDOFF.md, docs/IMPLEMENTATION-READINESS.md, docs/REFACTOR-OVERVIEW.md, and docs/roadmap.md.
+First read memory [[greenfield-cutover-active]] + [[two-gate-review-process]], then docs/REFACTOR-OVERVIEW.md,
+docs/IMPLEMENTATION-HANDOFF.md, docs/roadmap.md. Verify doc claims against `git log` before trusting them.
 
-Do not start a new implementation slice yet. The current backend/runtime retirement slice is staged and locally verified. Re-run the required GStack Review gate now that Codex CLI quota should be available. Also honor the standing per-slice process: GStack Review, Karpathy diff review, and Claude Review before commit.
+The backend/runtime cutover is committed (legacy context runtime retired, disabled-model fail-closed enqueue,
+workspace switcher). No staged slice. Per-slice gate = gstack /review (bundles Codex adversarial — honor block
+verdicts) + /karpathy-audit diff. Commit only when both are clean or findings fixed/justified.
 
-If GStack Review is clean, commit the staged slice with:
-  git commit -m "refactor: retire legacy context runtime"
+Current phase is the frontend rewrite (Phase 5). Before building more frontend, get Joseph's visual verification
+of the shell. Then decompose webapp/src/pages/TalkDetailPage.tsx ONE isolated extraction at a time, each verified
+visually. Do NOT big-bang it and do NOT build a create-workspace flow.
 
-If GStack Review finds an issue, patch only that issue, rerun focused tests plus npm run typecheck, npm run build, git diff --cached --check, then rerun GStack Review, Karpathy diff review, and Claude Review. Commit only when clean.
-
-After that commit, continue autonomously into the next implementation phase: webapp/Talk rewrite against final greenfield APIs. Stop only for human verification, destructive external actions, or unresolved product decisions.
+Backend slices: prettier pre-commit runs format:fix on src/ + scripts/ only — run `npm run format:fix && git add -u`
+before commit. Backend tests: `CLAWTALK_ALLOW_UNSUPPORTED_NODE=1 npm run test -- <file>` (local node is v22).
 ```
