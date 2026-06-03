@@ -128,6 +128,40 @@ async function createTalkFixture(input?: { workspaceId?: string }): Promise<{
   return { workspaceId, talkId: created.body.data.talk.id, agentIds };
 }
 
+async function assignDisabledModelToAgent(input: {
+  workspaceId: string;
+  agentId: string;
+}): Promise<void> {
+  const db = getDbPg();
+  const modelId = `disabled-chat-snapshot-${input.agentId.slice(0, 8)}`;
+  await db`
+    insert into public.llm_provider_models (
+      provider_id, model_id, display_name, context_window_tokens,
+      default_max_output_tokens, default_ttft_timeout_ms, enabled,
+      capabilities_json
+    )
+    values (
+      'provider.openai',
+      ${modelId},
+      'Disabled chat snapshot regression model',
+      128000,
+      4096,
+      30000,
+      false,
+      '{}'::jsonb
+    )
+    on conflict (provider_id, model_id) do update set
+      enabled = false,
+      display_name = excluded.display_name
+  `;
+  await db`
+    update public.agents
+    set model_id = ${modelId}
+    where workspace_id = ${input.workspaceId}::uuid
+      and id = ${input.agentId}::uuid
+  `;
+}
+
 describe('greenfield chat routes', () => {
   beforeAll(async () => {
     await initPgDatabase();
@@ -205,6 +239,64 @@ describe('greenfield chat routes', () => {
       snapshot_group_count: 1,
       trigger_message_ids: [result.body.data.message.id],
     });
+  });
+
+  it('rejects chat enqueue when a targeted agent model is disabled', async () => {
+    const { workspaceId, talkId, agentIds } = await createTalkFixture();
+    await assignDisabledModelToAgent({ workspaceId, agentId: agentIds[0]! });
+
+    const result = await enqueueGreenfieldChatRoute({
+      auth: auth(),
+      workspaceId,
+      talkId,
+      content: 'Should not enqueue against a disabled model.',
+      targetAgentIds: [agentIds[0]!],
+      threadId: talkId,
+    });
+
+    expect(result.statusCode).toBe(409);
+    expect(result.body.ok ? null : result.body.error).toMatchObject({
+      code: 'agent_model_not_found',
+    });
+
+    // Fails closed at enqueue: no message, run, or frozen snapshot is created.
+    const db = getDbPg();
+    const counts = await db<
+      Array<{
+        message_count: number;
+        run_count: number;
+        snapshot_count: number;
+      }>
+    >`
+      select
+        (select count(*)::int from public.messages where talk_id = ${talkId}::uuid) as message_count,
+        (select count(*)::int from public.runs where talk_id = ${talkId}::uuid) as run_count,
+        (select count(*)::int from public.talk_agent_snapshots where talk_id = ${talkId}::uuid) as snapshot_count
+    `;
+    expect(counts[0]).toMatchObject({
+      message_count: 0,
+      run_count: 0,
+      snapshot_count: 0,
+    });
+  });
+
+  it('still enqueues for an enabled agent when a non-targeted agent model is disabled', async () => {
+    const { workspaceId, talkId, agentIds } = await createTalkFixture();
+    await assignDisabledModelToAgent({ workspaceId, agentId: agentIds[0]! });
+
+    const result = await enqueueGreenfieldChatRoute({
+      auth: auth(),
+      workspaceId,
+      talkId,
+      content: 'Target the still-enabled agent only.',
+      targetAgentIds: [agentIds[1]!],
+      threadId: talkId,
+    });
+
+    expect(result.statusCode).toBe(202);
+    if (!result.body.ok) throw new Error('Expected chat enqueue to succeed');
+    expect(result.body.data.runs).toHaveLength(1);
+    expect(result.body.data.runs[0]?.targetAgentId).toBe(agentIds[1]);
   });
 
   it('rejects malformed chat enqueue payload fields without throwing', async () => {

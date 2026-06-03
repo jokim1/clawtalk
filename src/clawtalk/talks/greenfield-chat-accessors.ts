@@ -213,6 +213,7 @@ export async function enqueueGreenfieldChatTurn(input: {
         select provider_id
         from public.llm_provider_models
         where model_id = a.model_id
+          and enabled = true
         order by provider_id asc
         limit 1
       ) lpm on true
