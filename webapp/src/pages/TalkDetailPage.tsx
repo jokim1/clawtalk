@@ -1,15 +1,4 @@
 import {
-  DndContext,
-  PointerSensor,
-  closestCenter,
-  useDraggable,
-  useDroppable,
-  useSensor,
-  useSensors,
-  type DragEndEvent,
-} from '@dnd-kit/core';
-import { CSS } from '@dnd-kit/utilities';
-import {
   Component,
   FormEvent,
   KeyboardEvent as ReactKeyboardEvent,
@@ -43,11 +32,9 @@ import {
   getThreadContent,
   patchContent,
   createTalkThread,
-  createTalkContextRule,
   createTalkJob,
   deleteTalkMessages,
   deleteTalkThread,
-  deleteTalkContextRule,
   deleteTalkJob,
   getAiAgents,
   getTalk,
@@ -63,11 +50,9 @@ import {
   listTalkThreads,
   listTalkMessages,
   searchTalkMessages,
-  patchTalkContextRule,
   patchTalkMetadata,
   patchTalkJob,
   sendTalkMessage,
-  setTalkGoal,
   Talk,
   TalkAgent,
   TalkJob,
@@ -104,6 +89,10 @@ import { LiveResponsePanel } from '../components/LiveResponsePanel';
 import { InlineEditableTitle } from '../components/InlineEditableTitle';
 import { TalkToolsPanel } from '../components/TalkToolsPanel';
 import { SavedSourcesPanel } from '../components/SavedSourcesPanel';
+import {
+  TalkContextPanel,
+  type ContextStatusState,
+} from '../components/TalkContextPanel';
 import {
   SourceMentionPicker,
   buildSourceMentionOptions,
@@ -1751,89 +1740,6 @@ function buildThreadHref(
   return `${base}?thread=${encodeURIComponent(threadId)}`;
 }
 
-function sortRulesByOrder(rules: ContextRule[]): ContextRule[] {
-  return [...rules].sort((left, right) => {
-    const delta = left.sortOrder - right.sortOrder;
-    if (delta !== 0) return delta;
-    return left.createdAt.localeCompare(right.createdAt);
-  });
-}
-
-function buildRuleDraftMap(rules: ContextRule[]): Record<string, string> {
-  return rules.reduce<Record<string, string>>((acc, rule) => {
-    acc[rule.id] = rule.ruleText;
-    return acc;
-  }, {});
-}
-
-function reorderRules(
-  rules: ContextRule[],
-  activeId: string,
-  overId: string,
-): ContextRule[] {
-  const ordered = sortRulesByOrder(rules);
-  const fromIndex = ordered.findIndex((rule) => rule.id === activeId);
-  const toIndex = ordered.findIndex((rule) => rule.id === overId);
-  if (fromIndex < 0 || toIndex < 0 || fromIndex === toIndex) {
-    return ordered;
-  }
-
-  const next = [...ordered];
-  const [moved] = next.splice(fromIndex, 1);
-  if (!moved) return ordered;
-  next.splice(toIndex, 0, moved);
-  return next.map((rule, index) => ({ ...rule, sortOrder: index }));
-}
-
-function RuleRow({
-  ruleId,
-  disabled,
-  label,
-  children,
-}: {
-  ruleId: string;
-  disabled: boolean;
-  label: string;
-  children: ReactNode;
-}): JSX.Element {
-  const { attributes, listeners, setNodeRef, transform, isDragging } =
-    useDraggable({
-      id: ruleId,
-      disabled,
-    });
-  const { isOver, setNodeRef: setDropNodeRef } = useDroppable({
-    id: ruleId,
-    disabled,
-  });
-
-  return (
-    <div
-      ref={(node) => {
-        setNodeRef(node);
-        setDropNodeRef(node);
-      }}
-      className={`talk-rule-row${isDragging ? ' talk-rule-row-dragging' : ''}${
-        isOver && !disabled ? ' talk-rule-row-over' : ''
-      }`}
-      style={{
-        transform: transform ? CSS.Translate.toString(transform) : undefined,
-      }}
-    >
-      <button
-        type="button"
-        className="talk-rule-handle"
-        aria-label={`Reorder ${label}`}
-        disabled={disabled}
-        {...attributes}
-        {...listeners}
-      >
-        <span aria-hidden="true">⋮⋮</span>
-      </button>
-      <div className="talk-rule-row-body">{children}</div>
-    </div>
-  );
-}
-
 function buildAgentLabel(agent: Pick<TalkAgent, 'nickname' | 'role'>): string {
   return `${agent.nickname} (${formatTalkRole(agent.role)})`;
 }
@@ -2486,11 +2392,23 @@ export function TalkDetailPage({
   const [contextRules, setContextRules] = useState<ContextRule[]>([]);
   const [contextSources, setContextSources] = useState<ContextSource[]>([]);
   const [contextLoaded, setContextLoaded] = useState(false);
+  // Page-owned status shared with TalkContextPanel: drives the load gate and the
+  // goal/rule mutation feedback. Kept on the page (not the tab-mounted panel) so
+  // the 'saving' lockout and any in-flight mutation survive the user leaving and
+  // re-entering the Context tab.
+  const [contextStatus, setContextStatus] = useState<ContextStatusState>({
+    status: 'idle',
+  });
+  // Goal/rule draft state for TalkContextPanel, page-owned (like jobDraft) so
+  // unsaved edits survive leaving and re-entering the Context tab. These are
+  // sparse in-progress *overrides*: goalDraft === null / a missing ruleDrafts
+  // entry means "no override — render the live goal/rule prop". An override is
+  // set as the user types and cleared again on a successful (or no-op) save, so
+  // a mutation that resolves after a tab switch is reflected from the refreshed
+  // props and can't be reverted by a stale draft.
+  const [goalDraft, setGoalDraft] = useState<string | null>(null);
+  const [newRuleText, setNewRuleText] = useState('');
   const [ruleDrafts, setRuleDrafts] = useState<Record<string, string>>({});
-  const [contextStatus, setContextStatus] = useState<{
-    status: 'idle' | 'loading' | 'saving' | 'error' | 'success';
-    message?: string;
-  }>({ status: 'idle' });
   const [talkJobs, setTalkJobs] = useState<TalkJob[]>([]);
   const [talkJobsLoaded, setTalkJobsLoaded] = useState(false);
   const [talkJobsStatus, setTalkJobsStatus] = useState<{
@@ -2517,8 +2435,6 @@ export function TalkDetailPage({
     status: 'idle' | 'loading' | 'error';
     message?: string;
   }>({ status: 'idle' });
-  const [goalDraft, setGoalDraft] = useState('');
-  const [newRuleText, setNewRuleText] = useState('');
 
   const titleInputRef = useRef<HTMLInputElement | null>(null);
   const messageElementRefs = useRef<Map<string, HTMLElement>>(new Map());
@@ -2546,13 +2462,6 @@ export function TalkDetailPage({
     dispatch({ type: 'THREAD_SELECTED', threadId: activeThreadId });
   }, [activeThreadId]);
 
-  const ruleSensors = useSensors(
-    useSensor(PointerSensor, { activationConstraint: { distance: 8 } }),
-  );
-  const orderedContextRules = useMemo(
-    () => sortRulesByOrder(contextRules),
-    [contextRules],
-  );
   const activeRuleCount = useMemo(
     () => contextRules.filter((rule) => rule.isActive).length,
     [contextRules],
@@ -3305,18 +3214,13 @@ export function TalkDetailPage({
   );
 
   const refreshContext = useCallback(
-    async (options?: { hydrateGoalDraft?: boolean; showLoading?: boolean }) => {
+    async (options?: { showLoading?: boolean }) => {
       if (options?.showLoading) {
         setContextStatus({ status: 'loading' });
       }
       const ctx = await getTalkContext(talkId);
       setContextGoal(ctx.goal);
-      if (options?.hydrateGoalDraft) {
-        setGoalDraft(ctx.goal?.goalText ?? '');
-      }
-      const sortedRules = sortRulesByOrder(ctx.rules);
-      setContextRules(sortedRules);
-      setRuleDrafts(buildRuleDraftMap(sortedRules));
+      setContextRules(ctx.rules);
       setContextSources(ctx.sources);
       setContextLoaded(true);
       setContextStatus({ status: 'idle' });
@@ -3473,8 +3377,10 @@ export function TalkDetailPage({
     setContextGoal(null);
     setContextRules([]);
     setContextSources([]);
-    setRuleDrafts({});
     setContextStatus({ status: 'idle' });
+    setGoalDraft(null);
+    setNewRuleText('');
+    setRuleDrafts({});
     setTalkJobs([]);
     setTalkJobsLoaded(false);
     setTalkJobsStatus({ status: 'idle' });
@@ -3486,8 +3392,6 @@ export function TalkDetailPage({
     setJobToolsState(null);
     setJobToolsLoaded(false);
     setJobToolsStatus({ status: 'idle' });
-    setGoalDraft('');
-    setNewRuleText('');
     setTalkContent(null);
     setTalkContentPendingEdits([]);
     setTalkContentError(null);
@@ -4905,7 +4809,6 @@ export function TalkDetailPage({
     const loadContext = async () => {
       try {
         await refreshContext({
-          hydrateGoalDraft: true,
           showLoading: currentTab === 'context',
         });
         if (cancelled) return;
@@ -5000,158 +4903,6 @@ export function TalkDetailPage({
   ]);
 
   // Context handlers
-  const handleSaveGoal = async () => {
-    setContextStatus({ status: 'saving' });
-    try {
-      const result = await setTalkGoal({ talkId, goalText: goalDraft });
-      setContextGoal(result.goal);
-      setContextStatus({ status: 'success', message: 'Goal saved.' });
-    } catch (err) {
-      setContextStatus({
-        status: 'error',
-        message: err instanceof Error ? err.message : 'Failed to save goal.',
-      });
-    }
-  };
-
-  const handleAddRule = async () => {
-    if (!newRuleText.trim()) return;
-    setContextStatus({ status: 'saving' });
-    try {
-      const rule = await createTalkContextRule({
-        talkId,
-        ruleText: newRuleText.trim(),
-      });
-      setContextRules((prev) => sortRulesByOrder([...prev, rule]));
-      setRuleDrafts((prev) => ({ ...prev, [rule.id]: rule.ruleText }));
-      setNewRuleText('');
-      setContextStatus({ status: 'idle' });
-    } catch (err) {
-      setContextStatus({
-        status: 'error',
-        message: err instanceof Error ? err.message : 'Failed to add rule.',
-      });
-    }
-  };
-
-  const handleToggleRule = async (rule: ContextRule) => {
-    try {
-      const updated = await patchTalkContextRule({
-        talkId,
-        ruleId: rule.id,
-        isActive: !rule.isActive,
-      });
-      setContextRules((prev) =>
-        sortRulesByOrder(prev.map((r) => (r.id === updated.id ? updated : r))),
-      );
-    } catch (err) {
-      setContextStatus({
-        status: 'error',
-        message:
-          err instanceof Error ? err.message : 'Failed to update rule state.',
-      });
-    }
-  };
-
-  const handleSaveRuleText = async (rule: ContextRule) => {
-    const draft = (ruleDrafts[rule.id] ?? rule.ruleText).trim();
-    if (!draft) {
-      setRuleDrafts((prev) => ({ ...prev, [rule.id]: rule.ruleText }));
-      setContextStatus({
-        status: 'error',
-        message: 'Rule text is required.',
-      });
-      return;
-    }
-    if (draft === rule.ruleText) {
-      return;
-    }
-
-    setContextStatus({ status: 'saving' });
-    try {
-      const updated = await patchTalkContextRule({
-        talkId,
-        ruleId: rule.id,
-        ruleText: draft,
-      });
-      setContextRules((prev) =>
-        sortRulesByOrder(
-          prev.map((current) =>
-            current.id === updated.id ? updated : current,
-          ),
-        ),
-      );
-      setRuleDrafts((prev) => ({ ...prev, [rule.id]: updated.ruleText }));
-      setContextStatus({ status: 'success', message: 'Rule updated.' });
-    } catch (err) {
-      setContextStatus({
-        status: 'error',
-        message: err instanceof Error ? err.message : 'Failed to update rule.',
-      });
-    }
-  };
-
-  const handleDeleteRule = async (ruleId: string) => {
-    try {
-      await deleteTalkContextRule({ talkId, ruleId });
-      setContextRules((prev) => prev.filter((r) => r.id !== ruleId));
-      setRuleDrafts((prev) => {
-        const next = { ...prev };
-        delete next[ruleId];
-        return next;
-      });
-    } catch (err) {
-      setContextStatus({
-        status: 'error',
-        message: err instanceof Error ? err.message : 'Failed to delete rule.',
-      });
-    }
-  };
-
-  const handleRuleReorder = async (event: DragEndEvent) => {
-    const activeId = String(event.active.id);
-    const overId = event.over ? String(event.over.id) : null;
-    if (!overId || activeId === overId) {
-      return;
-    }
-
-    const previousRules = orderedContextRules;
-    const nextRules = reorderRules(previousRules, activeId, overId);
-    if (nextRules === previousRules) {
-      return;
-    }
-
-    const changedRules = nextRules.filter((rule, index) => {
-      const previous = previousRules.find(
-        (candidate) => candidate.id === rule.id,
-      );
-      return previous?.sortOrder !== index;
-    });
-
-    setContextRules(nextRules);
-    setContextStatus({ status: 'saving' });
-
-    try {
-      await Promise.all(
-        changedRules.map((rule, index) =>
-          patchTalkContextRule({
-            talkId,
-            ruleId: rule.id,
-            sortOrder: rule.sortOrder,
-          }),
-        ),
-      );
-      setContextStatus({ status: 'success', message: 'Rule order updated.' });
-    } catch (err) {
-      setContextRules(previousRules);
-      setContextStatus({
-        status: 'error',
-        message:
-          err instanceof Error ? err.message : 'Failed to reorder rules.',
-      });
-    }
-  };
-
   const handleCreateJobDraft = useCallback(() => {
     setCreatingJob(true);
     setSelectedJobId(null);
@@ -7303,203 +7054,24 @@ export function TalkDetailPage({
                 <p className="page-state error">{contextStatus.message}</p>
               ) : (
                 <>
-                  {/* Goal */}
-                  <div className="talk-llm-card">
-                    <div className="connector-card-header">
-                      <div>
-                        <h3>Goal</h3>
-                        <p className="talk-llm-meta">
-                          What is this talk for? Describe the overall objective
-                          so agents share a frame for every discussion.
-                        </p>
-                      </div>
-                    </div>
-                    {canEditAgents ? (
-                      <>
-                        <label style={{ display: 'block' }}>
-                          <span className="sr-only">Talk goal</span>
-                          <textarea
-                            maxLength={1000}
-                            rows={4}
-                            value={goalDraft}
-                            onChange={(e) => setGoalDraft(e.target.value)}
-                            placeholder="e.g. Track and discuss Cal Football news each week — scores, key plays, injury reports, and how the team is trending toward bowl eligibility."
-                            disabled={contextStatus.status === 'saving'}
-                            style={{ width: '100%' }}
-                          />
-                        </label>
-                        <div
-                          className="connector-attach-row"
-                          style={{ justifyContent: 'space-between' }}
-                        >
-                          <p className="talk-llm-meta">
-                            {goalDraft.length}/1000
-                          </p>
-                          <button
-                            type="button"
-                            className="secondary-btn"
-                            onClick={() => void handleSaveGoal()}
-                            disabled={contextStatus.status === 'saving'}
-                          >
-                            Save
-                          </button>
-                        </div>
-                      </>
-                    ) : (
-                      <p className="talk-llm-meta">
-                        {contextGoal?.goalText || <em>No goal set.</em>}
-                      </p>
-                    )}
-                  </div>
-
-                  {/* Rules */}
-                  <div className="talk-llm-card">
-                    <div className="connector-card-header">
-                      <div>
-                        <h3>Rules</h3>
-                        <p className="talk-llm-meta">
-                          Specific formats and constraints — e.g. an output
-                          shape to follow, or sources to avoid. Up to 8 active
-                          rules, applied in order. Inactive rules stay editable
-                          without affecting prompt injection.
-                        </p>
-                      </div>
-                    </div>
-                    {orderedContextRules.length > 0 ? (
-                      <DndContext
-                        sensors={ruleSensors}
-                        collisionDetection={closestCenter}
-                        onDragEnd={(event) => void handleRuleReorder(event)}
-                      >
-                        <div className="talk-rule-list">
-                          {orderedContextRules.map((rule) => {
-                            const draft = ruleDrafts[rule.id] ?? rule.ruleText;
-                            const hasTextChange =
-                              draft.trim().length > 0 &&
-                              draft.trim() !== rule.ruleText;
-                            return (
-                              <RuleRow
-                                key={rule.id}
-                                ruleId={rule.id}
-                                disabled={!canEditAgents}
-                                label={rule.ruleText}
-                              >
-                                <div
-                                  className={`talk-rule-card${
-                                    rule.isActive
-                                      ? ''
-                                      : ' talk-rule-card-inactive'
-                                  }`}
-                                >
-                                  <div className="talk-rule-card-top">
-                                    <span className="talk-agent-chip">
-                                      {rule.isActive ? 'Active' : 'Inactive'}
-                                    </span>
-                                    <span className="talk-llm-meta">
-                                      Position {rule.sortOrder + 1}
-                                    </span>
-                                  </div>
-                                  {canEditAgents ? (
-                                    <>
-                                      <label className="talk-rule-edit-field">
-                                        <span className="sr-only">
-                                          Rule text
-                                        </span>
-                                        <textarea
-                                          maxLength={800}
-                                          rows={2}
-                                          value={draft}
-                                          onChange={(event) =>
-                                            setRuleDrafts((prev) => ({
-                                              ...prev,
-                                              [rule.id]: event.target.value,
-                                            }))
-                                          }
-                                          onBlur={() =>
-                                            void handleSaveRuleText(rule)
-                                          }
-                                          disabled={
-                                            contextStatus.status === 'saving'
-                                          }
-                                          style={{ width: '100%' }}
-                                        />
-                                      </label>
-                                      <div className="talk-rule-actions">
-                                        <button
-                                          type="button"
-                                          className="secondary-btn"
-                                          onClick={() =>
-                                            void handleToggleRule(rule)
-                                          }
-                                        >
-                                          {rule.isActive ? 'Pause' : 'Activate'}
-                                        </button>
-                                        <button
-                                          type="button"
-                                          className="secondary-btn"
-                                          onClick={() =>
-                                            void handleSaveRuleText(rule)
-                                          }
-                                          disabled={
-                                            contextStatus.status === 'saving' ||
-                                            !hasTextChange
-                                          }
-                                        >
-                                          Save
-                                        </button>
-                                        <button
-                                          type="button"
-                                          className="secondary-btn"
-                                          onClick={() =>
-                                            void handleDeleteRule(rule.id)
-                                          }
-                                        >
-                                          Delete
-                                        </button>
-                                      </div>
-                                    </>
-                                  ) : (
-                                    <p className="talk-rule-readonly">
-                                      {rule.ruleText}
-                                    </p>
-                                  )}
-                                </div>
-                              </RuleRow>
-                            );
-                          })}
-                        </div>
-                      </DndContext>
-                    ) : (
-                      <p className="page-state">No rules yet.</p>
-                    )}
-                    {canEditAgents ? (
-                      <div className="talk-rule-create-row">
-                        <label style={{ flex: 1 }}>
-                          <span className="sr-only">New rule text</span>
-                          <textarea
-                            maxLength={800}
-                            rows={2}
-                            value={newRuleText}
-                            onChange={(e) => setNewRuleText(e.target.value)}
-                            placeholder="e.g. When summarizing Cal Football news, use: ⟨headline⟩ — ⟨score⟩ — three bullets of key plays."
-                            disabled={contextStatus.status === 'saving'}
-                            style={{ width: '100%' }}
-                          />
-                        </label>
-                        <button
-                          type="button"
-                          className="secondary-btn"
-                          onClick={() => void handleAddRule()}
-                          disabled={
-                            contextStatus.status === 'saving' ||
-                            !newRuleText.trim()
-                          }
-                        >
-                          Add Rule
-                        </button>
-                      </div>
-                    ) : null}
-                  </div>
+                  <TalkContextPanel
+                    key={talkId}
+                    talkId={talkId}
+                    goal={contextGoal}
+                    rules={contextRules}
+                    setGoal={setContextGoal}
+                    setRules={setContextRules}
+                    status={contextStatus}
+                    setStatus={setContextStatus}
+                    goalDraft={goalDraft}
+                    setGoalDraft={setGoalDraft}
+                    newRuleText={newRuleText}
+                    setNewRuleText={setNewRuleText}
+                    ruleDrafts={ruleDrafts}
+                    setRuleDrafts={setRuleDrafts}
+                    canEdit={canEditAgents}
+                    onUnauthorized={handleUnauthorized}
+                  />
 
                   <SavedSourcesPanel
                     talkId={talkId}
