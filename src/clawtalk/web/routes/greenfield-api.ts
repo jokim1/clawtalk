@@ -30,10 +30,8 @@ import {
   createGreenfieldTalkContextSourceRoute,
   deleteGreenfieldTalkContextRuleRoute,
   deleteGreenfieldTalkContextSourceRoute,
-  deleteGreenfieldTalkStateEntryRoute,
   getGreenfieldTalkContextRoute,
   getGreenfieldTalkContextSourceContentRoute,
-  getGreenfieldTalkStateRoute,
   listGreenfieldTalkContextRulesRoute,
   patchGreenfieldTalkContextRuleRoute,
   patchGreenfieldTalkContextSourceRoute,
@@ -1098,33 +1096,6 @@ export function mountGreenfieldApiRoutes(app: GreenfieldApp): void {
       workspaceId: requestedWorkspaceId(c),
       talkId: c.req.param('talkId'),
       ruleId: c.req.param('ruleId'),
-    });
-    return jsonResponse(result);
-  });
-
-  app.get('/api/v1/talks/:talkId/state', async (c) => {
-    const auth = c.get('auth');
-    const rl = checkRateLimit({ principalId: auth.userId, bucket: 'read' });
-    if (!rl.allowed) return rateLimitedResponse(c, rl);
-    const result = await getGreenfieldTalkStateRoute({
-      auth,
-      workspaceId: requestedWorkspaceId(c),
-      talkId: c.req.param('talkId'),
-    });
-    return jsonResponse(result);
-  });
-
-  app.delete('/api/v1/talks/:talkId/state/:key', async (c) => {
-    const auth = c.get('auth');
-    const rl = checkRateLimit({ principalId: auth.userId, bucket: 'write' });
-    if (!rl.allowed) return rateLimitedResponse(c, rl);
-    const csrfFail = checkCsrf(c, auth);
-    if (csrfFail) return csrfFail;
-    const result = await deleteGreenfieldTalkStateEntryRoute({
-      auth,
-      workspaceId: requestedWorkspaceId(c),
-      talkId: c.req.param('talkId'),
-      key: c.req.param('key'),
     });
     return jsonResponse(result);
   });

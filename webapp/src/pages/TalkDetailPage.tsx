@@ -1584,7 +1584,7 @@ function getTabFromPath(pathname: string, talkId: string): TabKey {
   ) {
     return 'connectors';
   }
-  if (pathname === `${base}/tools` || pathname === `${base}/state`) {
+  if (pathname === `${base}/tools`) {
     return 'context';
   }
   return 'talk';

@@ -37,10 +37,8 @@ import {
   createGreenfieldTalkContextRuleRoute,
   createGreenfieldTalkContextSourceRoute,
   deleteGreenfieldTalkContextSourceRoute,
-  deleteGreenfieldTalkStateEntryRoute,
   getGreenfieldTalkContextRoute,
   getGreenfieldTalkContextSourceContentRoute,
-  getGreenfieldTalkStateRoute,
   patchGreenfieldTalkContextRuleRoute,
   patchGreenfieldTalkContextSourceRoute,
   retryGreenfieldTalkContextSourceRoute,
@@ -799,12 +797,6 @@ describe('greenfield context compatibility routes', () => {
         title: 'Guest source',
         extractedText: 'Guest text',
       }),
-      await deleteGreenfieldTalkStateEntryRoute({
-        auth: guest,
-        workspaceId,
-        talkId,
-        key: 'guest.key',
-      }),
     ]) {
       expect(result.statusCode).toBe(403);
       expect(result.body).toMatchObject({
@@ -1283,32 +1275,5 @@ describe('greenfield context compatibility routes', () => {
       put.mockRestore();
     }
     expect(bucket.store.get(pageKey)?.body.equals(JPEG)).toBe(true);
-  });
-
-  it('keeps the removed talk-state table as an empty compatibility surface', async () => {
-    const { workspaceId, talkId } = await createTalkFixture();
-    const state = await getGreenfieldTalkStateRoute({
-      auth: auth(),
-      workspaceId,
-      talkId,
-    });
-    expect(state.statusCode).toBe(200);
-    expect(state.body.ok && state.body.data.entries).toEqual([]);
-
-    const invalid = await deleteGreenfieldTalkStateEntryRoute({
-      auth: auth(),
-      workspaceId,
-      talkId,
-      key: 'bad key',
-    });
-    expect(invalid.statusCode).toBe(400);
-
-    const missing = await deleteGreenfieldTalkStateEntryRoute({
-      auth: auth(),
-      workspaceId,
-      talkId,
-      key: 'valid:key',
-    });
-    expect(missing.statusCode).toBe(404);
   });
 });

@@ -34,8 +34,6 @@
 //   /api/v1/user/tool-permissions   — user-settings.ts
 //   /api/v1/talks/:talkId/context[/...] — greenfield-api.ts compatibility
 //                                         routes over context_sources
-//   /api/v1/talks/:talkId/state[/...]   — greenfield-api.ts read-only
-//                                         compatibility surface
 //   /api/v1/talks/:talkId/jobs[/...]    — greenfield-api.ts compatibility
 //                                         routes over jobs/runs
 //   /api/v1/talks/:talkId/attachments[/...] — unavailable until greenfield

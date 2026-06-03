@@ -68,20 +68,8 @@ type SourceContentResult =
       headers: Record<string, string>;
     };
 
-type TalkStateEntrySnapshot = {
-  id: string;
-  key: string;
-  value: unknown;
-  version: number;
-  updatedAt: string;
-  updatedByUserId: string | null;
-  updatedByRunId: string | null;
-};
-
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-const MAX_STATE_KEY_LENGTH = 80;
-const STATE_KEY_PATTERN = /^[a-zA-Z0-9_][a-zA-Z0-9_.:-]*$/;
 
 function ok<T>(data: T, statusCode = 200): RouteResult<T> {
   return { statusCode, body: { ok: true, data } };
@@ -133,22 +121,6 @@ async function cleanupGreenfieldContextSourceStorage(input: {
 
 function isUuid(value: string): boolean {
   return UUID_RE.test(value);
-}
-
-function validateStateKey(key: string): string {
-  const trimmed = key.trim();
-  if (!trimmed) throw new Error('State key is required');
-  if (trimmed.length > MAX_STATE_KEY_LENGTH) {
-    throw new Error(
-      `State key exceeds ${MAX_STATE_KEY_LENGTH}-character limit`,
-    );
-  }
-  if (!STATE_KEY_PATTERN.test(trimmed)) {
-    throw new Error(
-      'State key must contain only letters, digits, underscores, dots, colons, or hyphens, and must start with a letter, digit, or underscore.',
-    );
-  }
-  return trimmed;
 }
 
 async function findVisibleTalkWorkspaceId(
@@ -447,34 +419,6 @@ export async function deleteGreenfieldTalkContextRuleRoute(input: {
     if (!deleted) return error(404, 'not_found', 'Rule not found.');
     return ok({ deleted: true });
   });
-}
-
-export async function getGreenfieldTalkStateRoute(input: {
-  auth: AuthContext;
-  workspaceId?: string | null;
-  talkId: string;
-}): Promise<RouteResult<{ entries: TalkStateEntrySnapshot[] }>> {
-  return withTalk(input, async () => ok({ entries: [] }));
-}
-
-export async function deleteGreenfieldTalkStateEntryRoute(input: {
-  auth: AuthContext;
-  workspaceId?: string | null;
-  talkId: string;
-  key: string;
-}): Promise<RouteResult<{ deleted: true }>> {
-  try {
-    validateStateKey(input.key);
-  } catch (err) {
-    return error(
-      400,
-      'invalid_key',
-      err instanceof Error ? err.message : 'Invalid key.',
-    );
-  }
-  return withWritableTalk(input, async () =>
-    error(404, 'not_found', 'State entry not found.'),
-  );
 }
 
 export async function createGreenfieldTalkContextSourceRoute(input: {
