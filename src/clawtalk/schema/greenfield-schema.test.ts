@@ -169,8 +169,12 @@ describe('greenfield schema invariants', () => {
     `;
     expect(indexes).toHaveLength(1);
     const indexDef = indexes[0]!.indexdef.toLowerCase();
-    expect(indexDef).toContain('(talk_id, sort_order, created_at, id)');
-    expect(indexDef).toContain("kind <> 'rule'::text");
+    // Serves greenfield-executor's per-run context load: equality on
+    // (workspace_id, talk_id) + the sort_order/created_at/id ordering. Rules are
+    // NOT excluded — the injection query includes kind='rule' rows.
+    expect(indexDef).toContain(
+      '(workspace_id, talk_id, sort_order, created_at, id)',
+    );
     expect(indexDef).toContain('include_in_prompt = true');
   });
 

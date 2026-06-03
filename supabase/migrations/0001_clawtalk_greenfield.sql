@@ -997,9 +997,14 @@ create table public.context_sources (
 create unique index context_sources_legacy_source_ref_unique
   on public.context_sources (workspace_id, talk_id, (upper(meta_json->>'sourceRef')))
   where kind <> 'rule' and meta_json ? 'sourceRef';
+-- Serves the per-run context-source load in greenfield-executor.ts
+-- (loadGreenfieldContextSources + loadGreenfieldContextSourceForRead): equality
+-- on (workspace_id, talk_id), then sort_order/created_at/id ordering, scoped to
+-- prompt-included sources. The predicate is include_in_prompt only; rules are
+-- intentionally NOT excluded because the injection query selects kind='rule' rows.
 create index context_sources_prompt_lookup_idx
-  on public.context_sources (talk_id, sort_order, created_at, id)
-  where kind <> 'rule' and include_in_prompt = true;
+  on public.context_sources (workspace_id, talk_id, sort_order, created_at, id)
+  where include_in_prompt = true;
 create unique index context_sources_goal_unique
   on public.context_sources (workspace_id, talk_id)
   where kind = 'rule' and meta_json->>'compatKind' = 'goal';

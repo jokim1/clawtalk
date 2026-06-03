@@ -50,10 +50,8 @@ import {
   GREENFIELD_DOCUMENT_EDIT_RUNTIME_TOOL,
   loadGreenfieldDocumentContext,
 } from './greenfield-document-tools.js';
-import { buildToolExecutor } from './new-executor.js';
+import { buildToolExecutor, PDF_ATTACHMENT_MIME_TYPE } from './new-executor.js';
 import { emitOutboxEvent } from './outbox-emit.js';
-
-const PDF_ATTACHMENT_MIME_TYPE = 'application/pdf';
 
 type GreenfieldExecutorRunRow = {
   id: string;

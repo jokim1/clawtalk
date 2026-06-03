@@ -1,6 +1,5 @@
 import { getDbPg } from '../../db.js';
 import type { EffectiveToolAccess } from '../db/agent-accessors.js';
-import type { LlmContentBlock } from '../agents/llm-client.js';
 import { executeApplyContentEdit } from './content-apply-handler.js';
 import { CONTEXT_SOURCE_STATUS_SQL } from './context-source-status-sql.js';
 import { executeGoogleDriveTalkTool } from './google-drive-tools.js';
@@ -17,7 +16,7 @@ import {
   type TalkJobExecutionPolicy,
 } from './executor.js';
 
-const PDF_ATTACHMENT_MIME_TYPE = 'application/pdf';
+export const PDF_ATTACHMENT_MIME_TYPE = 'application/pdf';
 
 type ToolResult = { result: string; isError?: boolean };
 
@@ -347,19 +346,6 @@ export function buildToolExecutor(
       isError: true,
     };
   };
-}
-
-export function prependImageBlocks(
-  baseContent: string | LlmContentBlock[],
-  imageBlocks: LlmContentBlock[],
-  headerText: string,
-): string | LlmContentBlock[] {
-  if (imageBlocks.length === 0) return baseContent;
-  const baseBlocks: LlmContentBlock[] =
-    typeof baseContent === 'string'
-      ? [{ type: 'text', text: baseContent }]
-      : baseContent;
-  return [{ type: 'text', text: headerText }, ...imageBlocks, ...baseBlocks];
 }
 
 export class CleanTalkExecutor implements TalkExecutor {
