@@ -164,6 +164,21 @@ export function getDbPg(): Sql {
 function assertTrustedWriteQueryAllowed(store: UserContextStore): void {
   if ((store.trustedWriteDepth ?? 0) === 0) return;
   if (trustedWriteStorage.getStore() === store.trustedWriteToken) return;
+  // TEMP cutover-debug instrumentation — remove after diagnosis.
+  const als = trustedWriteStorage.getStore();
+  console.error(
+    '[GUARD-DEBUG]',
+    JSON.stringify({
+      depth: store.trustedWriteDepth ?? 0,
+      als:
+        als === undefined
+          ? 'UNDEFINED'
+          : als === store.trustedWriteToken
+            ? 'MATCH'
+            : 'DIFFERENT',
+    }),
+    new Error('guard-trace').stack,
+  );
   throw new Error(
     'Database query attempted while trusted DB writes are active outside the trusted callback',
   );
