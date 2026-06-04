@@ -1,7 +1,9 @@
 > **Status:** active · **Generated:** 2026-05-29 · **Last updated:** 2026-05-30 (design-debt resolution pass)
 > Every spec-readiness gap found in the 2026-05-29 audit (8 parallel cross-doc audits + DOC-AUDIT.md closure check). Stable IDs so we can walk through them one-by-one.
 >
-> **Verdict (post-design-debt-pass 2026-05-30): READY — VERIFIED + DESIGN-DEBT RESOLVED + MIGRATION WRITTEN.** All P0 + all P1 + the 10 design-debt items resolved. The greenfield migration SQL is written and locally validated; it lives at [`docs/canonical-greenfield-migration.sql`](./canonical-greenfield-migration.sql) as a docs-side reference (the executable copy lands in `supabase/migrations/0040+_*.sql` at cutover, when the §05 Phases 2–12 src/ rewrites are ready). PRs #499 + #501 used `0037` + `0038`. See [REFACTOR-OVERVIEW.md §14](./REFACTOR-OVERVIEW.md) for the cutover strategy.
+> **Verdict (post-design-debt-pass 2026-05-30; implementation-note updated 2026-06-01): READY — VERIFIED + DESIGN-DEBT RESOLVED + SCHEMA REFERENCE WRITTEN.** All P0 + all P1 + the 10 design-debt items resolved. The original greenfield schema SQL was parked at [`docs/canonical-greenfield-migration.sql`](./canonical-greenfield-migration.sql) as a docs-side draft; that file is now a non-executable historical pointer. The implementation branch's single executable baseline is `supabase/migrations/0001_clawtalk_greenfield.sql`; it removes or archives the old active migration stream and resets/recreates Supabase. PRs #499 + #501 used `0037` + `0038` historically, but implementation does not layer a `0040+` migration over disposable data. See [REFACTOR-OVERVIEW.md §14](./REFACTOR-OVERVIEW.md) for the cutover strategy.
+>
+> **2026-05-30 note:** this is now a historical gap log, not the current implementation-readiness document. For the live codebase audit, test results, and cutover recommendation, use [IMPLEMENTATION-READINESS.md](./IMPLEMENTATION-READINESS.md). Some older body entries intentionally remain as audit trail even where later passes closed or accepted them.
 >
 > **Verification pass (2026-05-30):** 8 parallel verification agents re-read each doc and confirmed the gap closures landed in the body (not just marked closed). Drifts caught + fixed inline:
 > 1. §12 `inbox_items` → `home_inbox_items` (3 spots).
@@ -35,7 +37,7 @@
 | README / roadmap / SECURITY | 3 | **3** ✅ | 2 | **2** ✅ | 0 |
 | **TOTAL** | **~38** | **~38 closed** | **~72** | **~68 closed (~4 accept-as-design / covered cross-doc)** | **~37 remaining** |
 
-**Verdict:** All P0 + all P1 gaps closed across the spec corpus. Remaining ~37 P2s are cosmetic — ID prefix tables, idempotency-key endpoint annotations, audit-events §08 surface, GLOSSARY collapse cleanups, etc. None block writing `0037_clawtalk_greenfield.sql` per §05 Phase 1.
+**Verdict:** All P0 + all P1 gaps closed across the spec corpus. Remaining ~37 P2s are cosmetic — ID prefix tables, idempotency-key endpoint annotations, audit-events §08 surface, GLOSSARY collapse cleanups, etc. None block starting the implementation cutover. The implementation branch should keep a fresh active baseline at `supabase/migrations/0001_clawtalk_greenfield.sql` aligned with `11-data-model.md`, then reset/recreate Supabase instead of applying a chain of compatibility migrations.
 
 ---
 
@@ -56,11 +58,11 @@
 
 **G-11.P0.4 · `is_workspace_admin(ws)` undefined. ✅ CLOSED 2026-05-29.** Added `is_workspace_admin` `security definer` function next to `is_workspace_member` in §12 RLS section: returns true iff `role in ('owner','admin')`. Documented split: `is_workspace_member` for content writes (Talks/Documents/Agents/Jobs/messages/edits), `is_workspace_admin` for admin-only writes (invite/remove members, role updates, connector authorize/revoke, workspace delete, transfer ownership, optimization-proposal review, algorithm version/assignment management). `workspace_members` non-recursive policy explicit: reads `using (user_id = auth.uid())`, writes `using (is_workspace_admin(workspace_id))`.
 
-**G-11.P0.5 · RLS policy DDL not actually written. ✅ CLOSED 2026-05-29.** Added §12.1–12.6 to §11. §12.1 ships a fully spelled `CREATE POLICY` worked example using `talks` (member-read + member-write, with WITH CHECK on both directions) and lists every table the pattern applies to (~35 tables). §12.2 lists the 6 admin-write exceptions (workspace_members, connectors, connector_bindings, connector_secrets, home_optimization_proposals, home_algorithm_versions, home_algorithm_assignments, home_ranking_profiles) with a worked example. §12.3 documents that `agents.is_system` filtering is query-layer, not RLS. §12.4 handles the `home_news_items` shared pool (`using (true)` read; service-role write only). §12.5 specifies the service-role bypass mechanism: paths skip the `withUserContext` role-swap so they hit a Postgres role with `bypassrls`. §12.6 cross-links §14 verification tests.
+**G-11.P0.5 · RLS policy DDL not actually written. ✅ CLOSED 2026-05-29.** Added §12.1–12.6 to §11. §12.1 ships a fully spelled `CREATE POLICY` worked example using `talks` (member-read + member-write, with WITH CHECK on both directions) and lists every table the pattern applies to (~35 tables). §12.2 lists the 8 admin-write exceptions (`workspace_members`, `connectors`, `connector_bindings`, `connector_secrets`, `home_optimization_proposals`, `home_algorithm_versions`, `home_algorithm_assignments`, `home_ranking_profiles`) with a worked example. §12.3 documents that `agents.is_system` filtering is query-layer, not RLS. §12.4 handles the `home_news_items` shared pool (`using (true)` read; service-role write only). §12.5 specifies the service-role bypass mechanism: paths skip the `withUserContext` role-swap so they hit a Postgres role with `bypassrls`. §12.6 cross-links §14 verification tests.
 
-**G-11.P0.6 · Explicit drop list absent. ✅ CLOSED 2026-05-29.** Added §11.1 "Drop list (greenfield migration step 1)" with the explicit `DROP TABLE … CASCADE` statement listing all 37 legacy tables grounded against the 0001–0036 shipped schema. Kept tables listed explicitly: `users`, `event_outbox`, `idempotency_cache`, `settings_kv`, `provider_oauth_states`, the 7 `llm_*`/`workspace_provider_*` tables. `users` kept structurally but `ALTER TABLE`'d in step 2 to add §1 columns. Documented that the list is a snapshot at migration 0036; any later migrations append to it.
+**G-11.P0.6 · Explicit legacy table disposition absent. ✅ CLOSED 2026-05-29; UPDATED 2026-05-30.** §11.1 now keeps the 37-table legacy `DROP TABLE … CASCADE` list as an audit/manual-cleanup reference only. The active implementation plan is a fresh Supabase baseline from an empty/reset database, so `0001_clawtalk_greenfield.sql` creates final tables directly and does not include a legacy drop/alter/backfill phase.
 
-**G-11.P0.7 · `llm_models` seeding mechanism unspecified. ✅ CLOSED 2026-05-29.** `llm_models` redefined as a `CREATE VIEW` over `llm_provider_models` (kept table). Live model discovery (#484) already writes to `llm_provider_models`; the view auto-syncs. Migration extends `llm_provider_models` with `capabilities_json jsonb not null default '{}'` (additive ALTER) and adds a unique index on `model_id` so FKs from agents/templates/snapshots/runs target a real unique column. Documented the global-uniqueness assumption + the collision-rejection semantic.
+**G-11.P0.7 · `llm_models` seeding mechanism unspecified. ✅ CLOSED 2026-05-29; UPDATED 2026-05-30.** `llm_models` redefined as a `CREATE VIEW` over `llm_provider_models` (recreated in the fresh baseline). Live model discovery (#484) writes to `llm_provider_models`; the view auto-syncs. The baseline defines `llm_provider_models.capabilities_json jsonb not null default '{}'` and adds a unique index on `model_id` so FKs from agents/templates/snapshots/runs target a real unique column. Documented the global-uniqueness assumption + the collision-rejection semantic.
 
 **G-11.P0.8 · `llm_models.id text pk` with no FK back to `llm_provider_models`. ✅ CLOSED 2026-05-29.** Resolved by G-11.P0.7 — `llm_models` is now a view, so the underlying table IS `llm_provider_models`. FKs from agents/templates/snapshots/runs target `llm_provider_models(model_id)` via the new unique index. `run_prompt_snapshots.provider` denormalization drift risk is now structural-impossible because both `provider` and `model_id` are read from the same row at snapshot time.
 
@@ -68,7 +70,7 @@
 
 **G-11.P1.9 · `agent_role_templates.role_key text pk` with no CHECK. ✅ CLOSED 2026-05-29.** Added CHECK enum: `strategist|critic|researcher|editor|quant|forge_rewriter|forge_critic`.
 
-**G-11.P1.10 · `runs.response_group_id`, `runs.last_run_status`, `jobs.block_reason` text without CHECKs. ✅ CLOSED 2026-05-29.** `response_group_id` length-bounded (1..64); `last_run_status` CHECK `(null or in ('completed','failed'))`; `block_reason` CHECK against the 5 known values. `sequence_index` and `run_count` also got `>= 0` CHECKs.
+**G-11.P1.10 · `runs.response_group_id`, `runs.last_run_status`, `jobs.block_reason` text without CHECKs. ✅ CLOSED 2026-05-29.** `response_group_id` length-bounded (1..64); `last_run_status` CHECK `(null or in ('completed','failed','cancelled'))`; `block_reason` CHECK against the 5 known values. `sequence_index` and `run_count` also got `>= 0` CHECKs.
 
 **G-11.P1.11 · `talk_agent_snapshots.source_agent_id` NULL behavior. ✅ CLOSED 2026-05-29.** Added inline note next to `unique (snapshot_group_id, source_agent_id)`: NULL semantics intentional; historical attribution lives in the snapshot's frozen fields, not in this FK.
 
@@ -100,7 +102,7 @@
 
 **G-11.P2.24 · L286** "6 indexes per row" is observability note, not a blocker.
 
-**G-11.P2.25 · `talk_agents` collision.** L99 (kept new name) + L676 (`talk_agents [old]` as superseded legacy). Document explicitly that greenfield migration drops + recreates and same name is intentional.
+**G-11.P2.25 · `talk_agents` collision.** L99 (kept new name) + L676 (`talk_agents [old]` as superseded legacy). Document explicitly that the fresh baseline defines the new `talk_agents` table and the old same-named table is historical only after reset.
 
 **G-11.P2.26 · `news_topics.mode`/`decision_type`/`sensitivity`** — three enums declared without value vocabulary at L465. §07 owns these but §11 should cross-reference field-level.
 
@@ -391,11 +393,11 @@ None — the jobs spec is clean against §11 modulo §11's own gaps.
 
 **G-05.P0.1 · §05 stack still pre-D1. ✅ CLOSED 2026-05-29.** Phase 0 rewritten: Cloudflare Workers + Hono + DO + Hyperdrive + Queues committed explicitly; "No Redis, no BullMQ, no Sidekiq." Provisioning list updated.
 
-**G-05.P0.2 · §05 not rewritten for §11 greenfield migration. ✅ CLOSED 2026-05-29.** Phase 1 rewritten as 3-step plan: single `0037_clawtalk_greenfield.sql` (drop/keep/ALTER/create/trigger/RLS/verify sub-steps); seed `agent_role_templates` (Samira fix + Forge templates); first-signin workspace bootstrap. References §11 §11.1, §11 trigger bodies, §11 §12.1/§12.2/§12.4, §11 §14.
+**G-05.P0.2 · §05 not rewritten for §11 greenfield baseline. ✅ CLOSED 2026-05-29; UPDATED 2026-05-30.** Phase 1 is now a 3-step plan: fresh `supabase/migrations/0001_clawtalk_greenfield.sql` baseline from an empty/reset Supabase DB; seed `agent_role_templates` (Samira fix + Forge templates); first-signin workspace bootstrap. References §11 §11.1 legacy disposition, §11 trigger bodies, §11 §12.1/§12.2/§12.4, §11 §14.
 
 **G-05.P0.3 · §05 not rewritten for D6/Forge/Jobs/Home. ✅ CLOSED 2026-05-29.** New Phase 9 (Jobs): scheduler.ts rewrite per §12 §5 + atomic claim + executor + UI + inbox emit. New Phase 14 (Forge, post-MVP): improvement-run executor + SSR + audiences UI + gallery + winner-promote → `document_edits.source='forge'`.
 
-**G-05.P0.4 · Risk register unfixed. ✅ CLOSED 2026-05-29.** "BullMQ / Sidekiq" dropped. New mitigation: CF Queues + scheduler.ts cron + atomic claim + §12 stuck-queued (5min) / stuck-running (1h) sweep.
+**G-05.P0.4 · Risk register unfixed. ✅ CLOSED 2026-05-29.** "BullMQ / Sidekiq" dropped. New mitigation: CF Queues + scheduler.ts cron + atomic claim + §12 stuck-queued re-dispatch (5min) / stuck-running fail sweep (1h).
 
 ### P1
 

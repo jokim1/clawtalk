@@ -30,7 +30,7 @@
  * header to api.anthropic.com.
  */
 
-import { getDbPg, type Sql } from '../../db.js';
+import { getDbPg, withTrustedDbWrites, type Sql } from '../../db.js';
 import type {
   RegisteredAgentCredentialMode,
   RegisteredAgentRecord,
@@ -68,6 +68,8 @@ interface LlmProviderModelRow {
 }
 
 interface LlmProviderSecretRow {
+  owner_id: string | null;
+  workspace_id: string | null;
   ciphertext: string;
   credential_kind: 'api_key' | 'subscription';
   encrypted_refresh_token: string | null;
@@ -87,6 +89,20 @@ export interface ExecutionBinding {
   secret: LlmSecret;
   /** Default output budget configured for this provider/model pair. */
   defaultMaxOutputTokens?: number;
+}
+
+export interface ExecutionCredentialScope {
+  /**
+   * Explicit owner for personal provider secrets. Required because queue and
+   * runtime paths may execute with a DB role that bypasses user RLS. Omitted or
+   * null principal scopes deliberately cannot read personal credentials.
+   */
+  principalUserId?: string | null;
+  /**
+   * Explicit workspace for workspace-shared provider secrets. Required by
+   * service-role queue execution so it never reads another workspace's key.
+   */
+  workspaceId?: string | null;
 }
 
 export class ExecutionResolverError extends Error {
@@ -116,7 +132,10 @@ export class ExecutionResolverError extends Error {
  */
 export async function resolveExecution(
   agent: RegisteredAgentRecord,
-  options?: { credentialKindSnapshot?: RegisteredAgentCredentialMode | null },
+  options?: {
+    credentialKindSnapshot?: RegisteredAgentCredentialMode | null;
+    credentialScope?: ExecutionCredentialScope | null;
+  },
 ): Promise<ExecutionBinding> {
   const db: Sql = getDbPg();
 
@@ -141,7 +160,12 @@ export async function resolveExecution(
   // --- Step 2: Resolve credentials ---
   const pinnedMode =
     options?.credentialKindSnapshot ?? agent.credential_mode ?? null;
-  const secret = await resolveSecret(agent, db, pinnedMode);
+  const secret = await resolveSecret(
+    agent,
+    db,
+    pinnedMode,
+    options?.credentialScope ?? null,
+  );
 
   // --- Step 3: Build provider config ---
   // For provider.anthropic, honour the ANTHROPIC_BASE_URL env var override
@@ -187,7 +211,10 @@ export async function resolveExecution(
  * Subscription/OAuth credentials are NOT sufficient for direct HTTP
  * execution and this function returns false for them.
  */
-export async function isAnthropicDirectHttpReady(): Promise<boolean> {
+export async function isAnthropicDirectHttpReady(input: {
+  principalUserId: string | null;
+  workspaceId: string | null;
+}): Promise<boolean> {
   if (TALK_EXECUTOR_ANTHROPIC_API_KEY) return true;
 
   const db: Sql = getDbPg();
@@ -195,16 +222,24 @@ export async function isAnthropicDirectHttpReady(): Promise<boolean> {
     select 1 as one
     from public.llm_provider_secrets
     where provider_id = ${'provider.anthropic'}
+      and credential_kind = 'api_key'
+      and ${input.principalUserId}::uuid is not null
+      and owner_id = ${input.principalUserId}::uuid
     limit 1
   `;
   if (personalRows.length > 0) return true;
 
-  const workspaceRows = await db`
-    select 1 as one
-    from public.workspace_provider_secrets
-    where provider_id = ${'provider.anthropic'}
-    limit 1
-  `;
+  const workspaceRows = await withTrustedDbWrites(
+    () => db`
+      select 1 as one
+      from public.workspace_provider_secrets
+      where ${input.workspaceId}::uuid is not null
+        and workspace_id = ${input.workspaceId}::uuid
+        and provider_id = ${'provider.anthropic'}
+        and credential_kind = 'api_key'
+      limit 1
+    `,
+  );
   return workspaceRows.length > 0;
 }
 
@@ -227,6 +262,7 @@ async function resolveSecret(
   agent: RegisteredAgentRecord,
   db: Sql,
   pinnedMode: RegisteredAgentCredentialMode | null,
+  credentialScope: ExecutionCredentialScope | null,
 ): Promise<LlmSecret> {
   // Order precedence (when no pinned mode):
   //   1. Personal api_key
@@ -239,12 +275,16 @@ async function resolveSecret(
   // credential_kind so only that mode is considered. Env-var fallback
   // is skipped for the 'subscription' pin (env-var is api_key only).
   //
-  // Per-user RLS scopes the personal queries to auth.uid() automatically.
+  // Queue/service-role paths can bypass user RLS, so personal rows require an
+  // explicit principal. Null means "no personal credential scope", not "any".
   const personalRows = await db<LlmProviderSecretRow[]>`
-    select ciphertext, credential_kind, encrypted_refresh_token,
+    select owner_id::text, null::text as workspace_id,
+           ciphertext, credential_kind, encrypted_refresh_token,
            expires_at::text as expires_at
     from public.llm_provider_secrets
     where provider_id = ${agent.provider_id}
+      and ${credentialScope?.principalUserId ?? null}::uuid is not null
+      and owner_id = ${credentialScope?.principalUserId ?? null}::uuid
       and (${pinnedMode}::text is null
            or credential_kind = ${pinnedMode}::text)
     order by case credential_kind
@@ -263,19 +303,24 @@ async function resolveSecret(
     if (secret) return secret;
   }
 
-  const workspaceRows = await db<LlmProviderSecretRow[]>`
-    select ciphertext, credential_kind, encrypted_refresh_token,
-           expires_at::text as expires_at
-    from public.workspace_provider_secrets
-    where provider_id = ${agent.provider_id}
-      and (${pinnedMode}::text is null
-           or credential_kind = ${pinnedMode}::text)
-    order by case credential_kind
-      when 'api_key' then 0
-      when 'subscription' then 1
-    end asc
-    limit 2
-  `;
+  const workspaceRows = await withTrustedDbWrites(
+    () => db<LlmProviderSecretRow[]>`
+      select null::text as owner_id, workspace_id::text,
+             ciphertext, credential_kind, encrypted_refresh_token,
+             expires_at::text as expires_at
+      from public.workspace_provider_secrets
+      where provider_id = ${agent.provider_id}
+        and ${credentialScope?.workspaceId ?? null}::uuid is not null
+        and workspace_id = ${credentialScope?.workspaceId ?? null}::uuid
+        and (${pinnedMode}::text is null
+             or credential_kind = ${pinnedMode}::text)
+      order by case credential_kind
+        when 'api_key' then 0
+        when 'subscription' then 1
+      end asc
+      limit 2
+    `,
+  );
 
   for (const row of workspaceRows) {
     const secret = await tryUseSecretRow({
@@ -335,14 +380,18 @@ async function resolveSecret(
  */
 export async function resolveCredentialKindSnapshot(
   agent: RegisteredAgentRecord,
+  credentialScope: ExecutionCredentialScope,
+  sql?: Sql,
 ): Promise<RegisteredAgentCredentialMode | null> {
-  const db: Sql = getDbPg();
+  const db: Sql = sql ?? getDbPg();
   const pinnedMode = agent.credential_mode ?? null;
 
   const personalRow = await db<Array<{ credential_kind: string }>>`
     select credential_kind
     from public.llm_provider_secrets
     where provider_id = ${agent.provider_id}
+      and ${credentialScope?.principalUserId ?? null}::uuid is not null
+      and owner_id = ${credentialScope?.principalUserId ?? null}::uuid
       and (${pinnedMode}::text is null
            or credential_kind = ${pinnedMode}::text)
     order by case credential_kind
@@ -355,18 +404,22 @@ export async function resolveCredentialKindSnapshot(
     return personalRow[0].credential_kind as RegisteredAgentCredentialMode;
   }
 
-  const workspaceRow = await db<Array<{ credential_kind: string }>>`
-    select credential_kind
-    from public.workspace_provider_secrets
-    where provider_id = ${agent.provider_id}
-      and (${pinnedMode}::text is null
-           or credential_kind = ${pinnedMode}::text)
-    order by case credential_kind
-      when 'api_key' then 0
-      when 'subscription' then 1
-    end asc
-    limit 1
-  `;
+  const workspaceRow = await withTrustedDbWrites(
+    () => db<Array<{ credential_kind: string }>>`
+      select credential_kind
+      from public.workspace_provider_secrets
+      where provider_id = ${agent.provider_id}
+        and ${credentialScope?.workspaceId ?? null}::uuid is not null
+        and workspace_id = ${credentialScope?.workspaceId ?? null}::uuid
+        and (${pinnedMode}::text is null
+             or credential_kind = ${pinnedMode}::text)
+      order by case credential_kind
+        when 'api_key' then 0
+        when 'subscription' then 1
+      end asc
+      limit 1
+    `,
+  );
   if (workspaceRow[0]) {
     return workspaceRow[0].credential_kind as RegisteredAgentCredentialMode;
   }
@@ -422,6 +475,8 @@ async function resolveSubscriptionSecret(input: {
     const refreshedAccess = await refreshAndPersist({
       providerId,
       origin,
+      ownerId: row.owner_id,
+      workspaceId: row.workspace_id,
       encryptedRefreshToken: row.encrypted_refresh_token,
     });
     return { apiKey: refreshedAccess, credentialKind: 'subscription' };
@@ -441,6 +496,8 @@ async function resolveSubscriptionSecret(input: {
 async function refreshAndPersist(input: {
   providerId: string;
   origin: CredentialOrigin;
+  ownerId?: string | null;
+  workspaceId?: string | null;
   encryptedRefreshToken: string;
 }): Promise<string> {
   const refreshTokenPayload = await decryptProviderSecret(
@@ -460,15 +517,19 @@ async function refreshAndPersist(input: {
 
   const db = getDbPg();
   if (input.origin === 'workspace') {
-    await db`
-      update public.workspace_provider_secrets
-      set ciphertext = ${encryptedAccess},
-          encrypted_refresh_token = ${encryptedRefresh},
-          expires_at = ${refreshed.expiresAtIso}::timestamptz,
-          updated_at = now()
-      where provider_id = ${input.providerId}
-        and credential_kind = 'subscription'
-    `;
+    await withTrustedDbWrites(
+      () => db`
+        update public.workspace_provider_secrets
+        set ciphertext = ${encryptedAccess},
+            encrypted_refresh_token = ${encryptedRefresh},
+            expires_at = ${refreshed.expiresAtIso}::timestamptz,
+            updated_at = now()
+        where provider_id = ${input.providerId}
+          and credential_kind = 'subscription'
+          and ${input.workspaceId ?? null}::uuid is not null
+          and workspace_id = ${input.workspaceId ?? null}::uuid
+      `,
+    );
   } else {
     await db`
       update public.llm_provider_secrets
@@ -478,6 +539,8 @@ async function refreshAndPersist(input: {
           updated_at = now()
       where provider_id = ${input.providerId}
         and credential_kind = 'subscription'
+        and ${input.ownerId ?? null}::uuid is not null
+        and owner_id = ${input.ownerId ?? null}::uuid
     `;
   }
   return refreshed.accessToken;

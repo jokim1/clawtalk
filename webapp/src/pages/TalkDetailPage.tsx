@@ -1,21 +1,9 @@
 import {
-  DndContext,
-  PointerSensor,
-  closestCenter,
-  useDraggable,
-  useDroppable,
-  useSensor,
-  useSensors,
-  type DragEndEvent,
-} from '@dnd-kit/core';
-import { CSS } from '@dnd-kit/utilities';
-import {
   Component,
   FormEvent,
   KeyboardEvent as ReactKeyboardEvent,
   type MouseEvent as ReactMouseEvent,
   type ReactNode,
-  type TextareaHTMLAttributes,
   Suspense,
   lazy,
   useCallback,
@@ -30,14 +18,8 @@ import { Link, useLocation, useNavigate, useParams } from 'react-router-dom';
 import {
   AgentProviderCard,
   AiAgentsPageData,
-  attachTalkDataConnector,
   ApiError,
   cancelTalkRuns,
-  ChannelConnection,
-  ChannelInstructionReview,
-  ChannelQueueFailure,
-  ChannelTarget,
-  ChannelTargetListPage,
   Content,
   ContentEditSummary,
   ContentFormat,
@@ -50,80 +32,34 @@ import {
   getThreadContent,
   patchContent,
   createTalkThread,
-  createTalkChannel,
-  createTalkContextRule,
-  createTalkJob,
-  DataConnector,
-  deleteTalkChannel,
-  deleteTalkChannelBindingState,
-  deleteTalkChannelDeliveryFailure,
-  deleteTalkChannelIngressFailure,
   deleteTalkMessages,
   deleteTalkThread,
-  deleteTalkContextRule,
-  deleteTalkJob,
-  deleteTalkStateEntry,
-  detachTalkDataConnector,
   getAiAgents,
-  getDataConnectors,
   getTalk,
   getTalkAgents,
   getTalkContent,
-  getTalkJob,
-  getTalkState,
   getTalkContext,
   getTalkRunContext,
-  getTalkDataConnectors,
   getTalkRuns,
-  listTalkJobRuns,
-  listTalkJobs,
   listTalkThreads,
-  listChannelConnections,
-  listChannelTargets,
-  listTalkChannelDeliveryFailures,
-  listTalkChannelIngressFailures,
-  listTalkChannels,
-  listTalkChannelBindingState,
-  syncSlackWorkspace,
   listTalkMessages,
   searchTalkMessages,
-  patchTalkChannel,
-  patchTalkContextRule,
   patchTalkMetadata,
-  patchTalkJob,
-  retryTalkChannelDeliveryFailure,
-  retryTalkChannelIngressFailure,
-  reviewTalkChannelInstructions,
   sendTalkMessage,
-  setTalkGoal,
   Talk,
   TalkAgent,
   TalkJob,
   TalkJobRunSummary,
-  TalkJobSchedule,
-  TalkJobScope,
-  TalkJobWeekday,
-  TalkChannelBinding,
-  TalkChannelBindingStateEntry,
-  TalkDataConnector,
   TalkMessage,
   TalkMessageSearchResult,
   TalkMessageAttachment,
   TalkRun,
   TalkSnapshot,
   TalkRunContextSnapshot,
-  TalkStateEntry,
   TalkThread,
   uploadTalkAttachment,
-  testTalkChannelBinding,
-  unquarantineTalkChannelBinding,
-  retryTalkChannelDeliveryFailuresCapped,
-  upsertTalkChannelBindingState,
   updateTalkAgents,
   updateTalkThread,
-  pauseTalkJob,
-  resumeTalkJob,
-  runTalkJobNow,
   listRegisteredAgents,
   type RegisteredAgent,
   UnauthorizedError,
@@ -139,6 +75,18 @@ import { LiveResponsePanel } from '../components/LiveResponsePanel';
 import { InlineEditableTitle } from '../components/InlineEditableTitle';
 import { TalkToolsPanel } from '../components/TalkToolsPanel';
 import { SavedSourcesPanel } from '../components/SavedSourcesPanel';
+import {
+  TalkContextPanel,
+  type ContextStatusState,
+} from '../components/TalkContextPanel';
+import {
+  TalkJobsPanel,
+  buildDefaultJobDraft,
+  type JobAgentOption,
+  type JobLoadStatus,
+  type TalkJobDraft,
+  type TalkJobsStatusState,
+} from '../components/TalkJobsPanel';
 import {
   SourceMentionPicker,
   buildSourceMentionOptions,
@@ -204,7 +152,7 @@ import type {
   TalkStreamState,
 } from '../lib/talkStream';
 
-type TabKey = 'talk' | 'agents' | 'context' | 'connectors' | 'runs';
+type TabKey = 'talk' | 'agents' | 'context' | 'connectors' | 'jobs' | 'runs';
 
 type TalkOrchestrationMode = Talk['orchestrationMode'];
 
@@ -354,21 +302,6 @@ type ThreadListState = {
   error: string | null;
 };
 
-type TalkJobDraft = {
-  title: string;
-  prompt: string;
-  targetAgentId: string;
-  scheduleKind: TalkJobSchedule['kind'];
-  everyHours: number;
-  weekdays: TalkJobWeekday[];
-  hour: number;
-  minute: number;
-  timezone: string;
-  connectorIds: string[];
-  channelBindingIds: string[];
-  allowWeb: boolean;
-};
-
 // PR C (talk-load architecture refactor): server data — talk, messages,
 // threads, content — moved to React Query (snapshotQuery). This reducer
 // holds only UI state + live streaming/runs state that the WS event
@@ -390,151 +323,6 @@ type DetailState = {
   };
   hasUnreadBelow: boolean;
 };
-
-const JOB_WEEKDAY_ORDER: TalkJobWeekday[] = [
-  'sun',
-  'mon',
-  'tue',
-  'wed',
-  'thu',
-  'fri',
-  'sat',
-];
-
-const JOB_WEEKDAY_LABELS: Record<TalkJobWeekday, string> = {
-  sun: 'Sun',
-  mon: 'Mon',
-  tue: 'Tue',
-  wed: 'Wed',
-  thu: 'Thu',
-  fri: 'Fri',
-  sat: 'Sat',
-};
-
-function getDefaultJobTimezone(): string {
-  try {
-    return Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
-  } catch {
-    return 'UTC';
-  }
-}
-
-function buildDefaultJobDraft(input?: {
-  targetAgentId?: string;
-  timezone?: string;
-}): TalkJobDraft {
-  return {
-    title: '',
-    prompt: '',
-    targetAgentId: input?.targetAgentId ?? '',
-    scheduleKind: 'weekly',
-    everyHours: 24,
-    weekdays: ['mon', 'tue', 'wed', 'thu', 'fri'],
-    hour: 9,
-    minute: 0,
-    timezone: input?.timezone ?? getDefaultJobTimezone(),
-    connectorIds: [],
-    channelBindingIds: [],
-    allowWeb: false,
-  };
-}
-
-function buildJobDraftFromJob(job: TalkJob): TalkJobDraft {
-  return {
-    title: job.title,
-    prompt: job.prompt,
-    targetAgentId: job.targetAgentId ?? '',
-    scheduleKind: job.schedule.kind,
-    everyHours:
-      job.schedule.kind === 'hourly_interval' ? job.schedule.everyHours : 24,
-    weekdays:
-      job.schedule.kind === 'weekly'
-        ? [...job.schedule.weekdays]
-        : ['mon', 'tue', 'wed', 'thu', 'fri'],
-    hour: job.schedule.kind === 'weekly' ? job.schedule.hour : 9,
-    minute: job.schedule.kind === 'weekly' ? job.schedule.minute : 0,
-    timezone: job.timezone,
-    connectorIds: [...job.sourceScope.connectorIds],
-    channelBindingIds: [...job.sourceScope.channelBindingIds],
-    allowWeb: job.sourceScope.allowWeb,
-  };
-}
-
-function draftToTalkJobSchedule(draft: TalkJobDraft): TalkJobSchedule {
-  if (draft.scheduleKind === 'hourly_interval') {
-    return {
-      kind: 'hourly_interval',
-      everyHours: Math.max(1, Math.min(24, Math.trunc(draft.everyHours || 1))),
-    };
-  }
-  return {
-    kind: 'weekly',
-    weekdays:
-      draft.weekdays.length > 0
-        ? draft.weekdays
-        : ['mon', 'tue', 'wed', 'thu', 'fri'],
-    hour: Math.max(0, Math.min(23, Math.trunc(draft.hour || 0))),
-    minute: Math.max(0, Math.min(59, Math.trunc(draft.minute || 0))),
-  };
-}
-
-function draftToTalkJobScope(draft: TalkJobDraft): TalkJobScope {
-  return {
-    connectorIds: [...draft.connectorIds],
-    channelBindingIds: [...draft.channelBindingIds],
-    allowWeb: draft.allowWeb,
-  };
-}
-
-function formatTalkJobSchedule(schedule: TalkJobSchedule): string {
-  if (schedule.kind === 'hourly_interval') {
-    return `Every ${schedule.everyHours} hour${schedule.everyHours === 1 ? '' : 's'}`;
-  }
-  const days = schedule.weekdays
-    .map((day) => JOB_WEEKDAY_LABELS[day])
-    .join(', ');
-  return `${days} at ${String(schedule.hour).padStart(2, '0')}:${String(
-    schedule.minute,
-  ).padStart(2, '0')}`;
-}
-
-function summarizeTalkJobScope(
-  scope: TalkJobScope,
-  connectors: TalkDataConnector[],
-  bindings: TalkChannelBinding[],
-): string {
-  const parts: string[] = [];
-  if (scope.connectorIds.length > 0) {
-    parts.push(
-      `${scope.connectorIds.length} connector${
-        scope.connectorIds.length === 1 ? '' : 's'
-      }`,
-    );
-  }
-  if (scope.channelBindingIds.length > 0) {
-    parts.push(
-      `${scope.channelBindingIds.length} channel binding${
-        scope.channelBindingIds.length === 1 ? '' : 's'
-      }`,
-    );
-  }
-  if (scope.allowWeb) {
-    parts.push('web access');
-  }
-  if (parts.length === 0) {
-    return 'No extra scoped sources selected.';
-  }
-  const connectorNames = connectors
-    .filter((connector) => scope.connectorIds.includes(connector.id))
-    .map((connector) => connector.name);
-  const channelNames = bindings
-    .filter((binding) => scope.channelBindingIds.includes(binding.id))
-    .map((binding) => binding.displayName);
-  const named = [...connectorNames, ...channelNames];
-  return named.length > 0
-    ? `${parts.join(' · ')}: ${named.join(', ')}`
-    : parts.join(' · ');
-}
 
 type DetailAction =
   | { type: 'TALK_RESET' }
@@ -635,7 +423,7 @@ const MISSING_PERSISTED_MESSAGE_REFETCH_MS = 3_000;
 const MAX_EVENT_RUN_CACHE = 500;
 const COMPOSER_TEXTAREA_MIN_HEIGHT_PX = 48;
 const COMPOSER_TEXTAREA_MAX_HEIGHT_PX = 240;
-const BINDING_INSTRUCTIONS_TEXTAREA_MAX_HEIGHT_PX = 360;
+const GREENFIELD_MESSAGE_ATTACHMENTS_ENABLED = false;
 
 const TALK_AGENT_ROLE_OPTIONS: TalkAgent['role'][] = [
   'assistant',
@@ -754,71 +542,6 @@ type AgentCreationDraft = {
   modelId: string;
   role: TalkAgent['role'];
 };
-
-type InstructionTemplateKey = 'blank' | 'study_tracker';
-
-type InstructionLintStatus =
-  | 'ready'
-  | 'needs_more_specifics'
-  | 'potential_conflicts';
-
-type InstructionLintResult = {
-  status: InstructionLintStatus;
-  messages: string[];
-};
-
-type ChannelInstructionReviewState = {
-  status: 'idle' | 'reviewing' | 'error' | 'ready';
-  review: ChannelInstructionReview | null;
-  message?: string;
-};
-
-type BindingMemoryPanelState = {
-  status: 'idle' | 'loading' | 'saving' | 'ready' | 'error';
-  stateNamespace: string;
-  entries: TalkChannelBindingStateEntry[];
-  newKeySuffix: string;
-  newValueJson: string;
-  errorMessage?: string;
-};
-
-const CREATE_CHANNEL_INSTRUCTION_REVIEW_KEY = '__create__';
-
-type ChannelBindingDraft = {
-  displayName: string;
-  active: boolean;
-  responseMode: TalkChannelBinding['responseMode'];
-  responderMode: TalkChannelBinding['responderMode'];
-  responderAgentId: string;
-  deliveryMode: TalkChannelBinding['deliveryMode'];
-  timezone: string;
-  instructions: string;
-  template: InstructionTemplateKey;
-  inboundRateLimitPerMinute: string;
-  maxPendingEvents: string;
-  overflowPolicy: TalkChannelBinding['overflowPolicy'];
-  maxDeferredAgeMinutes: string;
-};
-
-type ChannelCreateDraft = {
-  platform: ChannelConnection['platform'] | '';
-  connectionId: string;
-  targetKey: string;
-  displayName: string;
-  responseMode: TalkChannelBinding['responseMode'];
-  responderMode: TalkChannelBinding['responderMode'];
-  responderAgentId: string;
-  deliveryMode: TalkChannelBinding['deliveryMode'];
-  timezone: string;
-  instructions: string;
-  template: InstructionTemplateKey;
-  inboundRateLimitPerMinute: string;
-  maxPendingEvents: string;
-  overflowPolicy: TalkChannelBinding['overflowPolicy'];
-  maxDeferredAgeMinutes: string;
-};
-
-type ChannelTargetInventoryState = ChannelTargetListPage;
 
 type TalkAgentSourceOption = {
   id: string;
@@ -1676,269 +1399,18 @@ function getTabFromPath(pathname: string, talkId: string): TabKey {
   if (pathname === `${base}/agents`) return 'agents';
   if (pathname === `${base}/context`) return 'context';
   if (pathname === `${base}/connectors`) return 'connectors';
+  if (pathname === `${base}/jobs`) return 'jobs';
   if (pathname === `${base}/runs`) return 'runs';
   if (
-    pathname === `${base}/tools` ||
-    pathname === `${base}/state` ||
     pathname === `${base}/channels` ||
     pathname === `${base}/data-connectors`
   ) {
+    return 'connectors';
+  }
+  if (pathname === `${base}/tools`) {
     return 'context';
   }
   return 'talk';
-}
-
-function formatConnectorKind(kind: DataConnector['connectorKind']): string {
-  return kind === 'posthog' ? 'PostHog' : 'Google Sheets';
-}
-
-function formatConnectorStatus(
-  status: DataConnector['verificationStatus'],
-): string {
-  switch (status) {
-    case 'missing':
-      return 'Missing credential';
-    case 'not_verified':
-      return 'Needs verification';
-    case 'verifying':
-      return 'Verifying…';
-    case 'verified':
-      return 'Configured';
-    case 'invalid':
-      return 'Invalid';
-    case 'unavailable':
-      return 'Unavailable';
-    default:
-      return status;
-  }
-}
-
-function connectorStatusClass(
-  status: DataConnector['verificationStatus'],
-): string {
-  switch (status) {
-    case 'verified':
-      return 'talk-agent-chip talk-agent-chip-success';
-    case 'invalid':
-      return 'talk-agent-chip talk-agent-chip-error';
-    case 'unavailable':
-      return 'talk-agent-chip talk-agent-chip-warning';
-    default:
-      return 'talk-agent-chip';
-  }
-}
-
-function formatChannelPlatform(
-  platform: ChannelConnection['platform'],
-): string {
-  return platform === 'telegram' ? 'Telegram' : 'Slack';
-}
-
-function formatChannelConnectionHealthStatus(
-  status: ChannelConnection['healthStatus'],
-): string {
-  switch (status) {
-    case 'healthy':
-      return 'healthy';
-    case 'degraded':
-      return 'degraded';
-    case 'disconnected':
-      return 'disconnected';
-    case 'error':
-      return 'error';
-    default:
-      return status;
-  }
-}
-
-function channelConnectionStatusClass(
-  status: ChannelConnection['healthStatus'],
-): string {
-  switch (status) {
-    case 'healthy':
-      return 'talk-agent-chip talk-agent-chip-success';
-    case 'degraded':
-    case 'disconnected':
-      return 'talk-agent-chip talk-agent-chip-warning';
-    case 'error':
-      return 'talk-agent-chip talk-agent-chip-error';
-    default:
-      return 'talk-agent-chip';
-  }
-}
-
-function readChannelConnectionStringConfig(
-  connection: ChannelConnection,
-  key: string,
-): string | null {
-  const value = connection.config?.[key];
-  return typeof value === 'string' && value.trim() ? value : null;
-}
-
-function readChannelConnectionNumberConfig(
-  connection: ChannelConnection,
-  key: string,
-): number | null {
-  const value = connection.config?.[key];
-  return typeof value === 'number' && Number.isFinite(value) ? value : null;
-}
-
-function buildSlackWorkspaceSyncSummary(connection: ChannelConnection): string {
-  const totalCount = readChannelConnectionNumberConfig(
-    connection,
-    'lastSyncTotalCount',
-  );
-  const publicCount = readChannelConnectionNumberConfig(
-    connection,
-    'lastSyncPublicCount',
-  );
-  const privateCount = readChannelConnectionNumberConfig(
-    connection,
-    'lastSyncPrivateCount',
-  );
-  const lastSyncedAt = readChannelConnectionStringConfig(
-    connection,
-    'lastSyncedAt',
-  );
-  const countLabel =
-    totalCount == null
-      ? 'Sync Slack channels to refresh recent invites.'
-      : `${totalCount} synced channel${totalCount === 1 ? '' : 's'}`;
-  const splitLabel =
-    publicCount != null && privateCount != null
-      ? ` (${publicCount} public, ${privateCount} private)`
-      : '';
-  const freshnessLabel = lastSyncedAt
-    ? ` · Last synced ${formatDateTime(lastSyncedAt)}`
-    : ' · Never synced';
-  return `${countLabel}${splitLabel}${freshnessLabel}`;
-}
-
-function buildSlackWorkspaceSyncMessage(
-  workspaceLabel: string,
-  result: { syncedCount: number; publicCount: number; privateCount: number },
-): string {
-  const countLabel = `${result.syncedCount} Slack channel${result.syncedCount === 1 ? '' : 's'}`;
-  return `Synced ${countLabel} for ${workspaceLabel} (${result.publicCount} public, ${result.privateCount} private).`;
-}
-
-function buildBindingWorkspaceSummary(
-  binding: TalkChannelBinding,
-  connection: ChannelConnection | null,
-): string | null {
-  if (!connection || binding.platform !== 'slack') return null;
-  return `${connection.displayName} is ${formatChannelConnectionHealthStatus(connection.healthStatus)}. ${buildSlackWorkspaceSyncSummary(connection)}`;
-}
-
-function buildBindingActivitySummary(binding: TalkChannelBinding): string[] {
-  const summaries: string[] = [];
-  const platformLabel = binding.platform === 'slack' ? 'Slack' : 'Telegram';
-  if (binding.deferredIngressCount > 0) {
-    summaries.push(
-      `${binding.deferredIngressCount} ${platformLabel} message${binding.deferredIngressCount === 1 ? '' : 's'} waiting because another conversation is still running.`,
-    );
-  }
-  if (binding.pendingIngressCount > 0) {
-    summaries.push(
-      `${binding.pendingIngressCount} inbound message${binding.pendingIngressCount === 1 ? '' : 's'} queued and ready to process.`,
-    );
-  }
-  const unresolvedInboundOnly = Math.max(
-    0,
-    binding.unresolvedIngressCount - binding.deferredIngressCount,
-  );
-  if (unresolvedInboundOnly > 0) {
-    summaries.push(
-      `${unresolvedInboundOnly} inbound message${unresolvedInboundOnly === 1 ? '' : 's'} could not be resolved automatically and may need manual retry.`,
-    );
-  }
-  if (binding.deadLetterCount > 0) {
-    summaries.push(
-      `${binding.deadLetterCount} outbound deliver${binding.deadLetterCount === 1 ? 'y has' : 'ies have'} failed and can be retried below.`,
-    );
-  }
-  if (binding.suppressedReplyCount > 0) {
-    const lastSuppressedLabel = binding.lastSuppressedAt
-      ? ` Last suppressed ${formatDateTime(binding.lastSuppressedAt)}.`
-      : '';
-    const reasonLabel = binding.lastSuppressionReason
-      ? ` ${binding.lastSuppressionReason}`
-      : '';
-    summaries.push(
-      `${binding.suppressedReplyCount} reply${binding.suppressedReplyCount === 1 ? ' was' : 'ies were'} intentionally suppressed by channel instructions.${lastSuppressedLabel}${reasonLabel}`.trim(),
-    );
-  }
-  return summaries;
-}
-
-function buildChannelTargetOptionLabel(
-  target: ChannelTarget,
-  connections: ChannelConnection[],
-): string {
-  const connection =
-    connections.find((candidate) => candidate.id === target.connectionId) ||
-    null;
-  const platformLabel = connection
-    ? formatChannelPlatform(connection.platform)
-    : 'Channel';
-  const connectionLabel = connection?.displayName || target.connectionId;
-  return `${platformLabel} · ${connectionLabel} · ${target.displayName}`;
-}
-
-function buildChannelTargetOptionMetaLabel(
-  target: ChannelTarget,
-  connections: ChannelConnection[],
-): string {
-  const connection =
-    connections.find((candidate) => candidate.id === target.connectionId) ||
-    null;
-  const platformLabel = connection
-    ? formatChannelPlatform(connection.platform)
-    : 'Channel';
-  const connectionLabel = connection?.displayName || target.connectionId;
-  return `${platformLabel} · ${connectionLabel}`;
-}
-
-function buildChannelTargetOccupancyLabel(
-  target: ChannelTarget,
-  talkId: string,
-): string {
-  if (!target.activeBindingTalkId) return 'Available';
-  return target.activeBindingTalkId === talkId
-    ? 'Already bound'
-    : `Bound to ${target.activeBindingTalkTitle || 'another Talk'}`;
-}
-
-function readChannelTargetBooleanMetadata(
-  target: ChannelTarget,
-  key: string,
-): boolean | null {
-  const value = target.metadata?.[key];
-  return typeof value === 'boolean' ? value : null;
-}
-
-function formatChannelReasonCode(value: string | null): string {
-  if (!value) return 'None';
-  switch (value) {
-    case 'overflow_drop_oldest':
-      return 'Dropped oldest queued message';
-    case 'overflow_drop_newest':
-      return 'Dropped newest queued message';
-    case 'overflow_no_evictable_row':
-      return 'Queue full while another item was processing';
-    case 'expired_while_busy':
-      return 'Dropped after waiting too long for the talk to become idle';
-    case 'binding_deactivated':
-      return 'Binding was deactivated';
-    case 'enqueue_invalid_state':
-      return 'Talk state prevented channel enqueue';
-    case 'delivery_retries_exhausted':
-      return 'Delivery retries exhausted';
-    case 'delivery_transient_failure':
-      return 'Delivery failed and will retry';
-    default:
-      return value.replace(/_/g, ' ');
-  }
 }
 
 function formatDateTime(value: string | null): string {
@@ -1946,64 +1418,6 @@ function formatDateTime(value: string | null): string {
   const parsed = new Date(value);
   if (Number.isNaN(parsed.valueOf())) return value;
   return parsed.toLocaleString();
-}
-
-const STATE_JSON_TRUNCATE_LENGTH = 2000;
-
-function TalkStateCard({
-  entry,
-  canDelete,
-  onDelete,
-}: {
-  entry: TalkStateEntry;
-  canDelete: boolean;
-  onDelete: () => void;
-}) {
-  const [expanded, setExpanded] = useState(false);
-  const jsonText = JSON.stringify(entry.value, null, 2);
-  const isTruncated = jsonText.length > STATE_JSON_TRUNCATE_LENGTH;
-  const displayText =
-    isTruncated && !expanded
-      ? jsonText.slice(0, STATE_JSON_TRUNCATE_LENGTH)
-      : jsonText;
-
-  return (
-    <article className="talk-llm-card talk-state-card">
-      <div className="connector-card-header">
-        <div>
-          <h3>{entry.key}</h3>
-          <p className="talk-llm-meta">
-            Version {entry.version} · Updated {formatDateTime(entry.updatedAt)}
-          </p>
-        </div>
-        {canDelete ? (
-          <button
-            className="btn btn-sm btn-danger"
-            onClick={onDelete}
-            title="Delete state entry"
-          >
-            &times;
-          </button>
-        ) : null}
-      </div>
-      {entry.updatedByRunId ? (
-        <p className="talk-llm-meta">
-          Updated by run <code>{entry.updatedByRunId}</code>
-        </p>
-      ) : null}
-      {entry.updatedByUserId ? (
-        <p className="talk-llm-meta">
-          Updated by user <code>{entry.updatedByUserId}</code>
-        </p>
-      ) : null}
-      <pre className="talk-state-json">{displayText}</pre>
-      {isTruncated ? (
-        <button className="btn btn-sm" onClick={() => setExpanded(!expanded)}>
-          {expanded ? 'Show less' : 'Show full value'}
-        </button>
-      ) : null}
-    </article>
-  );
 }
 
 function sortThreads(threads: TalkThread[]): TalkThread[] {
@@ -2147,158 +1561,6 @@ function buildThreadHref(
       ? `/app/talks/${talkId}/${tab}`
       : `/app/talks/${talkId}`;
   return `${base}?thread=${encodeURIComponent(threadId)}`;
-}
-
-function sortRulesByOrder(rules: ContextRule[]): ContextRule[] {
-  return [...rules].sort((left, right) => {
-    const delta = left.sortOrder - right.sortOrder;
-    if (delta !== 0) return delta;
-    return left.createdAt.localeCompare(right.createdAt);
-  });
-}
-
-function buildRuleDraftMap(rules: ContextRule[]): Record<string, string> {
-  return rules.reduce<Record<string, string>>((acc, rule) => {
-    acc[rule.id] = rule.ruleText;
-    return acc;
-  }, {});
-}
-
-function reorderRules(
-  rules: ContextRule[],
-  activeId: string,
-  overId: string,
-): ContextRule[] {
-  const ordered = sortRulesByOrder(rules);
-  const fromIndex = ordered.findIndex((rule) => rule.id === activeId);
-  const toIndex = ordered.findIndex((rule) => rule.id === overId);
-  if (fromIndex < 0 || toIndex < 0 || fromIndex === toIndex) {
-    return ordered;
-  }
-
-  const next = [...ordered];
-  const [moved] = next.splice(fromIndex, 1);
-  if (!moved) return ordered;
-  next.splice(toIndex, 0, moved);
-  return next.map((rule, index) => ({ ...rule, sortOrder: index }));
-}
-
-function RuleRow({
-  ruleId,
-  disabled,
-  label,
-  children,
-}: {
-  ruleId: string;
-  disabled: boolean;
-  label: string;
-  children: ReactNode;
-}): JSX.Element {
-  const { attributes, listeners, setNodeRef, transform, isDragging } =
-    useDraggable({
-      id: ruleId,
-      disabled,
-    });
-  const { isOver, setNodeRef: setDropNodeRef } = useDroppable({
-    id: ruleId,
-    disabled,
-  });
-
-  return (
-    <div
-      ref={(node) => {
-        setNodeRef(node);
-        setDropNodeRef(node);
-      }}
-      className={`talk-rule-row${isDragging ? ' talk-rule-row-dragging' : ''}${
-        isOver && !disabled ? ' talk-rule-row-over' : ''
-      }`}
-      style={{
-        transform: transform ? CSS.Translate.toString(transform) : undefined,
-      }}
-    >
-      <button
-        type="button"
-        className="talk-rule-handle"
-        aria-label={`Reorder ${label}`}
-        disabled={disabled}
-        {...attributes}
-        {...listeners}
-      >
-        <span aria-hidden="true">⋮⋮</span>
-      </button>
-      <div className="talk-rule-row-body">{children}</div>
-    </div>
-  );
-}
-
-function buildChannelBindingDraft(
-  binding: TalkChannelBinding,
-): ChannelBindingDraft {
-  return {
-    displayName: binding.displayName,
-    active: binding.active,
-    responseMode: binding.responseMode,
-    responderMode: binding.responderMode,
-    responderAgentId: binding.responderAgentId || '',
-    deliveryMode: binding.deliveryMode,
-    timezone: binding.timezone,
-    instructions: binding.instructions || '',
-    template: 'blank',
-    inboundRateLimitPerMinute: String(binding.inboundRateLimitPerMinute),
-    maxPendingEvents: String(binding.maxPendingEvents),
-    overflowPolicy: binding.overflowPolicy,
-    maxDeferredAgeMinutes: String(binding.maxDeferredAgeMinutes),
-  };
-}
-
-function buildDefaultChannelCreateDraft(): ChannelCreateDraft {
-  return {
-    platform: '',
-    connectionId: '',
-    targetKey: '',
-    displayName: '',
-    responseMode: 'mentions',
-    responderMode: 'primary',
-    responderAgentId: '',
-    deliveryMode: 'reply',
-    timezone: getDefaultJobTimezone(),
-    instructions: '',
-    template: 'blank',
-    inboundRateLimitPerMinute: '10',
-    maxPendingEvents: '20',
-    overflowPolicy: 'drop_oldest',
-    maxDeferredAgeMinutes: '10',
-  };
-}
-
-function buildEmptyChannelTargetInventory(): ChannelTargetInventoryState {
-  return {
-    targets: [],
-    totalCount: 0,
-    hasMore: false,
-    nextOffset: null,
-  };
-}
-
-function buildChannelTargetKey(
-  target: Pick<ChannelTarget, 'connectionId' | 'targetKind' | 'targetId'>,
-): string {
-  return `${target.connectionId}::${target.targetKind}::${target.targetId}`;
-}
-
-function parseChannelTargetKey(
-  value: string,
-): { connectionId: string; targetKind: string; targetId: string } | null {
-  const firstSeparatorIndex = value.indexOf('::');
-  if (firstSeparatorIndex <= 0) return null;
-  const secondSeparatorIndex = value.indexOf('::', firstSeparatorIndex + 2);
-  if (secondSeparatorIndex <= firstSeparatorIndex + 2) return null;
-  return {
-    connectionId: value.slice(0, firstSeparatorIndex),
-    targetKind: value.slice(firstSeparatorIndex + 2, secondSeparatorIndex),
-    targetId: value.slice(secondSeparatorIndex + 2),
-  };
 }
 
 function buildAgentLabel(agent: Pick<TalkAgent, 'nickname' | 'role'>): string {
@@ -2575,250 +1837,6 @@ function buildTalkAgentExecutionGuardrail(
   };
 }
 
-const BINDING_INSTRUCTIONS_PLACEHOLDER = `Describe what this channel assistant should do, when it should reply, and what state it should keep.
-
-Example:
-- Reply only when directly asked or when a weekly milestone is reached.
-- For routine logs, begin with [[NO_CHANNEL_REPLY]] and update binding-owned state.
-- Keep all binding state under the provided binding state namespace.
-- Use one narrow state key per tracked person instead of one shared totals blob.
-- Weekly reset happens on Monday in the binding timezone.`;
-
-function buildInstructionTemplate(
-  template: InstructionTemplateKey,
-  stateNamespace?: string | null,
-): string {
-  if (template === 'blank') {
-    return '';
-  }
-  const namespaceHint = stateNamespace || '<binding state namespace>';
-  return [
-    'You are a study tracker for this Slack channel.',
-    'Reply only when someone directly asks for progress, asks for advice, or a tracked participant reaches the weekly goal.',
-    'For routine study logs, begin your response with [[NO_CHANNEL_REPLY]] so nothing is posted back to Slack.',
-    `Keep binding-owned state under ${namespaceHint}. Use one narrow key per participant, for example ${namespaceHint}tracker.asher.`,
-    'Use list_state with the binding namespace to inspect existing tracker entries before creating or summarizing state.',
-    'Store each participant entry as JSON with weekStartLocal, timezone, weeklyTargetMinutes, totalMinutes, carryoverMinutes, and lastLogAt.',
-    'Prefer stable Slack sender IDs over names whenever possible.',
-    'Use the binding timezone shown in channel settings when applying weekly reset logic.',
-    'Treat Monday as the weekly reset boundary in the binding timezone and carry over only minutes above 300.',
-    'If update_state reports a version conflict, read the latest state and retry.',
-    'When formatting a progress reply, include each participant total and how far they are from 300 minutes.',
-  ].join('\n');
-}
-
-type AutoGrowingTextareaProps = TextareaHTMLAttributes<HTMLTextAreaElement> & {
-  maxHeightPx?: number;
-};
-
-function AutoGrowingTextarea({
-  maxHeightPx = BINDING_INSTRUCTIONS_TEXTAREA_MAX_HEIGHT_PX,
-  style,
-  value,
-  ...props
-}: AutoGrowingTextareaProps): JSX.Element {
-  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
-  const minHeightRef = useRef<number | null>(null);
-
-  const resizeTextarea = useCallback(() => {
-    const textarea = textareaRef.current;
-    if (!textarea) return;
-
-    textarea.style.height = 'auto';
-    const measuredMinHeight = textarea.offsetHeight;
-    if (!minHeightRef.current && measuredMinHeight > 0) {
-      minHeightRef.current = measuredMinHeight;
-    }
-    const minHeight = minHeightRef.current ?? measuredMinHeight;
-    const scrollHeight = Math.max(textarea.scrollHeight, minHeight);
-    const nextHeight = Math.min(scrollHeight, maxHeightPx);
-    textarea.style.height = `${nextHeight}px`;
-    textarea.style.overflowY = scrollHeight > maxHeightPx ? 'auto' : 'hidden';
-  }, [maxHeightPx]);
-
-  useEffect(() => {
-    resizeTextarea();
-  }, [resizeTextarea, value]);
-
-  return (
-    <textarea
-      {...props}
-      ref={textareaRef}
-      value={value}
-      style={{
-        ...style,
-        overflowY: 'hidden',
-      }}
-    />
-  );
-}
-
-function lintChannelInstructions(input: {
-  instructions: string;
-  stateNamespace?: string | null;
-  timezone?: string | null;
-}): InstructionLintResult {
-  const trimmed = input.instructions.trim();
-  if (trimmed.length === 0) {
-    return {
-      status: 'needs_more_specifics',
-      messages: ['Add instructions that explain what this binding should do.'],
-    };
-  }
-
-  const lower = trimmed.toLowerCase();
-  const messages: string[] = [];
-  let hasConflict = false;
-
-  const mentionsSilenceRule =
-    lower.includes('[[no_channel_reply]]') ||
-    lower.includes('stay silent') ||
-    lower.includes('do not reply') ||
-    lower.includes('reply only');
-  if (!mentionsSilenceRule) {
-    messages.push(
-      'Explain when the assistant should reply versus stay silent.',
-    );
-  }
-
-  const seemsStateful =
-    /(track|state|log|weekly|minutes|total|ledger|memory)/i.test(trimmed);
-  const mentionsStateStrategy =
-    /(state namespace|list_state|read_state|update_state|key|json schema|json)/i.test(
-      trimmed,
-    );
-  if (seemsStateful && !mentionsStateStrategy) {
-    messages.push(
-      'Stateful instructions should describe the state keys or JSON schema to use.',
-    );
-  }
-
-  if (
-    /(week|weekly|daily|monday|timezone|reset|schedule)/i.test(trimmed) &&
-    !(
-      /(timezone|america\/|utc|local day-of-week|binding timezone)/i.test(
-        trimmed,
-      ) || Boolean(input.timezone?.trim())
-    )
-  ) {
-    messages.push(
-      'Time-based behavior should name a timezone or reset rule explicitly.',
-    );
-  }
-
-  if (
-    /(participant|sender|kid|child|member|person|student)/i.test(trimmed) &&
-    !/(sender id|slack id|stable id|user id)/i.test(trimmed)
-  ) {
-    messages.push(
-      'Entity-tracking instructions work better when they mention stable sender IDs.',
-    );
-  }
-
-  if (
-    /(every message|always reply)/i.test(trimmed) &&
-    /(\[\[no_channel_reply\]\]|stay silent|reply only)/i.test(trimmed)
-  ) {
-    hasConflict = true;
-    messages.push('The instructions describe conflicting reply behavior.');
-  }
-
-  if (trimmed.length < 120) {
-    messages.push(
-      'Add more specifics so the assistant knows the trigger rules, reply policy, and state strategy.',
-    );
-  }
-
-  if (trimmed.length > 4000) {
-    messages.push(
-      'Remove repetitive detail. Shorter, sharper instructions usually work better.',
-    );
-  }
-
-  if (/(study_tracker\.|tracker\.[a-z0-9_-]+)/i.test(trimmed)) {
-    hasConflict = true;
-    messages.push(
-      'Use the binding state namespace instead of hard-coded global state keys.',
-    );
-  }
-
-  if (
-    input.stateNamespace &&
-    trimmed.includes('channel.') &&
-    !trimmed.includes(input.stateNamespace)
-  ) {
-    messages.push(
-      'If you reference explicit state keys, keep them inside this binding namespace.',
-    );
-  }
-
-  if (hasConflict) {
-    return { status: 'potential_conflicts', messages };
-  }
-  if (messages.length > 0) {
-    return { status: 'needs_more_specifics', messages };
-  }
-  return {
-    status: 'ready',
-    messages: [
-      'The instructions define a clear reply policy and state strategy.',
-    ],
-  };
-}
-
-function getInstructionTemplateOptions(
-  platform: ChannelConnection['platform'] | '' | null | undefined,
-): Array<{ value: InstructionTemplateKey; label: string }> {
-  return platform === 'slack'
-    ? [
-        { value: 'blank', label: 'Blank' },
-        { value: 'study_tracker', label: 'Study Tracker' },
-      ]
-    : [{ value: 'blank', label: 'Blank' }];
-}
-
-function buildEmptyBindingMemoryPanelState(
-  stateNamespace: string,
-): BindingMemoryPanelState {
-  return {
-    status: 'idle',
-    stateNamespace,
-    entries: [],
-    newKeySuffix: '',
-    newValueJson: '{\n  \n}',
-  };
-}
-
-function formatInstructionLintTitle(status: InstructionLintStatus): string {
-  switch (status) {
-    case 'ready':
-      return 'Ready';
-    case 'potential_conflicts':
-      return 'Potential conflicts';
-    default:
-      return 'Needs more specifics';
-  }
-}
-
-function formatInstructionLintClassName(status: InstructionLintStatus): string {
-  switch (status) {
-    case 'ready':
-      return 'inline-banner inline-banner-success';
-    case 'potential_conflicts':
-      return 'inline-banner inline-banner-warning';
-    default:
-      return 'inline-banner';
-  }
-}
-
-function formatJsonForStateEditor(value: unknown): string {
-  try {
-    return JSON.stringify(value, null, 2);
-  } catch {
-    return 'null';
-  }
-}
-
 function serializeTalkAgentForDraftCompare(agent: TalkAgent): string {
   return JSON.stringify({
     id: agent.id,
@@ -2983,6 +2001,7 @@ export function TalkDetailPage({
     () => (talkSnapshot ? snapshotTalkToTalk(talkSnapshot.talk) : null),
     [talkSnapshot?.talk],
   );
+  const activeTalkWorkspaceId = talkSnapshot?.talk.workspaceId ?? null;
 
   const [threadState, setThreadState] = useState<ThreadListState>({
     threads: [],
@@ -3172,13 +2191,6 @@ export function TalkDetailPage({
     status: 'idle' | 'saving' | 'error' | 'success';
     message?: string;
   }>({ status: 'idle' });
-  const [talkConnectors, setTalkConnectors] = useState<TalkDataConnector[]>([]);
-  const [orgConnectors, setOrgConnectors] = useState<DataConnector[]>([]);
-  const [attachConnectorId, setAttachConnectorId] = useState('');
-  const [connectorState, setConnectorState] = useState<{
-    status: 'idle' | 'loading' | 'saving' | 'error' | 'success';
-    message?: string;
-  }>({ status: 'idle' });
   const [historyEditorOpen, setHistoryEditorOpen] = useState(false);
   const [historyEditState, setHistoryEditState] = useState<{
     status: 'idle' | 'saving' | 'error' | 'success';
@@ -3195,79 +2207,44 @@ export function TalkDetailPage({
   const [contextRules, setContextRules] = useState<ContextRule[]>([]);
   const [contextSources, setContextSources] = useState<ContextSource[]>([]);
   const [contextLoaded, setContextLoaded] = useState(false);
+  // Page-owned status shared with TalkContextPanel: drives the load gate and the
+  // goal/rule mutation feedback. Kept on the page (not the tab-mounted panel) so
+  // the 'saving' lockout and any in-flight mutation survive the user leaving and
+  // re-entering the Context tab.
+  const [contextStatus, setContextStatus] = useState<ContextStatusState>({
+    status: 'idle',
+  });
+  // Goal/rule draft state for TalkContextPanel, page-owned (like jobDraft) so
+  // unsaved edits survive leaving and re-entering the Context tab. These are
+  // sparse in-progress *overrides*: goalDraft === null / a missing ruleDrafts
+  // entry means "no override — render the live goal/rule prop". An override is
+  // set as the user types and cleared again on a successful (or no-op) save, so
+  // a mutation that resolves after a tab switch is reflected from the refreshed
+  // props and can't be reverted by a stale draft.
+  const [goalDraft, setGoalDraft] = useState<string | null>(null);
+  const [newRuleText, setNewRuleText] = useState('');
   const [ruleDrafts, setRuleDrafts] = useState<Record<string, string>>({});
-  const [contextStatus, setContextStatus] = useState<{
-    status: 'idle' | 'loading' | 'saving' | 'error' | 'success';
-    message?: string;
-  }>({ status: 'idle' });
-  const [talkStateEntries, setTalkStateEntries] = useState<TalkStateEntry[]>(
-    [],
-  );
-  const [talkStateLoaded, setTalkStateLoaded] = useState(false);
-  const [talkStateStatus, setTalkStateStatus] = useState<{
-    status: 'idle' | 'loading' | 'error';
-    message?: string;
-  }>({ status: 'idle' });
+  // Page-owned Jobs state. TalkJobsPanel is presentational: every piece an async
+  // mutation writes — the list, selection, draft, runs, and mutation status —
+  // lives here so a save/run that resolves after the panel unmounts (tab switch)
+  // still updates the live state, not an orphaned copy, and the half-filled form
+  // survives the round-trip. The panel self-fetches only the read-only tool
+  // scope. See TalkJobsPanel.
   const [talkJobs, setTalkJobs] = useState<TalkJob[]>([]);
   const [talkJobsLoaded, setTalkJobsLoaded] = useState(false);
-  const [talkJobsStatus, setTalkJobsStatus] = useState<{
-    status: 'idle' | 'loading' | 'saving' | 'error' | 'success';
-    message?: string;
-  }>({ status: 'idle' });
+  const [talkJobsStatus, setTalkJobsStatus] = useState<TalkJobsStatusState>({
+    status: 'idle',
+  });
   const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
-  const [selectedJobRuns, setSelectedJobRuns] = useState<TalkJobRunSummary[]>(
-    [],
-  );
-  const [selectedJobRunsStatus, setSelectedJobRunsStatus] = useState<{
-    status: 'idle' | 'loading' | 'error';
-    message?: string;
-  }>({ status: 'idle' });
   const [creatingJob, setCreatingJob] = useState(false);
   const [jobDraft, setJobDraft] = useState<TalkJobDraft>(() =>
     buildDefaultJobDraft(),
   );
-  const [goalDraft, setGoalDraft] = useState('');
-  const [newRuleText, setNewRuleText] = useState('');
-  const [channelBindings, setChannelBindings] = useState<TalkChannelBinding[]>(
+  const [selectedJobRuns, setSelectedJobRuns] = useState<TalkJobRunSummary[]>(
     [],
   );
-  const [channelConnections, setChannelConnections] = useState<
-    ChannelConnection[]
-  >([]);
-  const [channelTargetInventory, setChannelTargetInventory] =
-    useState<ChannelTargetInventoryState>(buildEmptyChannelTargetInventory());
-  const [channelDrafts, setChannelDrafts] = useState<
-    Record<string, ChannelBindingDraft>
-  >({});
-  const [channelFailuresByBindingId, setChannelFailuresByBindingId] = useState<
-    Record<
-      string,
-      { ingress: ChannelQueueFailure[]; delivery: ChannelQueueFailure[] }
-    >
-  >({});
-  const [channelBindingMemoryById, setChannelBindingMemoryById] = useState<
-    Record<string, BindingMemoryPanelState>
-  >({});
-  const [channelInstructionReviews, setChannelInstructionReviews] = useState<
-    Record<string, ChannelInstructionReviewState>
-  >({});
-  const [channelCreateDraft, setChannelCreateDraft] =
-    useState<ChannelCreateDraft>(buildDefaultChannelCreateDraft());
-  const [channelTargetQuery, setChannelTargetQuery] = useState('');
-  const [channelTargetsLoading, setChannelTargetsLoading] = useState(false);
-  const [channelSyncingConnectionId, setChannelSyncingConnectionId] = useState<
-    string | null
-  >(null);
-  const [channelStatus, setChannelStatus] = useState<{
-    status: 'idle' | 'loading' | 'saving' | 'error' | 'success';
-    message?: string;
-  }>({ status: 'idle' });
-  const [channelTestStatus, setChannelTestStatus] = useState<{
-    bindingId: string | null;
-    status: 'idle' | 'sending' | 'error' | 'success';
-    message?: string;
-    location?: 'diagnosis' | 'footer';
-  }>({ bindingId: null, status: 'idle' });
+  const [selectedJobRunsStatus, setSelectedJobRunsStatus] =
+    useState<JobLoadStatus>({ status: 'idle' });
 
   const titleInputRef = useRef<HTMLInputElement | null>(null);
   const messageElementRefs = useRef<Map<string, HTMLElement>>(new Map());
@@ -3295,13 +2272,6 @@ export function TalkDetailPage({
     dispatch({ type: 'THREAD_SELECTED', threadId: activeThreadId });
   }, [activeThreadId]);
 
-  const ruleSensors = useSensors(
-    useSensor(PointerSensor, { activationConstraint: { distance: 8 } }),
-  );
-  const orderedContextRules = useMemo(
-    () => sortRulesByOrder(contextRules),
-    [contextRules],
-  );
   const activeRuleCount = useMemo(
     () => contextRules.filter((rule) => rule.isActive).length,
     [contextRules],
@@ -4054,18 +3024,13 @@ export function TalkDetailPage({
   );
 
   const refreshContext = useCallback(
-    async (options?: { hydrateGoalDraft?: boolean; showLoading?: boolean }) => {
+    async (options?: { showLoading?: boolean }) => {
       if (options?.showLoading) {
         setContextStatus({ status: 'loading' });
       }
       const ctx = await getTalkContext(talkId);
       setContextGoal(ctx.goal);
-      if (options?.hydrateGoalDraft) {
-        setGoalDraft(ctx.goal?.goalText ?? '');
-      }
-      const sortedRules = sortRulesByOrder(ctx.rules);
-      setContextRules(sortedRules);
-      setRuleDrafts(buildRuleDraftMap(sortedRules));
+      setContextRules(ctx.rules);
       setContextSources(ctx.sources);
       setContextLoaded(true);
       setContextStatus({ status: 'idle' });
@@ -4073,120 +3038,16 @@ export function TalkDetailPage({
     [talkId],
   );
 
-  const refreshTalkStateEntries = useCallback(
-    async (options?: { showLoading?: boolean }) => {
-      if (options?.showLoading) {
-        setTalkStateStatus({ status: 'loading' });
-      }
-      try {
-        const entries = await getTalkState(talkId);
-        setTalkStateEntries(entries);
-        setTalkStateLoaded(true);
-        setTalkStateStatus({ status: 'idle' });
-      } catch (err) {
-        if (err instanceof UnauthorizedError) {
-          handleUnauthorized();
-          return;
-        }
-        setTalkStateStatus({
-          status: 'error',
-          message: err instanceof Error ? err.message : 'Failed to load state.',
-        });
+  // After a Run-Now settles in TalkJobsPanel: if the job's thread is the active
+  // thread, resync the thread/run views. Encapsulates the page-private
+  // activeThreadIdRef + resyncTalkState so the panel needs neither.
+  const handleJobRunSettled = useCallback(
+    async (jobThreadId: string | null) => {
+      if (jobThreadId === activeThreadIdRef.current) {
+        await resyncTalkState({ refreshThreads: true });
       }
     },
-    [handleUnauthorized, talkId],
-  );
-
-  const loadSelectedJobRuns = useCallback(
-    async (jobId: string, options?: { showLoading?: boolean }) => {
-      if (options?.showLoading) {
-        setSelectedJobRunsStatus({ status: 'loading' });
-      }
-      const runs = await listTalkJobRuns({ talkId, jobId, limit: 20 });
-      setSelectedJobRuns(runs);
-      setSelectedJobRunsStatus({ status: 'idle' });
-      return runs;
-    },
-    [talkId],
-  );
-
-  const refreshTalkJobs = useCallback(
-    async (options?: {
-      showLoading?: boolean;
-      preserveSelection?: boolean;
-      preferredJobId?: string | null;
-    }) => {
-      if (options?.showLoading) {
-        setTalkJobsStatus({ status: 'loading' });
-      }
-      const [jobs, attachedConnectors, bindings] = await Promise.all([
-        listTalkJobs(talkId),
-        getTalkDataConnectors(talkId),
-        listTalkChannels(talkId),
-      ]);
-      setTalkJobs(jobs);
-      setTalkJobsLoaded(true);
-      setTalkConnectors(attachedConnectors);
-      setChannelBindings(bindings);
-      setTalkJobsStatus({ status: 'idle' });
-
-      const nextSelectedId =
-        (options?.preferredJobId &&
-          jobs.some((job) => job.id === options.preferredJobId) &&
-          options.preferredJobId) ||
-        (options?.preserveSelection &&
-          selectedJobId &&
-          jobs.some((job) => job.id === selectedJobId) &&
-          selectedJobId) ||
-        jobs[0]?.id ||
-        null;
-
-      if (!nextSelectedId) {
-        setSelectedJobId(null);
-        setCreatingJob(false);
-        setJobDraft(
-          buildDefaultJobDraft({
-            targetAgentId:
-              agents.find((agent) => agent.isPrimary)?.id || agents[0]?.id,
-          }),
-        );
-        setSelectedJobRuns([]);
-        setSelectedJobRunsStatus({ status: 'idle' });
-        return jobs;
-      }
-
-      const job = jobs.find((candidate) => candidate.id === nextSelectedId);
-      if (!job) {
-        return jobs;
-      }
-
-      setCreatingJob(false);
-      setSelectedJobId(job.id);
-      setJobDraft(buildJobDraftFromJob(job));
-      await loadSelectedJobRuns(job.id, { showLoading: false });
-      return jobs;
-    },
-    [agents, loadSelectedJobRuns, selectedJobId, talkId],
-  );
-
-  const refreshSelectedJobExecutionState = useCallback(
-    async (jobId: string) => {
-      const [job, runs] = await Promise.all([
-        getTalkJob({ talkId, jobId }),
-        listTalkJobRuns({ talkId, jobId, limit: 20 }),
-      ]);
-      setTalkJobs((current) =>
-        current.map((candidate) => (candidate.id === job.id ? job : candidate)),
-      );
-      if (selectedJobId === job.id) {
-        setSelectedJobId(job.id);
-        setJobDraft(buildJobDraftFromJob(job));
-        setSelectedJobRuns(runs);
-      }
-      setSelectedJobRunsStatus({ status: 'idle' });
-      return { job, runs };
-    },
-    [selectedJobId, talkId],
+    [resyncTalkState],
   );
 
   // Tracks the last (talkId, activeThreadId) we fully hydrated from the
@@ -4217,10 +3078,6 @@ export function TalkDetailPage({
     setTargetAgentIds([]);
     setAgentsCatalogError(null);
     setAgentState({ status: 'idle' });
-    setTalkConnectors([]);
-    setOrgConnectors([]);
-    setAttachConnectorId('');
-    setConnectorState({ status: 'idle' });
     setHistoryEditorOpen(false);
     setHistoryEditState({ status: 'idle' });
     setOrchestrationState({ status: 'idle' });
@@ -4229,29 +3086,19 @@ export function TalkDetailPage({
     setContextGoal(null);
     setContextRules([]);
     setContextSources([]);
-    setRuleDrafts({});
     setContextStatus({ status: 'idle' });
-    setTalkStateEntries([]);
-    setTalkStateLoaded(false);
-    setTalkStateStatus({ status: 'idle' });
+    setGoalDraft(null);
+    setNewRuleText('');
+    setRuleDrafts({});
+    // Page-owned Jobs state (TalkJobsPanel self-fetches only the tool scope).
     setTalkJobs([]);
     setTalkJobsLoaded(false);
     setTalkJobsStatus({ status: 'idle' });
     setSelectedJobId(null);
-    setSelectedJobRuns([]);
-    setSelectedJobRunsStatus({ status: 'idle' });
     setCreatingJob(false);
     setJobDraft(buildDefaultJobDraft());
-    setGoalDraft('');
-    setNewRuleText('');
-    setChannelBindings([]);
-    setChannelConnections([]);
-    setChannelTargetInventory(buildEmptyChannelTargetInventory());
-    setChannelDrafts({});
-    setChannelFailuresByBindingId({});
-    setChannelCreateDraft(buildDefaultChannelCreateDraft());
-    setChannelTargetsLoading(false);
-    setChannelStatus({ status: 'idle' });
+    setSelectedJobRuns([]);
+    setSelectedJobRunsStatus({ status: 'idle' });
     setTalkContent(null);
     setTalkContentPendingEdits([]);
     setTalkContentError(null);
@@ -4486,12 +3333,19 @@ export function TalkDetailPage({
   }, [activeThreadId, isNearBottom, pageKind, talkId]);
 
   useEffect(() => {
+    if (pageKind !== 'ready' || !activeTalkWorkspaceId) {
+      setAiAgentsData(null);
+      setRegisteredAgentsCatalog([]);
+      setAgentsCatalogError(null);
+      return;
+    }
+
     let cancelled = false;
     const loadAiAgents = async () => {
       try {
         const [next, regAgents] = await Promise.all([
-          getAiAgents(),
-          listRegisteredAgents(),
+          getAiAgents({ workspaceId: activeTalkWorkspaceId }),
+          listRegisteredAgents({ workspaceId: activeTalkWorkspaceId }),
         ]);
         if (cancelled) return;
         setAiAgentsData(next);
@@ -4519,7 +3373,7 @@ export function TalkDetailPage({
     return () => {
       cancelled = true;
     };
-  }, [handleUnauthorized]);
+  }, [activeTalkWorkspaceId, handleUnauthorized, pageKind]);
 
   const ensureKnownThread = useCallback(
     (threadId?: string | null): boolean => {
@@ -4960,23 +3814,20 @@ export function TalkDetailPage({
     accessRole === 'owner' || accessRole === 'admin' || accessRole === 'editor';
   const canEditJobs = canEditAgents;
   const canEditDoc = canEditAgents;
+  // Pre-built agent options for TalkJobsPanel's target-agent picker (the panel
+  // owns neither the roster nor buildAgentLabel).
+  const jobAgentOptions = useMemo<JobAgentOption[]>(
+    () =>
+      agents.map((agent) => ({
+        id: agent.id,
+        label: buildAgentLabel(agent),
+        isPrimary: agent.isPrimary,
+      })),
+    [agents],
+  );
 
   const canManageTalkConnectors =
     accessRole === 'owner' || accessRole === 'admin';
-  const canEditChannels = canEditAgents;
-  const canBrowseChannelConnections = canManageTalkConnectors;
-  const selectedJob = useMemo(
-    () => talkJobs.find((job) => job.id === selectedJobId) ?? null,
-    [selectedJobId, talkJobs],
-  );
-  const hasUnsavedJobChanges = useMemo(() => {
-    if (creatingJob) {
-      return Boolean(jobDraft.title.trim() || jobDraft.prompt.trim());
-    }
-    if (!selectedJob) return false;
-    const original = buildJobDraftFromJob(selectedJob);
-    return JSON.stringify(original) !== JSON.stringify(jobDraft);
-  }, [creatingJob, jobDraft, selectedJob]);
 
   const configuredProviders = useMemo(
     () => getConfiguredProviders(aiAgentsData),
@@ -5610,115 +4461,6 @@ export function TalkDetailPage({
     },
     [agentLabelById],
   );
-  const availableConnectors = useMemo(
-    () =>
-      orgConnectors.filter(
-        (connector) =>
-          connector.enabled &&
-          connector.verificationStatus === 'verified' &&
-          !talkConnectors.some((attached) => attached.id === connector.id),
-      ),
-    [orgConnectors, talkConnectors],
-  );
-  const availableChannelPlatforms = useMemo(
-    () =>
-      Array.from(
-        new Set(channelConnections.map((connection) => connection.platform)),
-      ),
-    [channelConnections],
-  );
-  const selectedChannelPlatform = useMemo(
-    () =>
-      channelCreateDraft.platform &&
-      availableChannelPlatforms.includes(channelCreateDraft.platform)
-        ? channelCreateDraft.platform
-        : availableChannelPlatforms[0] || '',
-    [availableChannelPlatforms, channelCreateDraft.platform],
-  );
-  const selectedPlatformConnections = useMemo(
-    () =>
-      selectedChannelPlatform
-        ? channelConnections.filter(
-            (connection) => connection.platform === selectedChannelPlatform,
-          )
-        : ([] as ChannelConnection[]),
-    [channelConnections, selectedChannelPlatform],
-  );
-  const selectedChannelConnection = useMemo(
-    () =>
-      selectedPlatformConnections.find(
-        (connection) => connection.id === channelCreateDraft.connectionId,
-      ) ||
-      selectedPlatformConnections[0] ||
-      null,
-    [channelCreateDraft.connectionId, selectedPlatformConnections],
-  );
-  const selectedChannelTarget = useMemo(
-    () =>
-      channelTargetInventory.targets.find(
-        (target) =>
-          buildChannelTargetKey(target) === channelCreateDraft.targetKey,
-      ) || null,
-    [channelCreateDraft.targetKey, channelTargetInventory.targets],
-  );
-  const createInstructionTemplateOptions = useMemo(
-    () => getInstructionTemplateOptions(selectedChannelPlatform),
-    [selectedChannelPlatform],
-  );
-  const createInstructionLint = useMemo(
-    () =>
-      lintChannelInstructions({
-        instructions: channelCreateDraft.instructions,
-        stateNamespace: null,
-        timezone: channelCreateDraft.timezone,
-      }),
-    [channelCreateDraft.instructions, channelCreateDraft.timezone],
-  );
-  const channelTargetOptions = useMemo(
-    () =>
-      channelTargetInventory.targets
-        .map((target) => {
-          const key = buildChannelTargetKey(target);
-          const label = buildChannelTargetOptionLabel(
-            target,
-            channelConnections,
-          );
-          const metaLabel = buildChannelTargetOptionMetaLabel(
-            target,
-            channelConnections,
-          );
-          const connection =
-            channelConnections.find(
-              (candidate) => candidate.id === target.connectionId,
-            ) || null;
-          const occupiedByThisTalk = target.activeBindingTalkId === talkId;
-          const occupiedByOtherTalk =
-            Boolean(target.activeBindingTalkId) && !occupiedByThisTalk;
-          const requiresInvite =
-            connection?.platform === 'slack' &&
-            readChannelTargetBooleanMetadata(target, 'isMember') === false;
-          return {
-            key,
-            label,
-            metaLabel,
-            occupancyLabel: requiresInvite
-              ? 'Invite app in Slack, then sync channels'
-              : buildChannelTargetOccupancyLabel(target, talkId),
-            occupiedByThisTalk,
-            occupiedByOtherTalk,
-            requiresInvite,
-            openTalkHref:
-              occupiedByOtherTalk &&
-              target.activeBindingTalkAccessible &&
-              target.activeBindingTalkId
-                ? `/app/talks/${encodeURIComponent(target.activeBindingTalkId)}/channels`
-                : null,
-            target,
-          };
-        })
-        .sort((left, right) => left.label.localeCompare(right.label)),
-    [channelConnections, channelTargetInventory.targets, talkId],
-  );
   const talkTabHref = `/app/talks/${talkId}`;
   const threadAwareTalkTabHref = activeThreadId
     ? buildThreadHref(talkId, activeThreadId)
@@ -5732,6 +4474,9 @@ export function TalkDetailPage({
   const workspaceConnectorsTabHref = activeThreadId
     ? buildThreadHref(talkId, activeThreadId, 'connectors')
     : `/app/talks/${talkId}/connectors`;
+  const jobsTabHref = activeThreadId
+    ? buildThreadHref(talkId, activeThreadId, 'jobs')
+    : `/app/talks/${talkId}/jobs`;
   const runsTabHref = activeThreadId
     ? buildThreadHref(talkId, activeThreadId, 'runs')
     : `/app/talks/${talkId}/runs`;
@@ -5748,127 +4493,6 @@ export function TalkDetailPage({
   const manageConnectorsHref = '/app/connectors';
   const isRenaming = renameDraft?.talkId === talkId;
 
-  const reloadTalkChannels = useCallback(
-    async (options?: { quiet?: boolean }) => {
-      if (pageKind !== 'ready') return;
-      if (!options?.quiet) {
-        setChannelStatus((current) =>
-          current.status === 'saving' ? current : { status: 'loading' },
-        );
-      }
-      try {
-        const [bindings, connections] = await Promise.all([
-          listTalkChannels(talkId),
-          canBrowseChannelConnections
-            ? listChannelConnections()
-            : Promise.resolve([] as ChannelConnection[]),
-        ]);
-        const failureEntries = await Promise.all(
-          bindings.map(async (binding) => {
-            const [ingress, delivery] = await Promise.all([
-              listTalkChannelIngressFailures({
-                talkId,
-                bindingId: binding.id,
-              }),
-              listTalkChannelDeliveryFailures({
-                talkId,
-                bindingId: binding.id,
-              }),
-            ]);
-            return [binding.id, { ingress, delivery }] as const;
-          }),
-        );
-        setChannelBindings(bindings);
-        setChannelDrafts(
-          bindings.reduce<Record<string, ChannelBindingDraft>>(
-            (acc, binding) => {
-              acc[binding.id] = buildChannelBindingDraft(binding);
-              return acc;
-            },
-            {},
-          ),
-        );
-        setChannelBindingMemoryById((current) =>
-          Object.fromEntries(
-            bindings.map((binding) => [
-              binding.id,
-              current[binding.id] ??
-                buildEmptyBindingMemoryPanelState(binding.stateNamespace),
-            ]),
-          ),
-        );
-        setChannelInstructionReviews((current) => ({
-          [CREATE_CHANNEL_INSTRUCTION_REVIEW_KEY]: current[
-            CREATE_CHANNEL_INSTRUCTION_REVIEW_KEY
-          ] ?? {
-            status: 'idle',
-            review: null,
-          },
-          ...Object.fromEntries(
-            bindings.map((binding) => [
-              binding.id,
-              current[binding.id] ?? { status: 'idle', review: null },
-            ]),
-          ),
-        }));
-        setChannelFailuresByBindingId(Object.fromEntries(failureEntries));
-        setChannelConnections(connections);
-        setChannelCreateDraft((current) => {
-          const availablePlatforms = Array.from(
-            new Set(connections.map((connection) => connection.platform)),
-          );
-          const nextPlatform =
-            current.platform && availablePlatforms.includes(current.platform)
-              ? current.platform
-              : availablePlatforms[0] || '';
-          const platformConnections = nextPlatform
-            ? connections.filter(
-                (connection) => connection.platform === nextPlatform,
-              )
-            : [];
-          const nextConnectionId =
-            platformConnections.find(
-              (connection) => connection.id === current.connectionId,
-            )?.id ||
-            platformConnections[0]?.id ||
-            '';
-          const parsedTarget = current.targetKey
-            ? parseChannelTargetKey(current.targetKey)
-            : null;
-          return {
-            ...current,
-            platform: nextPlatform,
-            connectionId: nextConnectionId,
-            template:
-              nextPlatform === 'slack' || current.template === 'blank'
-                ? current.template
-                : 'blank',
-            targetKey:
-              parsedTarget?.connectionId === nextConnectionId
-                ? current.targetKey
-                : '',
-          };
-        });
-        if (!options?.quiet) {
-          setChannelStatus({ status: 'idle' });
-        }
-      } catch (err) {
-        if (err instanceof UnauthorizedError) {
-          handleUnauthorized();
-          return;
-        }
-        setChannelStatus({
-          status: 'error',
-          message:
-            err instanceof Error
-              ? err.message
-              : 'Failed to load talk channels.',
-        });
-      }
-    },
-    [canBrowseChannelConnections, handleUnauthorized, pageKind, talkId],
-  );
-
   // Load Talk context once so Rules badges and context surfaces stay hydrated.
   useEffect(() => {
     if (pageKind !== 'ready') return;
@@ -5879,7 +4503,6 @@ export function TalkDetailPage({
     const loadContext = async () => {
       try {
         await refreshContext({
-          hydrateGoalDraft: true,
           showLoading: currentTab === 'context',
         });
         if (cancelled) return;
@@ -5903,14 +4526,6 @@ export function TalkDetailPage({
       cancelled = true;
     };
   }, [contextLoaded, currentTab, handleUnauthorized, refreshContext, pageKind]);
-
-  useEffect(() => {
-    if (pageKind !== 'ready' || currentTab !== 'context') {
-      return;
-    }
-
-    void refreshTalkStateEntries({ showLoading: !talkStateLoaded });
-  }, [currentTab, refreshTalkStateEntries, pageKind, talkStateLoaded]);
 
   useEffect(() => {
     if (pageKind !== 'ready' || currentTab !== 'context' || !contextLoaded) {
@@ -5950,1329 +4565,6 @@ export function TalkDetailPage({
     refreshContext,
     pageKind,
   ]);
-
-  // Context handlers
-  const handleSaveGoal = async () => {
-    setContextStatus({ status: 'saving' });
-    try {
-      const result = await setTalkGoal({ talkId, goalText: goalDraft });
-      setContextGoal(result.goal);
-      setContextStatus({ status: 'success', message: 'Goal saved.' });
-    } catch (err) {
-      setContextStatus({
-        status: 'error',
-        message: err instanceof Error ? err.message : 'Failed to save goal.',
-      });
-    }
-  };
-
-  const handleAddRule = async () => {
-    if (!newRuleText.trim()) return;
-    setContextStatus({ status: 'saving' });
-    try {
-      const rule = await createTalkContextRule({
-        talkId,
-        ruleText: newRuleText.trim(),
-      });
-      setContextRules((prev) => sortRulesByOrder([...prev, rule]));
-      setRuleDrafts((prev) => ({ ...prev, [rule.id]: rule.ruleText }));
-      setNewRuleText('');
-      setContextStatus({ status: 'idle' });
-    } catch (err) {
-      setContextStatus({
-        status: 'error',
-        message: err instanceof Error ? err.message : 'Failed to add rule.',
-      });
-    }
-  };
-
-  const handleToggleRule = async (rule: ContextRule) => {
-    try {
-      const updated = await patchTalkContextRule({
-        talkId,
-        ruleId: rule.id,
-        isActive: !rule.isActive,
-      });
-      setContextRules((prev) =>
-        sortRulesByOrder(prev.map((r) => (r.id === updated.id ? updated : r))),
-      );
-    } catch (err) {
-      setContextStatus({
-        status: 'error',
-        message:
-          err instanceof Error ? err.message : 'Failed to update rule state.',
-      });
-    }
-  };
-
-  const handleSaveRuleText = async (rule: ContextRule) => {
-    const draft = (ruleDrafts[rule.id] ?? rule.ruleText).trim();
-    if (!draft) {
-      setRuleDrafts((prev) => ({ ...prev, [rule.id]: rule.ruleText }));
-      setContextStatus({
-        status: 'error',
-        message: 'Rule text is required.',
-      });
-      return;
-    }
-    if (draft === rule.ruleText) {
-      return;
-    }
-
-    setContextStatus({ status: 'saving' });
-    try {
-      const updated = await patchTalkContextRule({
-        talkId,
-        ruleId: rule.id,
-        ruleText: draft,
-      });
-      setContextRules((prev) =>
-        sortRulesByOrder(
-          prev.map((current) =>
-            current.id === updated.id ? updated : current,
-          ),
-        ),
-      );
-      setRuleDrafts((prev) => ({ ...prev, [rule.id]: updated.ruleText }));
-      setContextStatus({ status: 'success', message: 'Rule updated.' });
-    } catch (err) {
-      setContextStatus({
-        status: 'error',
-        message: err instanceof Error ? err.message : 'Failed to update rule.',
-      });
-    }
-  };
-
-  const handleDeleteRule = async (ruleId: string) => {
-    try {
-      await deleteTalkContextRule({ talkId, ruleId });
-      setContextRules((prev) => prev.filter((r) => r.id !== ruleId));
-      setRuleDrafts((prev) => {
-        const next = { ...prev };
-        delete next[ruleId];
-        return next;
-      });
-    } catch (err) {
-      setContextStatus({
-        status: 'error',
-        message: err instanceof Error ? err.message : 'Failed to delete rule.',
-      });
-    }
-  };
-
-  const handleRuleReorder = async (event: DragEndEvent) => {
-    const activeId = String(event.active.id);
-    const overId = event.over ? String(event.over.id) : null;
-    if (!overId || activeId === overId) {
-      return;
-    }
-
-    const previousRules = orderedContextRules;
-    const nextRules = reorderRules(previousRules, activeId, overId);
-    if (nextRules === previousRules) {
-      return;
-    }
-
-    const changedRules = nextRules.filter((rule, index) => {
-      const previous = previousRules.find(
-        (candidate) => candidate.id === rule.id,
-      );
-      return previous?.sortOrder !== index;
-    });
-
-    setContextRules(nextRules);
-    setContextStatus({ status: 'saving' });
-
-    try {
-      await Promise.all(
-        changedRules.map((rule, index) =>
-          patchTalkContextRule({
-            talkId,
-            ruleId: rule.id,
-            sortOrder: rule.sortOrder,
-          }),
-        ),
-      );
-      setContextStatus({ status: 'success', message: 'Rule order updated.' });
-    } catch (err) {
-      setContextRules(previousRules);
-      setContextStatus({
-        status: 'error',
-        message:
-          err instanceof Error ? err.message : 'Failed to reorder rules.',
-      });
-    }
-  };
-
-  const handleCreateJobDraft = useCallback(() => {
-    setCreatingJob(true);
-    setSelectedJobId(null);
-    setSelectedJobRuns([]);
-    setSelectedJobRunsStatus({ status: 'idle' });
-    setTalkJobsStatus({ status: 'idle' });
-    setJobDraft(
-      buildDefaultJobDraft({
-        targetAgentId:
-          agents.find((agent) => agent.isPrimary)?.id || agents[0]?.id,
-      }),
-    );
-  }, [agents]);
-
-  const handleSelectJob = useCallback(
-    async (jobId: string) => {
-      const job = talkJobs.find((candidate) => candidate.id === jobId);
-      if (!job) return;
-      setCreatingJob(false);
-      setSelectedJobId(job.id);
-      setJobDraft(buildJobDraftFromJob(job));
-      try {
-        await loadSelectedJobRuns(job.id, { showLoading: true });
-        setTalkJobsStatus({ status: 'idle' });
-      } catch (err) {
-        if (err instanceof UnauthorizedError) {
-          handleUnauthorized();
-          return;
-        }
-        setSelectedJobRunsStatus({
-          status: 'error',
-          message:
-            err instanceof Error ? err.message : 'Failed to load job runs.',
-        });
-      }
-    },
-    [handleUnauthorized, loadSelectedJobRuns, talkJobs],
-  );
-
-  const handleToggleJobWeekday = useCallback((weekday: TalkJobWeekday) => {
-    setJobDraft((current) => {
-      const exists = current.weekdays.includes(weekday);
-      return {
-        ...current,
-        weekdays: exists
-          ? current.weekdays.filter((value) => value !== weekday)
-          : [...current.weekdays, weekday],
-      };
-    });
-  }, []);
-
-  const handleToggleJobConnector = useCallback((connectorId: string) => {
-    setJobDraft((current) => {
-      const exists = current.connectorIds.includes(connectorId);
-      return {
-        ...current,
-        connectorIds: exists
-          ? current.connectorIds.filter((value) => value !== connectorId)
-          : [...current.connectorIds, connectorId],
-      };
-    });
-  }, []);
-
-  const handleToggleJobChannelBinding = useCallback((bindingId: string) => {
-    setJobDraft((current) => {
-      const exists = current.channelBindingIds.includes(bindingId);
-      return {
-        ...current,
-        channelBindingIds: exists
-          ? current.channelBindingIds.filter((value) => value !== bindingId)
-          : [...current.channelBindingIds, bindingId],
-      };
-    });
-  }, []);
-
-  const handleSaveJob = useCallback(async () => {
-    if (!canEditJobs) return;
-    if (!creatingJob && !selectedJob) return;
-
-    setTalkJobsStatus({ status: 'saving' });
-    try {
-      const sourceScope = draftToTalkJobScope(jobDraft);
-      const schedule = draftToTalkJobSchedule(jobDraft);
-
-      const saved = creatingJob
-        ? await createTalkJob({
-            talkId,
-            title: jobDraft.title,
-            prompt: jobDraft.prompt,
-            targetAgentId: jobDraft.targetAgentId,
-            schedule,
-            timezone: jobDraft.timezone,
-            sourceScope,
-          })
-        : await patchTalkJob({
-            talkId,
-            jobId: selectedJob!.id,
-            title: jobDraft.title,
-            prompt: jobDraft.prompt,
-            targetAgentId: jobDraft.targetAgentId,
-            schedule,
-            timezone: jobDraft.timezone,
-            sourceScope,
-          });
-
-      await refreshTalkJobs({
-        preferredJobId: saved.id,
-        preserveSelection: true,
-      });
-      setTalkJobsStatus({
-        status: 'success',
-        message: creatingJob ? 'Job created.' : 'Job saved.',
-      });
-    } catch (err) {
-      if (err instanceof UnauthorizedError) {
-        handleUnauthorized();
-        return;
-      }
-      setTalkJobsStatus({
-        status: 'error',
-        message: err instanceof Error ? err.message : 'Failed to save job.',
-      });
-    }
-  }, [
-    canEditJobs,
-    creatingJob,
-    handleUnauthorized,
-    jobDraft,
-    refreshTalkJobs,
-    selectedJob,
-    talkId,
-  ]);
-
-  const handleDeleteJob = useCallback(async () => {
-    if (!selectedJob || !canEditJobs) return;
-    const confirmed = window.confirm(
-      `Delete "${selectedJob.title}"? This cannot be undone.`,
-    );
-    if (!confirmed) return;
-
-    setTalkJobsStatus({ status: 'saving' });
-    try {
-      await deleteTalkJob({ talkId, jobId: selectedJob.id });
-      const remaining = talkJobs.filter((job) => job.id !== selectedJob.id);
-      setTalkJobs(remaining);
-      setTalkJobsLoaded(true);
-      if (remaining.length > 0) {
-        const next = remaining[0]!;
-        setCreatingJob(false);
-        setSelectedJobId(next.id);
-        setJobDraft(buildJobDraftFromJob(next));
-        await loadSelectedJobRuns(next.id, { showLoading: false });
-      } else {
-        setSelectedJobId(null);
-        setSelectedJobRuns([]);
-        setSelectedJobRunsStatus({ status: 'idle' });
-        setCreatingJob(false);
-        setJobDraft(
-          buildDefaultJobDraft({
-            targetAgentId:
-              agents.find((agent) => agent.isPrimary)?.id || agents[0]?.id,
-          }),
-        );
-      }
-      setTalkJobsStatus({ status: 'success', message: 'Job deleted.' });
-    } catch (err) {
-      if (err instanceof UnauthorizedError) {
-        handleUnauthorized();
-        return;
-      }
-      setTalkJobsStatus({
-        status: 'error',
-        message: err instanceof Error ? err.message : 'Failed to delete job.',
-      });
-    }
-  }, [
-    agents,
-    canEditJobs,
-    handleUnauthorized,
-    loadSelectedJobRuns,
-    selectedJob,
-    talkId,
-    talkJobs,
-  ]);
-
-  const handlePauseJob = useCallback(async () => {
-    if (!selectedJob || !canEditJobs) return;
-    setTalkJobsStatus({ status: 'saving' });
-    try {
-      const paused = await pauseTalkJob({ talkId, jobId: selectedJob.id });
-      setTalkJobs((current) =>
-        current.map((job) => (job.id === paused.id ? paused : job)),
-      );
-      setTalkJobsStatus({ status: 'success', message: 'Job paused.' });
-    } catch (err) {
-      if (err instanceof UnauthorizedError) {
-        handleUnauthorized();
-        return;
-      }
-      setTalkJobsStatus({
-        status: 'error',
-        message: err instanceof Error ? err.message : 'Failed to pause job.',
-      });
-    }
-  }, [canEditJobs, handleUnauthorized, selectedJob, talkId]);
-
-  const handleResumeJob = useCallback(async () => {
-    if (!selectedJob || !canEditJobs) return;
-    setTalkJobsStatus({ status: 'saving' });
-    try {
-      const resumed = await resumeTalkJob({ talkId, jobId: selectedJob.id });
-      setTalkJobs((current) =>
-        current.map((job) => (job.id === resumed.id ? resumed : job)),
-      );
-      setTalkJobsStatus({ status: 'success', message: 'Job resumed.' });
-    } catch (err) {
-      if (err instanceof UnauthorizedError) {
-        handleUnauthorized();
-        return;
-      }
-      setTalkJobsStatus({
-        status: 'error',
-        message: err instanceof Error ? err.message : 'Failed to resume job.',
-      });
-    }
-  }, [canEditJobs, handleUnauthorized, selectedJob, talkId]);
-
-  const handleRunJobNow = useCallback(async () => {
-    if (!selectedJob || !canEditJobs) return;
-    setTalkJobsStatus({ status: 'saving' });
-    try {
-      const queued = await runTalkJobNow({ talkId, jobId: selectedJob.id });
-      await refreshSelectedJobExecutionState(selectedJob.id);
-      setTalkJobsStatus({ status: 'success', message: 'Job queued.' });
-
-      void (async () => {
-        const isTerminal = (status: TalkJobRunSummary['status']) =>
-          status === 'completed' ||
-          status === 'failed' ||
-          status === 'cancelled';
-
-        for (let attempt = 0; attempt < 15; attempt += 1) {
-          await new Promise((resolve) => window.setTimeout(resolve, 1000));
-          try {
-            const { runs } = await refreshSelectedJobExecutionState(
-              selectedJob.id,
-            );
-            const latest =
-              runs.find((run) => run.id === queued.runId) ?? runs[0] ?? null;
-            if (!latest || !isTerminal(latest.status)) {
-              continue;
-            }
-            if (selectedJob.threadId === activeThreadIdRef.current) {
-              await resyncTalkState({ refreshThreads: true });
-            }
-            setTalkJobsStatus(
-              latest.status === 'completed'
-                ? { status: 'success', message: 'Job completed.' }
-                : {
-                    status: 'error',
-                    message:
-                      latest.errorMessage ||
-                      latest.cancelReason ||
-                      `Job ${latest.status}.`,
-                  },
-            );
-            return;
-          } catch (pollErr) {
-            if (pollErr instanceof UnauthorizedError) {
-              handleUnauthorized();
-            }
-            return;
-          }
-        }
-      })();
-    } catch (err) {
-      if (err instanceof UnauthorizedError) {
-        handleUnauthorized();
-        return;
-      }
-      setTalkJobsStatus({
-        status: 'error',
-        message: err instanceof Error ? err.message : 'Failed to queue job.',
-      });
-    }
-  }, [
-    canEditJobs,
-    handleUnauthorized,
-    refreshSelectedJobExecutionState,
-    resyncTalkState,
-    selectedJob,
-    talkId,
-  ]);
-
-  const handleChannelDraftChange = useCallback(
-    (bindingId: string, patch: Partial<ChannelBindingDraft>) => {
-      setChannelDrafts((current) => ({
-        ...current,
-        [bindingId]: {
-          ...current[bindingId],
-          ...patch,
-        },
-      }));
-      if (patch.instructions !== undefined) {
-        setChannelInstructionReviews((current) => ({
-          ...current,
-          [bindingId]: {
-            status: 'idle',
-            review: null,
-          },
-        }));
-      }
-    },
-    [],
-  );
-
-  const handleApplyChannelTemplate = useCallback(
-    (binding: TalkChannelBinding, template: InstructionTemplateKey) => {
-      const nextInstructions = buildInstructionTemplate(
-        template,
-        binding.stateNamespace,
-      );
-      const currentInstructions =
-        channelDrafts[binding.id]?.instructions || binding.instructions || '';
-      if (
-        currentInstructions.trim().length > 0 &&
-        currentInstructions.trim() !== nextInstructions.trim() &&
-        !window.confirm(
-          `Replace the current instructions for ${binding.displayName}?`,
-        )
-      ) {
-        return;
-      }
-      handleChannelDraftChange(binding.id, {
-        template,
-        instructions: nextInstructions,
-      });
-    },
-    [channelDrafts, handleChannelDraftChange],
-  );
-
-  const handleApplyCreateTemplate = useCallback(
-    (template: InstructionTemplateKey) => {
-      const nextInstructions = buildInstructionTemplate(template, null);
-      setChannelCreateDraft((current) => {
-        if (
-          current.instructions.trim().length > 0 &&
-          current.instructions.trim() !== nextInstructions.trim() &&
-          !window.confirm('Replace the current draft instructions?')
-        ) {
-          return current;
-        }
-        return {
-          ...current,
-          template,
-          instructions: nextInstructions,
-        };
-      });
-      setChannelInstructionReviews((current) => ({
-        ...current,
-        [CREATE_CHANNEL_INSTRUCTION_REVIEW_KEY]: {
-          status: 'idle',
-          review: null,
-        },
-      }));
-    },
-    [],
-  );
-
-  const handleLoadMoreChannelTargets = useCallback(async () => {
-    if (
-      !selectedChannelConnection ||
-      channelTargetInventory.nextOffset == null
-    ) {
-      return;
-    }
-    setChannelTargetsLoading(true);
-    try {
-      const nextPage = await listChannelTargets({
-        connectionId: selectedChannelConnection.id,
-        query: channelTargetQuery.trim() || undefined,
-        limit: selectedChannelPlatform === 'slack' ? 50 : 100,
-        offset: channelTargetInventory.nextOffset,
-        approval: selectedChannelPlatform === 'slack' ? 'all' : 'approved',
-      });
-      setChannelTargetInventory((current) => ({
-        targets: [...current.targets, ...nextPage.targets],
-        totalCount: nextPage.totalCount,
-        hasMore: nextPage.hasMore,
-        nextOffset: nextPage.nextOffset,
-      }));
-      setChannelStatus({ status: 'idle' });
-    } catch (err) {
-      if (err instanceof UnauthorizedError) {
-        handleUnauthorized();
-        return;
-      }
-      setChannelStatus({
-        status: 'error',
-        message:
-          err instanceof Error
-            ? err.message
-            : 'Failed to load more channel targets.',
-      });
-    } finally {
-      setChannelTargetsLoading(false);
-    }
-  }, [
-    channelTargetInventory.nextOffset,
-    channelTargetQuery,
-    handleUnauthorized,
-    selectedChannelConnection,
-    selectedChannelPlatform,
-  ]);
-
-  const handleSyncSelectedSlackWorkspace = useCallback(async () => {
-    if (
-      !canBrowseChannelConnections ||
-      !selectedChannelConnection ||
-      selectedChannelConnection.platform !== 'slack'
-    ) {
-      return;
-    }
-
-    const connectionId = selectedChannelConnection.id;
-    const workspaceLabel = selectedChannelConnection.displayName;
-    setChannelSyncingConnectionId(connectionId);
-    setChannelStatus({ status: 'idle' });
-
-    try {
-      const result = await syncSlackWorkspace(connectionId);
-      await reloadTalkChannels({ quiet: true });
-      setChannelStatus({
-        status: 'success',
-        message: buildSlackWorkspaceSyncMessage(workspaceLabel, result),
-      });
-    } catch (err) {
-      if (err instanceof UnauthorizedError) {
-        handleUnauthorized();
-        return;
-      }
-      setChannelStatus({
-        status: 'error',
-        message:
-          err instanceof Error ? err.message : 'Failed to sync Slack channels.',
-      });
-    } finally {
-      setChannelSyncingConnectionId((current) =>
-        current === connectionId ? null : current,
-      );
-    }
-  }, [
-    canBrowseChannelConnections,
-    handleUnauthorized,
-    reloadTalkChannels,
-    selectedChannelConnection,
-  ]);
-
-  const handleCreateChannel = useCallback(async () => {
-    if (!canEditChannels) return;
-    const parsedTarget = parseChannelTargetKey(channelCreateDraft.targetKey);
-    if (!parsedTarget) {
-      setChannelStatus({
-        status: 'error',
-        message:
-          'Select a channel destination before creating a channel binding.',
-      });
-      return;
-    }
-    if (
-      selectedChannelPlatform === 'slack' &&
-      selectedChannelTarget &&
-      readChannelTargetBooleanMetadata(selectedChannelTarget, 'isMember') ===
-        false
-    ) {
-      setChannelStatus({
-        status: 'error',
-        message:
-          'Invite the Slack app to this channel first, then sync channels again before binding it to this Talk.',
-      });
-      return;
-    }
-    setChannelStatus({ status: 'saving' });
-    try {
-      await createTalkChannel({
-        talkId,
-        connectionId: parsedTarget.connectionId,
-        targetKind: parsedTarget.targetKind,
-        targetId: parsedTarget.targetId,
-        displayName:
-          channelCreateDraft.displayName.trim() ||
-          selectedChannelTarget?.displayName ||
-          parsedTarget.targetId,
-        responseMode: channelCreateDraft.responseMode,
-        responderMode: channelCreateDraft.responderMode,
-        responderAgentId:
-          channelCreateDraft.responderMode === 'agent'
-            ? channelCreateDraft.responderAgentId || null
-            : null,
-        deliveryMode: channelCreateDraft.deliveryMode,
-        timezone: channelCreateDraft.timezone.trim() || null,
-        instructions: channelCreateDraft.instructions.trim() || null,
-        inboundRateLimitPerMinute:
-          Number.parseInt(channelCreateDraft.inboundRateLimitPerMinute, 10) ||
-          10,
-        maxPendingEvents:
-          Number.parseInt(channelCreateDraft.maxPendingEvents, 10) || 20,
-        overflowPolicy: channelCreateDraft.overflowPolicy,
-        maxDeferredAgeMinutes:
-          Number.parseInt(channelCreateDraft.maxDeferredAgeMinutes, 10) || 10,
-      });
-      await reloadTalkChannels({ quiet: true });
-      setChannelCreateDraft((current) => ({
-        ...buildDefaultChannelCreateDraft(),
-        platform: current.platform,
-        connectionId: parsedTarget.connectionId,
-      }));
-      setChannelStatus({
-        status: 'success',
-        message: 'Talk channel binding created.',
-      });
-    } catch (err) {
-      if (err instanceof UnauthorizedError) {
-        handleUnauthorized();
-        return;
-      }
-      setChannelStatus({
-        status: 'error',
-        message:
-          err instanceof Error
-            ? err.message
-            : 'Failed to create talk channel binding.',
-      });
-    }
-  }, [
-    canEditChannels,
-    channelCreateDraft,
-    handleUnauthorized,
-    reloadTalkChannels,
-    selectedChannelTarget?.displayName,
-    talkId,
-  ]);
-
-  const handleSaveChannelBinding = useCallback(
-    async (binding: TalkChannelBinding) => {
-      if (!canEditChannels) return;
-      const draft = channelDrafts[binding.id];
-      if (!draft) return;
-      setChannelStatus({ status: 'saving' });
-      try {
-        await patchTalkChannel({
-          talkId,
-          bindingId: binding.id,
-          active: draft.active,
-          displayName: draft.displayName.trim() || binding.displayName,
-          responseMode: draft.responseMode,
-          responderMode: draft.responderMode,
-          responderAgentId:
-            draft.responderMode === 'agent'
-              ? draft.responderAgentId || null
-              : null,
-          deliveryMode: draft.deliveryMode,
-          timezone: draft.timezone.trim() || null,
-          instructions: draft.instructions.trim() || null,
-          inboundRateLimitPerMinute:
-            Number.parseInt(draft.inboundRateLimitPerMinute, 10) ||
-            binding.inboundRateLimitPerMinute,
-          maxPendingEvents:
-            Number.parseInt(draft.maxPendingEvents, 10) ||
-            binding.maxPendingEvents,
-          overflowPolicy: draft.overflowPolicy,
-          maxDeferredAgeMinutes:
-            Number.parseInt(draft.maxDeferredAgeMinutes, 10) ||
-            binding.maxDeferredAgeMinutes,
-        });
-        await reloadTalkChannels({ quiet: true });
-        setChannelStatus({
-          status: 'success',
-          message: `Saved channel settings for ${binding.displayName}.`,
-        });
-      } catch (err) {
-        if (err instanceof UnauthorizedError) {
-          handleUnauthorized();
-          return;
-        }
-        setChannelStatus({
-          status: 'error',
-          message:
-            err instanceof Error
-              ? err.message
-              : 'Failed to save talk channel settings.',
-        });
-      }
-    },
-    [
-      canEditChannels,
-      channelDrafts,
-      handleUnauthorized,
-      reloadTalkChannels,
-      talkId,
-    ],
-  );
-
-  const handleLoadChannelBindingMemory = useCallback(
-    async (binding: TalkChannelBinding, force = false) => {
-      const current = channelBindingMemoryById[binding.id];
-      if (
-        !force &&
-        current &&
-        (current.status === 'loading' || current.status === 'ready')
-      ) {
-        return;
-      }
-      setChannelBindingMemoryById((state) => ({
-        ...state,
-        [binding.id]: {
-          ...(state[binding.id] ??
-            buildEmptyBindingMemoryPanelState(binding.stateNamespace)),
-          status: 'loading',
-          errorMessage: undefined,
-          stateNamespace: binding.stateNamespace,
-        },
-      }));
-      try {
-        const result = await listTalkChannelBindingState({
-          talkId,
-          bindingId: binding.id,
-        });
-        setChannelBindingMemoryById((state) => ({
-          ...state,
-          [binding.id]: {
-            ...(state[binding.id] ??
-              buildEmptyBindingMemoryPanelState(result.stateNamespace)),
-            status: 'ready',
-            stateNamespace: result.stateNamespace,
-            entries: result.entries,
-            errorMessage: undefined,
-          },
-        }));
-      } catch (err) {
-        if (err instanceof UnauthorizedError) {
-          handleUnauthorized();
-          return;
-        }
-        setChannelBindingMemoryById((state) => ({
-          ...state,
-          [binding.id]: {
-            ...(state[binding.id] ??
-              buildEmptyBindingMemoryPanelState(binding.stateNamespace)),
-            status: 'error',
-            errorMessage:
-              err instanceof Error
-                ? err.message
-                : 'Failed to load binding memory.',
-          },
-        }));
-      }
-    },
-    [channelBindingMemoryById, handleUnauthorized, talkId],
-  );
-
-  const handleChannelBindingMemoryDraftChange = useCallback(
-    (
-      bindingId: string,
-      patch: Partial<
-        Pick<BindingMemoryPanelState, 'newKeySuffix' | 'newValueJson'>
-      >,
-    ) => {
-      setChannelBindingMemoryById((state) => ({
-        ...state,
-        [bindingId]: {
-          ...state[bindingId],
-          ...patch,
-        },
-      }));
-    },
-    [],
-  );
-
-  const handleCreateChannelBindingMemoryEntry = useCallback(
-    async (binding: TalkChannelBinding) => {
-      if (!canEditChannels) return;
-      const panel =
-        channelBindingMemoryById[binding.id] ??
-        buildEmptyBindingMemoryPanelState(binding.stateNamespace);
-      const keySuffix = panel.newKeySuffix.trim();
-      if (!keySuffix) {
-        setChannelStatus({
-          status: 'error',
-          message: 'Enter a key suffix before saving binding memory.',
-        });
-        return;
-      }
-      let value: unknown;
-      try {
-        value = JSON.parse(panel.newValueJson);
-      } catch {
-        setChannelStatus({
-          status: 'error',
-          message: 'Binding memory values must be valid JSON.',
-        });
-        return;
-      }
-
-      setChannelBindingMemoryById((state) => ({
-        ...state,
-        [binding.id]: {
-          ...panel,
-          status: 'saving',
-          errorMessage: undefined,
-        },
-      }));
-      try {
-        await upsertTalkChannelBindingState({
-          talkId,
-          bindingId: binding.id,
-          keySuffix,
-          value,
-          expectedVersion: 0,
-        });
-        await handleLoadChannelBindingMemory(binding, true);
-        setChannelBindingMemoryById((state) => ({
-          ...state,
-          [binding.id]: {
-            ...(state[binding.id] ??
-              buildEmptyBindingMemoryPanelState(binding.stateNamespace)),
-            status: 'ready',
-            stateNamespace: binding.stateNamespace,
-            newKeySuffix: '',
-            newValueJson: '{\n  \n}',
-            entries: state[binding.id]?.entries ?? [],
-          },
-        }));
-        setChannelStatus({
-          status: 'success',
-          message: `Added binding memory entry for ${binding.displayName}.`,
-        });
-      } catch (err) {
-        if (err instanceof UnauthorizedError) {
-          handleUnauthorized();
-          return;
-        }
-        setChannelBindingMemoryById((state) => ({
-          ...state,
-          [binding.id]: {
-            ...(state[binding.id] ??
-              buildEmptyBindingMemoryPanelState(binding.stateNamespace)),
-            status: 'error',
-            errorMessage:
-              err instanceof Error
-                ? err.message
-                : 'Failed to save binding memory.',
-          },
-        }));
-        setChannelStatus({
-          status: 'error',
-          message:
-            err instanceof Error
-              ? err.message
-              : 'Failed to save binding memory.',
-        });
-      }
-    },
-    [
-      canEditChannels,
-      channelBindingMemoryById,
-      handleLoadChannelBindingMemory,
-      handleUnauthorized,
-      talkId,
-    ],
-  );
-
-  const handleEditChannelBindingMemoryEntry = useCallback(
-    async (
-      binding: TalkChannelBinding,
-      entry: TalkChannelBindingStateEntry,
-    ) => {
-      if (!canEditChannels) return;
-      const nextValueJson = window.prompt(
-        `Edit JSON for ${entry.keySuffix}:`,
-        formatJsonForStateEditor(entry.value),
-      );
-      if (nextValueJson == null) return;
-      let value: unknown;
-      try {
-        value = JSON.parse(nextValueJson);
-      } catch {
-        setChannelStatus({
-          status: 'error',
-          message: 'Binding memory values must be valid JSON.',
-        });
-        return;
-      }
-      setChannelBindingMemoryById((state) => ({
-        ...state,
-        [binding.id]: {
-          ...(state[binding.id] ??
-            buildEmptyBindingMemoryPanelState(binding.stateNamespace)),
-          status: 'saving',
-          stateNamespace: binding.stateNamespace,
-          entries: state[binding.id]?.entries ?? [],
-        },
-      }));
-      try {
-        await upsertTalkChannelBindingState({
-          talkId,
-          bindingId: binding.id,
-          keySuffix: entry.keySuffix,
-          value,
-          expectedVersion: entry.version,
-        });
-        await handleLoadChannelBindingMemory(binding, true);
-        setChannelStatus({
-          status: 'success',
-          message: `Updated ${entry.keySuffix}.`,
-        });
-      } catch (err) {
-        if (err instanceof UnauthorizedError) {
-          handleUnauthorized();
-          return;
-        }
-        setChannelStatus({
-          status: 'error',
-          message:
-            err instanceof Error
-              ? err.message
-              : 'Failed to update binding memory.',
-        });
-        setChannelBindingMemoryById((state) => ({
-          ...state,
-          [binding.id]: {
-            ...(state[binding.id] ??
-              buildEmptyBindingMemoryPanelState(binding.stateNamespace)),
-            status: 'error',
-            errorMessage:
-              err instanceof Error
-                ? err.message
-                : 'Failed to update binding memory.',
-          },
-        }));
-      }
-    },
-    [
-      canEditChannels,
-      handleLoadChannelBindingMemory,
-      handleUnauthorized,
-      talkId,
-    ],
-  );
-
-  const handleDeleteChannelBindingMemoryEntry = useCallback(
-    async (
-      binding: TalkChannelBinding,
-      entry: TalkChannelBindingStateEntry,
-    ) => {
-      if (!canEditChannels) return;
-      const confirmed = window.confirm(
-        `Delete binding memory entry ${entry.keySuffix}?`,
-      );
-      if (!confirmed) return;
-      setChannelBindingMemoryById((state) => ({
-        ...state,
-        [binding.id]: {
-          ...(state[binding.id] ??
-            buildEmptyBindingMemoryPanelState(binding.stateNamespace)),
-          status: 'saving',
-          stateNamespace: binding.stateNamespace,
-          entries: state[binding.id]?.entries ?? [],
-        },
-      }));
-      try {
-        await deleteTalkChannelBindingState({
-          talkId,
-          bindingId: binding.id,
-          keySuffix: entry.keySuffix,
-          expectedVersion: entry.version,
-        });
-        await handleLoadChannelBindingMemory(binding, true);
-        setChannelStatus({
-          status: 'success',
-          message: `Deleted ${entry.keySuffix}.`,
-        });
-      } catch (err) {
-        if (err instanceof UnauthorizedError) {
-          handleUnauthorized();
-          return;
-        }
-        setChannelStatus({
-          status: 'error',
-          message:
-            err instanceof Error
-              ? err.message
-              : 'Failed to delete binding memory.',
-        });
-        setChannelBindingMemoryById((state) => ({
-          ...state,
-          [binding.id]: {
-            ...(state[binding.id] ??
-              buildEmptyBindingMemoryPanelState(binding.stateNamespace)),
-            status: 'error',
-            errorMessage:
-              err instanceof Error
-                ? err.message
-                : 'Failed to delete binding memory.',
-          },
-        }));
-      }
-    },
-    [
-      canEditChannels,
-      handleLoadChannelBindingMemory,
-      handleUnauthorized,
-      talkId,
-    ],
-  );
-
-  const handleReviewBindingInstructions = useCallback(
-    async (input: {
-      reviewKey: string;
-      platform: 'slack' | 'telegram';
-      instructions: string;
-      bindingId?: string | null;
-      bindingLabel?: string | null;
-      timezone?: string | null;
-    }) => {
-      if (!canEditChannels) return;
-      if (input.instructions.trim().length === 0) {
-        setChannelStatus({
-          status: 'error',
-          message: 'Enter instructions before requesting a review.',
-        });
-        return;
-      }
-      setChannelInstructionReviews((current) => ({
-        ...current,
-        [input.reviewKey]: { status: 'reviewing', review: null },
-      }));
-      try {
-        const review = await reviewTalkChannelInstructions({
-          talkId,
-          platform: input.platform,
-          instructions: input.instructions,
-          bindingId: input.bindingId ?? null,
-          bindingLabel: input.bindingLabel ?? null,
-          timezone: input.timezone ?? null,
-        });
-        setChannelInstructionReviews((current) => ({
-          ...current,
-          [input.reviewKey]: {
-            status: 'ready',
-            review,
-          },
-        }));
-      } catch (err) {
-        if (err instanceof UnauthorizedError) {
-          handleUnauthorized();
-          return;
-        }
-        setChannelInstructionReviews((current) => ({
-          ...current,
-          [input.reviewKey]: {
-            status: 'error',
-            review: null,
-            message:
-              err instanceof Error
-                ? err.message
-                : 'Failed to review channel instructions.',
-          },
-        }));
-      }
-    },
-    [canEditChannels, handleUnauthorized, talkId],
-  );
-
-  const handleDeleteChannelBinding = useCallback(
-    async (binding: TalkChannelBinding) => {
-      if (!canEditChannels) return;
-      const confirmed = window.confirm(
-        `Delete the channel binding for ${binding.displayName}?`,
-      );
-      if (!confirmed) return;
-      setChannelStatus({ status: 'saving' });
-      try {
-        await deleteTalkChannel({
-          talkId,
-          bindingId: binding.id,
-        });
-        await reloadTalkChannels({ quiet: true });
-        setChannelStatus({
-          status: 'success',
-          message: `Deleted channel binding for ${binding.displayName}.`,
-        });
-      } catch (err) {
-        if (err instanceof UnauthorizedError) {
-          handleUnauthorized();
-          return;
-        }
-        setChannelStatus({
-          status: 'error',
-          message:
-            err instanceof Error
-              ? err.message
-              : 'Failed to delete talk channel binding.',
-        });
-      }
-    },
-    [canEditChannels, handleUnauthorized, reloadTalkChannels, talkId],
-  );
-
-  const handleTestChannel = useCallback(
-    async (
-      binding: TalkChannelBinding,
-      location: 'diagnosis' | 'footer' = 'footer',
-    ) => {
-      if (!canEditChannels) return;
-      setChannelStatus({ status: 'saving', message: 'Sending test…' });
-      setChannelTestStatus({
-        bindingId: binding.id,
-        status: 'sending',
-        message: 'Sending test…',
-        location,
-      });
-      try {
-        await testTalkChannelBinding({
-          talkId,
-          bindingId: binding.id,
-        });
-        await reloadTalkChannels({ quiet: true });
-        setChannelStatus({
-          status: 'success',
-          message: `Sent a test message to ${binding.displayName}.`,
-        });
-        setChannelTestStatus({
-          bindingId: binding.id,
-          status: 'success',
-          message: `Sent a test message to ${binding.displayName}.`,
-          location,
-        });
-      } catch (err) {
-        if (err instanceof UnauthorizedError) {
-          handleUnauthorized();
-          return;
-        }
-        const message =
-          err instanceof Error
-            ? err.message
-            : 'Failed to send test channel message.';
-        setChannelStatus({
-          status: 'error',
-          message,
-        });
-        setChannelTestStatus({
-          bindingId: binding.id,
-          status: 'error',
-          message,
-          location,
-        });
-      }
-    },
-    [canEditChannels, handleUnauthorized, reloadTalkChannels, talkId],
-  );
-
-  const handleRetryIngressFailure = useCallback(
-    async (bindingId: string, rowId: string) => {
-      setChannelStatus({ status: 'saving' });
-      try {
-        await retryTalkChannelIngressFailure({ talkId, bindingId, rowId });
-        await reloadTalkChannels({ quiet: true });
-        setChannelStatus({
-          status: 'success',
-          message: 'Ingress failure retried.',
-        });
-      } catch (err) {
-        if (err instanceof UnauthorizedError) {
-          handleUnauthorized();
-          return;
-        }
-        setChannelStatus({
-          status: 'error',
-          message:
-            err instanceof Error
-              ? err.message
-              : 'Failed to retry ingress failure.',
-        });
-      }
-    },
-    [handleUnauthorized, reloadTalkChannels, talkId],
-  );
-
-  const handleDismissIngressFailure = useCallback(
-    async (bindingId: string, rowId: string) => {
-      setChannelStatus({ status: 'saving' });
-      try {
-        await deleteTalkChannelIngressFailure({ talkId, bindingId, rowId });
-        await reloadTalkChannels({ quiet: true });
-        setChannelStatus({
-          status: 'success',
-          message: 'Ingress failure dismissed.',
-        });
-      } catch (err) {
-        if (err instanceof UnauthorizedError) {
-          handleUnauthorized();
-          return;
-        }
-        setChannelStatus({
-          status: 'error',
-          message:
-            err instanceof Error
-              ? err.message
-              : 'Failed to dismiss ingress failure.',
-        });
-      }
-    },
-    [handleUnauthorized, reloadTalkChannels, talkId],
-  );
-
-  const handleRetryDeliveryFailure = useCallback(
-    async (bindingId: string, rowId: string) => {
-      setChannelStatus({ status: 'saving' });
-      try {
-        await retryTalkChannelDeliveryFailure({ talkId, bindingId, rowId });
-        await reloadTalkChannels({ quiet: true });
-        setChannelStatus({
-          status: 'success',
-          message: 'Delivery failure retried.',
-        });
-      } catch (err) {
-        if (err instanceof UnauthorizedError) {
-          handleUnauthorized();
-          return;
-        }
-        setChannelStatus({
-          status: 'error',
-          message:
-            err instanceof Error
-              ? err.message
-              : 'Failed to retry delivery failure.',
-        });
-      }
-    },
-    [handleUnauthorized, reloadTalkChannels, talkId],
-  );
-
-  const handleDismissDeliveryFailure = useCallback(
-    async (bindingId: string, rowId: string) => {
-      setChannelStatus({ status: 'saving' });
-      try {
-        await deleteTalkChannelDeliveryFailure({ talkId, bindingId, rowId });
-        await reloadTalkChannels({ quiet: true });
-        setChannelStatus({
-          status: 'success',
-          message: 'Delivery failure dismissed.',
-        });
-      } catch (err) {
-        if (err instanceof UnauthorizedError) {
-          handleUnauthorized();
-          return;
-        }
-        setChannelStatus({
-          status: 'error',
-          message:
-            err instanceof Error
-              ? err.message
-              : 'Failed to dismiss delivery failure.',
-        });
-      }
-    },
-    [handleUnauthorized, reloadTalkChannels, talkId],
-  );
 
   const openHistoryEditor = useCallback(() => {
     if (pageKind !== 'ready') return;
@@ -7548,7 +4840,7 @@ export function TalkDetailPage({
   };
 
   const handleFilesSelected = async (files: FileList | File[]) => {
-    if (!pageTalk) return;
+    if (!pageTalk || !GREENFIELD_MESSAGE_ATTACHMENTS_ENABLED) return;
     const fileArray = Array.from(files);
     const currentCount = pendingAttachments.length;
     if (currentCount + fileArray.length > MAX_ATTACHMENTS_PER_MESSAGE) {
@@ -7663,6 +4955,7 @@ export function TalkDetailPage({
   };
 
   const handleAttachButtonClick = () => {
+    if (!GREENFIELD_MESSAGE_ATTACHMENTS_ENABLED) return;
     fileInputRef.current?.click();
   };
 
@@ -7684,6 +4977,7 @@ export function TalkDetailPage({
   const handleDragEnter = (event: React.DragEvent) => {
     event.preventDefault();
     event.stopPropagation();
+    if (!GREENFIELD_MESSAGE_ATTACHMENTS_ENABLED) return;
     dragCounterRef.current += 1;
     if (hasFileTransfer(event.dataTransfer)) {
       setIsDragOver(true);
@@ -7693,6 +4987,7 @@ export function TalkDetailPage({
   const handleDragLeave = (event: React.DragEvent) => {
     event.preventDefault();
     event.stopPropagation();
+    if (!GREENFIELD_MESSAGE_ATTACHMENTS_ENABLED) return;
     dragCounterRef.current = Math.max(0, dragCounterRef.current - 1);
     if (dragCounterRef.current === 0) {
       setIsDragOver(false);
@@ -7702,7 +4997,10 @@ export function TalkDetailPage({
   const handleDragOver = (event: React.DragEvent) => {
     event.preventDefault();
     event.stopPropagation();
-    if (hasFileTransfer(event.dataTransfer)) {
+    if (
+      GREENFIELD_MESSAGE_ATTACHMENTS_ENABLED &&
+      hasFileTransfer(event.dataTransfer)
+    ) {
       event.dataTransfer.dropEffect = 'copy';
     }
   };
@@ -7712,7 +5010,10 @@ export function TalkDetailPage({
     event.stopPropagation();
     dragCounterRef.current = 0;
     setIsDragOver(false);
-    if (event.dataTransfer.files.length > 0) {
+    if (
+      GREENFIELD_MESSAGE_ATTACHMENTS_ENABLED &&
+      event.dataTransfer.files.length > 0
+    ) {
       void handleFilesSelected(event.dataTransfer.files);
     }
   };
@@ -7744,7 +5045,9 @@ export function TalkDetailPage({
       if (!hasFileTransfer(event.dataTransfer)) return;
       event.preventDefault();
       if (event.dataTransfer) {
-        event.dataTransfer.dropEffect = 'copy';
+        event.dataTransfer.dropEffect = GREENFIELD_MESSAGE_ATTACHMENTS_ENABLED
+          ? 'copy'
+          : 'none';
       }
       if (event.type === 'drop') {
         dragCounterRef.current = 0;
@@ -7792,6 +5095,7 @@ export function TalkDetailPage({
       }
 
       const result = await sendTalkMessage({
+        workspaceId: activeTalkWorkspaceId,
         talkId: pageTalk.id,
         content: input.content,
         targetAgentIds: input.targetAgentIds,
@@ -7831,7 +5135,7 @@ export function TalkDetailPage({
       }
       return result;
     },
-    [activeThreadId, pageKind, pageTalk],
+    [activeTalkWorkspaceId, activeThreadId, pageKind, pageTalk],
   );
 
   const submitDraft = async () => {
@@ -8060,7 +5364,9 @@ export function TalkDetailPage({
     if (pageKind !== 'ready' || !pageTalk || !activeThreadId) return;
     dispatch({ type: 'CANCEL_STARTED' });
     try {
-      const result = await cancelTalkRuns(pageTalk.id, activeThreadId);
+      const result = await cancelTalkRuns(pageTalk.id, activeThreadId, {
+        workspaceId: activeTalkWorkspaceId,
+      });
       dispatch({
         type: 'CANCEL_SUCCEEDED',
         message: `Cancelled ${result.cancelledRuns} run${result.cancelledRuns === 1 ? '' : 's'}.`,
@@ -8206,90 +5512,6 @@ export function TalkDetailPage({
     },
     [navigate, talkId],
   );
-
-  const handleAttachConnector = async () => {
-    if (!canManageTalkConnectors || !attachConnectorId) return;
-
-    setConnectorState({ status: 'saving' });
-    try {
-      const attached = await attachTalkDataConnector({
-        talkId,
-        connectorId: attachConnectorId,
-      });
-      setTalkConnectors((current) =>
-        current.some((connector) => connector.id === attached.id)
-          ? current
-          : [...current, attached],
-      );
-      setOrgConnectors((current) =>
-        current.map((connector) =>
-          connector.id === attached.id
-            ? {
-                ...connector,
-                attachedTalkCount: connector.attachedTalkCount + 1,
-              }
-            : connector,
-        ),
-      );
-      setConnectorState({
-        status: 'success',
-        message: `${attached.name} attached to this talk.`,
-      });
-    } catch (err) {
-      if (err instanceof UnauthorizedError) {
-        handleUnauthorized();
-        return;
-      }
-      setConnectorState({
-        status: 'error',
-        message:
-          err instanceof Error
-            ? err.message
-            : 'Failed to attach data connector.',
-      });
-    }
-  };
-
-  const handleDetachConnector = async (connector: TalkDataConnector) => {
-    if (!canManageTalkConnectors) return;
-
-    setConnectorState({ status: 'saving' });
-    try {
-      await detachTalkDataConnector({
-        talkId,
-        connectorId: connector.id,
-      });
-      setTalkConnectors((current) =>
-        current.filter((item) => item.id !== connector.id),
-      );
-      setOrgConnectors((current) =>
-        current.map((item) =>
-          item.id === connector.id
-            ? {
-                ...item,
-                attachedTalkCount: Math.max(0, item.attachedTalkCount - 1),
-              }
-            : item,
-        ),
-      );
-      setConnectorState({
-        status: 'success',
-        message: `${connector.name} detached from this talk.`,
-      });
-    } catch (err) {
-      if (err instanceof UnauthorizedError) {
-        handleUnauthorized();
-        return;
-      }
-      setConnectorState({
-        status: 'error',
-        message:
-          err instanceof Error
-            ? err.message
-            : 'Failed to detach data connector.',
-      });
-    }
-  };
 
   const handleClearUnread = () => {
     scrollToBottom('smooth');
@@ -8785,6 +6007,12 @@ export function TalkDetailPage({
                         Connectors
                       </Link>
                       <Link
+                        to={jobsTabHref}
+                        className={`talk-tab ${currentTab === 'jobs' ? 'talk-tab-active' : ''}`}
+                      >
+                        Jobs
+                      </Link>
+                      <Link
                         to={runsTabHref}
                         className={`talk-tab ${currentTab === 'runs' ? 'talk-tab-active' : ''}`}
                       >
@@ -9207,203 +6435,24 @@ export function TalkDetailPage({
                 <p className="page-state error">{contextStatus.message}</p>
               ) : (
                 <>
-                  {/* Goal */}
-                  <div className="talk-llm-card">
-                    <div className="connector-card-header">
-                      <div>
-                        <h3>Goal</h3>
-                        <p className="talk-llm-meta">
-                          What is this talk for? Describe the overall objective
-                          so agents share a frame for every discussion.
-                        </p>
-                      </div>
-                    </div>
-                    {canEditAgents ? (
-                      <>
-                        <label style={{ display: 'block' }}>
-                          <span className="sr-only">Talk goal</span>
-                          <textarea
-                            maxLength={1000}
-                            rows={4}
-                            value={goalDraft}
-                            onChange={(e) => setGoalDraft(e.target.value)}
-                            placeholder="e.g. Track and discuss Cal Football news each week — scores, key plays, injury reports, and how the team is trending toward bowl eligibility."
-                            disabled={contextStatus.status === 'saving'}
-                            style={{ width: '100%' }}
-                          />
-                        </label>
-                        <div
-                          className="connector-attach-row"
-                          style={{ justifyContent: 'space-between' }}
-                        >
-                          <p className="talk-llm-meta">
-                            {goalDraft.length}/1000
-                          </p>
-                          <button
-                            type="button"
-                            className="secondary-btn"
-                            onClick={() => void handleSaveGoal()}
-                            disabled={contextStatus.status === 'saving'}
-                          >
-                            Save
-                          </button>
-                        </div>
-                      </>
-                    ) : (
-                      <p className="talk-llm-meta">
-                        {contextGoal?.goalText || <em>No goal set.</em>}
-                      </p>
-                    )}
-                  </div>
-
-                  {/* Rules */}
-                  <div className="talk-llm-card">
-                    <div className="connector-card-header">
-                      <div>
-                        <h3>Rules</h3>
-                        <p className="talk-llm-meta">
-                          Specific formats and constraints — e.g. an output
-                          shape to follow, or sources to avoid. Up to 8 active
-                          rules, applied in order. Inactive rules stay editable
-                          without affecting prompt injection.
-                        </p>
-                      </div>
-                    </div>
-                    {orderedContextRules.length > 0 ? (
-                      <DndContext
-                        sensors={ruleSensors}
-                        collisionDetection={closestCenter}
-                        onDragEnd={(event) => void handleRuleReorder(event)}
-                      >
-                        <div className="talk-rule-list">
-                          {orderedContextRules.map((rule) => {
-                            const draft = ruleDrafts[rule.id] ?? rule.ruleText;
-                            const hasTextChange =
-                              draft.trim().length > 0 &&
-                              draft.trim() !== rule.ruleText;
-                            return (
-                              <RuleRow
-                                key={rule.id}
-                                ruleId={rule.id}
-                                disabled={!canEditAgents}
-                                label={rule.ruleText}
-                              >
-                                <div
-                                  className={`talk-rule-card${
-                                    rule.isActive
-                                      ? ''
-                                      : ' talk-rule-card-inactive'
-                                  }`}
-                                >
-                                  <div className="talk-rule-card-top">
-                                    <span className="talk-agent-chip">
-                                      {rule.isActive ? 'Active' : 'Inactive'}
-                                    </span>
-                                    <span className="talk-llm-meta">
-                                      Position {rule.sortOrder + 1}
-                                    </span>
-                                  </div>
-                                  {canEditAgents ? (
-                                    <>
-                                      <label className="talk-rule-edit-field">
-                                        <span className="sr-only">
-                                          Rule text
-                                        </span>
-                                        <textarea
-                                          maxLength={800}
-                                          rows={2}
-                                          value={draft}
-                                          onChange={(event) =>
-                                            setRuleDrafts((prev) => ({
-                                              ...prev,
-                                              [rule.id]: event.target.value,
-                                            }))
-                                          }
-                                          onBlur={() =>
-                                            void handleSaveRuleText(rule)
-                                          }
-                                          disabled={
-                                            contextStatus.status === 'saving'
-                                          }
-                                          style={{ width: '100%' }}
-                                        />
-                                      </label>
-                                      <div className="talk-rule-actions">
-                                        <button
-                                          type="button"
-                                          className="secondary-btn"
-                                          onClick={() =>
-                                            void handleToggleRule(rule)
-                                          }
-                                        >
-                                          {rule.isActive ? 'Pause' : 'Activate'}
-                                        </button>
-                                        <button
-                                          type="button"
-                                          className="secondary-btn"
-                                          onClick={() =>
-                                            void handleSaveRuleText(rule)
-                                          }
-                                          disabled={
-                                            contextStatus.status === 'saving' ||
-                                            !hasTextChange
-                                          }
-                                        >
-                                          Save
-                                        </button>
-                                        <button
-                                          type="button"
-                                          className="secondary-btn"
-                                          onClick={() =>
-                                            void handleDeleteRule(rule.id)
-                                          }
-                                        >
-                                          Delete
-                                        </button>
-                                      </div>
-                                    </>
-                                  ) : (
-                                    <p className="talk-rule-readonly">
-                                      {rule.ruleText}
-                                    </p>
-                                  )}
-                                </div>
-                              </RuleRow>
-                            );
-                          })}
-                        </div>
-                      </DndContext>
-                    ) : (
-                      <p className="page-state">No rules yet.</p>
-                    )}
-                    {canEditAgents ? (
-                      <div className="talk-rule-create-row">
-                        <label style={{ flex: 1 }}>
-                          <span className="sr-only">New rule text</span>
-                          <textarea
-                            maxLength={800}
-                            rows={2}
-                            value={newRuleText}
-                            onChange={(e) => setNewRuleText(e.target.value)}
-                            placeholder="e.g. When summarizing Cal Football news, use: ⟨headline⟩ — ⟨score⟩ — three bullets of key plays."
-                            disabled={contextStatus.status === 'saving'}
-                            style={{ width: '100%' }}
-                          />
-                        </label>
-                        <button
-                          type="button"
-                          className="secondary-btn"
-                          onClick={() => void handleAddRule()}
-                          disabled={
-                            contextStatus.status === 'saving' ||
-                            !newRuleText.trim()
-                          }
-                        >
-                          Add Rule
-                        </button>
-                      </div>
-                    ) : null}
-                  </div>
+                  <TalkContextPanel
+                    key={talkId}
+                    talkId={talkId}
+                    goal={contextGoal}
+                    rules={contextRules}
+                    setGoal={setContextGoal}
+                    setRules={setContextRules}
+                    status={contextStatus}
+                    setStatus={setContextStatus}
+                    goalDraft={goalDraft}
+                    setGoalDraft={setGoalDraft}
+                    newRuleText={newRuleText}
+                    setNewRuleText={setNewRuleText}
+                    ruleDrafts={ruleDrafts}
+                    setRuleDrafts={setRuleDrafts}
+                    canEdit={canEditAgents}
+                    onUnauthorized={handleUnauthorized}
+                  />
 
                   <SavedSourcesPanel
                     talkId={talkId}
@@ -9415,73 +6464,6 @@ export function TalkDetailPage({
                     )}
                     onUnauthorized={handleUnauthorized}
                   />
-
-                  {/* State */}
-                  <div className="talk-llm-card">
-                    <div className="connector-card-header">
-                      <div>
-                        <h3>State</h3>
-                        <p className="talk-llm-meta">
-                          Structured Talk state entries. Agents read and write
-                          these via compare-and-swap updates.
-                        </p>
-                      </div>
-                      <button
-                        className="btn btn-sm"
-                        onClick={() => {
-                          void refreshTalkStateEntries({ showLoading: false });
-                        }}
-                      >
-                        Refresh
-                      </button>
-                    </div>
-                    {talkStateStatus.status === 'error' ? (
-                      <p className="page-state error">
-                        {talkStateStatus.message}
-                      </p>
-                    ) : null}
-                    {talkStateStatus.status === 'loading' &&
-                    !talkStateLoaded ? (
-                      <p className="page-state">Loading state…</p>
-                    ) : talkStateEntries.length > 0 ? (
-                      <div className="talk-state-list">
-                        {talkStateEntries.map((entry) => (
-                          <TalkStateCard
-                            key={entry.id}
-                            entry={entry}
-                            canDelete={canEditAgents}
-                            onDelete={async () => {
-                              const confirmed = window.confirm(
-                                `Delete state entry "${entry.key}"? This cannot be undone.`,
-                              );
-                              if (!confirmed) return;
-                              try {
-                                await deleteTalkStateEntry(talkId, entry.key);
-                                setTalkStateStatus({ status: 'idle' });
-                                setTalkStateEntries((prev) =>
-                                  prev.filter((e) => e.id !== entry.id),
-                                );
-                              } catch (err) {
-                                if (err instanceof UnauthorizedError) {
-                                  handleUnauthorized();
-                                  return;
-                                }
-                                setTalkStateStatus({
-                                  status: 'error',
-                                  message:
-                                    err instanceof Error
-                                      ? err.message
-                                      : 'Failed to delete state entry.',
-                                });
-                              }
-                            }}
-                          />
-                        ))}
-                      </div>
-                    ) : (
-                      <p className="page-state">No state entries yet.</p>
-                    )}
-                  </div>
 
                   {/* Drive Resources */}
                   <TalkToolsPanel talkId={talkId} />
@@ -9499,6 +6481,33 @@ export function TalkDetailPage({
             <TalkConnectorsPanel
               talkId={talkId}
               onUnauthorized={handleUnauthorized}
+            />
+          ) : null}
+
+          {currentTab === 'jobs' ? (
+            <TalkJobsPanel
+              key={talkId}
+              talkId={talkId}
+              canEditJobs={canEditJobs}
+              agentOptions={jobAgentOptions}
+              jobDraft={jobDraft}
+              setJobDraft={setJobDraft}
+              creatingJob={creatingJob}
+              setCreatingJob={setCreatingJob}
+              selectedJobId={selectedJobId}
+              setSelectedJobId={setSelectedJobId}
+              talkJobs={talkJobs}
+              setTalkJobs={setTalkJobs}
+              talkJobsLoaded={talkJobsLoaded}
+              setTalkJobsLoaded={setTalkJobsLoaded}
+              selectedJobRuns={selectedJobRuns}
+              setSelectedJobRuns={setSelectedJobRuns}
+              selectedJobRunsStatus={selectedJobRunsStatus}
+              setSelectedJobRunsStatus={setSelectedJobRunsStatus}
+              status={talkJobsStatus}
+              setStatus={setTalkJobsStatus}
+              onUnauthorized={handleUnauthorized}
+              onJobRunSettled={handleJobRunSettled}
             />
           ) : null}
 
@@ -10235,6 +7244,7 @@ export function TalkDetailPage({
                         multiple
                         accept={ALLOWED_ATTACHMENT_EXTENSIONS}
                         onChange={handleFileInputChange}
+                        disabled={!GREENFIELD_MESSAGE_ATTACHMENTS_ENABLED}
                         style={{ display: 'none' }}
                       />
                       <div
@@ -10402,10 +7412,15 @@ export function TalkDetailPage({
                                 state.sendState.status === 'posting' ||
                                 activeRound ||
                                 hasUnsavedAgentChanges ||
-                                !activeThreadId
+                                !activeThreadId ||
+                                !GREENFIELD_MESSAGE_ATTACHMENTS_ENABLED
                               }
                               aria-label="Attach"
-                              title="Attach files"
+                              title={
+                                GREENFIELD_MESSAGE_ATTACHMENTS_ENABLED
+                                  ? 'Attach files'
+                                  : 'Attachments unavailable'
+                              }
                             >
                               <ComposerAttachIcon />
                             </button>

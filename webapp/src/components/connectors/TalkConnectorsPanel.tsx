@@ -29,14 +29,31 @@ type Props = {
 
 const CHANNEL_KIND_LABELS: Record<ChannelKind, string> = {
   slack: 'Slack',
-  telegram: 'Telegram',
 };
 
 const DATA_CONNECTOR_KIND_LABELS: Record<DataConnectorKind, string> = {
-  posthog: 'PostHog',
   google_docs: 'Google Docs',
   google_sheets: 'Google Sheets',
 };
+
+function channelKindLabel(kind: string): string {
+  return CHANNEL_KIND_LABELS[kind as ChannelKind] ?? 'Unsupported channel';
+}
+
+function dataConnectorKindLabel(kind: string): string {
+  return (
+    DATA_CONNECTOR_KIND_LABELS[kind as DataConnectorKind] ??
+    'Unsupported data source'
+  );
+}
+
+function toggleDisabled(row: {
+  enabled: boolean;
+  hasCredential: boolean;
+  linked: boolean;
+}): boolean {
+  return !row.enabled || (!row.linked && !row.hasCredential);
+}
 
 type LoadState =
   | { kind: 'loading' }
@@ -200,17 +217,20 @@ export function TalkConnectorsPanel({
                   channel.linked ? 'Disable' : 'Enable'
                 } channel ${channel.displayName} for this talk`}
                 onClick={() => void toggleChannel(channel)}
-                disabled={!channel.enabled}
+                disabled={toggleDisabled(channel)}
               >
                 {channel.linked ? 'On' : 'Off'}
               </button>
               <div className="talk-connector-row-meta">
                 <strong>{channel.displayName}</strong>
                 <span className="talk-connector-row-kind">
-                  {CHANNEL_KIND_LABELS[channel.kind]}
+                  {channelKindLabel(channel.kind)}
                 </span>
               </div>
-              <ConnectorStatusPill enabled={channel.enabled} hasCredential />
+              <ConnectorStatusPill
+                enabled={channel.enabled}
+                hasCredential={channel.hasCredential}
+              />
             </div>
           ))
         )}
@@ -247,17 +267,20 @@ export function TalkConnectorsPanel({
                   dc.linked ? 'Disable' : 'Enable'
                 } data source ${dc.displayName} for this talk`}
                 onClick={() => void toggleDataConnector(dc)}
-                disabled={!dc.enabled}
+                disabled={toggleDisabled(dc)}
               >
                 {dc.linked ? 'On' : 'Off'}
               </button>
               <div className="talk-connector-row-meta">
                 <strong>{dc.displayName}</strong>
                 <span className="talk-connector-row-kind">
-                  {DATA_CONNECTOR_KIND_LABELS[dc.kind]}
+                  {dataConnectorKindLabel(dc.kind)}
                 </span>
               </div>
-              <ConnectorStatusPill enabled={dc.enabled} hasCredential />
+              <ConnectorStatusPill
+                enabled={dc.enabled}
+                hasCredential={dc.hasCredential}
+              />
             </div>
           ))
         )}

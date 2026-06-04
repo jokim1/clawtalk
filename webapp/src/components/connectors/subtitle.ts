@@ -1,5 +1,5 @@
 // Per-kind subtitle resolver for workspace connectors (D12 — 2026-05-24).
-// Identifier-only: human names from Slack/PostHog/Google APIs are PR 4
+// Identifier-only: human names from Slack/Google APIs are PR 4
 // work, which requires the credential + a network call. Identifier-only
 // is honest, falsifiable, debug-friendly today.
 //
@@ -18,21 +18,6 @@ export function resolveConnectorSubtitle(
     if (ws && ch) return `workspace ${ws} · channel ${ch}`;
     if (ws) return `workspace ${ws}`;
     return null;
-  }
-
-  if (kind === 'telegram') {
-    const chat = typeof cfg.chat_id === 'string' ? cfg.chat_id : null;
-    return chat ? `chat ${chat}` : null;
-  }
-
-  if (kind === 'posthog') {
-    const host = typeof cfg.host === 'string' ? cfg.host : null;
-    if (!host) return null;
-    try {
-      return new URL(host).hostname;
-    } catch {
-      return host;
-    }
   }
 
   if (kind === 'google_docs' || kind === 'google_sheets') {

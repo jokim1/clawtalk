@@ -1,15 +1,3 @@
-// Talk-resources route tests (PR2 Lane C).
-//
-// Covers:
-//   - GET /resources happy path (RLS-scoped read)
-//   - POST /resources happy path (kind + externalId + displayName + metadata)
-//   - C3 edit-permission gate on POST and DELETE
-//   - C2 binding uniqueness scope (two owners → two rows; same owner → idempotent)
-//   - DELETE returns 404 when binding is missing
-//   - CSRF gate (POST + DELETE) and auth gate (GET + POST + DELETE) via the
-//     real Worker app — drives requests through the same middleware stack
-//     prod uses.
-
 import {
   afterAll,
   beforeAll,
@@ -22,498 +10,534 @@ import {
 import { SignJWT, exportJWK, generateKeyPair } from 'jose';
 import type { JWK, KeyLike } from 'jose';
 
-import {
-  closePgDatabase,
-  getDbPg,
-  initPgDatabase,
-  withUserContext,
-} from '../../../db.js';
+import { closePgDatabase, getDbPg, initPgDatabase } from '../../../db.js';
+import { ensureWorkspaceBootstrapForUser } from '../../workspaces/bootstrap.js';
 import { CLAWTALK_ALLOWED_ORIGINS } from '../../config.js';
-import {
-  createTalkResourceBinding,
-  listTalkResourceBindings,
-} from '../../db/talk-tools-accessors.js';
-import { ACCESS_TOKEN_COOKIE } from '../cookies.js';
+import { ACCESS_TOKEN_COOKIE, CSRF_TOKEN_COOKIE } from '../cookies.js';
 import { validateCsrfTokenPg } from '../middleware/csrf.js';
 import { _resetWorkerAppForTests, getWorkerApp } from '../worker-app.js';
 import type { AuthContext } from '../types.js';
-
 import {
   createTalkGoogleDriveResourceRoute,
   deleteTalkResourceRoute,
   listTalkResourcesRoute,
 } from './talk-resources.js';
 
-// Reserve a unique 6-digit prefix per the test-helpers harness convention.
-const USER_A_ID = '0c666601-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
-const USER_B_ID = '0c666601-bbbb-bbbb-bbbb-bbbbbbbbbbbb';
-const TALK_A_ID = '0c666601-cccc-cccc-cccc-ccccccccc0a1';
+const USER_ID = '0c666601-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
+const OTHER_ID = '0c666601-bbbb-bbbb-bbbb-bbbbbbbbbbbb';
+const MEMBER_ID = '0c666601-cccc-cccc-cccc-cccccccccccc';
 
-const AUTH_A: AuthContext = {
+const AUTH: AuthContext = {
   sessionId: 'session-a',
-  userId: USER_A_ID,
+  userId: USER_ID,
   role: 'owner',
-  authType: 'cookie',
+  authType: 'bearer',
 };
-const AUTH_B: AuthContext = {
+const OTHER_AUTH: AuthContext = {
   sessionId: 'session-b',
-  userId: USER_B_ID,
+  userId: OTHER_ID,
   role: 'owner',
-  authType: 'cookie',
+  authType: 'bearer',
+};
+const MEMBER_AUTH: AuthContext = {
+  sessionId: 'session-c',
+  userId: MEMBER_ID,
+  role: 'member',
+  authType: 'bearer',
 };
 
-async function seedAuthUser(
-  id: string,
-  email: string,
-  displayName: string,
-): Promise<void> {
+async function seedAuthUser(id: string, email: string): Promise<void> {
   const db = getDbPg();
   await db`
     insert into auth.users (id, email, raw_user_meta_data)
-    values (${id}::uuid, ${email}::text,
-            jsonb_build_object('full_name', ${displayName}::text))
-    on conflict (id) do nothing
+    values (
+      ${id}::uuid,
+      ${email}::text,
+      jsonb_build_object('full_name', ${email}::text)
+    )
+    on conflict (id) do update set
+      email = excluded.email,
+      raw_user_meta_data = excluded.raw_user_meta_data
   `;
 }
 
-async function seedTalk(talkId: string, ownerId: string): Promise<void> {
+async function deleteFixtureUsers(): Promise<void> {
   const db = getDbPg();
   await db`
-    insert into public.talks (id, owner_id, topic_title)
-    values (${talkId}::uuid, ${ownerId}::uuid, 'Resources Route Test')
-    on conflict (id) do nothing
+    delete from public.workspaces
+    where owner_id in (${USER_ID}::uuid, ${OTHER_ID}::uuid, ${MEMBER_ID}::uuid)
+  `;
+  await db`
+    delete from auth.users
+    where id in (${USER_ID}::uuid, ${OTHER_ID}::uuid, ${MEMBER_ID}::uuid)
   `;
 }
 
-async function purgeBindings(): Promise<void> {
+async function createFixture(input?: { talkCreatorId?: string }): Promise<{
+  workspaceId: string;
+  talkId: string;
+}> {
+  await seedAuthUser(USER_ID, 'resource-owner@clawtalk.local');
+  await seedAuthUser(OTHER_ID, 'resource-other@clawtalk.local');
+  await seedAuthUser(MEMBER_ID, 'resource-member@clawtalk.local');
+  const workspaceId = await ensureWorkspaceBootstrapForUser(USER_ID);
   const db = getDbPg();
+  const talkCreatorId = input?.talkCreatorId ?? USER_ID;
   await db`
-    delete from public.talk_resource_bindings
-    where talk_id = ${TALK_A_ID}::uuid
+    insert into public.workspace_members (workspace_id, user_id, role)
+    values (${workspaceId}::uuid, ${MEMBER_ID}::uuid, 'member')
+    on conflict (workspace_id, user_id) do update set role = excluded.role
   `;
+  const talkRows = await db<Array<{ id: string }>>`
+    insert into public.talks (workspace_id, sort_order, title, created_by)
+    values (${workspaceId}::uuid, 0, 'Resource Test Talk', ${talkCreatorId}::uuid)
+    returning id
+  `;
+  return { workspaceId, talkId: talkRows[0]!.id };
 }
 
 beforeAll(async () => {
   await initPgDatabase();
-  await seedAuthUser(USER_A_ID, 'res-a@clawtalk.local', 'Res User A');
-  await seedAuthUser(USER_B_ID, 'res-b@clawtalk.local', 'Res User B');
-  await seedTalk(TALK_A_ID, USER_A_ID);
 });
 
 afterAll(async () => {
-  const db = getDbPg();
-  await db`delete from public.talk_resource_bindings where talk_id = ${TALK_A_ID}::uuid`;
-  await db`delete from public.talks where id = ${TALK_A_ID}::uuid`;
-  await db`delete from auth.users where id in (${USER_A_ID}::uuid, ${USER_B_ID}::uuid)`;
+  await deleteFixtureUsers();
   await closePgDatabase();
 });
 
-beforeEach(async () => {
-  await purgeBindings();
-});
+describe('greenfield talk resource compatibility routes', () => {
+  beforeEach(async () => {
+    await deleteFixtureUsers();
+  });
 
-// ---------------------------------------------------------------------------
-// Direct handler tests (DB-backed, no HTTP layer)
-// ---------------------------------------------------------------------------
+  it('creates, lists, and deletes Drive resource bindings via connector_bindings', async () => {
+    const { talkId } = await createFixture();
 
-describe('listTalkResourcesRoute', () => {
-  it('returns the bindings owned by the caller, RLS-scoped', async () => {
-    // Seed two A-owned bindings; one B-owned binding on the same talk to
-    // prove RLS scoping (B's binding must not leak into A's list).
-    await withUserContext(USER_A_ID, async () => {
-      await createTalkResourceBinding({
-        ownerId: USER_A_ID,
-        talkId: TALK_A_ID,
-        bindingKind: 'google_drive_folder',
-        externalId: 'folder-1',
-        displayName: 'Folder 1',
-        createdBy: USER_A_ID,
-      });
-      await createTalkResourceBinding({
-        ownerId: USER_A_ID,
-        talkId: TALK_A_ID,
-        bindingKind: 'google_drive_file',
+    const created = await createTalkGoogleDriveResourceRoute({
+      auth: AUTH,
+      talkId,
+      body: {
+        kind: 'google_drive_file',
         externalId: 'file-1',
-        displayName: 'File 1',
-        createdBy: USER_A_ID,
-      });
-    });
-    await withUserContext(USER_B_ID, async () => {
-      await createTalkResourceBinding({
-        ownerId: USER_B_ID,
-        talkId: TALK_A_ID,
-        bindingKind: 'google_drive_file',
-        externalId: 'file-b',
-        displayName: 'File B',
-        createdBy: USER_B_ID,
-      });
-    });
-
-    const result = await listTalkResourcesRoute({
-      auth: AUTH_A,
-      talkId: TALK_A_ID,
-    });
-    expect(result.statusCode).toBe(200);
-    if (!result.body.ok) throw new Error('expected ok');
-    expect(result.body.data.talkId).toBe(TALK_A_ID);
-    expect(result.body.data.bindings.length).toBe(2);
-    expect(result.body.data.bindings.map((b) => b.externalId).sort()).toEqual([
-      'file-1',
-      'folder-1',
-    ]);
-    // The API projection drops owner_id; instead uses `kind` not bindingKind.
-    expect(result.body.data.bindings[0]).toHaveProperty('kind');
-    expect(result.body.data.bindings[0]).not.toHaveProperty('bindingKind');
-    expect(result.body.data.bindings[0]).not.toHaveProperty('ownerId');
-  });
-
-  it('returns 404 when the talk does not exist (or is not visible to the caller)', async () => {
-    const result = await listTalkResourcesRoute({
-      auth: AUTH_A,
-      talkId: '00000000-0000-0000-0000-000000000404',
-    });
-    expect(result.statusCode).toBe(404);
-  });
-});
-
-describe('createTalkGoogleDriveResourceRoute', () => {
-  it('creates a folder binding for the owner and returns it', async () => {
-    const result = await createTalkGoogleDriveResourceRoute({
-      auth: AUTH_A,
-      talkId: TALK_A_ID,
-      body: {
-        kind: 'google_drive_folder',
-        externalId: 'folder-create',
-        displayName: 'Project Notes',
-        metadata: { driveId: 'abc' },
+        displayName: 'Launch Notes',
+        metadata: { mimeType: 'application/vnd.google-apps.document' },
       },
     });
-    expect(result.statusCode).toBe(201);
-    if (!result.body.ok) throw new Error('expected ok');
-    expect(result.body.data.binding.kind).toBe('google_drive_folder');
-    expect(result.body.data.binding.externalId).toBe('folder-create');
-    expect(result.body.data.binding.metadata).toEqual({ driveId: 'abc' });
-    expect(result.body.data.binding.createdBy).toBe(USER_A_ID);
+    expect(created.statusCode).toBe(201);
+    if (!created.body.ok) throw new Error('expected ok');
+    expect(created.body.data.binding).toMatchObject({
+      kind: 'google_drive_file',
+      externalId: 'file-1',
+      displayName: 'Launch Notes',
+      metadata: { mimeType: 'application/vnd.google-apps.document' },
+      createdBy: USER_ID,
+    });
+
+    const list = await listTalkResourcesRoute({ auth: AUTH, talkId });
+    expect(list.statusCode).toBe(200);
+    if (!list.body.ok) throw new Error('expected ok');
+    expect(
+      list.body.data.bindings.map((binding) => binding.externalId),
+    ).toEqual(['file-1']);
+
+    const dbRows = await getDbPg()<
+      Array<{ service: string; target: string | null; surface: string | null }>
+    >`
+      select c.service, cb.target, cb.meta_json->>'compatSurface' as surface
+      from public.connector_bindings cb
+      join public.connectors c
+        on c.workspace_id = cb.workspace_id
+       and c.id = cb.connector_id
+      where cb.id = ${created.body.data.binding.id}::uuid
+    `;
+    expect(dbRows[0]).toEqual({
+      service: 'gdrive',
+      target: 'file-1',
+      surface: 'talk_resource',
+    });
+
+    const deleted = await deleteTalkResourceRoute({
+      auth: AUTH,
+      talkId,
+      resourceId: created.body.data.binding.id,
+    });
+    expect(deleted.statusCode).toBe(200);
+    const after = await listTalkResourcesRoute({ auth: AUTH, talkId });
+    if (!after.body.ok) throw new Error('expected ok');
+    expect(after.body.data.bindings).toHaveLength(0);
   });
 
-  it('C3: rejects with 403/404 when the caller cannot edit the talk and writes no row', async () => {
-    // USER_B has no edit access on TALK_A (owned by USER_A). The current
-    // ACL helper (canUserEditTalk) defers to RLS-visible getTalkById,
-    // which returns undefined for USER_B — so the "talk not found"
-    // precheck inside the route handler fires first (404) before the
-    // canEditTalk gate would (403). Either response is correct: the
-    // load-bearing assertion is that NO binding row is created. Without
-    // C3, RLS on talk_resource_bindings would happily let B's INSERT
-    // through because the row's owner_id matches auth.uid().
-    const result = await createTalkGoogleDriveResourceRoute({
-      auth: AUTH_B,
-      talkId: TALK_A_ID,
+  it('is idempotent for the same Talk target and supports multiple targets', async () => {
+    const { talkId } = await createFixture();
+    const first = await createTalkGoogleDriveResourceRoute({
+      auth: AUTH,
+      talkId,
       body: {
-        kind: 'google_drive_folder',
-        externalId: 'folder-b-tries',
-        displayName: 'B should not be able to bind this',
+        kind: 'google_drive_file',
+        externalId: 'same-file',
+        displayName: 'First Name',
       },
     });
-    expect([403, 404]).toContain(result.statusCode);
-    if (result.body.ok) throw new Error('expected error');
-    expect(['forbidden', 'not_found']).toContain(result.body.error.code);
-
-    // Confirm no row was written.
-    await withUserContext(USER_A_ID, async () => {
-      const list = await listTalkResourceBindings(TALK_A_ID);
-      expect(list.length).toBe(0);
+    const second = await createTalkGoogleDriveResourceRoute({
+      auth: AUTH,
+      talkId,
+      body: {
+        kind: 'google_drive_file',
+        externalId: 'same-file',
+        displayName: 'Second Name',
+      },
     });
+    const third = await createTalkGoogleDriveResourceRoute({
+      auth: AUTH,
+      talkId,
+      body: {
+        kind: 'google_drive_folder',
+        externalId: 'folder-1',
+        displayName: 'Folder',
+      },
+    });
+    if (!first.body.ok || !second.body.ok || !third.body.ok) {
+      throw new Error('expected ok');
+    }
+    expect(second.body.data.binding.id).toBe(first.body.data.binding.id);
+
+    const list = await listTalkResourcesRoute({ auth: AUTH, talkId });
+    if (!list.body.ok) throw new Error('expected ok');
+    expect(
+      list.body.data.bindings.map((binding) => binding.externalId).sort(),
+    ).toEqual(['folder-1', 'same-file']);
   });
 
-  it("C3: even when the talk shell exists from B's perspective, the canEditTalk gate fires (403)", async () => {
-    // Pre-grant USER_B "viewer" membership so the RLS-visible
-    // getTalkById returns a row from B's view. (This is forward-looking
-    // — the current talks RLS policy is owner-only, but talk_members
-    // RLS already lets B read their own membership; once talks RLS
-    // expands to include members, B's getTalkById will succeed.)
-    //
-    // Even with the row visible, B's POST must NOT create a binding
-    // because `canEditTalk` is the security boundary, not getTalkById.
-    // The handler returns 403 in this branch.
-    //
-    // For now (talks RLS is owner-only) this test asserts the same
-    // overall outcome as the test above: 403 OR 404, with no row
-    // written. Once talks RLS expands, it becomes the canonical C3
-    // 403 assertion.
+  it('lists only resources for the requested Talk', async () => {
+    const { workspaceId, talkId } = await createFixture();
+    const otherTalkRows = await getDbPg()<Array<{ id: string }>>`
+      insert into public.talks (workspace_id, sort_order, title, created_by)
+      values (${workspaceId}::uuid, 1, 'Sibling Resource Talk', ${USER_ID}::uuid)
+      returning id
+    `;
+    const otherTalkId = otherTalkRows[0]!.id;
+
+    const first = await createTalkGoogleDriveResourceRoute({
+      auth: AUTH,
+      talkId,
+      body: {
+        kind: 'google_drive_file',
+        externalId: 'talk-a-file',
+        displayName: 'Talk A File',
+      },
+    });
+    const second = await createTalkGoogleDriveResourceRoute({
+      auth: AUTH,
+      talkId: otherTalkId,
+      body: {
+        kind: 'google_drive_file',
+        externalId: 'talk-b-file',
+        displayName: 'Talk B File',
+      },
+    });
+    if (!first.body.ok || !second.body.ok) throw new Error('seed failed');
+
+    const listA = await listTalkResourcesRoute({ auth: AUTH, talkId });
+    const listB = await listTalkResourcesRoute({
+      auth: AUTH,
+      talkId: otherTalkId,
+    });
+    if (!listA.body.ok || !listB.body.ok) throw new Error('expected ok');
+    expect(
+      listA.body.data.bindings.map((binding) => binding.externalId),
+    ).toEqual(['talk-a-file']);
+    expect(
+      listB.body.data.bindings.map((binding) => binding.externalId),
+    ).toEqual(['talk-b-file']);
+  });
+
+  it('keeps same-target resource bindings separate by editor and resource kind', async () => {
+    const { workspaceId, talkId } = await createFixture();
     const db = getDbPg();
     await db`
-      insert into public.talk_members (talk_id, user_id, role)
-      values (${TALK_A_ID}::uuid, ${USER_B_ID}::uuid, 'viewer')
-      on conflict (talk_id, user_id) do nothing
+      insert into public.workspace_members (workspace_id, user_id, role)
+      values (${workspaceId}::uuid, ${OTHER_ID}::uuid, 'admin')
+      on conflict (workspace_id, user_id) do update set role = excluded.role
     `;
 
-    try {
-      const result = await createTalkGoogleDriveResourceRoute({
-        auth: AUTH_B,
-        talkId: TALK_A_ID,
-        body: {
-          kind: 'google_drive_folder',
-          externalId: 'folder-b-viewer-tries',
-          displayName: 'Viewer should not be able to bind',
-        },
-      });
-      expect([403, 404]).toContain(result.statusCode);
-
-      await withUserContext(USER_A_ID, async () => {
-        const list = await listTalkResourceBindings(TALK_A_ID);
-        expect(list.length).toBe(0);
-      });
-    } finally {
-      await db`
-        delete from public.talk_members
-        where talk_id = ${TALK_A_ID}::uuid and user_id = ${USER_B_ID}::uuid
-      `;
-    }
-  });
-
-  it('rejects invalid kind with 400', async () => {
-    const result = await createTalkGoogleDriveResourceRoute({
-      auth: AUTH_A,
-      talkId: TALK_A_ID,
+    const ownerFile = await createTalkGoogleDriveResourceRoute({
+      auth: AUTH,
+      talkId,
       body: {
-        kind: 'gmail_message',
-        externalId: 'x',
-        displayName: 'y',
+        kind: 'google_drive_file',
+        externalId: 'same-target',
+        displayName: 'Owner File',
       },
     });
-    expect(result.statusCode).toBe(400);
-    if (result.body.ok) throw new Error('expected error');
-    expect(result.body.error.code).toBe('invalid_binding_kind');
+    const otherFile = await createTalkGoogleDriveResourceRoute({
+      auth: OTHER_AUTH,
+      talkId,
+      body: {
+        kind: 'google_drive_file',
+        externalId: 'same-target',
+        displayName: 'Other File',
+      },
+    });
+    const ownerFolder = await createTalkGoogleDriveResourceRoute({
+      auth: AUTH,
+      talkId,
+      body: {
+        kind: 'google_drive_folder',
+        externalId: 'same-target',
+        displayName: 'Owner Folder',
+      },
+    });
+    if (!ownerFile.body.ok || !otherFile.body.ok || !ownerFolder.body.ok) {
+      throw new Error('expected ok');
+    }
+    expect(
+      new Set([
+        ownerFile.body.data.binding.id,
+        otherFile.body.data.binding.id,
+        ownerFolder.body.data.binding.id,
+      ]).size,
+    ).toBe(3);
+
+    const list = await listTalkResourcesRoute({ auth: AUTH, talkId });
+    if (!list.body.ok) throw new Error('expected ok');
+    expect(
+      list.body.data.bindings.filter(
+        (binding) => binding.externalId === 'same-target',
+      ),
+    ).toHaveLength(3);
   });
 
-  it('rejects missing externalId with 400', async () => {
-    const result = await createTalkGoogleDriveResourceRoute({
-      auth: AUTH_A,
-      talkId: TALK_A_ID,
+  it('blocks non-editor members from creating or deleting resource bindings', async () => {
+    const { talkId } = await createFixture();
+    const created = await createTalkGoogleDriveResourceRoute({
+      auth: AUTH,
+      talkId,
+      body: {
+        kind: 'google_drive_file',
+        externalId: 'owner-file',
+        displayName: 'Owner File',
+      },
+    });
+    if (!created.body.ok) throw new Error('seed failed');
+
+    const deniedCreate = await createTalkGoogleDriveResourceRoute({
+      auth: MEMBER_AUTH,
+      talkId,
+      body: {
+        kind: 'google_drive_file',
+        externalId: 'member-file',
+        displayName: 'Member File',
+      },
+    });
+    expect(deniedCreate.statusCode).toBe(403);
+
+    const deniedDelete = await deleteTalkResourceRoute({
+      auth: MEMBER_AUTH,
+      talkId,
+      resourceId: created.body.data.binding.id,
+    });
+    expect(deniedDelete.statusCode).toBe(403);
+
+    const list = await listTalkResourcesRoute({ auth: AUTH, talkId });
+    if (!list.body.ok) throw new Error('expected ok');
+    expect(list.body.data.bindings).toHaveLength(1);
+  });
+
+  it('lets a member creator manage resource bindings on their Talk', async () => {
+    const { talkId } = await createFixture({ talkCreatorId: MEMBER_ID });
+    const created = await createTalkGoogleDriveResourceRoute({
+      auth: MEMBER_AUTH,
+      talkId,
+      body: {
+        kind: 'google_drive_file',
+        externalId: 'creator-file',
+        displayName: 'Creator File',
+      },
+    });
+    expect(created.statusCode).toBe(201);
+    if (!created.body.ok) throw new Error('expected ok');
+
+    const deleted = await deleteTalkResourceRoute({
+      auth: MEMBER_AUTH,
+      talkId,
+      resourceId: created.body.data.binding.id,
+    });
+    expect(deleted.statusCode).toBe(200);
+  });
+
+  it('blocks guest talk creators from resource mutations', async () => {
+    const { workspaceId, talkId } = await createFixture({
+      talkCreatorId: MEMBER_ID,
+    });
+    await getDbPg()`
+      update public.workspace_members
+      set role = 'guest'
+      where workspace_id = ${workspaceId}::uuid
+        and user_id = ${MEMBER_ID}::uuid
+    `;
+
+    const deniedCreate = await createTalkGoogleDriveResourceRoute({
+      auth: MEMBER_AUTH,
+      talkId,
+      body: {
+        kind: 'google_drive_file',
+        externalId: 'guest-file',
+        displayName: 'Guest File',
+      },
+    });
+    expect(deniedCreate.statusCode).toBe(403);
+
+    const deniedDelete = await deleteTalkResourceRoute({
+      auth: MEMBER_AUTH,
+      talkId,
+      resourceId: '00000000-0000-0000-0000-000000000000',
+    });
+    expect(deniedDelete.statusCode).toBe(403);
+  });
+
+  it('blocks callers outside the Talk workspace', async () => {
+    const { talkId } = await createFixture();
+    const denied = await createTalkGoogleDriveResourceRoute({
+      auth: OTHER_AUTH,
+      talkId,
+      body: {
+        kind: 'google_drive_file',
+        externalId: 'private-file',
+        displayName: 'Private File',
+      },
+    });
+    expect([403, 404]).toContain(denied.statusCode);
+  });
+
+  it('rejects invalid resource payloads', async () => {
+    const { talkId } = await createFixture();
+    const invalidKind = await createTalkGoogleDriveResourceRoute({
+      auth: AUTH,
+      talkId,
+      body: { kind: 'gmail_message', externalId: 'x', displayName: 'Y' },
+    });
+    const invalidMetadata = await createTalkGoogleDriveResourceRoute({
+      auth: AUTH,
+      talkId,
+      body: {
+        kind: 'google_drive_file',
+        externalId: 'x',
+        displayName: 'Y',
+        metadata: 'nope',
+      },
+    });
+    const blankExternalId = await createTalkGoogleDriveResourceRoute({
+      auth: AUTH,
+      talkId,
       body: {
         kind: 'google_drive_file',
         externalId: '   ',
-        displayName: 'y',
+        displayName: 'Y',
       },
     });
-    expect(result.statusCode).toBe(400);
-    if (result.body.ok) throw new Error('expected error');
-    expect(result.body.error.code).toBe('external_id_required');
-  });
-
-  it('rejects missing displayName with 400', async () => {
-    const result = await createTalkGoogleDriveResourceRoute({
-      auth: AUTH_A,
-      talkId: TALK_A_ID,
+    const blankDisplayName = await createTalkGoogleDriveResourceRoute({
+      auth: AUTH,
+      talkId,
       body: {
         kind: 'google_drive_file',
-        externalId: 'file-x',
-        displayName: '',
+        externalId: 'x',
+        displayName: '   ',
       },
     });
-    expect(result.statusCode).toBe(400);
-    if (result.body.ok) throw new Error('expected error');
-    expect(result.body.error.code).toBe('display_name_required');
+    expect(invalidKind.statusCode).toBe(400);
+    expect(invalidMetadata.statusCode).toBe(400);
+    expect(blankExternalId.statusCode).toBe(400);
+    expect(blankDisplayName.statusCode).toBe(400);
   });
 
-  it('rejects non-object metadata with 400', async () => {
-    const result = await createTalkGoogleDriveResourceRoute({
-      auth: AUTH_A,
-      talkId: TALK_A_ID,
+  it('returns stable 400s for malformed resource route UUID params', async () => {
+    const { talkId } = await createFixture();
+
+    const badList = await listTalkResourcesRoute({
+      auth: AUTH,
+      talkId: 'not-a-uuid',
+    });
+    expect(badList.statusCode).toBe(400);
+    if (badList.body.ok) throw new Error('expected error');
+    expect(badList.body.error.code).toBe('invalid_talk_id');
+
+    const badCreate = await createTalkGoogleDriveResourceRoute({
+      auth: AUTH,
+      talkId: 'not-a-uuid',
       body: {
         kind: 'google_drive_file',
-        externalId: 'file-x',
-        displayName: 'X',
-        metadata: 'not-an-object',
+        externalId: 'file-1',
+        displayName: 'File',
       },
     });
-    expect(result.statusCode).toBe(400);
-    if (result.body.ok) throw new Error('expected error');
-    expect(result.body.error.code).toBe('invalid_metadata');
+    expect(badCreate.statusCode).toBe(400);
+    if (badCreate.body.ok) throw new Error('expected error');
+    expect(badCreate.body.error.code).toBe('invalid_talk_id');
+
+    const badDeleteResource = await deleteTalkResourceRoute({
+      auth: AUTH,
+      talkId,
+      resourceId: 'not-a-uuid',
+    });
+    expect(badDeleteResource.statusCode).toBe(400);
+    if (badDeleteResource.body.ok) throw new Error('expected error');
+    expect(badDeleteResource.body.error.code).toBe('invalid_resource_id');
+
+    const badDeleteTalk = await deleteTalkResourceRoute({
+      auth: AUTH,
+      talkId: 'not-a-uuid',
+      resourceId: '00000000-0000-0000-0000-000000000000',
+    });
+    expect(badDeleteTalk.statusCode).toBe(400);
+    if (badDeleteTalk.body.ok) throw new Error('expected error');
+    expect(badDeleteTalk.body.error.code).toBe('invalid_talk_id');
   });
 
-  it('C2: same-user re-bind is idempotent — returns the existing binding row', async () => {
-    const first = await createTalkGoogleDriveResourceRoute({
-      auth: AUTH_A,
-      talkId: TALK_A_ID,
-      body: {
-        kind: 'google_drive_file',
-        externalId: 'idemp-file',
-        displayName: 'First name',
-      },
+  it('returns 404 when deleting a missing resource binding', async () => {
+    const { talkId } = await createFixture();
+    const missing = await deleteTalkResourceRoute({
+      auth: AUTH,
+      talkId,
+      resourceId: '00000000-0000-0000-0000-000000000000',
     });
-    expect(first.statusCode).toBe(201);
-    if (!first.body.ok) throw new Error('expected ok');
-    const firstId = first.body.data.binding.id;
-
-    const second = await createTalkGoogleDriveResourceRoute({
-      auth: AUTH_A,
-      talkId: TALK_A_ID,
-      body: {
-        kind: 'google_drive_file',
-        externalId: 'idemp-file',
-        displayName: 'Second name (ignored)',
-      },
-    });
-    expect(second.statusCode).toBe(201);
-    if (!second.body.ok) throw new Error('expected ok');
-    expect(second.body.data.binding.id).toBe(firstId);
-
-    // List shows a single row.
-    await withUserContext(USER_A_ID, async () => {
-      const list = await listTalkResourceBindings(TALK_A_ID);
-      expect(list.length).toBe(1);
-    });
+    expect(missing.statusCode).toBe(404);
   });
-});
 
-// ---------------------------------------------------------------------------
-// C2 regression — two users in the same talk binding the same external_id
-// ---------------------------------------------------------------------------
-
-describe('createTalkGoogleDriveResourceRoute — C2 multi-owner binding scope', () => {
-  it('two users in the same talk binding the same external_id each get their own row', async () => {
-    // Pre-0018, the 3-column unique index on
-    // (talk_id, binding_kind, external_id) collided across owners.
-    // Migration 0018 (Lane D, already on main) widened it to 4 cols
-    // including owner_id. This test exercises the C2 behavior at the
-    // DB layer through both the route (USER_A path) and the accessor
-    // (USER_B path) — the route's C3 gate currently rejects B before
-    // it reaches the DB, so dropping under it via the accessor is the
-    // surest way to assert the unique-index scope.
-    const SHARED_EXTERNAL_ID = 'shared-doc-c2';
+  it('does not delete a resource binding from a different Talk', async () => {
+    const { workspaceId, talkId } = await createFixture();
     const db = getDbPg();
-
-    // A's binding goes via the public route (and through C3, which
-    // passes because A owns the talk).
-    const aResp = await createTalkGoogleDriveResourceRoute({
-      auth: AUTH_A,
-      talkId: TALK_A_ID,
-      body: {
-        kind: 'google_drive_file',
-        externalId: SHARED_EXTERNAL_ID,
-        displayName: "A's view",
-      },
-    });
-    expect(aResp.statusCode).toBe(201);
-    if (!aResp.body.ok) throw new Error('expected ok');
-
-    // B's binding goes through the accessor under B's user context.
-    // The 4-column unique scope means B's INSERT succeeds even though
-    // A already has a row with the same (talk, kind, externalId).
-    await withUserContext(USER_B_ID, async () => {
-      const created = await createTalkResourceBinding({
-        ownerId: USER_B_ID,
-        talkId: TALK_A_ID,
-        bindingKind: 'google_drive_file',
-        externalId: SHARED_EXTERNAL_ID,
-        displayName: "B's view",
-        createdBy: USER_B_ID,
-      });
-      expect(created.ownerId).toBe(USER_B_ID);
-    });
-
-    // Cross-check at the DB level (postgres role): both owner rows
-    // exist with the same external_id.
-    const rows = await db<{ owner_id: string }[]>`
-      select owner_id
-      from public.talk_resource_bindings
-      where talk_id = ${TALK_A_ID}::uuid
-        and binding_kind = 'google_drive_file'
-        and external_id = ${SHARED_EXTERNAL_ID}
-      order by owner_id
+    const otherTalkRows = await db<Array<{ id: string }>>`
+      insert into public.talks (workspace_id, sort_order, title, created_by)
+      values (${workspaceId}::uuid, 1, 'Other Resource Talk', ${USER_ID}::uuid)
+      returning id
     `;
-    expect(rows.length).toBe(2);
-    expect(rows.map((r) => r.owner_id).sort()).toEqual(
-      [USER_A_ID, USER_B_ID].sort(),
-    );
-
-    // Each user's RLS-scoped list returns exactly their own row.
-    await withUserContext(USER_A_ID, async () => {
-      const aList = await listTalkResourceBindings(TALK_A_ID);
-      expect(aList.length).toBe(1);
-      expect(aList[0].ownerId).toBe(USER_A_ID);
-    });
-    await withUserContext(USER_B_ID, async () => {
-      const bList = await listTalkResourceBindings(TALK_A_ID);
-      expect(bList.length).toBe(1);
-      expect(bList[0].ownerId).toBe(USER_B_ID);
-    });
-  });
-});
-
-describe('deleteTalkResourceRoute', () => {
-  it('deletes the binding when the caller can edit the talk', async () => {
-    const created = await createTalkGoogleDriveResourceRoute({
-      auth: AUTH_A,
-      talkId: TALK_A_ID,
+    const otherTalkId = otherTalkRows[0]!.id;
+    const otherBinding = await createTalkGoogleDriveResourceRoute({
+      auth: AUTH,
+      talkId: otherTalkId,
       body: {
         kind: 'google_drive_file',
-        externalId: 'to-delete',
-        displayName: 'To Delete',
+        externalId: 'other-talk-file',
+        displayName: 'Other Talk File',
       },
     });
-    if (!created.body.ok) throw new Error('seed failed');
-    const id = created.body.data.binding.id;
+    if (!otherBinding.body.ok) throw new Error('seed failed');
 
-    const result = await deleteTalkResourceRoute({
-      auth: AUTH_A,
-      talkId: TALK_A_ID,
-      resourceId: id,
+    const deleted = await deleteTalkResourceRoute({
+      auth: AUTH,
+      talkId,
+      resourceId: otherBinding.body.data.binding.id,
     });
-    expect(result.statusCode).toBe(200);
-    if (!result.body.ok) throw new Error('expected ok');
-    expect(result.body.data.deleted).toBe(true);
+    expect(deleted.statusCode).toBe(404);
 
-    await withUserContext(USER_A_ID, async () => {
-      expect((await listTalkResourceBindings(TALK_A_ID)).length).toBe(0);
+    const stillThere = await listTalkResourcesRoute({
+      auth: AUTH,
+      talkId: otherTalkId,
     });
-  });
-
-  it('returns 404 when the binding does not exist', async () => {
-    const result = await deleteTalkResourceRoute({
-      auth: AUTH_A,
-      talkId: TALK_A_ID,
-      resourceId: '00000000-0000-0000-0000-000000000404',
-    });
-    expect(result.statusCode).toBe(404);
-  });
-
-  it('C3: rejects with 403 when the caller cannot edit the talk', async () => {
-    // Seed a binding as USER_A, then try to delete it as USER_B.
-    const created = await createTalkGoogleDriveResourceRoute({
-      auth: AUTH_A,
-      talkId: TALK_A_ID,
-      body: {
-        kind: 'google_drive_file',
-        externalId: 'protect-me',
-        displayName: 'Protect Me',
-      },
-    });
-    if (!created.body.ok) throw new Error('seed failed');
-    const id = created.body.data.binding.id;
-
-    const result = await deleteTalkResourceRoute({
-      auth: AUTH_B,
-      talkId: TALK_A_ID,
-      resourceId: id,
-    });
-    // B can't even see the talk (RLS scope), so the not-found-precheck
-    // gate fires before the edit gate. Either way: NOT 200, and the row
-    // is still there afterwards.
-    expect([403, 404]).toContain(result.statusCode);
-
-    await withUserContext(USER_A_ID, async () => {
-      const list = await listTalkResourceBindings(TALK_A_ID);
-      expect(list.length).toBe(1);
-      expect(list[0].id).toBe(id);
-    });
+    if (!stillThere.body.ok) throw new Error('expected ok');
+    expect(stillThere.body.data.bindings).toHaveLength(1);
   });
 });
-
-// ---------------------------------------------------------------------------
-// HTTP-layer tests via the real Worker app (CSRF + auth gates).
-// ---------------------------------------------------------------------------
 
 const PROJECT_URL = 'https://test-project.supabase.co';
 const ISSUER = `${PROJECT_URL}/auth/v1`;
@@ -524,6 +548,12 @@ const VALID_ORIGIN = CLAWTALK_ALLOWED_ORIGINS[0] ?? 'http://localhost:5173';
 let privateKey: KeyLike;
 let publicJwk: JWK;
 const kvStore = new Map<string, string>();
+
+type ErrorEnvelope = { ok: false; error: { code: string } };
+type CreateResourceEnvelope = {
+  ok: true;
+  data: { binding: { id: string } };
+};
 
 const fakeKv = {
   async get(key: string, type?: 'json' | 'text'): Promise<unknown> {
@@ -546,10 +576,7 @@ function envForWorker(): Record<string, unknown> {
 }
 
 async function mintJwt(sub: string): Promise<string> {
-  return await new SignJWT({
-    session_id: 'session-x',
-    email: 'x@test.example',
-  })
+  return new SignJWT({ session_id: 'session-x', email: 'x@test.example' })
     .setProtectedHeader({ alg: 'ES256', kid: KID })
     .setIssuedAt()
     .setIssuer(ISSUER)
@@ -558,7 +585,7 @@ async function mintJwt(sub: string): Promise<string> {
     .sign(privateKey);
 }
 
-describe('worker-app integration — talk-resources gates', () => {
+describe('worker-app integration — greenfield talk resources', () => {
   beforeAll(async () => {
     const kp = await generateKeyPair('ES256', { extractable: true });
     privateKey = kp.privateKey;
@@ -568,7 +595,8 @@ describe('worker-app integration — talk-resources gates', () => {
     publicJwk.alg = 'ES256';
   });
 
-  beforeEach(() => {
+  beforeEach(async () => {
+    await deleteFixtureUsers();
     kvStore.clear();
     kvStore.set('supabase-jwks-v1', JSON.stringify({ keys: [publicJwk] }));
     _resetWorkerAppForTests();
@@ -587,23 +615,21 @@ describe('worker-app integration — talk-resources gates', () => {
     _resetWorkerAppForTests();
   });
 
-  it('GET /resources without auth returns 401', async () => {
+  it('keeps /resources mounted behind auth and CSRF', async () => {
+    const { talkId } = await createFixture();
     const app = getWorkerApp();
-    const res = await app.request(
-      new Request(`https://app.test/api/v1/talks/${TALK_A_ID}/resources`, {
+    const noAuth = await app.request(
+      new Request(`https://app.test/api/v1/talks/${talkId}/resources`, {
         headers: { origin: VALID_ORIGIN },
       }),
       undefined,
       envForWorker(),
     );
-    expect(res.status).toBe(401);
-  });
+    expect(noAuth.status).toBe(401);
 
-  it('GET /resources with valid auth returns 200', async () => {
-    const app = getWorkerApp();
-    const jwt = await mintJwt(USER_A_ID);
-    const res = await app.request(
-      new Request(`https://app.test/api/v1/talks/${TALK_A_ID}/resources`, {
+    const jwt = await mintJwt(USER_ID);
+    const authed = await app.request(
+      new Request(`https://app.test/api/v1/talks/${talkId}/resources`, {
         headers: {
           cookie: `${ACCESS_TOKEN_COOKIE}=${jwt}`,
           origin: VALID_ORIGIN,
@@ -612,106 +638,131 @@ describe('worker-app integration — talk-resources gates', () => {
       undefined,
       envForWorker(),
     );
-    expect(res.status).toBe(200);
+    expect(authed.status).toBe(200);
   });
 
-  it('POST /resources is wired through the Worker app (not 501 catch-all)', async () => {
+  it('keeps resource mutators behind auth and cookie CSRF', async () => {
+    const { talkId } = await createFixture();
     const app = getWorkerApp();
-    const jwt = await mintJwt(USER_A_ID);
-    const res = await app.request(
-      new Request(`https://app.test/api/v1/talks/${TALK_A_ID}/resources`, {
+    const url = `https://app.test/api/v1/talks/${talkId}/resources`;
+    const body = JSON.stringify({
+      kind: 'google_drive_file',
+      externalId: 'worker-file',
+      displayName: 'Worker File',
+    });
+
+    const noAuthPost = await app.request(
+      new Request(url, {
         method: 'POST',
         headers: {
-          cookie: `${ACCESS_TOKEN_COOKIE}=${jwt}`,
-          origin: VALID_ORIGIN,
           'content-type': 'application/json',
+          origin: VALID_ORIGIN,
         },
-        body: JSON.stringify({
-          kind: 'google_drive_file',
-          externalId: 'http-create-1',
-          displayName: 'Created via Worker app',
-        }),
+        body,
       }),
       undefined,
       envForWorker(),
     );
-    expect(res.status).not.toBe(501);
-    const body = (await res.json()) as {
-      ok: boolean;
-      error?: { code?: string };
-      data?: { binding: { kind: string; externalId: string } };
-    };
-    expect(body.error?.code).not.toBe('not_implemented_in_worker');
-    if (body.ok && body.data) {
-      expect(body.data.binding.kind).toBe('google_drive_file');
-      expect(body.data.binding.externalId).toBe('http-create-1');
-    }
-  });
+    expect(noAuthPost.status).toBe(401);
 
-  it('DELETE /resources/:id without auth returns 401', async () => {
-    const app = getWorkerApp();
-    const res = await app.request(
-      new Request(
-        `https://app.test/api/v1/talks/${TALK_A_ID}/resources/00000000-0000-0000-0000-000000000ddd`,
-        { method: 'DELETE', headers: { origin: VALID_ORIGIN } },
-      ),
+    const jwt = await mintJwt(USER_ID);
+    const missingCsrfPost = await app.request(
+      new Request(url, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          cookie: `${ACCESS_TOKEN_COOKIE}=${jwt}`,
+          origin: VALID_ORIGIN,
+        },
+        body,
+      }),
       undefined,
       envForWorker(),
     );
-    expect(res.status).toBe(401);
+    expect(missingCsrfPost.status).toBe(403);
+    expect(((await missingCsrfPost.json()) as ErrorEnvelope).error.code).toBe(
+      'csrf_failed',
+    );
+
+    const csrf = 'resource-csrf';
+    const created = await app.request(
+      new Request(url, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          cookie: `${ACCESS_TOKEN_COOKIE}=${jwt}; ${CSRF_TOKEN_COOKIE}=${csrf}`,
+          origin: VALID_ORIGIN,
+          'x-csrf-token': csrf,
+        },
+        body,
+      }),
+      undefined,
+      envForWorker(),
+    );
+    expect(created.status).toBe(201);
+    const createdJson = (await created.json()) as CreateResourceEnvelope;
+    expect(createdJson.ok).toBe(true);
+    const resourceId = createdJson.data.binding.id;
+
+    const noAuthDelete = await app.request(
+      new Request(`${url}/${resourceId}`, {
+        method: 'DELETE',
+        headers: { origin: VALID_ORIGIN },
+      }),
+      undefined,
+      envForWorker(),
+    );
+    expect(noAuthDelete.status).toBe(401);
+
+    const missingCsrfDelete = await app.request(
+      new Request(`${url}/${resourceId}`, {
+        method: 'DELETE',
+        headers: {
+          cookie: `${ACCESS_TOKEN_COOKIE}=${jwt}`,
+          origin: VALID_ORIGIN,
+        },
+      }),
+      undefined,
+      envForWorker(),
+    );
+    expect(missingCsrfDelete.status).toBe(403);
+    expect(((await missingCsrfDelete.json()) as ErrorEnvelope).error.code).toBe(
+      'csrf_failed',
+    );
+
+    const deleted = await app.request(
+      new Request(`${url}/${resourceId}`, {
+        method: 'DELETE',
+        headers: {
+          cookie: `${ACCESS_TOKEN_COOKIE}=${jwt}; ${CSRF_TOKEN_COOKIE}=${csrf}`,
+          origin: VALID_ORIGIN,
+          'x-csrf-token': csrf,
+        },
+      }),
+      undefined,
+      envForWorker(),
+    );
+    expect(deleted.status).toBe(200);
   });
 });
 
-// ---------------------------------------------------------------------------
-// CSRF gate — direct middleware tests.
-//
-// Note on scope: the cloud-mode auth middleware always issues
-// `authType: 'bearer'`, so `validateCsrfTokenPg` short-circuits to `ok`
-// for every Worker request today. The CSRF gate is wired on the new
-// routes so that if/when cookie-auth is re-introduced (legacy
-// device-code path, or a future first-party cookie flow), the
-// double-submit check is in place. These tests prove the wiring is
-// correct: with `authType: 'cookie'` the gate fires.
-// ---------------------------------------------------------------------------
-
-describe('CSRF gate wired on /resources mutators', () => {
-  it('cookie auth without CSRF header → rejected', () => {
-    const result = validateCsrfTokenPg({
-      method: 'POST',
-      authType: 'cookie',
-      cookieHeader: 'eb_csrf=token-xyz',
-      csrfHeader: undefined,
-    });
-    expect(result.ok).toBe(false);
-  });
-
-  it('cookie auth with matching cookie + header → accepted', () => {
-    const result = validateCsrfTokenPg({
-      method: 'POST',
-      authType: 'cookie',
-      cookieHeader: 'eb_csrf=token-xyz',
-      csrfHeader: 'token-xyz',
-    });
-    expect(result.ok).toBe(true);
-  });
-
-  it('cookie auth with mismatched header → rejected', () => {
-    const result = validateCsrfTokenPg({
-      method: 'DELETE',
-      authType: 'cookie',
-      cookieHeader: 'eb_csrf=token-xyz',
-      csrfHeader: 'something-else',
-    });
-    expect(result.ok).toBe(false);
-  });
-
-  it('bearer auth bypasses CSRF (current cloud mode)', () => {
-    const result = validateCsrfTokenPg({
-      method: 'POST',
-      authType: 'bearer',
-      cookieHeader: undefined,
-      csrfHeader: undefined,
-    });
-    expect(result.ok).toBe(true);
+describe('CSRF helper for resource mutators', () => {
+  it('requires a matching double-submit token for cookie mutators', () => {
+    expect(
+      validateCsrfTokenPg({
+        method: 'POST',
+        authType: 'cookie',
+        cookieHeader: 'eb_csrf=token-xyz',
+        csrfHeader: undefined,
+      }).ok,
+    ).toBe(false);
+    expect(
+      validateCsrfTokenPg({
+        method: 'DELETE',
+        authType: 'cookie',
+        cookieHeader: 'eb_csrf=token-xyz',
+        csrfHeader: 'token-xyz',
+      }).ok,
+    ).toBe(true);
   });
 });

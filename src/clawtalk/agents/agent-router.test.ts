@@ -58,8 +58,10 @@ describe('agent-router', () => {
     } as never);
   });
 
-  it('always permits read_state as a talk-internal context tool', () => {
-    expect(ALWAYS_ALLOWED_CONTEXT_TOOLS.has('read_state')).toBe(true);
+  it('does not permit retired state or attachment tools implicitly', () => {
+    expect(ALWAYS_ALLOWED_CONTEXT_TOOLS.has('read_state')).toBe(false);
+    expect(ALWAYS_ALLOWED_CONTEXT_TOOLS.has('list_state')).toBe(false);
+    expect(ALWAYS_ALLOWED_CONTEXT_TOOLS.has('read_attachment')).toBe(false);
   });
 
   it('always permits apply_content_edit (Talk-internal Content edits)', () => {

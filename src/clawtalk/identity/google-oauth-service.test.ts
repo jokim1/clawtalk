@@ -47,6 +47,7 @@ import {
   getUserGoogleCredential,
   upsertUserGoogleCredential,
 } from '../db/talk-tools-accessors.js';
+import { ensureWorkspaceBootstrapForUser } from '../workspaces/bootstrap.js';
 
 import {
   GoogleOAuthError,
@@ -60,8 +61,27 @@ import {
   decryptGoogleToolCredential,
   encryptGoogleToolCredential,
 } from './google-tools-credential-store.js';
+import {
+  expandGoogleScopeAliases,
+  normalizeGoogleScopeAliases,
+} from './google-scopes.js';
 
 const REDIRECT_URI = 'http://localhost:5173/api/v1/auth/google/callback';
+
+async function startOAuthForTest(
+  userId: string,
+  scopes: string[],
+): Promise<Awaited<ReturnType<typeof startGoogleOAuth>>> {
+  return withUserContext(userId, async () => {
+    const workspaceId = await ensureWorkspaceBootstrapForUser(userId);
+    return startGoogleOAuth({
+      workspaceId,
+      userId,
+      scopes,
+      redirectUri: REDIRECT_URI,
+    });
+  });
+}
 
 function base64url(buf: Buffer): string {
   return buf
@@ -159,15 +179,30 @@ describe('google-oauth-service', () => {
 
   describe('validateRequestedScopes (C7)', () => {
     it('accepts allowed scope aliases', () => {
-      expect(validateRequestedScopes(['drive.readonly', 'documents'])).toEqual([
+      expect(
+        validateRequestedScopes([
+          'drive.readonly',
+          'documents',
+          'gmail.readonly',
+          'gmail.send',
+        ]),
+      ).toEqual([
         'drive.readonly',
         'documents',
+        'gmail.readonly',
+        'gmail.send',
       ]);
     });
-    it('rejects gmail.send', () => {
-      expect(() => validateRequestedScopes(['gmail.send'])).toThrow(
-        GoogleOAuthError,
-      );
+    it('round-trips Gmail aliases through Google scope URLs', () => {
+      expect(expandGoogleScopeAliases(['gmail.send'])).toEqual([
+        'https://www.googleapis.com/auth/gmail.send',
+      ]);
+      expect(
+        normalizeGoogleScopeAliases([
+          'https://www.googleapis.com/auth/gmail.readonly',
+          'https://www.googleapis.com/auth/gmail.send',
+        ]),
+      ).toEqual(['gmail.readonly', 'gmail.send']);
     });
     it('rejects raw URL scopes outside the allowlist', () => {
       expect(() =>
@@ -200,12 +235,9 @@ describe('google-oauth-service', () => {
       const userId = await seedAuthUser();
       userIds.push(userId);
 
-      const result = await withUserContext(userId, () =>
-        startGoogleOAuth({
-          userId,
-          scopes: ensureOidcScopes(['drive.readonly', 'documents']),
-          redirectUri: REDIRECT_URI,
-        }),
+      const result = await startOAuthForTest(
+        userId,
+        ensureOidcScopes(['drive.readonly', 'documents']),
       );
 
       const rawState = stateFromUrl(result.authorizationUrl);
@@ -244,23 +276,35 @@ describe('google-oauth-service', () => {
     it('produces unique state/nonce/verifier per call', async () => {
       const userId = await seedAuthUser();
       userIds.push(userId);
-      const a = await withUserContext(userId, () =>
-        startGoogleOAuth({
-          userId,
-          scopes: ensureOidcScopes(['drive.readonly']),
-          redirectUri: REDIRECT_URI,
-        }),
+      const a = await startOAuthForTest(
+        userId,
+        ensureOidcScopes(['drive.readonly']),
       );
-      const b = await withUserContext(userId, () =>
-        startGoogleOAuth({
-          userId,
-          scopes: ensureOidcScopes(['drive.readonly']),
-          redirectUri: REDIRECT_URI,
-        }),
+      const b = await startOAuthForTest(
+        userId,
+        ensureOidcScopes(['drive.readonly']),
       );
       expect(stateFromUrl(a.authorizationUrl)).not.toEqual(
         stateFromUrl(b.authorizationUrl),
       );
+    });
+
+    it('rejects OIDC-only scope requests before writing OAuth state', async () => {
+      const userId = await seedAuthUser();
+      userIds.push(userId);
+
+      await expect(
+        startOAuthForTest(userId, ensureOidcScopes(['openid', 'email'])),
+      ).rejects.toMatchObject({
+        code: 'google_tool_scopes_required',
+        status: 400,
+      });
+      const rows = await getDbPg()<Array<{ count: string }>>`
+        select count(*)::text as count
+        from public.oauth_state
+        where user_id = ${userId}::uuid
+      `;
+      expect(rows[0]?.count).toBe('0');
     });
   });
 
@@ -280,17 +324,20 @@ describe('google-oauth-service', () => {
     it('returns state_invalid_or_expired when state belongs to a different provider (C5)', async () => {
       const userId = await seedAuthUser();
       userIds.push(userId);
+      const workspaceId = await withUserContext(userId, () =>
+        ensureWorkspaceBootstrapForUser(userId),
+      );
 
       // Insert an oauth_state row with provider != 'google_tools'
-      const rawState = 'other-provider-state';
+      const rawState = `other-provider-state-${userId}`;
       const stateHash = sha256Base64Url(rawState);
       const db = getDbPg();
       await db`
         insert into public.oauth_state
-          (user_id, provider, state_hash, nonce_hash, code_verifier_hash,
+          (user_id, workspace_id, provider, state_hash, nonce_hash, code_verifier_hash,
            code_verifier, redirect_uri, expires_at)
         values
-          (${userId}::uuid, 'something_else', ${stateHash}, 'irrelevant',
+          (${userId}::uuid, ${workspaceId}::uuid, 'something_else', ${stateHash}, 'irrelevant',
            'irrelevant', 'verifier', ${REDIRECT_URI},
            ${new Date(Date.now() + 60_000).toISOString()}::timestamptz)
       `;
@@ -305,15 +352,18 @@ describe('google-oauth-service', () => {
     it('returns state_invalid_or_expired when state has expired', async () => {
       const userId = await seedAuthUser();
       userIds.push(userId);
-      const rawState = 'expired-state-value';
+      const workspaceId = await withUserContext(userId, () =>
+        ensureWorkspaceBootstrapForUser(userId),
+      );
+      const rawState = `expired-state-value-${userId}`;
       const stateHash = sha256Base64Url(rawState);
       const db = getDbPg();
       await db`
         insert into public.oauth_state
-          (user_id, provider, state_hash, nonce_hash, code_verifier_hash,
+          (user_id, workspace_id, provider, state_hash, nonce_hash, code_verifier_hash,
            code_verifier, redirect_uri, expires_at)
         values
-          (${userId}::uuid, 'google_tools', ${stateHash}, 'irrelevant',
+          (${userId}::uuid, ${workspaceId}::uuid, 'google_tools', ${stateHash}, 'irrelevant',
            'irrelevant', 'verifier', ${REDIRECT_URI},
            ${new Date(Date.now() - 60_000).toISOString()}::timestamptz)
       `;
@@ -329,12 +379,9 @@ describe('google-oauth-service', () => {
       const userId = await seedAuthUser();
       userIds.push(userId);
 
-      const startResult = await withUserContext(userId, () =>
-        startGoogleOAuth({
-          userId,
-          scopes: ensureOidcScopes(['drive.readonly']),
-          redirectUri: REDIRECT_URI,
-        }),
+      const startResult = await startOAuthForTest(
+        userId,
+        ensureOidcScopes(['drive.readonly']),
       );
       const rawState = stateFromUrl(startResult.authorizationUrl);
 
@@ -358,12 +405,9 @@ describe('google-oauth-service', () => {
       const userId = await seedAuthUser();
       userIds.push(userId);
 
-      const startResult = await withUserContext(userId, () =>
-        startGoogleOAuth({
-          userId,
-          scopes: ensureOidcScopes(['drive.readonly', 'documents']),
-          redirectUri: REDIRECT_URI,
-        }),
+      const startResult = await startOAuthForTest(
+        userId,
+        ensureOidcScopes(['drive.readonly', 'documents']),
       );
       const rawState = stateFromUrl(startResult.authorizationUrl);
       const rawNonce = nonceFromUrl(startResult.authorizationUrl);
@@ -393,12 +437,9 @@ describe('google-oauth-service', () => {
       const userId = await seedAuthUser();
       userIds.push(userId);
 
-      const startResult = await withUserContext(userId, () =>
-        startGoogleOAuth({
-          userId,
-          scopes: ensureOidcScopes(['drive.readonly']),
-          redirectUri: REDIRECT_URI,
-        }),
+      const startResult = await startOAuthForTest(
+        userId,
+        ensureOidcScopes(['drive.readonly']),
       );
       const rawState = stateFromUrl(startResult.authorizationUrl);
 
@@ -422,12 +463,9 @@ describe('google-oauth-service', () => {
       const userId = await seedAuthUser();
       userIds.push(userId);
 
-      const startResult = await withUserContext(userId, () =>
-        startGoogleOAuth({
-          userId,
-          scopes: ensureOidcScopes(['drive.readonly']),
-          redirectUri: REDIRECT_URI,
-        }),
+      const startResult = await startOAuthForTest(
+        userId,
+        ensureOidcScopes(['drive.readonly']),
       );
       const rawState = stateFromUrl(startResult.authorizationUrl);
 
@@ -449,12 +487,9 @@ describe('google-oauth-service', () => {
       const userId = await seedAuthUser();
       userIds.push(userId);
 
-      const startResult = await withUserContext(userId, () =>
-        startGoogleOAuth({
-          userId,
-          scopes: ensureOidcScopes(['drive.readonly']),
-          redirectUri: REDIRECT_URI,
-        }),
+      const startResult = await startOAuthForTest(
+        userId,
+        ensureOidcScopes(['drive.readonly']),
       );
       const rawState = stateFromUrl(startResult.authorizationUrl);
 
@@ -490,6 +525,7 @@ describe('google-oauth-service', () => {
 
       // Seed an existing credential row with the prior refresh token.
       await withUserContext(userId, async () => {
+        const workspaceId = await ensureWorkspaceBootstrapForUser(userId);
         const ciphertext = encryptGoogleToolCredential({
           kind: 'google_tools',
           accessToken: 'old-access',
@@ -499,6 +535,7 @@ describe('google-oauth-service', () => {
           tokenType: 'Bearer',
         });
         await upsertUserGoogleCredential({
+          workspaceId,
           userId,
           googleSubject: 'sub-1',
           email: 'tester@example.com',
@@ -511,8 +548,10 @@ describe('google-oauth-service', () => {
 
       // Now persist a new identity that lacks refreshToken.
       await withUserContext(userId, async () => {
+        const workspaceId = await ensureWorkspaceBootstrapForUser(userId);
         await persistGoogleOAuthIdentity({
           userId,
+          workspaceId,
           identity: {
             googleSubject: 'sub-1',
             email: 'tester@example.com',
@@ -524,7 +563,7 @@ describe('google-oauth-service', () => {
             expiresInSec: 3600,
           },
         });
-        const fresh = await getUserGoogleCredential();
+        const fresh = await getUserGoogleCredential({ workspaceId });
         expect(fresh).toBeTruthy();
         const decoded = decryptGoogleToolCredential(fresh!.ciphertext);
         expect(decoded.refreshToken).toBe(priorRefresh);
@@ -538,6 +577,7 @@ describe('google-oauth-service', () => {
 
       // Prior credential with documents only
       await withUserContext(userId, async () => {
+        const workspaceId = await ensureWorkspaceBootstrapForUser(userId);
         const ciphertext = encryptGoogleToolCredential({
           kind: 'google_tools',
           accessToken: 'old',
@@ -547,6 +587,7 @@ describe('google-oauth-service', () => {
           tokenType: 'Bearer',
         });
         await upsertUserGoogleCredential({
+          workspaceId,
           userId,
           googleSubject: 'sub-1',
           email: 'tester@example.com',
@@ -559,8 +600,10 @@ describe('google-oauth-service', () => {
 
       // New identity grants only drive.readonly (would NORMALLY drop documents)
       await withUserContext(userId, async () => {
+        const workspaceId = await ensureWorkspaceBootstrapForUser(userId);
         await persistGoogleOAuthIdentity({
           userId,
+          workspaceId,
           identity: {
             googleSubject: 'sub-1',
             email: 'tester@example.com',
@@ -572,10 +615,41 @@ describe('google-oauth-service', () => {
             expiresInSec: 3600,
           },
         });
-        const fresh = await getUserGoogleCredential();
+        const fresh = await getUserGoogleCredential({ workspaceId });
         expect(fresh).toBeTruthy();
         // Persisted scopes should contain BOTH aliases
         expect(fresh!.scopes.sort()).toEqual(['documents', 'drive.readonly']);
+      });
+    });
+
+    it('rejects OIDC-only granted identities without materializing connectors', async () => {
+      const userId = await seedAuthUser();
+      userIds.push(userId);
+
+      await withUserContext(userId, async () => {
+        const workspaceId = await ensureWorkspaceBootstrapForUser(userId);
+        await expect(
+          persistGoogleOAuthIdentity({
+            userId,
+            workspaceId,
+            identity: {
+              googleSubject: 'sub-oidc-only',
+              email: 'tester@example.com',
+              displayName: 'Tester',
+              accessToken: 'access',
+              refreshToken: 'refresh',
+              scopes: ['openid', 'email', 'profile'],
+              tokenType: 'Bearer',
+              expiresInSec: 3600,
+            },
+          }),
+        ).rejects.toMatchObject({
+          code: 'google_tool_scopes_required',
+          status: 400,
+        });
+
+        const stored = await getUserGoogleCredential({ workspaceId });
+        expect(stored).toBeUndefined();
       });
     });
   });

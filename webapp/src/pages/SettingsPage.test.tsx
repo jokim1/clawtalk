@@ -1,4 +1,4 @@
-import { cleanup, render, screen, within } from '@testing-library/react';
+import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter } from 'react-router-dom';
@@ -10,6 +10,9 @@ import type {
   RegisteredAgent,
   SessionUser,
 } from '../lib/api';
+
+const TEST_WORKSPACE_ID = '00000000-0000-4000-8000-000000000001';
+const SECOND_WORKSPACE_ID = '00000000-0000-4000-8000-000000000002';
 
 describe('SettingsPage', () => {
   afterEach(() => {
@@ -226,17 +229,19 @@ function installSettingsFetch() {
             : request instanceof Request
               ? request.url
               : String(request);
+      const parsed = new URL(url, 'http://localhost');
+      const path = parsed.pathname;
       const method = init?.method || 'GET';
 
-      if (url.endsWith('/api/v1/agents') && method === 'GET') {
+      if (path === '/api/v1/agents' && method === 'GET') {
         return jsonResponse(200, { ok: true, data: snapshot });
       }
 
-      if (url.endsWith('/api/v1/registered-agents') && method === 'GET') {
+      if (path === '/api/v1/registered-agents' && method === 'GET') {
         return jsonResponse(200, { ok: true, data: registeredAgents });
       }
 
-      if (url.endsWith('/api/v1/registered-agents/main') && method === 'GET') {
+      if (path === '/api/v1/registered-agents/main' && method === 'GET') {
         if (!mainAgent) {
           return jsonResponse(404, {
             ok: false,
@@ -246,7 +251,7 @@ function installSettingsFetch() {
         return jsonResponse(200, { ok: true, data: mainAgent });
       }
 
-      const providerSaveMatch = url.match(
+      const providerSaveMatch = path.match(
         /\/api\/v1\/agents\/providers\/([^/?]+)$/,
       );
       if (providerSaveMatch && method === 'PUT') {
@@ -315,6 +320,17 @@ function buildSessionUser(overrides?: Partial<SessionUser>): SessionUser {
     displayName: 'Owner',
     role: 'owner',
     createdAt: '2026-01-01T00:00:00.000Z',
+    currentWorkspaceId:
+      overrides?.currentWorkspaceId ??
+      '00000000-0000-4000-8000-000000000001',
+    workspaces: [
+      {
+        id: '00000000-0000-4000-8000-000000000001',
+        name: 'Default Workspace',
+        role: overrides?.role ?? 'owner',
+        initials: 'DW',
+      },
+    ],
     ...overrides,
   };
 }
@@ -519,7 +535,7 @@ describe('GoogleAccountSection (flag-gated)', () => {
           connected: true,
           email: 'tester@example.com',
           displayName: 'Tester',
-          scopes: ['drive.readonly', 'documents'],
+          scopes: ['drive.readonly', 'documents', 'spreadsheets'],
           accessExpiresAt: '2026-12-31T00:00:00.000Z',
         }
       : {
@@ -541,6 +557,7 @@ describe('GoogleAccountSection (flag-gated)', () => {
                 ? request.url
                 : String(request);
         const method = init?.method || 'GET';
+        const path = new URL(url, 'http://localhost').pathname;
 
         if (url.endsWith('/api/v1/agents') && method === 'GET') {
           return jsonResponse(200, { ok: true, data: buildAiAgentsData() });
@@ -563,7 +580,10 @@ describe('GoogleAccountSection (flag-gated)', () => {
             data: { providers: [], activeProvider: null },
           });
         }
-        if (url.endsWith('/api/v1/me/google-account') && method === 'GET') {
+        if (path === '/api/v1/me/google-account' && method === 'GET') {
+          expect(
+            new URL(url, 'http://localhost').searchParams.get('workspaceId'),
+          ).toBe(TEST_WORKSPACE_ID);
           return jsonResponse(200, {
             ok: true,
             data: { googleAccount: account },
@@ -672,9 +692,9 @@ describe('GoogleAccountSection (flag-gated)', () => {
       dataConnectors: [
         {
           id: 'dc-1',
-          kind: 'posthog',
-          displayName: 'Prod analytics',
-          config: { project_id: '999', host: 'https://us.posthog.com' },
+          kind: 'google_docs',
+          displayName: 'Team docs',
+          config: { folder_id: 'folder-1' },
           hasCredential: true,
           enabled: true,
           boundTalkCount: 0,
@@ -705,8 +725,139 @@ describe('GoogleAccountSection (flag-gated)', () => {
     expect(screen.getByText('Used by 2 talks')).toBeTruthy();
     // Slack channel has no credential → amber pill
     expect(screen.getByLabelText('Credential missing')).toBeTruthy();
-    // PostHog has credential + enabled → Configuration only pill
+    // Google Docs has credential + enabled → Configuration only pill
     expect(screen.getByLabelText('Configuration only')).toBeTruthy();
+  });
+
+  it('Connectors tab: trusts API credential status for Slack channels', async () => {
+    installConnectorsFetch({
+      channels: [
+        {
+          id: 'ch-1',
+          kind: 'slack',
+          displayName: 'Eng Slack',
+          config: { teamId: 'T123', channel_id: 'C123' },
+          hasCredential: true,
+          enabled: true,
+          boundTalkCount: 0,
+          createdAt: '2026-05-22T00:00:00Z',
+          updatedAt: '2026-05-22T00:00:00Z',
+          createdBy: null,
+          updatedBy: null,
+        },
+      ],
+      dataConnectors: [],
+    });
+
+    render(
+      <MemoryRouter initialEntries={['/app/settings?tab=connectors']}>
+        <SettingsPage
+          user={buildSessionUser()}
+          userRole="owner"
+          onUnauthorized={vi.fn()}
+          onUserUpdated={vi.fn()}
+        />
+      </MemoryRouter>,
+    );
+
+    await screen.findByText('Eng Slack');
+    expect(screen.getByLabelText('Configuration only')).toBeTruthy();
+    expect(screen.queryByLabelText('Credential missing')).toBeNull();
+  });
+
+  it('Connectors tab: reloads connector rows when the current workspace changes', async () => {
+    const helpers = installConnectorsFetchByWorkspace({
+      [TEST_WORKSPACE_ID]: {
+        channels: [
+          {
+            id: 'ch-workspace-a',
+            kind: 'slack',
+            displayName: 'Workspace A Slack',
+            config: { teamId: 'T-A', channel_id: 'C-A' },
+            hasCredential: true,
+            enabled: true,
+            boundTalkCount: 0,
+            createdAt: '2026-05-22T00:00:00Z',
+            updatedAt: '2026-05-22T00:00:00Z',
+            createdBy: null,
+            updatedBy: null,
+          },
+        ],
+        dataConnectors: [],
+      },
+      [SECOND_WORKSPACE_ID]: {
+        channels: [
+          {
+            id: 'ch-workspace-b',
+            kind: 'slack',
+            displayName: 'Workspace B Slack',
+            config: { teamId: 'T-B', channel_id: 'C-B' },
+            hasCredential: true,
+            enabled: true,
+            boundTalkCount: 0,
+            createdAt: '2026-05-22T00:00:00Z',
+            updatedAt: '2026-05-22T00:00:00Z',
+            createdBy: null,
+            updatedBy: null,
+          },
+        ],
+        dataConnectors: [],
+      },
+    });
+    const onUnauthorized = vi.fn();
+    const onUserUpdated = vi.fn();
+    const workspaces = [
+      {
+        id: TEST_WORKSPACE_ID,
+        name: 'Workspace A',
+        role: 'owner' as const,
+        initials: 'WA',
+      },
+      {
+        id: SECOND_WORKSPACE_ID,
+        name: 'Workspace B',
+        role: 'owner' as const,
+        initials: 'WB',
+      },
+    ];
+
+    const view = render(
+      <MemoryRouter initialEntries={['/app/settings?tab=connectors']}>
+        <SettingsPage
+          user={buildSessionUser({
+            currentWorkspaceId: TEST_WORKSPACE_ID,
+            workspaces,
+          })}
+          userRole="owner"
+          onUnauthorized={onUnauthorized}
+          onUserUpdated={onUserUpdated}
+        />
+      </MemoryRouter>,
+    );
+
+    await screen.findByText('Workspace A Slack');
+
+    view.rerender(
+      <MemoryRouter initialEntries={['/app/settings?tab=connectors']}>
+        <SettingsPage
+          user={buildSessionUser({
+            currentWorkspaceId: SECOND_WORKSPACE_ID,
+            workspaces,
+          })}
+          userRole="owner"
+          onUnauthorized={onUnauthorized}
+          onUserUpdated={onUserUpdated}
+        />
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByText('Workspace B Slack')).toBeTruthy();
+    await waitFor(() =>
+      expect(screen.queryByText('Workspace A Slack')).toBeNull(),
+    );
+    expect(helpers.getWorkspaceIds()).toEqual(
+      expect.arrayContaining([TEST_WORKSPACE_ID, SECOND_WORKSPACE_ID]),
+    );
   });
 
   it('Connectors tab: member sees rows but no Add/Edit/Delete affordances', async () => {
@@ -780,7 +931,7 @@ describe('GoogleAccountSection (flag-gated)', () => {
     await screen.findByText('Eng Slack');
     await user.click(
       screen.getByRole('button', {
-        name: /Delete Slack\/Telegram channel: Eng Slack/,
+        name: /Delete Slack channel: Eng Slack/,
       }),
     );
 
@@ -799,7 +950,7 @@ describe('GoogleAccountSection (flag-gated)', () => {
 
 type WorkspaceChannelFixture = {
   id: string;
-  kind: 'slack' | 'telegram';
+  kind: 'slack';
   displayName: string;
   config: Record<string, unknown>;
   hasCredential: boolean;
@@ -813,7 +964,7 @@ type WorkspaceChannelFixture = {
 
 type WorkspaceDataConnectorFixture = {
   id: string;
-  kind: 'posthog' | 'google_docs' | 'google_sheets';
+  kind: 'google_docs' | 'google_sheets';
   displayName: string;
   config: Record<string, unknown>;
   hasCredential: boolean;
@@ -846,15 +997,18 @@ function installConnectorsFetch(seed: {
               ? request.url
               : String(request);
       const method = init?.method || 'GET';
+      const parsed = new URL(url, 'http://localhost');
+      const path = parsed.pathname;
+      expect(parsed.searchParams.get('workspaceId')).toBe(TEST_WORKSPACE_ID);
 
-      if (url.endsWith('/api/v1/workspace/channels') && method === 'GET') {
+      if (path === '/api/v1/workspace/channels' && method === 'GET') {
         return jsonResponse(200, {
           ok: true,
           data: { channels },
         });
       }
       if (
-        url.endsWith('/api/v1/workspace/data-connectors') &&
+        path === '/api/v1/workspace/data-connectors' &&
         method === 'GET'
       ) {
         return jsonResponse(200, {
@@ -863,12 +1017,12 @@ function installConnectorsFetch(seed: {
         });
       }
       if (
-        url.endsWith('/api/v1/workspace/connectors/slack/installs') &&
+        path === '/api/v1/workspace/connectors/slack/installs' &&
         method === 'GET'
       ) {
         return jsonResponse(200, { ok: true, data: { installs: [] } });
       }
-      const deleteChannelMatch = url.match(
+      const deleteChannelMatch = path.match(
         /\/api\/v1\/workspace\/channels\/([^/?]+)$/,
       );
       if (deleteChannelMatch && method === 'DELETE') {
@@ -877,7 +1031,7 @@ function installConnectorsFetch(seed: {
         channels = channels.filter((c) => c.id !== id);
         return jsonResponse(200, { ok: true, data: { deleted: true } });
       }
-      const deleteDcMatch = url.match(
+      const deleteDcMatch = path.match(
         /\/api\/v1\/workspace\/data-connectors\/([^/?]+)$/,
       );
       if (deleteDcMatch && method === 'DELETE') {
@@ -894,5 +1048,75 @@ function installConnectorsFetch(seed: {
   return {
     getDeleteChannelCalls: () => deleteChannelCalls,
     getDeleteDataConnectorCalls: () => deleteDataConnectorCalls,
+  };
+}
+
+function installConnectorsFetchByWorkspace(seed: Record<
+  string,
+  {
+    channels: WorkspaceChannelFixture[];
+    dataConnectors: WorkspaceDataConnectorFixture[];
+    slackInstalls?: Array<{
+      teamId: string;
+      teamName: string;
+      installedAt: string;
+      boundChannelCount: number;
+    }>;
+  }
+>) {
+  const workspaceIds: string[] = [];
+
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async (request: RequestInfo | URL, init?: RequestInit) => {
+      const url =
+        typeof request === 'string'
+          ? request
+          : request instanceof URL
+            ? request.toString()
+            : request instanceof Request
+              ? request.url
+              : String(request);
+      const method = init?.method || 'GET';
+      const parsed = new URL(url, 'http://localhost');
+      const path = parsed.pathname;
+      const workspaceId = parsed.searchParams.get('workspaceId') ?? '';
+      const dataset = seed[workspaceId];
+      workspaceIds.push(workspaceId);
+      if (!dataset) {
+        throw new Error(`Unexpected workspaceId: ${workspaceId}`);
+      }
+
+      if (path === '/api/v1/workspace/channels' && method === 'GET') {
+        return jsonResponse(200, {
+          ok: true,
+          data: { channels: dataset.channels },
+        });
+      }
+      if (
+        path === '/api/v1/workspace/data-connectors' &&
+        method === 'GET'
+      ) {
+        return jsonResponse(200, {
+          ok: true,
+          data: { dataConnectors: dataset.dataConnectors },
+        });
+      }
+      if (
+        path === '/api/v1/workspace/connectors/slack/installs' &&
+        method === 'GET'
+      ) {
+        return jsonResponse(200, {
+          ok: true,
+          data: { installs: dataset.slackInstalls ?? [] },
+        });
+      }
+
+      throw new Error(`Unexpected fetch: ${method} ${url}`);
+    }),
+  );
+
+  return {
+    getWorkspaceIds: () => workspaceIds,
   };
 }

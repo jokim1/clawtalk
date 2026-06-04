@@ -6,7 +6,7 @@ import { PersistQueryClientProvider } from '@tanstack/react-query-persist-client
 import { App } from './App';
 import {
   idbPersister,
-  QUERY_CACHE_BUSTER,
+  persistedCacheBuster,
   queryClient,
 } from './lib/queryClient';
 import './styles.css';
@@ -17,7 +17,7 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
       client={queryClient}
       persistOptions={{
         persister: idbPersister,
-        buster: QUERY_CACHE_BUSTER,
+        buster: persistedCacheBuster(),
         maxAge: 1000 * 60 * 60 * 24,
       }}
     >

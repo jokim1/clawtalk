@@ -11,12 +11,11 @@
 // `withUserContext(userId, ...)` block. RLS gates by the content's
 // owner_id (see migration 0028).
 //
-// NOTE — this module references the `content_edits` table BY NAME. The
-// table itself is created in commit 8 of the redesign single-PR. Until
-// then, runtime tests are skipped (`it.skip`) — only typecheck is
-// guaranteed green on commits 2-7. See plan Section H commit ordering.
+// The final greenfield baseline retires `content_edits` in favor of
+// `document_edits`. Reads degrade for mounted compatibility surfaces; writers
+// fail closed so an accidental legacy edit path is caught immediately.
 
-import { getDbPg } from '../../db.js';
+import { getDbPg, type Sql } from '../../db.js';
 import {
   type ContentEditRow,
   type ContentEditKind,
@@ -88,6 +87,23 @@ const CONTENT_MIN_COLUMNS = `
   id, owner_id, talk_id, thread_id, body_markdown, body_html, body_version
 `;
 
+let contentEditsTableExists: boolean | null = null;
+
+async function hasContentEditsTable(db: Sql): Promise<boolean> {
+  if (contentEditsTableExists !== null) return contentEditsTableExists;
+  const rows = await db<{ exists: boolean }[]>`
+    select to_regclass('public.content_edits') is not null as exists
+  `;
+  contentEditsTableExists = rows[0]?.exists === true;
+  return contentEditsTableExists;
+}
+
+async function assertContentEditsTable(db: Sql): Promise<void> {
+  if (!(await hasContentEditsTable(db))) {
+    throw new Error('legacy_content_edits_not_available');
+  }
+}
+
 // Loaded from content-accessors.ts to mirror its full toContent shape
 // without circular imports — only used for the return value of the
 // accept paths.
@@ -134,6 +150,7 @@ export async function getPendingEditsByContent(
   contentId: string,
 ): Promise<ContentEditRow[]> {
   const db = getDbPg();
+  if (!(await hasContentEditsTable(db))) return [];
   const rows = await db<ContentEditRecord[]>`
     select ${db.unsafe(EDIT_COLUMNS)}
     from public.content_edits
@@ -147,6 +164,7 @@ export async function getPendingEditById(
   editId: string,
 ): Promise<ContentEditRow | null> {
   const db = getDbPg();
+  if (!(await hasContentEditsTable(db))) return null;
   const rows = await db<ContentEditRecord[]>`
     select ${db.unsafe(EDIT_COLUMNS)}
     from public.content_edits
@@ -179,6 +197,7 @@ export async function insertPendingEdit(
   input: InsertPendingEditInput,
 ): Promise<ContentEditRow> {
   const db = getDbPg();
+  await assertContentEditsTable(db);
   const rows = await db<ContentEditRecord[]>`
     insert into public.content_edits
       (content_id, run_id, agent_id, agent_nickname, message_id,
@@ -204,6 +223,7 @@ export async function updatePendingEdit(input: {
   rationale: string | null;
 }): Promise<ContentEditRow | null> {
   const db = getDbPg();
+  await assertContentEditsTable(db);
   const rows = await db<ContentEditRecord[]>`
     update public.content_edits
     set kind = ${input.kind},
@@ -219,6 +239,7 @@ export async function updatePendingEdit(input: {
 
 export async function deletePendingEdit(editId: string): Promise<boolean> {
   const db = getDbPg();
+  await assertContentEditsTable(db);
   const rows = await db<{ id: string }[]>`
     delete from public.content_edits
     where id = ${editId}::uuid
@@ -232,6 +253,7 @@ export async function deletePendingEditsByRun(input: {
   runId: string;
 }): Promise<string[]> {
   const db = getDbPg();
+  await assertContentEditsTable(db);
   const rows = await db<{ id: string }[]>`
     delete from public.content_edits
     where content_id = ${input.contentId}::uuid
@@ -261,6 +283,7 @@ export async function acceptPendingEdit(input: {
   expectedContentVersion?: number;
 }): Promise<AcceptPendingEditResult> {
   const db = getDbPg();
+  await assertContentEditsTable(db);
 
   const editRows = await db<ContentEditRecord[]>`
     select ${db.unsafe(EDIT_COLUMNS)}
@@ -390,6 +413,7 @@ export async function rejectPendingEdit(input: {
   userId: string;
 }): Promise<RejectPendingEditResult> {
   const db = getDbPg();
+  await assertContentEditsTable(db);
   const editRows = await db<ContentEditRecord[]>`
     select ${db.unsafe(EDIT_COLUMNS)}
     from public.content_edits
@@ -454,6 +478,7 @@ export async function acceptPendingRun(input: {
   expectedContentVersion?: number;
 }): Promise<AcceptPendingRunResult> {
   const db = getDbPg();
+  await assertContentEditsTable(db);
 
   const editRows = await db<ContentEditRecord[]>`
     select ${db.unsafe(EDIT_COLUMNS)}
@@ -581,6 +606,7 @@ export async function rejectPendingRun(input: {
   userId: string;
 }): Promise<RejectPendingRunResult> {
   const db = getDbPg();
+  await assertContentEditsTable(db);
 
   const contentRows = await db<{ owner_id: string; talk_id: string }[]>`
     select owner_id, talk_id

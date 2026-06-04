@@ -30,6 +30,7 @@ import {
 import {
   buildProviderModelSupport,
   resolveRetirementTarget,
+  type ProviderModelCredentialScope,
   type ProviderModelSupport,
 } from './agent-model-support.js';
 import type { DiscoveryCacheLike } from './model-discovery.js';
@@ -55,7 +56,10 @@ function getRuntimeDiscoveryCache(): DiscoveryCacheLike | undefined {
  * Production uses the real implementations.
  */
 export interface EnsureRunnableModelDeps {
-  loadSupport: (providerId: string) => Promise<ProviderModelSupport>;
+  loadSupport: (
+    providerId: string,
+    credentialScope?: ProviderModelCredentialScope | null,
+  ) => Promise<ProviderModelSupport>;
   resolveTarget: (
     record: Pick<RegisteredAgentRecord, 'provider_id' | 'model_id'>,
     support: ProviderModelSupport,
@@ -73,15 +77,22 @@ export interface EnsureRunnableModelDeps {
   reload: (agentId: string) => Promise<RegisteredAgentRecord | undefined>;
 }
 
+export interface EnsureRunnableModelOptions {
+  credentialScope?: ProviderModelCredentialScope | null;
+  deps?: EnsureRunnableModelDeps;
+}
+
 // Each default is a thin arrow, not a direct export reference, so importing
 // this module never force-resolves the underlying bindings at load time —
 // tests that partially mock agent-accessors / agent-model-support (e.g.
 // agent-router.test.ts) can import the execution path without listing every
 // transitive export. The real functions run only on the Anthropic swap path.
 const defaultDeps: EnsureRunnableModelDeps = {
-  loadSupport: (providerId) =>
+  loadSupport: (providerId, credentialScope) =>
     buildProviderModelSupport(providerId, {
       cache: getRuntimeDiscoveryCache(),
+      principalUserId: credentialScope?.principalUserId ?? null,
+      workspaceId: credentialScope?.workspaceId ?? null,
     }),
   resolveTarget: (record, support) => resolveRetirementTarget(record, support),
   // Out-of-band (auto-commit) so the swap doesn't hold the agent row lock for
@@ -95,6 +106,12 @@ const defaultDeps: EnsureRunnableModelDeps = {
     ),
   reload: (agentId) => getRegisteredAgent(agentId),
 };
+
+function isDeps(
+  value: EnsureRunnableModelDeps | EnsureRunnableModelOptions,
+): value is EnsureRunnableModelDeps {
+  return typeof (value as EnsureRunnableModelDeps).loadSupport === 'function';
+}
 
 /**
  * If `agent`'s configured model is RETIRED, swap it to the newest served
@@ -111,14 +128,21 @@ const defaultDeps: EnsureRunnableModelDeps = {
  */
 export async function ensureRunnableModel(
   agent: RegisteredAgentRecord,
-  deps: EnsureRunnableModelDeps = defaultDeps,
+  optionsOrDeps: EnsureRunnableModelDeps | EnsureRunnableModelOptions = {},
 ): Promise<void> {
+  const deps = isDeps(optionsOrDeps)
+    ? optionsOrDeps
+    : (optionsOrDeps.deps ?? defaultDeps);
+  const credentialScope = isDeps(optionsOrDeps)
+    ? null
+    : (optionsOrDeps.credentialScope ?? null);
+
   // Skip the discovery call entirely for providers the lifecycle engine
   // can't reason about — only Claude ids parse into family + version.
   if (agent.provider_id !== ANTHROPIC_PROVIDER_ID) return;
 
   try {
-    const support = await deps.loadSupport(agent.provider_id);
+    const support = await deps.loadSupport(agent.provider_id, credentialScope);
     // resolveTarget returns null for any non-retired model and for a retired
     // model with no SAFE served target — both leave the agent untouched.
     const target = await deps.resolveTarget(agent, support);

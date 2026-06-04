@@ -13,6 +13,16 @@ const GOOGLE_SCOPE_ALIAS_BY_URL = Object.fromEntries(
   Object.entries(GOOGLE_SCOPE_URL_BY_ALIAS).map(([alias, url]) => [url, alias]),
 );
 
+const GOOGLE_TOOL_SCOPE_ALIASES = new Set([
+  'drive.readonly',
+  'gmail.readonly',
+  'gmail.send',
+  'documents',
+  'documents.readonly',
+  'spreadsheets',
+  'spreadsheets.readonly',
+]);
+
 export function expandGoogleScopeAliases(scopes: string[]): string[] {
   return Array.from(
     new Set(
@@ -31,6 +41,12 @@ export function normalizeGoogleScopeAliases(scopes: string[]): string[] {
         .filter(Boolean),
     ),
   ).sort();
+}
+
+export function hasGoogleToolScopeAlias(scopes: string[]): boolean {
+  return normalizeGoogleScopeAliases(scopes).some((scope) =>
+    GOOGLE_TOOL_SCOPE_ALIASES.has(scope),
+  );
 }
 
 // Google scope hierarchy: granting a parent scope at consent implicitly

@@ -1,17 +1,21 @@
-// clawtalk Phase 5 (PR 2) — postgres port of talk-tools-accessors.
+// Talk tool compatibility accessors backed by the greenfield schema.
 //
-// Surfaces ported:
-//   - talk_resource_bindings (RLS owner_id)
-//   - user_google_credentials (RLS user_id; unique on user_id)
-//   - google_oauth_link_requests (RLS user_id)
-//
-// Chassis cleanup: `talk_tool_grants` was removed from the postgres
-// schema, so initializeTalkToolGrants / listTalkToolGrants /
-// replaceTalkToolGrants are gone here. The BUILTIN_TALK_TOOLS catalog
-// stays (pure metadata, no DB touch); route handlers still use it for
-// the tool-permissions UI.
+// Legacy route/API names stay stable while storage moves to:
+//   - connector_bindings for per-Talk Drive resource targets.
+//   - connectors + connector_secrets for Google tool credentials.
+//   - talk_tools for the pre-greenfield active-tool toggle API shape.
 
-import { getDbPg } from '../../db.js';
+import {
+  getCurrentUserId,
+  getDbPg,
+  withTrustedDbWrites,
+  type Sql,
+} from '../../db.js';
+import {
+  normalizeTalkToolFamiliesFromRows,
+  TALK_TOOL_IDS_BY_FAMILY,
+} from './agent-accessors.js';
+import { normalizeGoogleScopeAliases } from '../identity/google-scopes.js';
 
 type JsonMap = Record<string, unknown>;
 
@@ -225,11 +229,49 @@ export interface UserGoogleCredentialRecord {
   updatedAt: string;
 }
 
-export interface GoogleOAuthLinkRequestRecord {
-  stateHash: string;
-  userId: string;
-  scopes: string[];
-  createdAt: string;
+const GOOGLE_TOOLS_COMPAT_SURFACE = 'google_tools';
+const TALK_RESOURCE_COMPAT_SURFACE = 'talk_resource';
+const GOOGLE_TOOL_CONNECTOR_SERVICES = ['gdrive', 'gmail'] as const;
+type GoogleToolConnectorService =
+  (typeof GOOGLE_TOOL_CONNECTOR_SERVICES)[number];
+
+const LEGACY_ACTIVE_TOOL_FAMILY_ALIASES: Record<string, string> = {
+  data_connectors: 'connectors',
+  gmail: 'gmail_read',
+  google_docs: 'google_read',
+  google_drive: 'google_read',
+  google_sheets: 'google_read',
+};
+
+async function withExistingOrNewTransaction<T>(
+  db: Sql,
+  fn: (txSql: Sql) => Promise<T>,
+): Promise<T> {
+  const maybeTransaction = db as Sql & { savepoint?: unknown };
+  if (
+    typeof maybeTransaction.savepoint === 'function' ||
+    typeof maybeTransaction.begin !== 'function'
+  ) {
+    return fn(db);
+  }
+  return (await maybeTransaction.begin(async (tx) =>
+    fn(tx as unknown as Sql),
+  )) as T;
+}
+
+async function resolveGoogleToolsWorkspaceId(
+  db: Sql,
+  userId: string,
+  requestedWorkspaceId: string,
+): Promise<string | undefined> {
+  const rows = await db<{ workspace_id: string }[]>`
+    select workspace_id
+    from public.workspace_members
+    where workspace_id = ${requestedWorkspaceId}::uuid
+      and user_id = ${userId}::uuid
+    limit 1
+  `;
+  return rows[0]?.workspace_id;
 }
 
 // ---------------------------------------------------------------------------
@@ -259,13 +301,6 @@ interface RawUserGoogleCredentialRow {
   access_expires_at: string | null;
   created_at: string;
   updated_at: string;
-}
-
-interface RawGoogleOAuthLinkRequestRow {
-  state_hash: string;
-  user_id: string;
-  scopes_json: string[];
-  created_at: string;
 }
 
 function toTalkResourceBindingRecord(
@@ -301,15 +336,26 @@ function toUserGoogleCredentialRecord(
   };
 }
 
-function toGoogleOAuthLinkRequestRecord(
-  row: RawGoogleOAuthLinkRequestRow,
-): GoogleOAuthLinkRequestRecord {
-  return {
-    stateHash: row.state_hash,
-    userId: row.user_id,
-    scopes: Array.isArray(row.scopes_json) ? row.scopes_json : [],
-    createdAt: row.created_at,
-  };
+function googleToolConnectorServicesForScopes(
+  scopes: string[],
+): GoogleToolConnectorService[] {
+  const services = new Set<GoogleToolConnectorService>();
+  for (const scope of scopes) {
+    if (scope === 'gmail.readonly' || scope === 'gmail.send') {
+      services.add('gmail');
+      continue;
+    }
+    if (
+      scope === 'drive.readonly' ||
+      scope === 'documents' ||
+      scope === 'documents.readonly' ||
+      scope === 'spreadsheets' ||
+      scope === 'spreadsheets.readonly'
+    ) {
+      services.add('gdrive');
+    }
+  }
+  return Array.from(services).sort();
 }
 
 // ---------------------------------------------------------------------------
@@ -321,11 +367,25 @@ export async function listTalkResourceBindings(
 ): Promise<TalkResourceBindingRecord[]> {
   const db = getDbPg();
   const rows = await db<RawTalkResourceBindingRow[]>`
-    select id, talk_id, owner_id, binding_kind, external_id, display_name,
-           metadata_json, created_at, created_by
-    from public.talk_resource_bindings
-    where talk_id = ${talkId}::uuid
-    order by created_at asc, id asc
+    select
+      cb.id,
+      cb.talk_id,
+      cb.created_by_user_id as owner_id,
+      coalesce(cb.meta_json->>'resourceKind', 'google_drive_file') as binding_kind,
+      coalesce(cb.target, '') as external_id,
+      coalesce(cb.display_name, cb.target, '') as display_name,
+      cb.meta_json->'metadata' as metadata_json,
+      cb.created_at,
+      cb.created_by_user_id as created_by
+    from public.connector_bindings cb
+    join public.connectors c
+      on c.workspace_id = cb.workspace_id
+     and c.id = cb.connector_id
+    where cb.talk_id = ${talkId}::uuid
+      and c.service = 'gdrive'
+      and cb.target is not null
+      and cb.meta_json->>'compatSurface' = ${TALK_RESOURCE_COMPAT_SURFACE}
+    order by cb.created_at asc, cb.id asc
   `;
   return rows.map(toTalkResourceBindingRecord);
 }
@@ -340,31 +400,140 @@ export async function createTalkResourceBinding(input: {
   createdBy?: string | null;
 }): Promise<TalkResourceBindingRecord> {
   const db = getDbPg();
-  // Migration 0018 widened the unique index to
-  // (talk_id, binding_kind, external_id, owner_id). The 4-column
-  // conflict target makes same-owner re-binds idempotent and lets two
-  // users in the same talk each hold their own binding row to the
-  // same external resource. The follow-up SELECT is RLS-scoped to
-  // owner_id = auth.uid(), so it returns the caller's row even when
-  // another user also has one.
-  await db`
-    insert into public.talk_resource_bindings
-      (talk_id, owner_id, binding_kind, external_id, display_name,
-       metadata_json, created_by)
-    values
-      (${input.talkId}::uuid, ${input.ownerId}::uuid, ${input.bindingKind},
-       ${input.externalId}, ${input.displayName},
-       ${input.metadata ? db.json(input.metadata as never) : null},
-       ${input.createdBy ?? null}::uuid)
-    on conflict (talk_id, binding_kind, external_id, owner_id) do nothing
+  const currentUserId = getCurrentUserId();
+  if (!currentUserId || currentUserId !== input.ownerId) {
+    throw new Error('resource binding owner must match current user');
+  }
+  if (input.createdBy && input.createdBy !== currentUserId) {
+    throw new Error('resource binding creator must match current user');
+  }
+  const authRows = await db<
+    Array<{
+      workspace_id: string;
+      created_by: string;
+      role: 'owner' | 'admin' | 'member' | 'guest';
+    }>
+  >`
+    select t.workspace_id, t.created_by, wm.role
+    from public.talks t
+    join public.workspace_members wm
+      on wm.workspace_id = t.workspace_id
+     and wm.user_id = ${currentUserId}::uuid
+    where t.id = ${input.talkId}::uuid
+    limit 1
   `;
+  const auth = authRows[0];
+  if (!auth) {
+    throw new Error('talk not found or not visible for resource binding');
+  }
+  if (
+    auth.role === 'guest' ||
+    (auth.role !== 'owner' &&
+      auth.role !== 'admin' &&
+      auth.created_by !== currentUserId)
+  ) {
+    throw new Error('user cannot edit talk resource bindings');
+  }
+  await withTrustedDbWrites(async () => {
+    const connectorRows = await db<Array<{ id: string }>>`
+      insert into public.connectors (
+        workspace_id,
+        service,
+        authorized,
+        authorized_at,
+        secret_ref,
+        config_json
+      )
+      values (
+        ${auth.workspace_id}::uuid,
+        'gdrive',
+        false,
+        null,
+        null,
+        ${db.json({
+          compatSurface: TALK_RESOURCE_COMPAT_SURFACE,
+          displayName: 'Google Drive resources',
+          authMode: 'resource_binding_only',
+        } as never)}
+      )
+      on conflict (workspace_id, service)
+        where config_json->>'compatSurface' = 'talk_resource'
+      do update set
+        authorized = false,
+        authorized_at = null,
+        secret_ref = null,
+        config_json = excluded.config_json,
+        updated_at = now()
+      returning id
+    `;
+    const connectorId = connectorRows[0]?.id;
+    if (!connectorId) {
+      throw new Error('failed to resolve Google Drive resource connector');
+    }
+    await db`
+      insert into public.connector_bindings (
+        workspace_id,
+        connector_id,
+        talk_id,
+        target,
+        scope,
+        enabled,
+        display_name,
+        meta_json,
+        created_by_user_id
+      )
+      values (
+        ${auth.workspace_id}::uuid,
+        ${connectorId}::uuid,
+        ${input.talkId}::uuid,
+        ${input.externalId},
+        ${[input.bindingKind]}::text[],
+        true,
+        ${input.displayName},
+        ${db.json({
+          compatSurface: TALK_RESOURCE_COMPAT_SURFACE,
+          resourceKind: input.bindingKind,
+          metadata: input.metadata ?? null,
+        } as never)},
+        ${currentUserId}::uuid
+      )
+      on conflict (
+        connector_id,
+        talk_id,
+        target,
+        created_by_user_id,
+        (coalesce(meta_json->>'resourceKind', ''))
+      )
+        where target is not null
+      do update set
+        scope = excluded.scope,
+        enabled = true,
+        display_name = excluded.display_name,
+        meta_json = excluded.meta_json,
+        updated_at = now()
+    `;
+  });
   const rows = await db<RawTalkResourceBindingRow[]>`
-    select id, talk_id, owner_id, binding_kind, external_id, display_name,
-           metadata_json, created_at, created_by
-    from public.talk_resource_bindings
-    where talk_id = ${input.talkId}::uuid
-      and binding_kind = ${input.bindingKind}
-      and external_id = ${input.externalId}
+    select
+      cb.id,
+      cb.talk_id,
+      cb.created_by_user_id as owner_id,
+      coalesce(cb.meta_json->>'resourceKind', 'google_drive_file') as binding_kind,
+      coalesce(cb.target, '') as external_id,
+      coalesce(cb.display_name, cb.target, '') as display_name,
+      cb.meta_json->'metadata' as metadata_json,
+      cb.created_at,
+      cb.created_by_user_id as created_by
+    from public.connector_bindings cb
+    join public.connectors c
+      on c.workspace_id = cb.workspace_id
+     and c.id = cb.connector_id
+    where cb.talk_id = ${input.talkId}::uuid
+      and c.service = 'gdrive'
+      and cb.target = ${input.externalId}
+      and cb.created_by_user_id = ${currentUserId}::uuid
+      and cb.meta_json->>'compatSurface' = ${TALK_RESOURCE_COMPAT_SURFACE}
+      and coalesce(cb.meta_json->>'resourceKind', 'google_drive_file') = ${input.bindingKind}
     limit 1
   `;
   if (!rows[0]) {
@@ -378,36 +547,99 @@ export async function deleteTalkResourceBinding(
   bindingId: string,
 ): Promise<boolean> {
   const db = getDbPg();
-  const rows = await db<{ id: string }[]>`
-    delete from public.talk_resource_bindings
-    where talk_id = ${talkId}::uuid and id = ${bindingId}::uuid
-    returning id
+  const userId = getCurrentUserId();
+  if (!userId) return false;
+
+  const authRows = await db<
+    Array<{
+      workspace_id: string;
+      created_by: string;
+      role: 'owner' | 'admin' | 'member' | 'guest';
+    }>
+  >`
+    select t.workspace_id, t.created_by, wm.role
+    from public.talks t
+    join public.workspace_members wm
+      on wm.workspace_id = t.workspace_id
+     and wm.user_id = ${userId}::uuid
+    where t.id = ${talkId}::uuid
+    limit 1
   `;
-  return rows.length > 0;
+  const auth = authRows[0];
+  if (
+    !auth ||
+    auth.role === 'guest' ||
+    (auth.role !== 'owner' &&
+      auth.role !== 'admin' &&
+      auth.created_by !== userId)
+  ) {
+    return false;
+  }
+
+  return withTrustedDbWrites(async () => {
+    const rows = await db<{ id: string }[]>`
+      delete from public.connector_bindings
+      where workspace_id = ${auth.workspace_id}::uuid
+        and talk_id = ${talkId}::uuid
+        and id = ${bindingId}::uuid
+        and meta_json->>'compatSurface' = ${TALK_RESOURCE_COMPAT_SURFACE}
+      returning id
+    `;
+    return rows.length > 0;
+  });
 }
 
 // ---------------------------------------------------------------------------
 // User Google credentials
 // ---------------------------------------------------------------------------
 
-export async function getUserGoogleCredential(): Promise<
-  UserGoogleCredentialRecord | undefined
-> {
-  // Inside withUserContext, user_id = auth.uid() is enforced by RLS —
-  // the SELECT scopes to the caller automatically. The sqlite-era
-  // userId param is now redundant.
+export async function getUserGoogleCredential(input: {
+  workspaceId: string | null;
+}): Promise<UserGoogleCredentialRecord | undefined> {
+  const userId = getCurrentUserId();
+  if (!userId) return undefined;
+  if (!input.workspaceId) return undefined;
   const db = getDbPg();
-  const rows = await db<RawUserGoogleCredentialRow[]>`
-    select id, user_id, google_subject, email, display_name, scopes_json,
-           ciphertext, access_expires_at, created_at, updated_at
-    from public.user_google_credentials
-    order by updated_at desc, created_at desc, id desc
-    limit 1
-  `;
+
+  const rows = await withTrustedDbWrites(
+    () => db<RawUserGoogleCredentialRow[]>`
+      select
+        c.id,
+        c.config_json->>'authorizedByUserId' as user_id,
+        coalesce(c.config_json->>'googleSubject', '') as google_subject,
+        coalesce(c.config_json->>'email', '') as email,
+        c.config_json->>'displayName' as display_name,
+        coalesce(c.config_json->'scopes', '[]'::jsonb) as scopes_json,
+        cs.ciphertext,
+        c.config_json->>'accessExpiresAt' as access_expires_at,
+        c.created_at,
+        c.updated_at
+      from public.connectors c
+      join public.workspace_members wm
+        on wm.workspace_id = c.workspace_id
+       and wm.user_id = ${userId}::uuid
+      join public.connector_secrets cs
+        on cs.workspace_id = c.workspace_id
+       and cs.id = c.secret_ref
+      where c.workspace_id = ${input.workspaceId}::uuid
+        and c.service in ${db(GOOGLE_TOOL_CONNECTOR_SERVICES)}
+        and c.authorized = true
+        and c.secret_ref is not null
+        and c.config_json->>'compatSurface' = ${GOOGLE_TOOLS_COMPAT_SURFACE}
+        and c.config_json->>'authorizedByUserId' = ${userId}
+      order by
+        case when c.service = 'gdrive' then 0 else 1 end,
+        c.updated_at desc,
+        c.created_at desc,
+        c.id desc
+      limit 1
+    `,
+  );
   return rows[0] ? toUserGoogleCredentialRecord(rows[0]) : undefined;
 }
 
 export async function upsertUserGoogleCredential(input: {
+  workspaceId: string;
   userId: string;
   googleSubject: string;
   email: string;
@@ -416,132 +648,238 @@ export async function upsertUserGoogleCredential(input: {
   ciphertext: string;
   accessExpiresAt?: string | null;
 }): Promise<UserGoogleCredentialRecord> {
-  const sortedScopes = Array.from(new Set(input.scopes)).sort();
+  const currentUserId = getCurrentUserId();
+  if (!currentUserId || currentUserId !== input.userId) {
+    throw new Error('upsertUserGoogleCredential: user mismatch');
+  }
+  const sortedScopes = normalizeGoogleScopeAliases(input.scopes);
+  const connectorServices = googleToolConnectorServicesForScopes(sortedScopes);
+  if (connectorServices.length === 0) {
+    throw new Error(
+      'upsertUserGoogleCredential: at least one Google tool scope is required',
+    );
+  }
   const db = getDbPg();
-  await db`
-    insert into public.user_google_credentials
-      (user_id, google_subject, email, display_name, scopes_json,
-       ciphertext, access_expires_at)
-    values
-      (${input.userId}::uuid, ${input.googleSubject}, ${input.email},
-       ${input.displayName ?? null}, ${db.json(sortedScopes as never)},
-       ${input.ciphertext}, ${input.accessExpiresAt ?? null})
-    on conflict (user_id) do update set
-      google_subject = excluded.google_subject,
-      email = excluded.email,
-      display_name = excluded.display_name,
-      scopes_json = excluded.scopes_json,
-      ciphertext = excluded.ciphertext,
-      access_expires_at = excluded.access_expires_at,
-      updated_at = now()
-  `;
-  const got = await getUserGoogleCredential();
+  if (!input.workspaceId) {
+    throw new Error('upsertUserGoogleCredential: workspaceId is required');
+  }
+  const workspaceId = await resolveGoogleToolsWorkspaceId(
+    db,
+    input.userId,
+    input.workspaceId,
+  );
+  if (!workspaceId) {
+    throw new Error('upsertUserGoogleCredential: workspace is not available');
+  }
+  const config = {
+    compatSurface: GOOGLE_TOOLS_COMPAT_SURFACE,
+    authorizedByUserId: input.userId,
+    googleSubject: input.googleSubject,
+    email: input.email,
+    displayName: input.displayName ?? null,
+    scopes: sortedScopes,
+    accessExpiresAt: input.accessExpiresAt ?? null,
+  };
+
+  await withTrustedDbWrites(async () => {
+    await withExistingOrNewTransaction(db, async (tx) => {
+      await tx`
+        select pg_advisory_xact_lock(
+          hashtext(${`google_tools:${workspaceId}:${input.userId}`})
+        )
+      `;
+      const existingRows = await tx<
+        Array<{
+          id: string;
+          service: GoogleToolConnectorService;
+          secret_ref: string | null;
+        }>
+      >`
+        select id, service, secret_ref
+        from public.connectors
+        where workspace_id = ${workspaceId}::uuid
+          and service in ${tx(GOOGLE_TOOL_CONNECTOR_SERVICES)}
+          and config_json->>'compatSurface' = ${GOOGLE_TOOLS_COMPAT_SURFACE}
+          and config_json->>'authorizedByUserId' = ${input.userId}
+        order by
+          case when service = 'gdrive' then 0 else 1 end,
+          updated_at desc,
+          created_at desc,
+          id desc
+        for update
+      `;
+      let secretId =
+        existingRows.find((row) => row.secret_ref)?.secret_ref ?? null;
+      if (secretId) {
+        const updated = await tx<{ id: string }[]>`
+          update public.connector_secrets
+          set ciphertext = ${input.ciphertext},
+              enc_key_version = 1,
+              updated_at = now()
+          where workspace_id = ${workspaceId}::uuid
+            and id = ${secretId}::uuid
+          returning id
+        `;
+        secretId = updated[0]?.id ?? null;
+      }
+      if (!secretId) {
+        const inserted = await tx<{ id: string }[]>`
+          insert into public.connector_secrets (workspace_id, ciphertext)
+          values (${workspaceId}::uuid, ${input.ciphertext})
+          returning id
+        `;
+        secretId = inserted[0]?.id ?? null;
+      }
+      if (!secretId) {
+        throw new Error('upsertUserGoogleCredential: failed to persist secret');
+      }
+
+      for (const service of connectorServices) {
+        await tx`
+          insert into public.connectors (
+            workspace_id,
+            service,
+            authorized,
+            authorized_at,
+            secret_ref,
+            config_json
+          )
+          values (
+            ${workspaceId}::uuid,
+            ${service},
+            true,
+            now(),
+            ${secretId}::uuid,
+            ${tx.json(config as never)}
+          )
+          on conflict (workspace_id, service, (coalesce(config_json->>'authorizedByUserId', '')))
+            where config_json->>'compatSurface' = 'google_tools'
+          do update set
+            authorized = true,
+            authorized_at = coalesce(public.connectors.authorized_at, now()),
+            secret_ref = excluded.secret_ref,
+            config_json = excluded.config_json,
+            updated_at = now()
+        `;
+      }
+      await tx`
+        delete from public.connectors
+        where workspace_id = ${workspaceId}::uuid
+          and service in ${tx(GOOGLE_TOOL_CONNECTOR_SERVICES)}
+          and service not in ${tx(connectorServices)}
+          and config_json->>'compatSurface' = ${GOOGLE_TOOLS_COMPAT_SURFACE}
+          and config_json->>'authorizedByUserId' = ${input.userId}
+      `;
+    });
+  });
+
+  const got = await getUserGoogleCredential({ workspaceId });
   if (!got) {
     throw new Error('upsertUserGoogleCredential: missing row after upsert');
   }
   return got;
 }
 
-export async function deleteUserGoogleCredential(): Promise<boolean> {
+export async function deleteUserGoogleCredential(input: {
+  workspaceId: string | null;
+}): Promise<boolean> {
+  const userId = getCurrentUserId();
+  if (!userId) return false;
+  if (!input.workspaceId) return false;
   const db = getDbPg();
-  const rows = await db<{ id: string }[]>`
-    delete from public.user_google_credentials
-    returning id
-  `;
-  return rows.length > 0;
+  return withTrustedDbWrites(async () => {
+    return withExistingOrNewTransaction(db, async (tx) => {
+      const rows = await tx<
+        Array<{
+          id: string;
+          workspace_id: string;
+          secret_ref: string | null;
+        }>
+      >`
+        select c.id, c.workspace_id, c.secret_ref
+        from public.connectors c
+        join public.workspace_members wm
+          on wm.workspace_id = c.workspace_id
+         and wm.user_id = ${userId}::uuid
+        where c.workspace_id = ${input.workspaceId}::uuid
+          and c.service in ${tx(GOOGLE_TOOL_CONNECTOR_SERVICES)}
+          and c.config_json->>'compatSurface' = ${GOOGLE_TOOLS_COMPAT_SURFACE}
+          and c.config_json->>'authorizedByUserId' = ${userId}
+        for update
+      `;
+      if (rows.length === 0) return false;
+      await tx`
+        delete from public.connectors c
+        using public.workspace_members wm
+        where wm.workspace_id = c.workspace_id
+          and wm.user_id = ${userId}::uuid
+          and c.workspace_id = ${input.workspaceId}::uuid
+          and c.service in ${tx(GOOGLE_TOOL_CONNECTOR_SERVICES)}
+          and c.config_json->>'compatSurface' = ${GOOGLE_TOOLS_COMPAT_SURFACE}
+          and c.config_json->>'authorizedByUserId' = ${userId}
+      `;
+      const secretRefs = new Map<string, Set<string>>();
+      for (const row of rows) {
+        if (!row.secret_ref) continue;
+        const ids = secretRefs.get(row.workspace_id) ?? new Set<string>();
+        ids.add(row.secret_ref);
+        secretRefs.set(row.workspace_id, ids);
+      }
+      for (const [workspaceId, ids] of secretRefs) {
+        await tx`
+          delete from public.connector_secrets
+          where workspace_id = ${workspaceId}::uuid
+            and id in ${tx(Array.from(ids))}
+        `;
+      }
+      return true;
+    });
+  });
 }
 
 // ---------------------------------------------------------------------------
-// Google OAuth link requests
-// ---------------------------------------------------------------------------
-
-export async function createGoogleOAuthLinkRequest(input: {
-  userId: string;
-  stateHash: string;
-  scopes: string[];
-}): Promise<GoogleOAuthLinkRequestRecord> {
-  const sortedScopes = Array.from(new Set(input.scopes)).sort();
-  const db = getDbPg();
-  await db`
-    insert into public.google_oauth_link_requests
-      (state_hash, user_id, scopes_json)
-    values
-      (${input.stateHash}, ${input.userId}::uuid,
-       ${db.json(sortedScopes as never)})
-    on conflict (state_hash) do update set
-      user_id = excluded.user_id,
-      scopes_json = excluded.scopes_json,
-      created_at = now()
-  `;
-  const got = await getGoogleOAuthLinkRequest(input.stateHash);
-  if (!got) {
-    throw new Error('createGoogleOAuthLinkRequest: missing row after insert');
-  }
-  return got;
-}
-
-export async function getGoogleOAuthLinkRequest(
-  stateHash: string,
-): Promise<GoogleOAuthLinkRequestRecord | undefined> {
-  const db = getDbPg();
-  const rows = await db<RawGoogleOAuthLinkRequestRow[]>`
-    select state_hash, user_id, scopes_json, created_at
-    from public.google_oauth_link_requests
-    where state_hash = ${stateHash}
-    limit 1
-  `;
-  return rows[0] ? toGoogleOAuthLinkRequestRecord(rows[0]) : undefined;
-}
-
-export async function deleteGoogleOAuthLinkRequest(
-  stateHash: string,
-): Promise<boolean> {
-  const db = getDbPg();
-  const rows = await db<{ state_hash: string }[]>`
-    delete from public.google_oauth_link_requests
-    where state_hash = ${stateHash}
-    returning state_hash
-  `;
-  return rows.length > 0;
-}
-
-// ---------------------------------------------------------------------------
-// Talk active-tool families (migration 0030)
+// Talk active-tool families
 //
-// `talks.active_tool_families_json` holds `Record<string, boolean>` keyed by
-// family slug (vocabulary from TOOL_FAMILY_MAP in agent-accessors.ts). This
-// is the per-Talk toggle layer that intersects with the agent capability
-// ceiling at effective-tools-computation time. The migration inherits
-// RLS from the existing `talks_owner` row policy.
+// Compatibility callers still read/write a Record keyed by family/tool slug.
+// Greenfield storage is one row per enabled/disabled tool in `talk_tools`.
 // ---------------------------------------------------------------------------
 
 export type TalkActiveToolFamilies = Record<string, boolean>;
 
-interface ActiveFamiliesRow {
-  active_tool_families_json: TalkActiveToolFamilies;
+interface ActiveToolRow {
+  tool_id: string;
+  enabled: boolean;
 }
 
-function normalizeActiveFamilies(value: unknown): TalkActiveToolFamilies {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
-  const out: TalkActiveToolFamilies = {};
-  for (const [key, raw] of Object.entries(value as Record<string, unknown>)) {
-    if (typeof raw === 'boolean') out[key] = raw;
-  }
-  return out;
+function canEditTalk(role: string, createdBy: string, userId: string): boolean {
+  return (
+    role !== 'guest' &&
+    (role === 'owner' || role === 'admin' || createdBy === userId)
+  );
+}
+
+function canonicalToolIdsForCompatKey(family: string): string[] {
+  const normalized = (
+    LEGACY_ACTIVE_TOOL_FAMILY_ALIASES[family] ?? family
+  ).trim();
+  const familyToolIds = TALK_TOOL_IDS_BY_FAMILY[normalized];
+  if (familyToolIds) return familyToolIds;
+  const knownToolIds = new Set(Object.values(TALK_TOOL_IDS_BY_FAMILY).flat());
+  if (knownToolIds.has(normalized)) return [normalized];
+  throw new Error(`unknown active tool family: ${family}`);
 }
 
 export async function getTalkActiveTools(
   talkId: string,
 ): Promise<TalkActiveToolFamilies> {
   const db = getDbPg();
-  const rows = await db<ActiveFamiliesRow[]>`
-    select active_tool_families_json
-    from public.talks
-    where id = ${talkId}::uuid
-    limit 1
+  const rows = await db<ActiveToolRow[]>`
+    select tool_id, enabled
+    from public.talk_tools
+    where talk_id = ${talkId}::uuid
+    order by tool_id asc
   `;
-  if (!rows[0]) return {};
-  return normalizeActiveFamilies(rows[0].active_tool_families_json);
+  return normalizeTalkToolFamiliesFromRows(rows);
 }
 
 export async function setTalkActiveTool(
@@ -550,19 +888,50 @@ export async function setTalkActiveTool(
   enabled: boolean,
 ): Promise<TalkActiveToolFamilies> {
   const db = getDbPg();
-  const rows = await db<ActiveFamiliesRow[]>`
-    update public.talks
-    set active_tool_families_json = jsonb_set(
-          coalesce(active_tool_families_json, '{}'::jsonb),
-          array[${family}],
-          to_jsonb(${enabled}::boolean)
-        ),
-        updated_at = now()
-    where id = ${talkId}::uuid
-    returning active_tool_families_json
-  `;
-  if (!rows[0]) {
+  const userId = getCurrentUserId();
+  if (!userId) {
     throw new Error(`setTalkActiveTool: talk ${talkId} not found`);
   }
-  return normalizeActiveFamilies(rows[0].active_tool_families_json);
+  const accessRows = await db<
+    Array<{
+      workspace_id: string;
+      created_by: string;
+      role: 'owner' | 'admin' | 'member' | 'guest';
+    }>
+  >`
+    select t.workspace_id, t.created_by, wm.role
+    from public.talks t
+    join public.workspace_members wm
+      on wm.workspace_id = t.workspace_id
+     and wm.user_id = ${userId}::uuid
+    where t.id = ${talkId}::uuid
+    limit 1
+  `;
+  const access = accessRows[0];
+  if (!access) {
+    throw new Error(`setTalkActiveTool: talk ${talkId} not found`);
+  }
+  if (!canEditTalk(access.role, access.created_by, userId)) {
+    throw new Error(`setTalkActiveTool: user cannot edit talk ${talkId}`);
+  }
+
+  const toolIds = canonicalToolIdsForCompatKey(family);
+  await withTrustedDbWrites(async () => {
+    await withExistingOrNewTransaction(db, async (tx) => {
+      for (const toolId of toolIds) {
+        await tx`
+          insert into public.talk_tools (workspace_id, talk_id, tool_id, enabled)
+          values (
+            ${access.workspace_id}::uuid,
+            ${talkId}::uuid,
+            ${toolId},
+            ${enabled}
+          )
+          on conflict (talk_id, tool_id) do update set
+            enabled = excluded.enabled
+        `;
+      }
+    });
+  });
+  return getTalkActiveTools(talkId);
 }

@@ -126,6 +126,7 @@ describe('ClawTalkSidebar', () => {
           error={null}
           user={buildUser()}
           mainTalkId={null}
+          onSwitchWorkspace={vi.fn()}
           onSignOut={vi.fn()}
           signOutBusy={false}
           onCreateTalk={vi.fn(async () => buildTalk())}
@@ -176,6 +177,7 @@ describe('ClawTalkSidebar', () => {
           error={null}
           user={buildUser()}
           mainTalkId={null}
+          onSwitchWorkspace={vi.fn()}
           onSignOut={vi.fn()}
           signOutBusy={false}
           onCreateTalk={vi.fn(async () => buildTalk())}
@@ -234,6 +236,7 @@ describe('ClawTalkSidebar', () => {
           error={null}
           user={buildUser()}
           mainTalkId={null}
+          onSwitchWorkspace={vi.fn()}
           onSignOut={vi.fn()}
           signOutBusy={false}
           onCreateTalk={vi.fn(async () => buildTalk())}

@@ -13,31 +13,30 @@
 // ownerId), but the webapp `TalkResourceBinding` type only carries the
 // {id, kind, externalId, displayName, metadata, createdAt, createdBy} subset
 // using `kind` instead of `bindingKind`. `toApiBinding` projects the
-// record into the API shape so the client doesn't need to know about
-// owner_id (RLS already scopes reads to the caller).
+// record into the API shape. Resource rows are Talk-shared: multiple editors
+// can bind the same target, and the API exposes createdBy so the client can
+// distinguish those rows when needed.
 //
 // C3 — edit-permission gate (security boundary):
 //   POST and DELETE both call `canEditTalk(talkId)` before touching the
-//   table. RLS on `talk_resource_bindings` only enforces
-//   `owner_id = auth.uid()` on the binding row itself; it does NOT
-//   verify the caller has edit rights on the parent talk. Without this
-//   gate, any authenticated user with a CSRF token could POST a binding
-//   row to anyone else's talk_id (their own owner_id would satisfy RLS
-//   WITH CHECK, the talk's RLS doesn't apply to the bindings table).
+//   final connector tables. Connector writes are intentionally admin-only
+//   under RLS, so the accessor performs trusted writes only after this route
+//   has verified membership and Talk edit rights.
 
-import { withUserContext } from '../../../db.js';
+import { getDbPg, withUserContext } from '../../../db.js';
 import {
   createTalkResourceBinding,
   deleteTalkResourceBinding,
-  getTalkForUser,
   listTalkResourceBindings,
   type TalkResourceBindingKind,
   type TalkResourceBindingRecord,
 } from '../../db/index.js';
-import { canEditTalk } from '../middleware/acl.js';
 import { ApiEnvelope, AuthContext } from '../types.js';
 
 type JsonMap = Record<string, unknown>;
+
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 interface ApiTalkResourceBinding {
   id: string;
@@ -94,10 +93,60 @@ function badRequest(
   };
 }
 
+function isUuid(value: string): boolean {
+  return UUID_RE.test(value);
+}
+
 const VALID_KINDS: ReadonlySet<TalkResourceBindingKind> = new Set([
   'google_drive_folder',
   'google_drive_file',
 ]);
+
+async function getTalkAccess(input: {
+  userId: string;
+  talkId: string;
+}): Promise<{
+  workspaceId: string;
+  createdBy: string;
+  role: 'owner' | 'admin' | 'member' | 'guest';
+} | null> {
+  const db = getDbPg();
+  const rows = await db<
+    Array<{
+      workspace_id: string;
+      created_by: string;
+      role: 'owner' | 'admin' | 'member' | 'guest';
+    }>
+  >`
+    select t.workspace_id, t.created_by, wm.role
+    from public.talks t
+    join public.workspace_members wm
+      on wm.workspace_id = t.workspace_id
+     and wm.user_id = ${input.userId}::uuid
+    where t.id = ${input.talkId}::uuid
+    limit 1
+  `;
+  const row = rows[0];
+  return row
+    ? {
+        workspaceId: row.workspace_id,
+        createdBy: row.created_by,
+        role: row.role,
+      }
+    : null;
+}
+
+function canEditTalkAccess(
+  access: NonNullable<Awaited<ReturnType<typeof getTalkAccess>>>,
+  userId: string,
+): boolean {
+  return (
+    access.role !== 'guest' &&
+    (access.role === 'owner' ||
+      access.role === 'admin' ||
+      access.createdBy === userId)
+  );
+}
 
 // ---------------------------------------------------------------------------
 // GET /api/v1/talks/:talkId/resources
@@ -113,9 +162,15 @@ export async function listTalkResourcesRoute(input: {
     bindings: ApiTalkResourceBinding[];
   }>;
 }> {
+  if (!isUuid(input.talkId)) {
+    return badRequest('invalid_talk_id', 'talkId must be a valid UUID.');
+  }
   return await withUserContext(input.auth.userId, async () => {
-    const talk = await getTalkForUser(input.talkId);
-    if (!talk) return notFoundResponse('Talk not found.');
+    const access = await getTalkAccess({
+      userId: input.auth.userId,
+      talkId: input.talkId,
+    });
+    if (!access) return notFoundResponse('Talk not found.');
 
     const rows = await listTalkResourceBindings(input.talkId);
     return {
@@ -148,13 +203,18 @@ export async function createTalkGoogleDriveResourceRoute(input: {
   statusCode: number;
   body: ApiEnvelope<{ binding: ApiTalkResourceBinding }>;
 }> {
+  if (!isUuid(input.talkId)) {
+    return badRequest('invalid_talk_id', 'talkId must be a valid UUID.');
+  }
   return await withUserContext(input.auth.userId, async () => {
-    const talk = await getTalkForUser(input.talkId);
-    if (!talk) return notFoundResponse('Talk not found.');
-    // C3: RLS lets the user write a binding with their own owner_id, but
-    // doesn't check whether they have edit rights on the parent talk.
-    // Gate explicitly before any insert.
-    if (!(await canEditTalk(input.talkId))) {
+    const access = await getTalkAccess({
+      userId: input.auth.userId,
+      talkId: input.talkId,
+    });
+    if (!access) return notFoundResponse('Talk not found.');
+    // C3: connector writes are trusted server-side writes, so route-level
+    // membership and Talk edit checks must pass before any insert.
+    if (!canEditTalkAccess(access, input.auth.userId)) {
       return forbiddenResponse('You do not have permission to edit this talk.');
     }
 
@@ -239,10 +299,22 @@ export async function deleteTalkResourceRoute(input: {
   statusCode: number;
   body: ApiEnvelope<{ deleted: true }>;
 }> {
+  if (!isUuid(input.talkId)) {
+    return badRequest('invalid_talk_id', 'talkId must be a valid UUID.');
+  }
+  if (!isUuid(input.resourceId)) {
+    return badRequest(
+      'invalid_resource_id',
+      'resourceId must be a valid UUID.',
+    );
+  }
   return await withUserContext(input.auth.userId, async () => {
-    const talk = await getTalkForUser(input.talkId);
-    if (!talk) return notFoundResponse('Talk not found.');
-    if (!(await canEditTalk(input.talkId))) {
+    const access = await getTalkAccess({
+      userId: input.auth.userId,
+      talkId: input.talkId,
+    });
+    if (!access) return notFoundResponse('Talk not found.');
+    if (!canEditTalkAccess(access, input.auth.userId)) {
       return forbiddenResponse('You do not have permission to edit this talk.');
     }
 

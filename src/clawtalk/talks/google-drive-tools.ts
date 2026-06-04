@@ -1,8 +1,8 @@
 // Google Drive / Docs tool executors for Talks.
 //
 // Surface:
-//   - `loadGoogleDriveBindings(talkId)` — async; reads talk_resource_bindings
-//     and assigns G1/G2/... refs by creation order. Drive/Docs bindings only.
+//   - `loadGoogleDriveBindings(talkId)` — async; reads final connector
+//     bindings and assigns G1/G2/... refs by creation order. Drive/Docs only.
 //   - `buildBoundGoogleDrivePromptSection(bindings)` — string fragment for
 //     the system prompt. Lists each bound resource by ref + kind + name, or
 //     a "no bindings" hint pointing the agent at the Tools tab.
@@ -39,6 +39,7 @@ import {
   type TalkResourceBindingKind,
   type TalkResourceBindingRecord,
 } from '../db/talk-tools-accessors.js';
+import { getDbPg, withUserContext } from '../../db.js';
 import { GoogleToolCredentialError } from '../identity/google-tools-errors.js';
 import {
   decryptGoogleToolCredential,
@@ -415,6 +416,46 @@ function parseJsonMap(value: unknown): JsonMap | null {
     : null;
 }
 
+async function verifyTalkExternalMutationAllowed(
+  input: ToolContext,
+): Promise<ExecutorResult | null> {
+  return withUserContext(input.userId, async () => {
+    const db = getDbPg();
+    const rows = await db<
+      Array<{
+        created_by: string;
+        role: 'owner' | 'admin' | 'member' | 'guest';
+      }>
+    >`
+      select t.created_by, wm.role
+      from public.talks t
+      join public.workspace_members wm
+        on wm.workspace_id = t.workspace_id
+       and wm.user_id = ${input.userId}::uuid
+      where t.workspace_id = ${input.workspaceId}::uuid
+        and t.id = ${input.talkId}::uuid
+      limit 1
+    `;
+    const access = rows[0];
+    if (!access) {
+      return errorResult(
+        'Talk not found or not available to the Google Drive tool requester.',
+      );
+    }
+    if (
+      access.role === 'guest' ||
+      (access.role !== 'owner' &&
+        access.role !== 'admin' &&
+        access.created_by !== input.userId)
+    ) {
+      return errorResult(
+        'external_mutation_forbidden: You do not have permission to edit this Talk.',
+      );
+    }
+    return null;
+  });
+}
+
 function escapeDriveQueryValue(value: string): string {
   return value.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
 }
@@ -469,13 +510,17 @@ function errorFromCredential(err: GoogleToolCredentialError): ExecutorResult {
 
 async function withTokenRefresh<T>(
   userId: string,
+  workspaceId: string,
   requiredScopes: string[],
   fn: (accessToken: string) => Promise<T>,
 ): Promise<T> {
-  const tokenInfo = await getValidGoogleToolAccessToken({
-    userId,
-    requiredScopes,
-  });
+  const tokenInfo = await withUserContext(userId, () =>
+    getValidGoogleToolAccessToken({
+      userId,
+      workspaceId,
+      requiredScopes,
+    }),
+  );
   try {
     return await fn(tokenInfo.accessToken);
   } catch (err) {
@@ -484,7 +529,9 @@ async function withTokenRefresh<T>(
     // out of band (admin console, security alert). Force a refresh and
     // retry the call once. If the second attempt also 401s, surface
     // google_reauth_required so the UI prompts a reconnect.
-    const credential = await getUserGoogleCredential();
+    const credential = await withUserContext(userId, () =>
+      getUserGoogleCredential({ workspaceId }),
+    );
     if (!credential) {
       throw new GoogleToolCredentialError(
         'google_account_not_connected',
@@ -502,7 +549,9 @@ async function withTokenRefresh<T>(
         401,
       );
     }
-    const refreshed = await performRefresh(userId, payload);
+    const refreshed = await withUserContext(userId, () =>
+      performRefresh(userId, payload, { workspaceId }),
+    );
     try {
       return await fn(refreshed.accessToken);
     } catch (retryErr) {
@@ -1049,6 +1098,7 @@ async function executeListFolder(
 
   const payload = await withTokenRefresh(
     input.userId,
+    input.workspaceId,
     ['drive.readonly'],
     async (accessToken) => {
       const params = new URLSearchParams({
@@ -1140,6 +1190,7 @@ async function executeSearch(
   if (results.length < maxResults) {
     await withTokenRefresh(
       input.userId,
+      input.workspaceId,
       ['drive.readonly'],
       async (accessToken) => {
         const params = new URLSearchParams({
@@ -1257,6 +1308,7 @@ async function executeDriveRead(
 
   return withTokenRefresh(
     input.userId,
+    input.workspaceId,
     ['drive.readonly'],
     async (accessToken) => {
       const metadata = await fetchDriveFileMetadata({
@@ -1347,6 +1399,7 @@ async function executeDocsRead(
   }
   return withTokenRefresh(
     input.userId,
+    input.workspaceId,
     ['documents.readonly'],
     async (accessToken) => {
       const document = await fetchGoogleDoc({
@@ -1391,17 +1444,24 @@ async function executeDocsBatchUpdate(
       `${bindingRef} is not a Google Doc. Bind a Google Doc file before using google_docs_batch_update.`,
     );
   }
+  const permissionError = await verifyTalkExternalMutationAllowed(input);
+  if (permissionError) return permissionError;
 
-  return withTokenRefresh(input.userId, ['documents'], async (accessToken) => {
-    const response = await batchUpdateGoogleDoc({
-      fileId: resource.externalId,
-      accessToken,
-      signal: input.signal,
-      requests,
-      writeControl,
-    });
-    return okResult(response);
-  });
+  return withTokenRefresh(
+    input.userId,
+    input.workspaceId,
+    ['documents'],
+    async (accessToken) => {
+      const response = await batchUpdateGoogleDoc({
+        fileId: resource.externalId,
+        accessToken,
+        signal: input.signal,
+        requests,
+        writeControl,
+      });
+      return okResult(response);
+    },
+  );
 }
 
 async function executeDocsCreate(input: ToolContext): Promise<ExecutorResult> {
@@ -1415,9 +1475,12 @@ async function executeDocsCreate(input: ToolContext): Promise<ExecutorResult> {
   if (!title) {
     return errorResult('google_docs_create requires a non-empty title.');
   }
+  const permissionError = await verifyTalkExternalMutationAllowed(input);
+  if (permissionError) return permissionError;
 
   const created = await withTokenRefresh(
     input.userId,
+    input.workspaceId,
     ['documents'],
     async (accessToken) => {
       return createGoogleDoc({
@@ -1428,23 +1491,25 @@ async function executeDocsCreate(input: ToolContext): Promise<ExecutorResult> {
     },
   );
 
-  // Self-bind the new doc to the Talk. Idempotent on conflict (the
-  // 4-column unique index added in migration 0018 covers this — same
-  // owner re-creating dedupes; different owners get distinct rows).
-  await createTalkResourceBinding({
-    ownerId: input.userId,
-    talkId: input.talkId,
-    bindingKind: 'google_drive_file',
-    externalId: created.documentId,
-    displayName: created.title,
-    metadata: { mimeType: GOOGLE_DOCS_MIME, url: created.url },
-    createdBy: input.userId,
-  });
+  const ref = await withUserContext(input.userId, async () => {
+    // Self-bind the new doc to the Talk. Idempotent on conflict (the
+    // connector_bindings unique index covers same-user re-creates; different
+    // editors get distinct rows).
+    await createTalkResourceBinding({
+      ownerId: input.userId,
+      talkId: input.talkId,
+      bindingKind: 'google_drive_file',
+      externalId: created.documentId,
+      displayName: created.title,
+      metadata: { mimeType: GOOGLE_DOCS_MIME, url: created.url },
+      createdBy: input.userId,
+    });
 
-  // Re-load bindings so we can report the new G-ref to the LLM.
-  const fresh = await loadGoogleDriveBindings(input.talkId);
-  const newBinding = fresh.find((b) => b.externalId === created.documentId);
-  const ref = newBinding ? newBinding.ref : 'G?';
+    // Re-load bindings so we can report the new G-ref to the LLM.
+    const fresh = await loadGoogleDriveBindings(input.talkId);
+    const newBinding = fresh.find((b) => b.externalId === created.documentId);
+    return newBinding ? newBinding.ref : 'G?';
+  });
   return okResult(`Created ${ref}: "${created.title}" at ${created.url}`);
 }
 
@@ -1481,6 +1546,7 @@ async function executeSheetsReadRange(
   const valueRenderOption = readString(input.args.valueRenderOption) || null;
   return withTokenRefresh(
     input.userId,
+    input.workspaceId,
     ['spreadsheets.readonly'],
     async (accessToken) => {
       const payload = await fetchSheetRange({
@@ -1533,8 +1599,11 @@ async function executeSheetsBatchUpdate(
       `${bindingRef} is not a Google Sheet. Bind a Sheets file before using google_sheets_batch_update.`,
     );
   }
+  const permissionError = await verifyTalkExternalMutationAllowed(input);
+  if (permissionError) return permissionError;
   return withTokenRefresh(
     input.userId,
+    input.workspaceId,
     ['spreadsheets'],
     async (accessToken) => {
       const response = await batchUpdateSheetValues({
@@ -1555,11 +1624,29 @@ async function executeSheetsBatchUpdate(
 
 interface ToolContext {
   talkId: string;
+  workspaceId: string;
   userId: string;
   toolName: string;
   args: Record<string, unknown>;
   signal: AbortSignal;
   jobPolicy: GoogleDriveJobPolicy | null;
+}
+
+async function resolveTalkWorkspaceId(input: {
+  talkId: string;
+  userId: string;
+}): Promise<string | null> {
+  return withUserContext(input.userId, async () => {
+    const db = getDbPg();
+    const rows = await db<Array<{ workspace_id: string }>>`
+      select workspace_id
+      from public.talks
+      where id = ${input.talkId}::uuid
+      limit 1
+    `;
+    const workspaceId = rows[0]?.workspace_id;
+    return workspaceId ?? null;
+  });
 }
 
 function readString(value: unknown): string {
@@ -1574,23 +1661,35 @@ export async function executeGoogleDriveTalkTool(input: {
   signal: AbortSignal;
   jobPolicy?: GoogleDriveJobPolicy | null;
 }): Promise<ExecutorResult> {
-  const ctx: ToolContext = {
-    talkId: input.talkId,
-    userId: input.userId,
-    toolName: input.toolName,
-    args: input.args,
-    signal: input.signal,
-    jobPolicy: input.jobPolicy ?? null,
-  };
-
   try {
+    const workspaceId = await resolveTalkWorkspaceId({
+      talkId: input.talkId,
+      userId: input.userId,
+    });
+    if (!workspaceId) {
+      return errorResult(
+        'Talk not found or not available to the Google Drive tool requester.',
+      );
+    }
+    const ctx: ToolContext = {
+      talkId: input.talkId,
+      workspaceId,
+      userId: input.userId,
+      toolName: input.toolName,
+      args: input.args,
+      signal: input.signal,
+      jobPolicy: input.jobPolicy ?? null,
+    };
+
     // google_docs_create doesn't require pre-existing bindings — it
     // creates and self-binds, so handle it before the bindings load.
     if (ctx.toolName === 'google_docs_create') {
       return await executeDocsCreate(ctx);
     }
 
-    const resources = await loadGoogleDriveBindings(ctx.talkId);
+    const resources = await withUserContext(input.userId, () =>
+      loadGoogleDriveBindings(ctx.talkId),
+    );
     if (resources.length === 0) {
       return errorResult(
         'No Google Drive resources are bound to this Talk. Ask the user to add a binding via the Tools tab.',

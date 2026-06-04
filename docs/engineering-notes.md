@@ -1,6 +1,6 @@
 # ClawTalk — Engineering Notes
 
-> **Status:** canonical (engineering reference) · **Last updated:** 2026-05-28
+> **Status:** canonical (engineering reference) · **Last updated:** 2026-06-02
 > Durable, hard-won engineering knowledge distilled from docs that were archived in the 2026-05-28 restructure. The originals live in [`archive/`](./archive/); line numbers there may be stale, so treat the code as truth and these as orientation. Stack decision is [DECISIONS.md](./DECISIONS.md) D1.
 
 ---
@@ -56,3 +56,18 @@ The current Talk runtime is **direct-HTTP / provider-routed** and does **not** u
 - A **V1 string prompt** sets `isSingleUserTurn = true`, which **auto-closes stdin and kills agent-team subagents mid-research**. The fix is to pass an `AsyncIterable<SDKUserMessage>` (streaming input) instead of a string. V1 vs `unstable_v2_createSession` showed zero difference in turn behavior.
 
 The archived doc has the full `query()` options table and message-type reference.
+
+---
+
+## 6. Cutover invariants — committed backend/runtime slice
+
+As of 2026-06-02, the greenfield cutover branch has **committed** the backend/runtime cutover (legacy context runtime retired in `951ab34`, disabled-model fail-closed enqueue in `6c40fb7`). Keep these invariants in mind while building on it:
+
+- Fresh Supabase baseline only. Keep editing `supabase/migrations/0001_clawtalk_greenfield.sql` for final-state schema while the DB is disposable; do not introduce compatibility/backfill migrations for old data.
+- `message_provider_replay` is the only storage surface for Codex encrypted provider replay blobs. `messages.metadata_json` is member-readable and must stay client-safe.
+- Runtime/provider/model identity after snapshot creation is `talk_agent_snapshots.provider_id/model_id`, not mutable agent rows and not caller-supplied response metadata.
+- Provider replay can cross neither source-agent nor provider/model boundaries. Read-side and write-side replay are both byte-budgeted.
+- Active source references are `context_sources.id::text`; legacy `meta_json.sourceRef` is only a compatibility alias.
+- The retired `CleanTalkExecutor` must fail closed. Do not restore the old legacy executor as a fallback.
+- Scheduled/run-now job snapshots should skip non-target roster agents whose provider/model is disabled, while still blocking if the target agent/provider is unavailable.
+- Per-slice review gate is mandatory before commit: focused tests, typecheck/build, then exactly two passes — gstack `/review` (bundles a Codex cross-model adversarial pass; honor its `block` verdicts) and `/karpathy-audit diff`. No third standalone Claude review.

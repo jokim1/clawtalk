@@ -1,4 +1,4 @@
-import { getDbPg, withUserContext } from '../../../db.js';
+import { getDbPg, withTrustedDbWrites, withUserContext } from '../../../db.js';
 import {
   autoUpgradeAgentModel,
   clearAgentModelUpgradeNotice,
@@ -27,6 +27,11 @@ import {
 import { resolveModelLifecycle } from '../../agents/model-lifecycle.js';
 import { TALK_EXECUTOR_ANTHROPIC_API_KEY } from '../../config.js';
 import { modelSupportsVision } from '../../llm/capabilities.js';
+import {
+  resolveWorkspaceForUser,
+  type WorkspaceSummaryRecord,
+} from '../../workspaces/accessors.js';
+import { ensureWorkspaceBootstrapForUser } from '../../workspaces/bootstrap.js';
 import type { ApiEnvelope, AuthContext } from '../types.js';
 
 // ---------------------------------------------------------------------------
@@ -73,23 +78,74 @@ function isAdminLike(role: string): boolean {
   return role === 'owner' || role === 'admin';
 }
 
-async function providerHasCredential(providerId: string): Promise<boolean> {
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+async function resolveActiveWorkspace(
+  auth: AuthContext,
+  requestedWorkspaceId?: string | null,
+): Promise<
+  | { ok: true; workspace: WorkspaceSummaryRecord }
+  | { ok: false; result: { statusCode: number; body: ApiEnvelope<never> } }
+> {
+  if (requestedWorkspaceId && !UUID_RE.test(requestedWorkspaceId)) {
+    return {
+      ok: false,
+      result: envelopeError(
+        400,
+        'invalid_workspace_id',
+        'workspaceId must be a valid UUID.',
+      ),
+    };
+  }
+  await ensureWorkspaceBootstrapForUser(auth.userId);
+  const workspace = await withUserContext(auth.userId, () =>
+    resolveWorkspaceForUser({
+      userId: auth.userId,
+      requestedWorkspaceId,
+    }),
+  );
+  if (!workspace) {
+    return {
+      ok: false,
+      result: envelopeError(
+        requestedWorkspaceId ? 403 : 404,
+        requestedWorkspaceId ? 'workspace_forbidden' : 'workspace_not_found',
+        requestedWorkspaceId
+          ? 'Workspace is not available for this user.'
+          : 'No workspace exists.',
+      ),
+    };
+  }
+  return { ok: true, workspace };
+}
+
+async function providerHasCredential(
+  providerId: string,
+  principalUserId: string,
+  workspaceId: string,
+): Promise<boolean> {
   const db = getDbPg();
-  // llm_provider_secrets carries BOTH personal api_keys and personal
-  // OAuth subscriptions (PR #330 added credential_kind). Same for the
-  // workspace-shared table. Any row is enough — the execution-resolver
-  // walks personal → workspace → env in the same order.
+  // Direct HTTP readiness only counts API keys. Subscription rows are valid
+  // executor credentials, but they cannot back the direct_http/api_key preview.
   const personal = await db<Array<{ ok: number }>>`
     select 1 as ok from public.llm_provider_secrets
     where provider_id = ${providerId}
+      and credential_kind = 'api_key'
+      and ${principalUserId}::uuid is not null
+      and owner_id = ${principalUserId}::uuid
     limit 1
   `;
   if (personal.length > 0) return true;
-  const workspace = await db<Array<{ ok: number }>>`
-    select 1 as ok from public.workspace_provider_secrets
-    where provider_id = ${providerId}
-    limit 1
-  `;
+  const workspace = await withTrustedDbWrites(
+    () => db<Array<{ ok: number }>>`
+      select 1 as ok from public.workspace_provider_secrets
+      where workspace_id = ${workspaceId}::uuid
+        and provider_id = ${providerId}
+        and credential_kind = 'api_key'
+      limit 1
+    `,
+  );
   if (workspace.length > 0) return true;
   if (providerId === 'provider.anthropic') {
     return TALK_EXECUTOR_ANTHROPIC_API_KEY.trim().length > 0;
@@ -109,10 +165,18 @@ async function getProviderName(providerId: string): Promise<string | null> {
 
 async function buildExecutionPreview(
   record: RegisteredAgentRecord,
+  principalUserId: string,
+  workspaceId: string,
 ): Promise<ExecutionPreview> {
   const providerName =
     (await getProviderName(record.provider_id)) || record.provider_id;
-  if (!(await providerHasCredential(record.provider_id))) {
+  if (
+    !(await providerHasCredential(
+      record.provider_id,
+      principalUserId,
+      workspaceId,
+    ))
+  ) {
     return {
       surface: 'main',
       backend: null,
@@ -140,11 +204,17 @@ async function buildExecutionPreview(
 
 async function toApiSnapshot(
   record: RegisteredAgentRecord,
+  principalUserId: string,
+  workspaceId: string,
   modelUpdateAvailable: RegisteredAgentApiSnapshot['modelUpdateAvailable'] = null,
 ): Promise<RegisteredAgentApiSnapshot> {
   return {
     ...toAgentSnapshot(record),
-    executionPreview: await buildExecutionPreview(record),
+    executionPreview: await buildExecutionPreview(
+      record,
+      principalUserId,
+      workspaceId,
+    ),
     supportsVision: modelSupportsVision(record.provider_id, record.model_id),
     modelUpdateAvailable,
   };
@@ -249,12 +319,17 @@ async function applyModelLifecycle(
   return { record, updateAvailable: null };
 }
 
-export async function listAgentsRoute(auth: AuthContext): Promise<{
+export async function listAgentsRoute(
+  auth: AuthContext,
+  requestedWorkspaceId?: string | null,
+): Promise<{
   statusCode: number;
   body: ApiEnvelope<RegisteredAgentApiSnapshot[]>;
 }> {
+  const workspace = await resolveActiveWorkspace(auth, requestedWorkspaceId);
+  if (!workspace.ok) return workspace.result;
   return withUserContext(auth.userId, async () => {
-    const records = await listRegisteredAgents();
+    const records = await listRegisteredAgents(workspace.workspace.id);
     // Build the authoritative supported-model picture once per distinct
     // provider, then apply the lifecycle policy (auto-upgrade retired /
     // flag newer) to each agent.
@@ -262,18 +337,33 @@ export async function listAgentsRoute(auth: AuthContext): Promise<{
     const supportByProvider = new Map<string, ProviderModelSupport>(
       await Promise.all(
         providerIds.map(
-          async (pid) => [pid, await buildProviderModelSupport(pid)] as const,
+          async (pid) =>
+            [
+              pid,
+              await buildProviderModelSupport(pid, {
+                principalUserId: auth.userId,
+                workspaceId: workspace.workspace.id,
+              }),
+            ] as const,
         ),
       ),
     );
-    const snapshots = await Promise.all(
-      records.map(async (record) => {
-        const support = supportByProvider.get(record.provider_id)!;
-        const { record: effective, updateAvailable } =
-          await applyModelLifecycle(record, support);
-        return toApiSnapshot(effective, updateAvailable);
-      }),
-    );
+    const snapshots: RegisteredAgentApiSnapshot[] = [];
+    for (const record of records) {
+      const support = supportByProvider.get(record.provider_id)!;
+      const { record: effective, updateAvailable } = await applyModelLifecycle(
+        record,
+        support,
+      );
+      snapshots.push(
+        await toApiSnapshot(
+          effective,
+          auth.userId,
+          workspace.workspace.id,
+          updateAvailable,
+        ),
+      );
+    }
     return envelopeOk(snapshots);
   });
 }
@@ -281,23 +371,36 @@ export async function listAgentsRoute(auth: AuthContext): Promise<{
 export async function getAgentRoute(
   auth: AuthContext,
   agentId: string,
+  requestedWorkspaceId?: string | null,
 ): Promise<{
   statusCode: number;
   body: ApiEnvelope<RegisteredAgentApiSnapshot>;
 }> {
+  const workspace = await resolveActiveWorkspace(auth, requestedWorkspaceId);
+  if (!workspace.ok) return workspace.result;
   return withUserContext(auth.userId, async () => {
-    const record = await getRegisteredAgent(agentId);
+    const record = await getRegisteredAgent(agentId, workspace.workspace.id);
     if (!record) {
       return envelopeError(404, 'not_found', `Agent '${agentId}' not found.`);
     }
     // Same lifecycle handling as the list route, so a single-agent fetch
     // (detail view, post-update refresh) auto-heals + flags consistently.
-    const support = await buildProviderModelSupport(record.provider_id);
+    const support = await buildProviderModelSupport(record.provider_id, {
+      principalUserId: auth.userId,
+      workspaceId: workspace.workspace.id,
+    });
     const { record: effective, updateAvailable } = await applyModelLifecycle(
       record,
       support,
     );
-    return envelopeOk(await toApiSnapshot(effective, updateAvailable));
+    return envelopeOk(
+      await toApiSnapshot(
+        effective,
+        auth.userId,
+        workspace.workspace.id,
+        updateAvailable,
+      ),
+    );
   });
 }
 
@@ -308,18 +411,27 @@ export async function getAgentRoute(
 export async function dismissAgentModelUpgradeRoute(
   auth: AuthContext,
   agentId: string,
+  requestedWorkspaceId?: string | null,
 ): Promise<{
   statusCode: number;
   body: ApiEnvelope<RegisteredAgentApiSnapshot>;
 }> {
+  const workspace = await resolveActiveWorkspace(auth, requestedWorkspaceId);
+  if (!workspace.ok) return workspace.result;
   return withUserContext(auth.userId, async () => {
-    const record = await getRegisteredAgent(agentId);
+    const record = await getRegisteredAgent(agentId, workspace.workspace.id);
     if (!record) {
       return envelopeError(404, 'not_found', `Agent '${agentId}' not found.`);
     }
-    await clearAgentModelUpgradeNotice(agentId);
-    const updated = await getRegisteredAgent(agentId);
-    return envelopeOk(await toApiSnapshot(updated ?? record));
+    await clearAgentModelUpgradeNotice(agentId, workspace.workspace.id);
+    const updated = await getRegisteredAgent(agentId, workspace.workspace.id);
+    return envelopeOk(
+      await toApiSnapshot(
+        updated ?? record,
+        auth.userId,
+        workspace.workspace.id,
+      ),
+    );
   });
 }
 
@@ -330,11 +442,14 @@ export async function dismissAgentModelUpgradeRoute(
 export async function createAgentRoute(
   auth: AuthContext,
   body: Record<string, unknown> | null,
+  requestedWorkspaceId?: string | null,
 ): Promise<{
   statusCode: number;
   body: ApiEnvelope<RegisteredAgentApiSnapshot>;
 }> {
-  if (!isAdminLike(auth.role)) {
+  const workspace = await resolveActiveWorkspace(auth, requestedWorkspaceId);
+  if (!workspace.ok) return workspace.result;
+  if (!isAdminLike(workspace.workspace.role)) {
     return envelopeError(
       403,
       'forbidden',
@@ -377,6 +492,7 @@ export async function createAgentRoute(
     try {
       const record = await createRegisteredAgent({
         ownerId: auth.userId,
+        workspaceId: workspace.workspace.id,
         name,
         providerId,
         modelId,
@@ -385,7 +501,9 @@ export async function createAgentRoute(
         description,
         credentialMode,
       });
-      return envelopeOk(await toApiSnapshot(record));
+      return envelopeOk(
+        await toApiSnapshot(record, auth.userId, workspace.workspace.id),
+      );
     } catch (err) {
       return envelopeError(
         400,
@@ -400,11 +518,14 @@ export async function updateAgentRoute(
   auth: AuthContext,
   agentId: string,
   body: Record<string, unknown> | null,
+  requestedWorkspaceId?: string | null,
 ): Promise<{
   statusCode: number;
   body: ApiEnvelope<RegisteredAgentApiSnapshot>;
 }> {
-  if (!isAdminLike(auth.role)) {
+  const workspace = await resolveActiveWorkspace(auth, requestedWorkspaceId);
+  if (!workspace.ok) return workspace.result;
+  if (!isAdminLike(workspace.workspace.role)) {
     return envelopeError(
       403,
       'forbidden',
@@ -436,15 +557,21 @@ export async function updateAgentRoute(
   }
 
   return withUserContext(auth.userId, async () => {
-    if (!(await getRegisteredAgent(agentId))) {
+    if (!(await getRegisteredAgent(agentId, workspace.workspace.id))) {
       return envelopeError(404, 'not_found', `Agent '${agentId}' not found.`);
     }
     try {
-      const updated = await updateRegisteredAgent(agentId, updates);
+      const updated = await updateRegisteredAgent(
+        agentId,
+        updates,
+        workspace.workspace.id,
+      );
       if (!updated) {
         return envelopeError(404, 'not_found', `Agent '${agentId}' not found.`);
       }
-      return envelopeOk(await toApiSnapshot(updated));
+      return envelopeOk(
+        await toApiSnapshot(updated, auth.userId, workspace.workspace.id),
+      );
     } catch (err) {
       return envelopeError(
         400,
@@ -458,11 +585,14 @@ export async function updateAgentRoute(
 export async function deleteAgentRoute(
   auth: AuthContext,
   agentId: string,
+  requestedWorkspaceId?: string | null,
 ): Promise<{
   statusCode: number;
   body: ApiEnvelope<{ deleted: true }>;
 }> {
-  if (!isAdminLike(auth.role)) {
+  const workspace = await resolveActiveWorkspace(auth, requestedWorkspaceId);
+  if (!workspace.ok) return workspace.result;
+  if (!isAdminLike(workspace.workspace.role)) {
     return envelopeError(
       403,
       'forbidden',
@@ -474,7 +604,7 @@ export async function deleteAgentRoute(
     // is a benign "nothing protected yet" state, not a 500. Throwing
     // out of these guards blocks the user from deleting any agent
     // when settings_kv has no defaults configured.
-    const protectedMainId = await getMainAgentIdOrNull();
+    const protectedMainId = await getMainAgentIdOrNull(workspace.workspace.id);
     if (protectedMainId && agentId === protectedMainId) {
       return envelopeError(
         400,
@@ -482,7 +612,9 @@ export async function deleteAgentRoute(
         'Cannot delete the main agent. Set a different main agent first.',
       );
     }
-    const protectedDefaultId = await getDefaultTalkAgentIdOrNull();
+    const protectedDefaultId = await getDefaultTalkAgentIdOrNull(
+      workspace.workspace.id,
+    );
     if (protectedDefaultId && agentId === protectedDefaultId) {
       return envelopeError(
         400,
@@ -490,7 +622,10 @@ export async function deleteAgentRoute(
         'Cannot delete the default Talk agent.',
       );
     }
-    const deleted = await deleteRegisteredAgent(agentId);
+    const deleted = await deleteRegisteredAgent(
+      agentId,
+      workspace.workspace.id,
+    );
     if (!deleted) {
       return envelopeError(404, 'not_found', `Agent '${agentId}' not found.`);
     }
@@ -502,14 +637,22 @@ export async function deleteAgentRoute(
 // Main agent
 // ---------------------------------------------------------------------------
 
-export async function getMainAgentRoute(auth: AuthContext): Promise<{
+export async function getMainAgentRoute(
+  auth: AuthContext,
+  requestedWorkspaceId?: string | null,
+): Promise<{
   statusCode: number;
   body: ApiEnvelope<RegisteredAgentApiSnapshot>;
 }> {
+  const workspace = await resolveActiveWorkspace(auth, requestedWorkspaceId);
+  if (!workspace.ok) return workspace.result;
   return withUserContext(auth.userId, async () => {
     try {
-      const mainAgentId = await getMainAgentId();
-      const record = await getRegisteredAgent(mainAgentId);
+      const mainAgentId = await getMainAgentId(workspace.workspace.id);
+      const record = await getRegisteredAgent(
+        mainAgentId,
+        workspace.workspace.id,
+      );
       if (!record) {
         return envelopeError(
           404,
@@ -517,7 +660,9 @@ export async function getMainAgentRoute(auth: AuthContext): Promise<{
           `Main agent '${mainAgentId}' not found.`,
         );
       }
-      return envelopeOk(await toApiSnapshot(record));
+      return envelopeOk(
+        await toApiSnapshot(record, auth.userId, workspace.workspace.id),
+      );
     } catch (err) {
       return envelopeError(
         404,
@@ -531,11 +676,14 @@ export async function getMainAgentRoute(auth: AuthContext): Promise<{
 export async function updateMainAgentRoute(
   auth: AuthContext,
   body: Record<string, unknown> | null,
+  requestedWorkspaceId?: string | null,
 ): Promise<{
   statusCode: number;
   body: ApiEnvelope<RegisteredAgentApiSnapshot>;
 }> {
-  if (!isAdminLike(auth.role)) {
+  const workspace = await resolveActiveWorkspace(auth, requestedWorkspaceId);
+  if (!workspace.ok) return workspace.result;
+  if (!isAdminLike(workspace.workspace.role)) {
     return envelopeError(
       403,
       'forbidden',
@@ -548,7 +696,7 @@ export async function updateMainAgentRoute(
   }
   return withUserContext(auth.userId, async () => {
     try {
-      await setMainAgentId(agentId);
+      await setMainAgentId(agentId, workspace.workspace.id, auth.userId);
     } catch (err) {
       return envelopeError(
         400,
@@ -556,11 +704,13 @@ export async function updateMainAgentRoute(
         err instanceof Error ? err.message : 'Failed to set main agent.',
       );
     }
-    const record = await getRegisteredAgent(agentId);
+    const record = await getRegisteredAgent(agentId, workspace.workspace.id);
     if (!record) {
       return envelopeError(404, 'not_found', `Agent '${agentId}' not found.`);
     }
-    return envelopeOk(await toApiSnapshot(record));
+    return envelopeOk(
+      await toApiSnapshot(record, auth.userId, workspace.workspace.id),
+    );
   });
 }
 
@@ -572,12 +722,15 @@ export async function updateMainAgentRoute(
 export async function getAgentFallbackRoute(
   auth: AuthContext,
   agentId: string,
+  requestedWorkspaceId?: string | null,
 ): Promise<{
   statusCode: number;
   body: ApiEnvelope<{ agentId: string; steps: [] }>;
 }> {
+  const workspace = await resolveActiveWorkspace(auth, requestedWorkspaceId);
+  if (!workspace.ok) return workspace.result;
   return withUserContext(auth.userId, async () => {
-    if (!(await getRegisteredAgent(agentId))) {
+    if (!(await getRegisteredAgent(agentId, workspace.workspace.id))) {
       return envelopeError(404, 'not_found', `Agent '${agentId}' not found.`);
     }
     return envelopeOk({ agentId, steps: [] as [] });
@@ -588,11 +741,14 @@ export async function setAgentFallbackRoute(
   auth: AuthContext,
   agentId: string,
   _body: Record<string, unknown> | null,
+  requestedWorkspaceId?: string | null,
 ): Promise<{
   statusCode: number;
   body: ApiEnvelope<{ agentId: string; steps: [] }>;
 }> {
-  if (!isAdminLike(auth.role)) {
+  const workspace = await resolveActiveWorkspace(auth, requestedWorkspaceId);
+  if (!workspace.ok) return workspace.result;
+  if (!isAdminLike(workspace.workspace.role)) {
     return envelopeError(
       403,
       'forbidden',
@@ -600,7 +756,7 @@ export async function setAgentFallbackRoute(
     );
   }
   return withUserContext(auth.userId, async () => {
-    if (!(await getRegisteredAgent(agentId))) {
+    if (!(await getRegisteredAgent(agentId, workspace.workspace.id))) {
       return envelopeError(404, 'not_found', `Agent '${agentId}' not found.`);
     }
     return envelopeOk({ agentId, steps: [] as [] });

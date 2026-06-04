@@ -22,9 +22,9 @@
  *                                             + codexMessageItems
  *
  * The two opaque blobs (codexReasoningItems, codexMessageItems) are
- * persisted into talk_messages.metadata_json after the turn so they
- * can be replayed verbatim on the next request — preserving the
- * server-side reasoning chain and prefix-cache hits.
+ * persisted into a trusted replay store after the turn so they can be
+ * replayed verbatim on the next request, preserving the server-side
+ * reasoning chain and prefix-cache hits.
  */
 
 import { createHash } from 'crypto';

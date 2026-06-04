@@ -1,6 +1,7 @@
 // Detect `@-references` to saved sources in the latest user message.
-// Two forms are supported:
+// Three forms are supported:
 //   `@S1`, `@s99`         — stable ref (case-insensitive; normalized to `S<n>`)
+//   `@<uuid>`             — raw source id fallback (normalized to lowercase)
 //   `@design-notes`       — title_slug form (case-insensitive; normalized to lowercase)
 //
 // The boundary guard is critical: a token only counts when the `@` is at
@@ -13,11 +14,13 @@
 // content-edit-intent, and the others are conventional non-mentions.
 
 const DENYLIST = new Set(['doc', 'everyone', 'here']);
+const UUID_SOURCE_REF_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**
- * Parse `@S<n>` ref-form and `@<slug>` slug-form mentions from a single
- * user message body. Returns deduped lists; refs are upper-cased to the
- * canonical `S<n>` form, slugs are lower-cased.
+ * Parse `@S<n>` / `@<uuid>` ref-form and `@<slug>` slug-form mentions from a
+ * single user message body. Returns deduped lists; `S<n>` refs are upper-cased,
+ * UUID refs are lower-cased, and slugs are lower-cased.
  */
 export function extractSourceReferences(messageText: string): {
   refs: string[];
@@ -47,6 +50,10 @@ export function extractSourceReferences(messageText: string): {
 
     if (/^s\d+$/i.test(inner)) {
       refs.add(`S${inner.slice(1)}`);
+      continue;
+    }
+    if (UUID_SOURCE_REF_PATTERN.test(inner)) {
+      refs.add(lower);
       continue;
     }
 

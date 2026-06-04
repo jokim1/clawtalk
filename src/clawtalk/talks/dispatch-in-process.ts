@@ -25,6 +25,7 @@
 import {
   type DbScopeEnvBindings,
   type RequestExecutionContext,
+  withNotifyQueueScope,
   withRequestScopedDb,
 } from '../../db.js';
 import { logger } from '../../logger.js';
@@ -62,11 +63,13 @@ export async function dispatchRunInProcess(
         ATTACHMENTS: env.ATTACHMENTS,
       },
       async () =>
-        processTalkRunMessage({
-          runId,
-          attempts: 1,
-          maxRetries: 3,
-        }),
+        withNotifyQueueScope(env, ctx, () =>
+          processTalkRunMessage({
+            runId,
+            attempts: 1,
+            maxRetries: 3,
+          }),
+        ),
     );
   } catch (err) {
     // Pre-claim failures (e.g. transient DB error in markRunRunning,

@@ -1,6 +1,6 @@
 # ClawTalk Refactor — Overview
 
-> **Status:** orientation (new readers start here) · **Last updated:** 2026-05-30
+> **Status:** orientation (new readers start here) · **Last updated:** 2026-06-02
 > One-page narrative for the ClawTalk greenfield rebuild. If you're new to this work, read this first. The detail docs (`01–12`, `SECURITY`, `eval-suite`, `GLOSSARY`) live next door.
 >
 > Precedence: when this overview disagrees with a canonical detail doc, **the detail doc wins**. See [README.md](./README.md) for the conflict-resolution order.
@@ -9,34 +9,50 @@
 
 ## 1. What this refactor is, in one paragraph
 
-ClawTalk is being **rebuilt greenfield on the existing infrastructure**. The design — workspace tenancy, the canonical Workspace → Folder → Talk + Document model, jobs as first-class scheduled runs, Forge as autonomous content improvement, no Threads — is a clean-slate redesign. The runtime — Cloudflare Workers + Hono + Durable Objects + Hyperdrive + Cloudflare Queues + Supabase Postgres with RLS — is the existing infra. The shipped schema and code (`talk_runs`/`talk_threads`/`registered_agents`/`contents` and the per-user RLS model) is **disposable**: it served as the prototype that proved the requirements, and is being replaced by a single greenfield migration that drops 37 legacy tables and creates ~50 new ones from a clean spec.
+ClawTalk is being **rebuilt greenfield on the existing infrastructure**. The design — workspace tenancy, the canonical Workspace → Folder → Talk + Document model, jobs as first-class scheduled runs, Forge as autonomous content improvement, no Threads — is a clean-slate redesign. The runtime — Cloudflare Workers + Hono + Durable Objects + Hyperdrive + Cloudflare Queues + Supabase Postgres with RLS — is the existing infra. The shipped schema and code (`talk_runs`/`talk_threads`/`registered_agents`/`contents` and the per-user RLS model) is **disposable**: it served as the prototype that proved the requirements, and is being replaced by a fresh Supabase baseline that creates the target schema from an empty database.
 
 This is not "evolve the schema." This is "the schema we have constrains every feature; rebuild it once, then build on top."
 
 ---
 
-## 2. Status snapshot (as of 2026-05-30)
+## 2. Status snapshot (as of 2026-06-02)
 
-| Status | What | Where |
-|---|---|---|
-| ✅ Merged | Spec corpus close pass (all P0 + P1 gaps closed across 14 docs) | PR [#497](https://github.com/jokim1/clawtalk/pull/497) → main `05e3a15` |
-| ✅ Merged | Talk-scoped tools refactor (removed per-agent `tool_permissions_json`) | PR [#499](https://github.com/jokim1/clawtalk/pull/499) → main `82641ed`, used migration **0037** |
-| ✅ Merged | 10 deferred design-debt items resolved + REFACTOR-OVERVIEW.md | PR [#500](https://github.com/jokim1/clawtalk/pull/500) → main `d75550c` |
-| ✅ Merged | PDF page rasterization Lane A (backend contract) | PR [#501](https://github.com/jokim1/clawtalk/pull/501) used migration **0038** |
-| ✅ Merged | §11 spec addition: `context_source_pages` + `context_sources.expected_page_count` | PR [#503](https://github.com/jokim1/clawtalk/pull/503) |
-| ✅ Merged | PDF rasterization Lane B + Lane C T9 (consume page images + client render/upload) | PRs [#504](https://github.com/jokim1/clawtalk/pull/504) + [#505](https://github.com/jokim1/clawtalk/pull/505) |
-| 🅿️ Parked | The greenfield migration — written, locally validated, held at [`docs/canonical-greenfield-migration.sql`](./canonical-greenfield-migration.sql) | PR #502 closed; lands as `0040+` in `supabase/migrations/` when src/ rewrite ready |
-| 🟢 Open PR | PDF rasterization Lane C T10 (render-pages affordance + capability surfacing) | PR [#506](https://github.com/jokim1/clawtalk/pull/506) |
-| ⏭️ Next | `agent_role_templates` seed migration (Phase 1 Step 2) | TBD |
-| ⏭️ Next | Cutover plan doc (one-page) | TBD |
-| ⏭️ Next | src/ rewrite per §05 Phases 2–12 (executor, scheduler, queue consumer, accessors, routes) | Phased |
-| ⏭️ Next | webapp/ rewrite per §05 Phases (every page touches new tables) | Phased |
-| ⏭️ Next | §14 verification test suite (24 invariants) | Phased |
-| ⏭️ Next | Phase 13 eval gate (harness contract done; scenarios + grader prompts TBD) | Phased |
+| Status            | What                                                                                                                                                                                                                                                                                                      | Where                                                                                                                                  |
+| ----------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- | --------------------------- |
+| ✅ Merged         | Spec corpus close pass (all P0 + P1 gaps closed across 14 docs)                                                                                                                                                                                                                                           | PR [#497](https://github.com/jokim1/clawtalk/pull/497) → main `05e3a15`                                                                |
+| ✅ Merged         | Talk-scoped tools refactor (removed per-agent `tool_permissions_json`)                                                                                                                                                                                                                                    | PR [#499](https://github.com/jokim1/clawtalk/pull/499) → main `82641ed`, used migration **0037**                                       |
+| ✅ Merged         | 10 deferred design-debt items resolved + REFACTOR-OVERVIEW.md                                                                                                                                                                                                                                             | PR [#500](https://github.com/jokim1/clawtalk/pull/500) → main `d75550c`                                                                |
+| ✅ Merged         | PDF page rasterization Lane A (backend contract)                                                                                                                                                                                                                                                          | PR [#501](https://github.com/jokim1/clawtalk/pull/501) used migration **0038**                                                         |
+| ✅ Merged         | §11 spec addition: `context_source_pages` + `context_sources.expected_page_count`                                                                                                                                                                                                                         | PR [#503](https://github.com/jokim1/clawtalk/pull/503)                                                                                 |
+| ✅ Merged         | PDF rasterization Lane B + Lane C T9 (consume page images + client render/upload)                                                                                                                                                                                                                         | PRs [#504](https://github.com/jokim1/clawtalk/pull/504) + [#505](https://github.com/jokim1/clawtalk/pull/505)                          |
+| ✅ Merged         | PDF rasterization Lane C T10 (render-pages affordance + capability surfacing)                                                                                                                                                                                                                             | PR [#506](https://github.com/jokim1/clawtalk/pull/506) → main `696302d`                                                                |
+| ✅ Merged         | Greenfield schema parked as docs-side draft                                                                                                                                                                                                                                                               | PR #507 → main `b520932`; historical pointer kept at [`docs/canonical-greenfield-migration.sql`](./canonical-greenfield-migration.sql) |
+| ✅ Cutover branch | The active Supabase baseline                                                                                                                                                                                                                                                                              | `supabase/migrations/0001_clawtalk_greenfield.sql`; old migrations archived under `docs/archive/legacy-supabase-migrations/`           |
+| ✅ Cutover branch | `agent_role_templates` seed (Phase 1 Step 2)                                                                                                                                                                                                                                                              | Five user roles copied from `03-agents.md`; Forge system prompts remain placeholders until Joseph authors final copy                   |
+| ✅ Cutover branch | Cutover foundation: fresh baseline + seed + first-signin workspace bootstrap + §11 verification tests                                                                                                                                                                                                     | Committed on `codex/clawtalk-greenfield-cutover`                                                                                       |
+| ✅ Cutover branch | Greenfield workspace/talk route modules: core workspace APIs, talk detail/snapshot APIs, and chat enqueue APIs                                                                                                                                                                                            | Commits `9f72e76`, `ff9b6d8`, `cac02ff`                                                                                                |
+| ✅ Cutover branch | Greenfield execution ports: queue consumer, executor, and scheduler sweeps target `runs` / `messages` / `talk_agent_snapshots`                                                                                                                                                                            | Commits `55c3d7e`, `3863628`, `c53df5a`                                                                                                |
+| ✅ Cutover branch | Greenfield run-state hardening: atomic outbox transitions, notify flush ownership, ordered/parallel sequencing, scheduler sweeps, DLQ retry behavior                                                                                                                                                      | Commit `2363ee1` (`fix: harden greenfield run state machine`)                                                                          |
+| ✅ Cutover branch | Greenfield API mount extraction: `/me`, workspace/folder/talk CRUD, snapshot/detail/content/thread compatibility, and chat mounts live in `greenfield-api.ts`                                                                                                                                             | API shell extraction slice                                                                                                             |
+| ✅ Cutover branch | Greenfield talk roster mutation: `PUT /api/v1/talks/:talkId/agents` now replaces `talk_agents` against workspace agents                                                                                                                                                                                   | API collision cleanup slice                                                                                                            |
+| ✅ Cutover branch | Greenfield talk policy facade: `GET/PUT /api/v1/talks/:talkId/policy` now derives from `talk_agents`, preserves the old no-op `PUT` leniency, reports the 5-agent roster cap, and skips a legacy policy mirror                                                                                            | API collision cleanup slice                                                                                                            |
+| ✅ Cutover branch | Greenfield talk tools route: `GET/PATCH /api/v1/talks/:talkId/tools` now materializes light-family toggles into canonical `talk_tools.tool_id` rows, freezes active families plus resolved effective tool permissions into run prompt snapshots, and emits `talk_tools_changed`                           | API collision cleanup slice                                                                                                            |
+| ✅ Cutover branch | Greenfield document edit compatibility: `/api/v1/contents/:contentId/edits/:editId/(accept                                                                                                                                                                                                                | reject)`and`/runs/:runId/(accept                                                                                                       | reject)`now materialize`document_edits`into`doc_blocks`, preserve the legacy response envelope, and keep the implicit-accept PATCH path | API collision cleanup slice |
+| ✅ Cutover branch | Greenfield context compatibility: `/api/v1/talks/:talkId/context`, rules, URL/text/file sources, raw file content, URL retry, and PDF page-image upload now write `context_sources` / `context_source_pages`; `/state` is an empty compatibility surface; legacy `talk_context_*` routes are removed      | API collision cleanup slice                                                                                                            |
+| ✅ Cutover branch | Greenfield jobs compatibility: `/api/v1/talks/:talkId/jobs` CRUD/lifecycle and manual run-now now write final `jobs` / `runs` / `run_prompt_snapshots`; delete archives; queue consumer executes manual job runs from prompt snapshots without trigger messages                                           | API collision cleanup slice                                                                                                            |
+| ✅ Cutover branch | Greenfield scheduler Path A: due `jobs` now claim into final `runs` / `run_prompt_snapshots`, freeze source-scoped tool manifests, block revoked dependencies, handle catch-up, dispatch each committed run, and bound hot due-row scans                                                                  | Scheduler jobs slice                                                                                                                   |
+| ✅ Cutover branch | Greenfield connector/tool compatibility: legacy workspace channel/data connector toggles, Talk Drive resources, Google tool credentials, and active-tool toggles now write final `connectors` / `connector_secrets` / `connector_bindings` / `talk_tools`; retired PostHog/Telegram surfaces are rejected | API collision cleanup slice                                                                                                            |
+| ✅ Cutover branch | Legacy context/runtime retirement: final-schema provider-replay privacy, immutable snapshot provider/model identity, source UUID refs, fail-closed retired executor, greenfield history replay scoping, and the disabled non-target roster-agent job-snapshot fix                                          | Commit `951ab34`                                                                                                                       |
+| ✅ Cutover branch | Disabled/retired models fail closed at chat enqueue (`llm_provider_models.enabled` filter → null provider → `agent_model_not_found`), matching the job path                                                                                                                                               | Commit `6c40fb7`                                                                                                                       |
+| ✅ Cutover branch | Webapp workspace switcher on the greenfield per-request model: no persisted active workspace; `x-workspace-id` marker; clean-reload switch discarding in-flight old-workspace requests; stale-marker self-heal                                                                                            | Commit `5bb6712`                                                                                                                       |
+| 🔄 Active next    | Frontend rewrite (Phase 5): human-verify the shell, then decompose `TalkDetailPage.tsx` one isolated extraction at a time                                                                                                                                                                                  | See [IMPLEMENTATION-HANDOFF.md](./IMPLEMENTATION-HANDOFF.md)                                                                            |
+| ⏭️ Next           | webapp/ rewrite per §05 Phases (every page touches new tables)                                                                                                                                                                                                                                            | Phased                                                                                                                                 |
+| ⏭️ Next           | §14 verification test suite (27 invariants)                                                                                                                                                                                                                                                               | Phased                                                                                                                                 |
+| ⏭️ Next           | Phase 13 eval gate (harness contract done; scenarios + grader prompts TBD)                                                                                                                                                                                                                                | Phased                                                                                                                                 |
 
-**Why the migration is parked, not landed.** The migration SQL is structurally complete and locally validated against `supabase db reset`. But shipping it on `main` without the matching src/ rewrite breaks every accessor + route + test — 38/38 accessor tests + 21/30 google-drive tests fail because they target the dropped legacy tables (CI run on PR #502 confirmed this exactly as §14 predicted). Per Joseph's docs-only posture: the SQL lives at [`docs/canonical-greenfield-migration.sql`](./canonical-greenfield-migration.sql) as the canonical reference; the executable copy lands in `supabase/migrations/` only when the src/ rewrite catches up. See §14 (Cutover risk) for strategy options.
+**Why the schema was parked on main.** The schema reference was structurally complete and locally validated, but it was authored as a destructive drop/create script for the old migration stream. Shipping it on `main` without the matching src/ rewrite breaks every accessor + route + test — 38/38 accessor tests + 21/30 google-drive tests fail because they target the dropped legacy tables (CI run on PR #502 confirmed this exactly as §14 predicted). Per Joseph's docs-only posture, PR #507 parked that draft at [`docs/canonical-greenfield-migration.sql`](./canonical-greenfield-migration.sql). The cutover branch has now converted the schema into the pure active baseline at `supabase/migrations/0001_clawtalk_greenfield.sql`, archived the old active migration stream, and keeps the docs SQL as a non-executable historical pointer so there is only one runnable reset baseline.
 
-For the full gap-by-gap close history, see [SPEC-READINESS.md](./SPEC-READINESS.md). For the canonical decisions, see [DECISIONS.md](./DECISIONS.md). For the phased build sequence, see [05-build-plan.md](./05-build-plan.md).
+For the current implementation audit, see [IMPLEMENTATION-READINESS.md](./IMPLEMENTATION-READINESS.md). For the full gap-by-gap close history, see [SPEC-READINESS.md](./SPEC-READINESS.md). For the canonical decisions, see [DECISIONS.md](./DECISIONS.md). For the phased build sequence, see [05-build-plan.md](./05-build-plan.md).
 
 ---
 
@@ -58,14 +74,16 @@ The shipped schema is the **proven prototype**, not the target. Specifically:
 ## 4. What changes vs what stays
 
 ### Stays
+
 - **Cloudflare platform.** Workers, Hono router, Durable Objects (UserEventHub), Hyperdrive (Postgres connection pool), Cloudflare Queues (TALK_RUN_QUEUE), Wrangler dev/deploy, R2 (attachments). [DECISIONS D1.](./DECISIONS.md)
-- **Supabase Postgres.** Same project, same instance, same auth bridge (`auth.users` → `public.users` trigger).
+- **Supabase Postgres.** Same database product/runtime and auth bridge pattern (`auth.users` → `public.users` trigger). The implementation can reset/recreate the project/database because old data is disposable.
 - **LLM provider layer.** `llm_providers`, `llm_provider_models`, `llm_provider_secrets`, `workspace_provider_secrets` (these are LLM keys, NOT OAuth tokens), plus the live model discovery path (#484) that auto-inserts new Anthropic / NVIDIA models.
 - **Event outbox / WebSocket Hibernation streaming.** `event_outbox` → `UserEventHub` DO. All streaming rides this.
 - **Auth.** Google OAuth + email magic-link (planned) + device-code (CLI). HttpOnly cookies (`eb_at` / `eb_rt` / `eb_csrf`) + double-submit CSRF. See [SECURITY.md](./SECURITY.md).
 
 ### Changes
-- **Schema.** 37 legacy tables dropped in one CASCADE; 50 new tables created from the spec. The greenfield migration is [`supabase/migrations/0038_clawtalk_greenfield.sql`](../supabase/migrations/0038_clawtalk_greenfield.sql).
+
+- **Schema.** Fresh Supabase baseline from an empty DB. The active migration path starts at `supabase/migrations/0001_clawtalk_greenfield.sql`; old `0001`-`0038` migrations are removed or archived from the active path. [`docs/canonical-greenfield-migration.sql`](./canonical-greenfield-migration.sql) is now only a guarded historical pointer; the active baseline is the single executable DDL source and creates final tables directly rather than running a legacy `DROP`/`ALTER` cleanup sequence.
 - **Tenancy.** `workspaces` + `workspace_members` from day one; every workspace-owned table carries `workspace_id`; composite FKs prevent cross-workspace references.
 - **Runs model.** New `runs` table with `snapshot_group_id` (per-run frozen roster), `agent_snapshot_id` (the acting agent), `trigger` (`user` / `scheduler` / `manual`), `scheduled_for` (slot identity for jobs), `prompt_snapshot_id` (immutable prompt at fire time).
 - **Documents model.** First-class `documents` + `doc_tabs` + `doc_blocks` + `document_edits`. Replaces the `contents` / `content_edits` / `content_proposals` stack. Pending edits go through one unified accept path with CAS via `base_block_version` / `base_list_version`.
@@ -74,7 +92,7 @@ The shipped schema is the **proven prototype**, not the target. Specifically:
 - **Home.** Inbox + recommendations + news as 14 `home_*` tables (§7), with structured ranking_profiles, algorithm versions + per-workspace assignments for percentage rollouts, news scoring formula reading topic.source_domains / topic.freshness_horizon_days.
 - **Agents.** `agents` (workspace-scoped) + `agent_role_templates` (DB-managed role catalog with `version`) + `talk_agent_snapshots` (per-run frozen roster) + `run_prompt_snapshots` (per-run prompt provenance) + `agent_feedback_events`. Includes `is_system=true` agents for Forge rewriter/critic.
 - **Tools + Connectors.** `talk_tools(workspace_id, talk_id, tool_id, enabled)` per-Talk toggles. `connectors` workspace-global + `connector_bindings` per-Talk binding. `connector_secrets` (encrypted OAuth tokens, separate from LLM provider keys).
-- **RLS.** Workspace-membership predicate via `is_workspace_member` + `is_workspace_admin` security-definer helpers. Member-write canonical; 8 admin-write exceptions (workspace_members, connectors family, home algorithms/ranking). Service-role bypass via Postgres role with `bypassrls` privilege.
+- **RLS.** Workspace-membership predicate via `is_workspace_member` + `is_workspace_admin` security-definer helpers. Lightweight workspace configuration tables use member-write policies; server-authored workflow tables (`messages`, context sources/pages, document content tables, `document_edits`, `jobs`, runtime snapshots, audit rows) are member-read only with direct authenticated mutation revoked, so chat validation, source-ingestion state, document provenance/CAS, and job execution principals are only changed through trusted app paths. Opaque provider replay blobs are stricter: `message_provider_replay` has no authenticated read/write surface, is capped before persistence, and is only read by trusted execution. Admin-write exceptions cover workspace/admin-owned configuration. Service-role bypass via Postgres role with `bypassrls` privilege.
 
 ---
 
@@ -172,7 +190,7 @@ The shipped schema is the **proven prototype**, not the target. Specifically:
 │ - LLM call           │         │   (single-txn)           │
 │ - outbox writes      │         │ - Path B: stuck-sweep    │
 └──────────┬───────────┘         │   (queued 5min,          │
-           │                     │   running 1h)            │
+           │                     │   running fail 1h)       │
            │ TALK_RUN_QUEUE      └──────────┬───────────────┘
            ▼                                │ dispatchRun()
 ┌──────────────────────────┐                ▼
@@ -189,9 +207,10 @@ The shipped schema is the **proven prototype**, not the target. Specifically:
 ```
 
 **Key runtime contracts:**
-- **Snapshot freeze per run.** When a run is created, the executor (or scheduler) inserts a `talk_agent_snapshots` row per agent in the live `talk_agents` roster, sharing a fresh `snapshot_group_id`. The run carries that group id + the acting agent's snapshot id. Editing an agent or the roster mid-flight doesn't rewrite history — the snapshot is immutable.
+
+- **Snapshot freeze per run.** When a run is created, the executor (or scheduler) inserts a `talk_agent_snapshots` row per agent in the live `talk_agents` roster, sharing a fresh `snapshot_group_id`. The run carries that group id + the acting agent's snapshot id. Editing an agent, model, provider, or roster mid-flight doesn't rewrite history — runtime execution and replay identity read the immutable snapshot provider/model.
 - **Atomic queue consumer claim.** `TALK_RUN_QUEUE` is at-least-once and can deliver concurrently. The first consumer to flip `status='queued'` → `'running'` wins; others get an empty `RETURNING` and ack-and-drop.
-- **Single-txn job claim.** The scheduler's Path A is one transaction: lock the due job (`FOR UPDATE SKIP LOCKED`), fire-time dep check, roster freeze, INSERT `runs` + `run_prompt_snapshots`, advance `next_due_at`, clear `claimed_at`, COMMIT. Queue dispatch happens outside the txn — if dispatch fails the stuck-queued sweep catches the orphan.
+- **Single-txn job claim.** The scheduler's Path A pages due `jobs` under a bounded scan budget with split unclaimed/retry-ready hot-path indexes and short `claimed_at` backoff for non-advancing busy rows and unexpected claim failures, then each claimed job runs one transaction: lock the due job (`FOR UPDATE SKIP LOCKED`), enforce job/Talk single-flight without waiting on locked Talk rows, run fire-time dep checks, freeze the roster, INSERT `runs` + `run_prompt_snapshots` with source-scoped effective tools, advance `next_due_at`, clear `claimed_at`, COMMIT. Queue dispatch happens immediately after each committed claim; the stuck-queued sweep re-dispatches committed rows if delivery was lost.
 - **Slot identity.** `runs.scheduled_for` + partial unique `(job_id, scheduled_for)` makes "never fire the same job slot twice" a Postgres invariant.
 - **Service-role bypass.** Scheduler / queue consumer / outbox writer / Forge executor / news ingest connect without `withUserContext`'s `set local role authenticated` swap, so RLS is bypassed by Postgres role privilege. User-input paths MUST call `withUserContext(authUserId)`.
 
@@ -199,15 +218,15 @@ The shipped schema is the **proven prototype**, not the target. Specifically:
 
 ## 7. Cross-cutting decisions (D0–D7, one sentence each)
 
-| ID | Decision |
-|---|---|
-| **D0** | Greenfield rebuild, not migration. Drop the legacy schema; treat local data as disposable. |
-| **D1** | Cloudflare Workers + Hono + DO + Hyperdrive + Queues + Supabase Postgres. No Redis. No BullMQ. No Next.js. |
-| **D2** | Clean data model on Workspace → Folder → Talk + Document hierarchy. No Threads. Multi-workspace from day one. |
-| **D3** | Forge rewriter / critic are built-in system agents (`is_system=true` rows in `agents`, hidden from `GET /agents` and roster). |
-| **D4** | No Threads. Anywhere. The new model never had them; the old model's threads are dropped wholesale. |
-| **D5** | Multi-workspace is foundational. `workspaces` + `workspace_members` from Phase 1 of the rebuild. |
-| **D6** | Jobs designed clean per [`12-jobs.md`](./12-jobs.md): scheduled single-agent prompts firing normal runs; slot identity; archive not delete; service-role auth. |
+| ID     | Decision                                                                                                                                                                                                                                                                                                |
+| ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **D0** | Greenfield rebuild, not migration. Start from a fresh Supabase baseline; treat old schema/data as disposable.                                                                                                                                                                                           |
+| **D1** | Cloudflare Workers + Hono + DO + Hyperdrive + Queues + Supabase Postgres. No Redis. No BullMQ. No Next.js.                                                                                                                                                                                              |
+| **D2** | Clean data model on Workspace → Folder → Talk + Document hierarchy. No Threads. Multi-workspace from day one.                                                                                                                                                                                           |
+| **D3** | Forge rewriter / critic are built-in system agents (`is_system=true` rows in `agents`, hidden from `GET /agents` and roster).                                                                                                                                                                           |
+| **D4** | No Threads. Anywhere. The new model never had them; the old model's threads are dropped wholesale.                                                                                                                                                                                                      |
+| **D5** | Multi-workspace is foundational. `workspaces` + `workspace_members` from Phase 1 of the rebuild.                                                                                                                                                                                                        |
+| **D6** | Jobs designed clean per [`12-jobs.md`](./12-jobs.md): scheduled single-agent prompts firing normal runs; slot identity; archive not delete; service-role auth.                                                                                                                                          |
 | **D7** | Schema pressure-test resolutions: composite FKs for tenant integrity, `auth.uid()` RLS identity (no `app.*` GUC), `agent_role_templates` as a DB table, `llm_models` as a single catalog seeded from `llm_provider_models`, Forge SSR per-workspace, secret stores split (LLM keys vs connector OAuth). |
 
 Full decision text + follow-ups: [DECISIONS.md](./DECISIONS.md).
@@ -216,21 +235,23 @@ Full decision text + follow-ups: [DECISIONS.md](./DECISIONS.md).
 
 ## 8. The schema in 30 seconds
 
-- **Drop list:** 37 legacy tables (every `talk_*`, `registered_agents`, `contents` / `content_*`, NanoClaw user/oauth tables, web_search providers, `llm_attempts`). One `DROP TABLE … CASCADE` per §11 §11.1.
-- **Kept list:** 12 tables (`users`, `event_outbox`, `idempotency_cache`, `settings_kv`, `provider_oauth_states`, plus the `llm_*` / `workspace_provider_*` stack). `users` gets `display_name → name` rename + drops the NanoClaw-era role / is_active / preferred_web_search_provider_id columns. `llm_provider_models` gets `capabilities_json` + a unique index on `model_id` so the new `llm_models` VIEW can FK against it.
-- **New:** 50 tables across §1 identity → §10 audit. 4 deferrable back-edge FKs for true cycles (`messages ↔ runs`, `improvement_runs ↔ document_versions`). 7 trigger functions (universal `tg_touch_updated_at`, 4 business triggers, 2 RLS helpers). RLS enabled on every workspace-owned table.
+- **Dispose/recreate list:** every `talk_*`, `registered_agents`, `contents` / `content_*`, NanoClaw user/oauth rows, old web-search rows, and `llm_attempts` are disposable per D0. The web-search table contract is recreated in the fresh baseline because mounted Settings routes and the `web_search` runtime tool still use it.
+- **Migration policy:** the cutover branch intentionally edits the fresh `0001_clawtalk_greenfield.sql` baseline and requires a Supabase reset/reapply from an empty database. Do not add forward compatibility migrations for legacy data unless D0 changes.
+- **Kept contract list:** 15 runtime tables (`users`, `oauth_state`, `event_outbox`, `idempotency_cache`, `settings_kv`, `provider_oauth_states`, `web_search_providers`, `web_search_provider_secrets`, plus the `llm_*` / `workspace_provider_*` stack). `users` gets `display_name → name` rename and keeps `preferred_web_search_provider_id` because the mounted Web Search settings and `web_search` runtime tool still use the per-user provider picker. `oauth_state` is recreated because the current Google/Slack popup flows need provider-scoped state through the callback. `llm_provider_models` gets `capabilities_json` + a unique index on `model_id` so the new `llm_models` VIEW can FK against it.
+- **New:** 50 tables across §1 identity → §10 audit. 4 deferrable back-edge FKs for true cycles (`messages ↔ runs`, `improvement_runs ↔ document_versions`). Trigger/helper functions cover `updated_at`, document CAS/last-tab guards, job roster/identity invariants, and RLS membership/job-edit predicates. RLS enabled on every workspace-owned table.
 - **Detail:** [11-data-model.md](./11-data-model.md) is the canonical schema source.
 
 ---
 
 ## 9. The behavior in 30 seconds
 
-- **A user sends a message in a Talk.** `/chat` writes a `messages` row (`author_kind='user'`), inserts one `runs` row per agent in the live roster (sharing a fresh `snapshot_group_id`), inserts `talk_agent_snapshots` rows for the freeze, enqueues each run onto `TALK_RUN_QUEUE`. The queue consumer atomically flips `status='queued'` → `'running'`, the executor reads `run_prompt_snapshots` (or assembles fresh) + the snapshot's frozen fields + `talk_tools` / connectors authorization + the conversation context, calls the LLM, writes the agent message + advances run state, and emits outbox events that the per-user `UserEventHub` DO streams to the browser.
-- **A scheduled Job fires.** The 1-minute cron tick reads `jobs WHERE status='active' AND next_due_at <= now()` `FOR UPDATE SKIP LOCKED`. Per claimed job: single-flight check, fire-time dep check (agent in roster + model enabled + primary doc if `emit_document_append` + tools enabled + connector authorized), roster freeze, INSERT `runs` (`trigger='scheduler'`) + `run_prompt_snapshots` (prompt frozen at fire time), advance `next_due_at`, clear `claimed_at`, COMMIT. Dispatch outside the txn. Any dep failure flips `status='blocked'` + writes a `home_inbox_items.type='job_blocked'` row in the same txn. On run completion, the queue consumer emits `job_output_ready` keyed by `ref_id = run.id` (at-least-once dedup via partial unique).
+- **A user sends a message in a Talk.** `/chat` writes a `messages` row (`author_kind='user'`), freezes the live roster into `talk_agent_snapshots` rows sharing a fresh `snapshot_group_id`, inserts one `runs` row per selected agent, inserts matching `run_prompt_snapshots`, and enqueues each run onto `TALK_RUN_QUEUE`. The queue consumer atomically flips `status='queued'` → `'running'`, the executor reads `run_prompt_snapshots` + the snapshot's frozen fields + `talk_tools` / connectors authorization + the conversation context, calls the LLM, writes the agent message + advances run state, and emits outbox events that the per-user `UserEventHub` DO streams to the browser.
+- **A scheduled Job fires.** The 1-minute cron tick pages due `jobs WHERE status='active' AND next_due_at <= now()` rows, with a 10x scan budget, split unclaimed/retry-ready indexes, and short busy/failure backoff so poison rows, busy Talks, lock races, and hot prefixes cannot consume an unbounded tick or starve later due work forever. Per claimed job: job/Talk single-flight checks, fire-time dep check (agent in roster + model enabled + primary doc if `emit_document_append` + tools enabled + connector authorized), roster freeze, INSERT `runs` (`trigger='scheduler'`) + `run_prompt_snapshots` (prompt and source-scoped effective tool manifest frozen at fire time), advance `next_due_at`, clear `claimed_at`, COMMIT. Dispatch happens immediately after each committed claim. Any dep failure flips `status='blocked'` + writes a `home_inbox_items.type='job_blocked'` row in the same txn. On run completion, the queue consumer emits `job_output_ready` keyed by `ref_id = run.id` (at-least-once dedup via partial unique).
 - **A user runs Forge.** "Improve this doc" projects an `improvement_runs.objective_json` from the workspace's default `forge_audiences` row (G-09.P0.1 RESOLVED — per [`09` §15 Q1](./09-autonomous-content-improvement-prd.md)). The improvement-run executor seeds ~20% of personas as held-out, runs the beam search over `document_versions` (per iteration: mutate, score against in-pool personas via SSR MCP, score against held-out, pick winners). On completion, the winning version lands as a `document_edits` row with `source='forge'`, reviewed through the same accept path the agent edits use.
 - **Home surfaces it.** The inbox carries `forge_run_needs_review` items; recommendations include `forge-suggestion` candidates; news matches feed via `home_news_topics` (workspace-scoped, privacy-structural — only `summary` + keywords/entities/source_domains) against the shared `home_news_items` pool.
 
 For per-doc detail:
+
 - Talks + messages + runs: [11 §3](./11-data-model.md) + [06 §3](./06-agent-system-design.md)
 - Agents + prompt assembly: [06](./06-agent-system-design.md) + [03](./03-agents.md)
 - Jobs: [12](./12-jobs.md) + [11 §8](./11-data-model.md)
@@ -246,23 +267,23 @@ For per-doc detail:
 
 Detail in [05-build-plan.md](./05-build-plan.md). Summary table:
 
-| Phase | What | Status |
-|---|---|---|
-| **0** | Project setup — commit to Workers/Hono/DO/Hyperdrive/Queues stack | ✅ existing infra |
-| **1** | Single greenfield migration (`0038_clawtalk_greenfield.sql`) + `agent_role_templates` seed + first-signin workspace bootstrap | 🟢 migration in PR [#502](https://github.com/jokim1/clawtalk/pull/502); seed pending |
-| **2** | Workspace switcher + auth | ⏭️ |
-| **3** | Folders + Talks CRUD + roster | ⏭️ |
-| **4** | Chat → executor → queue consumer → outbox → DO streaming end-to-end | ⏭️ huge |
-| **5** | Agents page + role templates + prompt assembly | ⏭️ |
-| **6** | Per-Talk tool toggles + workspace-global connectors | ⏭️ |
-| **7** | Documents + tabs + blocks + document_edits accept path | ⏭️ |
-| **8** | Context: URLs / files / past talks / rules / news binding | ⏭️ |
-| **9** | Jobs: scheduler.ts single-txn claim + queue-consumer atomic claim + UI + inbox emit | ⏭️ |
-| **10** | Home: inbox + recommendations + news (deterministic generators first) | ⏭️ |
-| **11** | Audit + analytics + reset/admin tools | ⏭️ |
-| **12** | Polish, perf, dark mode | ⏭️ |
-| **13** | Offline agent eval gate (launch-blocking — see [eval-suite.md](./eval-suite.md)) | ⏭️ |
-| **14** | Forge (post-MVP): improvement-run executor + SSR connector + gallery + winner-promote | ⏭️ |
+| Phase  | What                                                                                                                                          | Status                                                                                                                        |
+| ------ | --------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| **0**  | Project setup — commit to Workers/Hono/DO/Hyperdrive/Queues stack                                                                             | ✅ existing infra                                                                                                             |
+| **1**  | Fresh Supabase baseline (`supabase/migrations/0001_clawtalk_greenfield.sql`) + `agent_role_templates` seed + first-signin workspace bootstrap | ✅ committed on `codex/clawtalk-greenfield-cutover`                                                                           |
+| **2**  | Workspace switcher + auth                                                                                                                     | ✅ greenfield `/me`, workspace list, and switch routes mounted                                                                |
+| **3**  | Folders + Talks CRUD + roster                                                                                                                 | ✅ folder/talk CRUD + roster read/write routes mounted                                                                        |
+| **4**  | Chat → executor → queue consumer → outbox → DO streaming end-to-end                                                                           | ✅ backend runtime retirement committed (`951ab34`); disabled-model fail-closed enqueue (`6c40fb7`)                            |
+| **5**  | Agents page + role templates + prompt assembly                                                                                                | ⏭️                                                                                                                            |
+| **6**  | Per-Talk tool toggles + workspace-global connectors                                                                                           | ⏭️                                                                                                                            |
+| **7**  | Documents + tabs + blocks + document_edits accept path                                                                                        | 🔄 compatibility accept/reject path committed; full docs UI next                                                              |
+| **8**  | Context: URLs / files / past talks / rules / news binding                                                                                     | 🔄 compatibility URL/text/file/rules paths committed; connector/resources + final supporting-doc/past-talk/news surfaces next |
+| **9**  | Jobs: scheduler.ts single-txn claim + queue-consumer atomic claim + UI + inbox emit                                                           | 🔄 CRUD/run-now + scheduler Path A committed; document-append output + jobs UI next                                           |
+| **10** | Home: inbox + recommendations + news (deterministic generators first)                                                                         | ⏭️                                                                                                                            |
+| **11** | Audit + analytics + reset/admin tools                                                                                                         | ⏭️                                                                                                                            |
+| **12** | Polish, perf, dark mode                                                                                                                       | ⏭️                                                                                                                            |
+| **13** | Offline agent eval gate (launch-blocking — see [eval-suite.md](./eval-suite.md))                                                              | ⏭️                                                                                                                            |
+| **14** | Forge (post-MVP): improvement-run executor + SSR connector + gallery + winner-promote                                                         | ⏭️                                                                                                                            |
 
 Each phase has explicit entry/exit criteria in §05.
 
@@ -271,6 +292,7 @@ Each phase has explicit entry/exit criteria in §05.
 ## 11. What's locked, what's open
 
 ### Locked
+
 - §11 schema (validated end-to-end via `supabase db reset --local`).
 - §12 jobs spec + scheduler/executor contract.
 - §04 API endpoints + WebSocket event list.
@@ -284,42 +306,45 @@ Each phase has explicit entry/exit criteria in §05.
 - 10 deferred design-debt items resolved (forge_audiences `is_default`, fitness shape, score scale, co-editor level, SSR freshness, etc.).
 
 ### Open
-- `agent_role_templates` seed migration (Phase 1 Step 2) — mechanical INSERT statements with prompts copied verbatim from [`03-agents.md`](./03-agents.md). Not yet written; will land as `0039_*.sql` or extend `0038`.
-- Cutover sequencing plan — 0038 destructively drops 37 tables; the moment it merges, `src/` references break. Could use a 1-page coordination plan.
-- Forge `forge_rewriter` + `forge_critic` system prompts — §06 §3.6 has placeholder "TODO: Joseph to write at impl time."
+
+- Forge `forge_rewriter` + `forge_critic` system prompts — §06 §3.6 still has implementation placeholders; Joseph writes the production prompt text before Forge runtime work ships.
+- API shell/resource decomposition — greenfield route modules and their Hono mount layer now cover `/me`, workspace/folders/talk CRUD, roster read/write, the legacy policy facade, talk tools, snapshot/detail/content/thread/document-edit/context/jobs compatibility, chat enqueue/cancel, scheduler Path A, and connector/tool compatibility. The legacy context/runtime execution surface is now retired (committed `951ab34`); the frontend Talk rewrite (Phase 5) has started with the workspace switcher landed.
 - Phase 13 eval scenario content + grader prompts — [eval-suite.md](./eval-suite.md) locks the harness contract but defers scenario content.
 - Per-page visual design for new surfaces — [02-visual-system.md](./02-visual-system.md) covers tokens but doesn't have component-level designs for Jobs UI, Forge gallery / run-detail / Audiences, home Forge surfacing, DocTabStrip.
 - ~37 P2 polish items per [SPEC-READINESS.md](./SPEC-READINESS.md). None block impl.
 
 ### Tracked design debt
-[SPEC-READINESS.md](./SPEC-READINESS.md) has every closed gap with a stable ID (G-XX.PY.Z) and resolution note. Future drift catchable by re-running the verification audit pattern: see [`feedback_spec_corpus_parallel_close_verify_pattern`](../.claude/projects/-Users-josephkim-dev-clawtalk/memory/feedback_spec_corpus_parallel_close_verify_pattern.md) for the audit shape.
+
+[SPEC-READINESS.md](./SPEC-READINESS.md) has every closed gap with a stable ID (G-XX.PY.Z) and resolution note. Future drift is catchable by re-running the same parallel verification pattern used in the 2026-05-30 spec-readiness pass.
 
 ---
 
 ## 12. Doc navigation map
 
-| Concern | Owner doc(s) |
-|---|---|
-| Product behavior + screens | [01-product-spec.md](./01-product-spec.md) |
-| Visual tokens + components | [02-visual-system.md](./02-visual-system.md) |
-| 5 default agents' content (system prompts + methodologies) | [03-agents.md](./03-agents.md) |
-| REST + WebSocket API contracts | [04-api-contracts.md](./04-api-contracts.md) |
-| Phased build sequence | [05-build-plan.md](./05-build-plan.md) |
-| Agent runtime architecture (roles, snapshots, prompt assembly, evals) | [06-agent-system-design.md](./06-agent-system-design.md) |
-| Home (Inbox + Recommendations + News + Ranking + Algorithms) | [07-homepage-system-design.md](./07-homepage-system-design.md) |
-| Information architecture + hierarchy invariants | [08-information-architecture.md](./08-information-architecture.md) |
-| Forge PRD (what/why) | [09-autonomous-content-improvement-prd.md](./09-autonomous-content-improvement-prd.md) |
-| Forge design handoff (how it looks) | [10-forge-design-handoff.md](./10-forge-design-handoff.md) |
-| **Canonical schema (every table, every constraint)** | **[11-data-model.md](./11-data-model.md)** |
-| Jobs feature (D6 redesign) | [12-jobs.md](./12-jobs.md) |
-| Decision log (D0–D7 + future) | [DECISIONS.md](./DECISIONS.md) |
-| Security model (auth + RLS + secrets + CSRF + audit) | [SECURITY.md](./SECURITY.md) |
-| Phase 13 eval harness contract | [eval-suite.md](./eval-suite.md) |
-| Term reconciliation (shipped names ↔ canonical names) | [GLOSSARY.md](./GLOSSARY.md) |
-| Doc-corpus precedence + reading order | [README.md](./README.md) |
-| Gap-closure history + tracker | [SPEC-READINESS.md](./SPEC-READINESS.md) |
-| Durable engineering knowledge | [engineering-notes.md](./engineering-notes.md) |
-| Retired ClawRocket-era docs (do not implement from these) | [archive/](./archive/) |
+| Concern                                                               | Owner doc(s)                                                                           |
+| --------------------------------------------------------------------- | -------------------------------------------------------------------------------------- |
+| Product behavior + screens                                            | [01-product-spec.md](./01-product-spec.md)                                             |
+| Visual tokens + components                                            | [02-visual-system.md](./02-visual-system.md)                                           |
+| 5 default agents' content (system prompts + methodologies)            | [03-agents.md](./03-agents.md)                                                         |
+| REST + WebSocket API contracts                                        | [04-api-contracts.md](./04-api-contracts.md)                                           |
+| Phased build sequence                                                 | [05-build-plan.md](./05-build-plan.md)                                                 |
+| Agent runtime architecture (roles, snapshots, prompt assembly, evals) | [06-agent-system-design.md](./06-agent-system-design.md)                               |
+| Home (Inbox + Recommendations + News + Ranking + Algorithms)          | [07-homepage-system-design.md](./07-homepage-system-design.md)                         |
+| Information architecture + hierarchy invariants                       | [08-information-architecture.md](./08-information-architecture.md)                     |
+| Forge PRD (what/why)                                                  | [09-autonomous-content-improvement-prd.md](./09-autonomous-content-improvement-prd.md) |
+| Forge design handoff (how it looks)                                   | [10-forge-design-handoff.md](./10-forge-design-handoff.md)                             |
+| **Canonical schema (every table, every constraint)**                  | **[11-data-model.md](./11-data-model.md)**                                             |
+| Jobs feature (D6 redesign)                                            | [12-jobs.md](./12-jobs.md)                                                             |
+| Decision log (D0–D7 + future)                                         | [DECISIONS.md](./DECISIONS.md)                                                         |
+| Security model (auth + RLS + secrets + CSRF + audit)                  | [SECURITY.md](./SECURITY.md)                                                           |
+| Phase 13 eval harness contract                                        | [eval-suite.md](./eval-suite.md)                                                       |
+| Term reconciliation (shipped names ↔ canonical names)                 | [GLOSSARY.md](./GLOSSARY.md)                                                           |
+| Current implementation audit + cutover recommendation                 | [IMPLEMENTATION-READINESS.md](./IMPLEMENTATION-READINESS.md)                           |
+| Live implementation tracker                                           | [roadmap.md](./roadmap.md)                                                             |
+| Doc-corpus precedence + reading order                                 | [README.md](./README.md)                                                               |
+| Gap-closure history + tracker                                         | [SPEC-READINESS.md](./SPEC-READINESS.md)                                               |
+| Durable engineering knowledge                                         | [engineering-notes.md](./engineering-notes.md)                                         |
+| Retired ClawRocket-era docs (do not implement from these)             | [archive/](./archive/)                                                                 |
 
 **Precedence on conflict:** [DECISIONS.md](./DECISIONS.md) wins over anything else. Then the schema (§11) wins on column-level questions. Then the IA (§08) wins on hierarchy questions. Then the canonical detail doc for that concern.
 
@@ -329,41 +354,42 @@ Each phase has explicit entry/exit criteria in §05.
 
 If you're about to write code, here's where to start by task type:
 
-| Task | Start here |
-|---|---|
-| Writing the `agent_role_templates` seed migration | [03-agents.md](./03-agents.md) §2 (the 5 templates) + [11 §4](./11-data-model.md) (column shape) + the existing 0038 migration as the file format reference |
-| Rewriting `src/clawtalk/talks/scheduler.ts` for v8 jobs | [12 §5](./12-jobs.md) (Path A single-txn claim + Path B sweep) + [11 §8](./11-data-model.md) (jobs table) |
-| Rewriting `src/clawtalk/talks/queue-consumer.ts` | [12 §5](./12-jobs.md) (atomic claim) + [11 §3](./11-data-model.md) (runs CHECK invariant + partial uniques) |
-| Rewriting the executor | [06 §7](./06-agent-system-design.md) (prompt assembly) + [11 §3](./11-data-model.md) (runs/messages/snapshots) + [12 §3](./12-jobs.md) (job output emit) |
-| Writing accessors for the new schema | [11 §12](./11-data-model.md) (RLS policy worked example + admin exceptions) — every accessor wraps `withUserContext` |
-| Building the Jobs UI | [04 §18](./04-api-contracts.md) (Jobs endpoints) + [12 §6](./12-jobs.md) (lifecycle & surfacing) |
-| Building Forge surfaces | [04 §17](./04-api-contracts.md) (Forge endpoints) + [10](./10-forge-design-handoff.md) (visual handoff) + [09 §13](./09-autonomous-content-improvement-prd.md) (phased plan) |
-| Building Home (Inbox / Recommendations / News) | [07](./07-homepage-system-design.md) is huge; start with §6 (Inbox), §7 (Recommendations), §8 (News) |
-| Implementing RLS policies (greenfield migration applies the canonical patterns) | [11 §12.1](./11-data-model.md) (canonical pattern) + [11 §12.2](./11-data-model.md) (admin exceptions) |
-| Writing §14 verification tests | [11 §14](./11-data-model.md) (24 invariants with expected-failure cases) |
-| Writing eval-gate scenarios | [eval-suite.md](./eval-suite.md) (harness contract) + [03-agents.md](./03-agents.md) (role rubric) + [06 §14.6](./06-agent-system-design.md) (`AgentAuditResult`) |
-| Frontend onboarding | [01](./01-product-spec.md) + the prototype (`ClawTalk Salon.html`) + [02](./02-visual-system.md) |
-| Auth / RLS / secret-store work | [SECURITY.md](./SECURITY.md) + [11 §12](./11-data-model.md) + `src/clawtalk/identity/` + `src/clawtalk/llm/provider-secret-store.ts` |
+| Task                                                                           | Start here                                                                                                                                                                   |
+| ------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Writing the `agent_role_templates` seed                                        | [03-agents.md](./03-agents.md) §2 (the 5 templates) + [11 §4](./11-data-model.md) (column shape) + the baseline seed path                                                    |
+| Rewriting `src/clawtalk/talks/scheduler.ts` for v8 jobs                        | [12 §5](./12-jobs.md) (Path A single-txn claim + Path B sweep) + [11 §8](./11-data-model.md) (jobs table)                                                                    |
+| Rewriting `src/clawtalk/talks/queue-consumer.ts`                               | [12 §5](./12-jobs.md) (atomic claim) + [11 §3](./11-data-model.md) (runs CHECK invariant + partial uniques)                                                                  |
+| Rewriting the executor                                                         | [06 §7](./06-agent-system-design.md) (prompt assembly) + [11 §3](./11-data-model.md) (runs/messages/snapshots) + [12 §3](./12-jobs.md) (job output emit)                     |
+| Writing accessors for the new schema                                           | [11 §12](./11-data-model.md) (RLS policy worked example + admin exceptions) — every accessor wraps `withUserContext`                                                         |
+| Building the Jobs UI                                                           | [04 §18](./04-api-contracts.md) (Jobs endpoints) + [12 §6](./12-jobs.md) (lifecycle & surfacing)                                                                             |
+| Building Forge surfaces                                                        | [04 §17](./04-api-contracts.md) (Forge endpoints) + [10](./10-forge-design-handoff.md) (visual handoff) + [09 §13](./09-autonomous-content-improvement-prd.md) (phased plan) |
+| Building Home (Inbox / Recommendations / News)                                 | [07](./07-homepage-system-design.md) is huge; start with §6 (Inbox), §7 (Recommendations), §8 (News)                                                                         |
+| Implementing RLS policies (greenfield baseline applies the canonical patterns) | [11 §12.1](./11-data-model.md) (canonical pattern) + [11 §12.2](./11-data-model.md) (admin exceptions)                                                                       |
+| Writing §14 verification tests                                                 | [11 §14](./11-data-model.md) (24 invariants with expected-failure cases)                                                                                                     |
+| Writing eval-gate scenarios                                                    | [eval-suite.md](./eval-suite.md) (harness contract) + [03-agents.md](./03-agents.md) (role rubric) + [06 §14.6](./06-agent-system-design.md) (`AgentAuditResult`)            |
+| Frontend onboarding                                                            | [01](./01-product-spec.md) + the prototype (`ClawTalk Salon.html`) + [02](./02-visual-system.md)                                                                             |
+| Auth / RLS / secret-store work                                                 | [SECURITY.md](./SECURITY.md) + [11 §12](./11-data-model.md) + `src/clawtalk/identity/` + `src/clawtalk/llm/provider-secret-store.ts`                                         |
 
 ---
 
-## 14. Cutover risk: the moment the migration lands
+## 14. Cutover risk: the moment the baseline lands
 
-> **Status (2026-05-30):** Confirmed empirically. PR #502 attempted to land the migration as `0039_clawtalk_greenfield.sql`. CI ran and **38/38 accessor tests + 21/30 google-drive tests failed** because they target the dropped legacy tables — exactly as this section predicted. PR #502 was closed; the migration SQL is now parked at [`docs/canonical-greenfield-migration.sql`](./canonical-greenfield-migration.sql) until the src/ rewrite is ready. The cutover-strategy choice below is the gating decision.
+> **Status (2026-05-30; implementation-note updated 2026-06-01):** Confirmed empirically twice. PR #502 attempted to land the schema as a destructive `0039_clawtalk_greenfield.sql`; CI ran and **38/38 accessor tests + 21/30 google-drive tests failed** because they target the dropped legacy tables. A fresh local audit against the current worktree reproduced the same class of failures: backend tests still query `talks.owner_id`, `users.role`, and `registered_agents` while the DB shape has moved on. PR #502 was closed; PR #507 parked the SQL draft at [`docs/canonical-greenfield-migration.sql`](./canonical-greenfield-migration.sql). The current cutover branch has promoted the schema into the active fresh baseline at `supabase/migrations/0001_clawtalk_greenfield.sql`; the docs SQL is now a guarded historical pointer, and legacy source tests are intentionally expected to stay red until the src/webapp rewrite catches up.
 
-The greenfield migration is **destructive**. The moment it lands on `main`:
+The active greenfield baseline is a **reset**, not a compatibility migration. The moment it lands on `main`:
 
-1. **All 37 legacy tables are gone** (`talk_runs`, `talk_messages`, `talk_threads`, `talk_jobs`, `registered_agents`, `contents`, `content_edits`, `content_proposals`, NanoClaw user/oauth tables, etc.).
-2. **Local data is wiped.** Per CLAUDE.md, this is by design — Joseph is the only user and the data is dogfood. Joseph re-OAuths Google / Anthropic / Forge SSR providers after the migration.
-3. **Existing `src/` code that references the dropped tables CRASHES IMMEDIATELY.** Every accessor in `src/clawtalk/db/*` that targets `talk_runs` / `talk_messages` / `registered_agents` / `contents` / `content_edits` will throw on first call. Every route in `src/clawtalk/web/routes/*` that depends on those accessors will return 500s.
-4. **The webapp breaks.** Every page that fetches from the broken routes will fall back to error states.
+1. **The old Supabase migration stream is no longer active.** The implementation branch resets/recreates the database and applies `0001_clawtalk_greenfield.sql` from zero.
+2. **All legacy product tables are absent from the final schema** (`talk_runs`, `talk_messages`, `talk_threads`, `talk_jobs`, `registered_agents`, `contents`, `content_edits`, `content_proposals`, NanoClaw user/oauth tables, etc.).
+3. **Local/staging data is wiped.** Per CLAUDE.md and D0, this is by design — Joseph is the only user and the data is dogfood. Joseph re-OAuths Google / Anthropic / Forge SSR providers after the reset.
+4. **Existing `src/` code that references the legacy tables CRASHES IMMEDIATELY.** Every accessor in `src/clawtalk/db/*` that targets `talk_runs` / `talk_messages` / `registered_agents` / `contents` / `content_edits` will throw on first call. Every route in `src/clawtalk/web/routes/*` that depends on those accessors will return 500s.
+5. **The webapp breaks.** Every page that fetches from the broken routes will fall back to error states.
 
 This is why [SPEC-READINESS.md](./SPEC-READINESS.md) flags **cutover sequencing plan** as the one remaining design-shaped item. Two paths:
 
-- **Big-bang cutover.** One coordinated PR that lands the migration + every src/ + webapp/ rewrite + the seed in a single squash-merge. Maximum carnage, single transition window, simplest mental model. Joseph has zero downstream users; downtime is "ClawTalk doesn't work for an hour."
+- **Big-bang cutover.** One coordinated branch that lands the fresh baseline + every src/ + webapp/ rewrite + the seed before merging. Maximum churn, single transition window, simplest mental model. Joseph has zero downstream users; downtime is "ClawTalk doesn't work while the branch is mid-cutover."
 - **Feature-flag cutover.** Branch the code paths behind `CT_GREENFIELD` (or similar). Old paths read the legacy tables, new paths read the greenfield tables. Migrate per Phase. Higher complexity (dual-path code; runtime forks; double the test surface) for the benefit of "the prod webapp keeps working for the human while I'm migrating."
 
-Both are valid. The right choice depends on whether Joseph wants to keep dogfooding the shipped app during the rewrite. **The migration stays parked at [`canonical-greenfield-migration.sql`](./canonical-greenfield-migration.sql) until this decision lands; it moves to `supabase/migrations/0040+_*.sql` only at cutover.**
+**Recommendation:** use the big-bang cutover branch. The codebase is too schema-entangled for a clean dual-path flag, and D0 makes dogfood data disposable. **The active implementation now creates `supabase/migrations/0001_clawtalk_greenfield.sql`, resets/recreates Supabase, and removes or archives the old active migration stream.** See [IMPLEMENTATION-READINESS.md](./IMPLEMENTATION-READINESS.md).
 
 ---
 
@@ -394,11 +420,11 @@ The clawtalk repo dogfooded a multi-agent reasoning product through the NanoClaw
 
 But the schema couldn't bear weight beyond what it proved: per-user RLS, threads everywhere, the `contents` / `registered_agents` vocabulary, jobs-as-messages, no tenancy. Two design rebuilds (v7 → v8 jobs spec; the 11-data-model greenfield) and one spec-readiness close pass (~38 P0 + ~72 P1 gaps closed) brought the design to the point where the rebuild is writable from spec.
 
-The migration is now written and validated locally. The next milestones are:
+The schema reference has now been promoted into the active cutover branch, and the first backend runtime spine is committed through greenfield workspace/talk routes, API mount extraction, chat enqueue, queue consumption, execution, scheduler sweeps, and run-state hardening. The next milestones are:
 
-1. **Land PR #500** (design-debt resolutions) and **PR #502** (the migration).
-2. **Write the `agent_role_templates` seed** (mechanical follow-up).
-3. **Decide the cutover sequencing** (big-bang vs feature-flag).
-4. **Begin §05 Phase 2** (workspace switcher + auth), then the rest of the phases in order.
+1. **Retire remaining legacy route/accessor collisions one family at a time.**
+2. **Port resources/connector bindings and the remaining jobs output/UI paths to greenfield contracts.**
+3. **Keep `worker-app.ts` as public/auth/health/WebSocket glue rather than product-resource logic.**
+4. **Start the frontend shell and Talk rewrite once the backend API no longer depends on legacy table families for core Talk workflows.**
 
 When this is done, ClawTalk has a multi-tenant, jobs-aware, Forge-ready, Home-driven, eval-gated, RLS-enforced architecture that the shipped prototype could never have grown into incrementally. That's the bet of this refactor.

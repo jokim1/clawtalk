@@ -6,8 +6,7 @@
 //   - GET /api/v1/talks/:talkId/events       — talk-scope WS.
 //
 // Both pre-flight auth (the surrounding middleware), validate scope
-// (canUserAccessTalk for talk-scope, resolveThreadIdForTalk if a
-// threadId qs is present), then clone the original `c.req.raw` so
+// (workspace membership for talk-scope), then clone the original `c.req.raw` so
 // the handshake headers (Sec-WebSocket-Key/Version/Extensions) survive
 // the forward (G9), strip cookie + CSRF, and set the x-clawtalk-*
 // auth-pass-through headers. The DO handles the actual WS upgrade.
@@ -18,12 +17,7 @@
 
 import type { Context } from 'hono';
 
-import { withUserContext } from '../../../db.js';
-import {
-  canUserAccessTalk,
-  resolveThreadIdForTalk,
-  TalkThreadValidationError,
-} from '../../db/accessors.js';
+import { getDbPg, withUserContext } from '../../../db.js';
 import type { AuthContext } from '../types.js';
 
 export interface UserEventHubBindings {
@@ -48,6 +42,13 @@ function parsePositiveInt(raw: string | undefined): number | null {
   if (!Number.isFinite(n)) return null;
   const i = Math.trunc(n);
   return i > 0 ? i : null;
+}
+
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function isUuid(value: string): boolean {
+  return UUID_RE.test(value);
 }
 
 /**
@@ -128,6 +129,23 @@ function forwardToDo(
   return stub.fetch(upgrade);
 }
 
+async function canUserAccessGreenfieldTalk(input: {
+  userId: string;
+  talkId: string;
+}): Promise<boolean> {
+  const db = getDbPg();
+  const rows = await db<{ id: string }[]>`
+    select t.id
+    from public.talks t
+    join public.workspace_members wm
+      on wm.workspace_id = t.workspace_id
+     and wm.user_id = ${input.userId}::uuid
+    where t.id = ${input.talkId}::uuid
+    limit 1
+  `;
+  return rows.length === 1;
+}
+
 export async function userEventsUpgradeRoute(
   c: RouteContext,
 ): Promise<Response> {
@@ -153,34 +171,15 @@ export async function talkEventsUpgradeRoute(
 ): Promise<Response> {
   const auth = c.get('auth');
   const talkId = c.req.param('talkId');
-  if (!talkId) {
+  if (!talkId || !isUuid(talkId)) {
     return c.json({ ok: false, error: { code: 'invalid_talk_id' } }, 400);
   }
 
   const access = await withUserContext(auth.userId, () =>
-    canUserAccessTalk(talkId),
+    canUserAccessGreenfieldTalk({ userId: auth.userId, talkId }),
   );
   if (!access) {
     return c.json({ ok: false, error: { code: 'not_found' } }, 404);
-  }
-
-  const requestedThreadId = (c.req.query('threadId') || '').trim() || null;
-  let threadId: string | null = null;
-  if (requestedThreadId) {
-    try {
-      threadId = await withUserContext(auth.userId, () =>
-        resolveThreadIdForTalk({
-          talkId,
-          threadId: requestedThreadId,
-          ownerId: auth.userId,
-        }),
-      );
-    } catch (err) {
-      if (err instanceof TalkThreadValidationError) {
-        return c.json({ ok: false, error: { code: 'invalid_thread_id' } }, 400);
-      }
-      throw err;
-    }
   }
 
   const lastEventId = parsePositiveInt(c.req.query('lastEventId')) ?? 0;
@@ -193,7 +192,9 @@ export async function talkEventsUpgradeRoute(
       'x-clawtalk-scope': 'talk',
       'x-clawtalk-topic': `talk:${talkId}`,
       'x-clawtalk-talk-id': talkId,
-      'x-clawtalk-thread-id': threadId ?? '',
+      // Greenfield has no separate thread table; the Talk id is the stable
+      // synthetic thread id carried by run/message events.
+      'x-clawtalk-thread-id': talkId,
       'x-clawtalk-last-event-id': String(lastEventId),
       'x-clawtalk-jwt-exp': String(jwtExp),
     },

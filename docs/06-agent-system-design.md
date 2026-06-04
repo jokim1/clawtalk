@@ -329,7 +329,7 @@ Plus two **system** role templates for Forge (§3.6 / D3):
 - `forge_rewriter`
 - `forge_critic`
 
-The five user-facing role templates live in `agent_role_templates` (§11 §4) with their `system_prompt` / `method_default` text seeded verbatim from `03-agents.md` (do not paraphrase in code). The two Forge system role templates are seeded from [`09-talk-doc-improvement.md`](./09-talk-doc-improvement.md) §9.
+The five user-facing role templates live in `agent_role_templates` (§11 §4) with their `system_prompt` / `method_default` text seeded verbatim from `03-agents.md` (do not paraphrase in code). The two Forge system role templates are seeded from the Forge loop responsibilities in [`09-autonomous-content-improvement-prd.md`](./09-autonomous-content-improvement-prd.md); final rewriter/critic prompt text is a Joseph-authored implementation input.
 
 ### 3.3 Workspace Agent
 
@@ -516,7 +516,7 @@ Seed values both rows must carry:
 - `role_key`, `default_name`, `default_handle`, `default_initials`, `default_accent`, `default_accent_dark`
 - `default_model_id` (FK to `llm_models.id`) — Joseph chooses at impl time.
 - `default_temperature` — Joseph chooses at impl time.
-- `job`, `system_prompt` — **placeholder at this layer.** The canonical content lives in [`09`](./09-talk-doc-improvement.md) §9; the role template seed copies that text verbatim. TODO: Joseph to write the actual prompts at impl time.
+- `job`, `system_prompt` — **placeholder at this layer.** The behavioral contract lives in [`09`](./09-autonomous-content-improvement-prd.md); Joseph writes the actual rewriter/critic prompts at impl time.
 - `method_default text[]` — short procedural steps mirroring §09's rewriter/critic loop.
 - `version int` — `1` on initial seed.
 
@@ -538,7 +538,7 @@ Seed values both rows must carry:
 - `DELETE /agents/:id` on a system row returns `403 Forbidden`. System agents cannot be soft- or hard-deleted by user-facing surfaces.
 - Talk UI never lists rewriter/critic as targets for @mention.
 
-Cross-references: see §11 §4 (`agents.is_system` column + design note), §11 §12.3 (system-agent visibility on `agents` — filtered at the query layer, not RLS), and [`09-talk-doc-improvement.md`](./09-talk-doc-improvement.md) §9 (canonical rewriter/critic prompt content).
+Cross-references: see §11 §4 (`agents.is_system` column + design note), §11 §12.3 (system-agent visibility on `agents` — filtered at the query layer, not RLS), and [`09-autonomous-content-improvement-prd.md`](./09-autonomous-content-improvement-prd.md) (Forge loop responsibilities for the rewriter/critic).
 
 ## 4. User-Facing Agent Editor
 
@@ -973,14 +973,14 @@ Example:
 - Quant may have `calculate`.
 - Editor may have `propose_document_edits`.
 
-Even if the agent has a capability, the run cannot use it unless the Talk has enabled the corresponding tool **and** the workspace has valid authorization. Per-Talk enablement is read from `talk_tools(workspace_id, talk_id, tool_id, enabled)` (§11 §6) at run start; the tool-manifest section of prompt assembly (§7 step 8) and the runtime capability gate both query this table. A tool that depends on a connector (e.g. `gdrive-read` → `gdrive`) additionally requires the workspace's `connectors` row to be `authorized = true` (§11 §6 tool↔connector dependency).
+Even if the agent has a capability, the run cannot use it unless the Talk has enabled the corresponding tool **and** the required authorization is valid for the execution principal. Per-Talk enablement is read from `talk_tools(workspace_id, talk_id, tool_id, enabled)` (§11 §6) at run start; the tool-manifest section of prompt assembly (§7 step 8) and the runtime capability gate both query this table. Workspace connector tools such as Slack messaging require a matching workspace connector row with `authorized = true`; Google tools additionally require a per-user `connectors` row with `compatSurface = 'google_tools'`, `secret_ref is not null`, `authorizedByUserId = <execution user id>`, and the tool's required Google scopes (§11 §6, §12 §5).
 
 #### 8.1.1 Dispatch-Time Authorization Check (Chat Runs)
 
 At run dispatch time — the `POST /api/v1/chat` handler before enqueue, and again as the executor pre-step inside the queue consumer (defense-in-depth across the boundary) — the runtime validates **every** tool in the run's resolved toolset:
 
 1. **Per-Talk enablement.** A `talk_tools(workspace_id, talk_id, tool_id, enabled = true)` row exists (§11 §6).
-2. **Connector authorization.** If the static `tool_id → required_service` map (§11 §6 design notes) marks the tool as connector-dependent, the matching `connectors(workspace_id, service, authorized = true)` row exists.
+2. **Connector authorization.** If the static `tool_id → required_service` map (§11 §6 design notes) marks the tool as connector-dependent, the runtime validates the matching authorization shape. Workspace connectors need `connectors(workspace_id, service, authorized = true)`. Google tools need the execution user's `google_tools` connector row with a secret and sufficient scopes; a Talk resource row, data-source catalog row, or another user's OAuth credential is not sufficient.
 
 If either check fails, the executor emits an `agent_replied` message with body `'Tool {tool_id} is not available — connector authorization required'` (the UI renders the connector-action button from this body shape) and terminates the run with `status = 'failed'` and `error_json = {'code': 'tool_not_authorized', 'tool_id': '<id>', 'required_service': '<service or null>'}`. The check uses the same code path as the fire-time check in §12 §5 step 2 (jobs surface) — only the failure surface differs (run-fail with an agent message here vs. job-block + inbox event there).
 
@@ -1098,7 +1098,7 @@ Do not store user-editable raw system prompts here in v1.
 - `version int not null`
 - `updated_at`
 
-The canonical default content for the five user-facing roles comes from `03-agents.md` and `shared/data.jsx`. The two Forge system-agent roles seed their `system_prompt` / `method_default` from [`09-talk-doc-improvement.md`](./09-talk-doc-improvement.md) §9 (the canonical rewriter / critic prompt content).
+The canonical default content for the five user-facing roles comes from `03-agents.md` and `shared/data.jsx`. The two Forge system-agent roles seed their `job` / `method_default` from [`09-autonomous-content-improvement-prd.md`](./09-autonomous-content-improvement-prd.md)'s rewriter/critic responsibilities; final `system_prompt` text is written during implementation.
 
 ### 10.3 `team_compositions`
 

@@ -2,11 +2,14 @@
 //
 // Provides the PKCE start + callback flow used by /api/v1/me/google-account/*
 // routes. The OAuth state lives in the `oauth_state` table (provider scope =
-// 'google_tools'); credentials live encrypted in `user_google_credentials`.
+// 'google_tools'); credentials live encrypted in the greenfield
+// `connectors` + `connector_secrets` store.
 //
 // Boundary contract:
 //   - `startGoogleOAuth` must be called from inside `withUserContext(userId)`.
 //     RLS on `oauth_state` enforces user_id = auth.uid() at INSERT time.
+//     The target workspace_id is persisted in state so the public callback
+//     stores the per-user Google tools connector in the same workspace.
 //   - `completeGoogleOAuthCallback` is called from a PUBLIC callback route
 //     (no auth.uid()). The connection pool is the BYPASSRLS `postgres` role,
 //     so the atomic state claim runs without an RLS scope. After claiming
@@ -43,6 +46,7 @@ import {
 } from './google-tools-credential-store.js';
 import {
   expandGoogleScopeAliases,
+  hasGoogleToolScopeAlias,
   normalizeGoogleScopeAliases,
 } from './google-scopes.js';
 
@@ -64,12 +68,14 @@ const OIDC_SCOPES = ['openid', 'email', 'profile'] as const;
 
 // C7: scope allowlist. Any alias outside this set → 400 from
 // validateRequestedScopes. Prevents authenticated users from coercing the
-// OAuth client into Gmail / arbitrary Google scopes.
+// OAuth client into arbitrary Google scopes beyond product-supported tools.
 const ALLOWED_SCOPE_ALIASES = new Set<string>([
   'openid',
   'email',
   'profile',
   'drive.readonly',
+  'gmail.readonly',
+  'gmail.send',
   'documents',
   'documents.readonly',
   'spreadsheets',
@@ -149,6 +155,7 @@ export function ensureOidcScopes(scopes: string[]): string[] {
 
 export interface StartGoogleOAuthInput {
   userId: string;
+  workspaceId: string;
   scopes: string[]; // alias form; OIDC scopes added by caller via ensureOidcScopes
   redirectUri: string;
   returnTo?: string | null;
@@ -203,6 +210,13 @@ export async function startGoogleOAuth(
       503,
     );
   }
+  if (!hasGoogleToolScopeAlias(input.scopes)) {
+    throw new GoogleOAuthError(
+      'google_tool_scopes_required',
+      'At least one Google tool scope is required.',
+      400,
+    );
+  }
 
   const rawState = randomBase64Url(32);
   const rawNonce = randomBase64Url(32);
@@ -216,10 +230,10 @@ export async function startGoogleOAuth(
   const db = getDbPg();
   await db`
     insert into public.oauth_state
-      (user_id, provider, state_hash, nonce_hash, code_verifier_hash,
+      (user_id, workspace_id, provider, state_hash, nonce_hash, code_verifier_hash,
        code_verifier, redirect_uri, return_to, expires_at)
     values
-      (${input.userId}::uuid, ${PROVIDER}, ${stateHash}, ${nonceHash},
+      (${input.userId}::uuid, ${input.workspaceId}::uuid, ${PROVIDER}, ${stateHash}, ${nonceHash},
        ${codeVerifierHash}, ${rawCodeVerifier}, ${input.redirectUri},
        ${input.returnTo ?? null}, ${expiresAt}::timestamptz)
   `;
@@ -252,6 +266,7 @@ export async function startGoogleOAuth(
 interface ClaimedStateRow {
   id: string;
   user_id: string;
+  workspace_id: string;
   provider: string;
   state_hash: string;
   nonce_hash: string;
@@ -274,7 +289,7 @@ export async function completeGoogleOAuthCallback(
       and provider = ${PROVIDER}
       and expires_at > now()
     returning id, user_id, provider, state_hash, nonce_hash,
-              code_verifier, redirect_uri, return_to, expires_at
+              workspace_id, code_verifier, redirect_uri, return_to, expires_at
   `;
   if (claimed.length === 0) {
     return {
@@ -328,7 +343,11 @@ export async function completeGoogleOAuthCallback(
       redirectUri: row.redirect_uri,
       expectedNonceHash: row.nonce_hash,
     });
-    await persistGoogleOAuthIdentity({ userId: row.user_id, identity });
+    await persistGoogleOAuthIdentity({
+      userId: row.user_id,
+      workspaceId: row.workspace_id,
+      identity,
+    });
     return { status: 'success' as const };
   });
 }
@@ -458,10 +477,13 @@ async function exchangeCodeForIdentity(input: {
 
 export async function persistGoogleOAuthIdentity(input: {
   userId: string;
+  workspaceId: string;
   identity: GoogleIdentity;
 }): Promise<UserGoogleCredentialRecord> {
   // Caller is responsible for being inside withUserContext(userId).
-  const existing = await getUserGoogleCredential();
+  const existing = await getUserGoogleCredential({
+    workspaceId: input.workspaceId,
+  });
   let priorRefreshToken: string | null = null;
   let priorScopeAliases: string[] = [];
   if (existing) {
@@ -479,6 +501,13 @@ export async function persistGoogleOAuthIdentity(input: {
   const mergedAliases = Array.from(
     new Set([...priorScopeAliases, ...grantedAliases]),
   ).sort();
+  if (!hasGoogleToolScopeAlias(mergedAliases)) {
+    throw new GoogleOAuthError(
+      'google_tool_scopes_required',
+      'At least one Google tool scope is required.',
+      400,
+    );
+  }
   const mergedScopeUrls = expandGoogleScopeAliases(mergedAliases);
 
   const refreshToken =
@@ -499,6 +528,7 @@ export async function persistGoogleOAuthIdentity(input: {
   const ciphertext = encryptGoogleToolCredential(payload);
 
   return upsertUserGoogleCredential({
+    workspaceId: input.workspaceId,
     userId: input.userId,
     googleSubject: input.identity.googleSubject,
     email: input.identity.email,
@@ -513,6 +543,8 @@ export async function persistGoogleOAuthIdentity(input: {
 // disconnect — thin wrapper so the route doesn't import the accessor twice
 // ---------------------------------------------------------------------------
 
-export async function disconnectGoogleAccount(): Promise<boolean> {
-  return deleteUserGoogleCredential();
+export async function disconnectGoogleAccount(input: {
+  workspaceId: string;
+}): Promise<boolean> {
+  return deleteUserGoogleCredential({ workspaceId: input.workspaceId });
 }

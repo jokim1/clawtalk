@@ -20,6 +20,16 @@ main = "src/worker.ts"
 compatibility_date = "2026-05-12"
 compatibility_flags = ["nodejs_compat"]
 
+# ─── Local dev ────────────────────────────────────────────────────────
+#
+# Pin `wrangler dev` to :8788 so the local target is deterministic.
+# Bare `wrangler dev` defaults to :8787, but the webapp dev proxy
+# (webapp/vite.config.ts) and APP_ORIGIN both target :8788 — without
+# this pin the proxy points at a port nothing is listening on. Dev-only;
+# ignored by `wrangler deploy`.
+[dev]
+port = 8788
+
 # ─── Static Assets ────────────────────────────────────────────────────
 #
 # `run_worker_first = true` is load-bearing for OAuth callback flows. Without
@@ -48,7 +58,7 @@ run_worker_first = true
 # `id` below with the value `wrangler hyperdrive create` prints.
 [[hyperdrive]]
 binding = "DB"
-id = "6612a8ac15c4450a8bcdf0fdd2a1df35"
+id = "0bca93f7b90b4b5d8443215428ee59b2"
 # Local supabase stack runs on the clawtalk-specific 54430–54439 port
 # range (see supabase/config.toml). 54432 is the database port.
 localConnectionString = "postgresql://postgres:postgres@127.0.0.1:54432/postgres"
@@ -114,15 +124,15 @@ max_retries = 3
 dead_letter_queue = "clawtalk-talk-runs-dlq"
 
 # DLQ consumer — messages that exhaust max_retries above land here.
-# The handler flips the corresponding talk_runs row to 'failed' with
-# error_code='dlq_exhausted' so the UI moves on. No retries on the
-# DLQ itself: these messages are already post-failure and acking them
-# is unconditional.
+# The handler flips the corresponding runs row to 'failed' with
+# error_json.code='dlq_exhausted' so the UI moves on. Transient
+# DB/outbox infrastructure failures retry here too; scheduler sweeps
+# remain the final stuck-run backstop.
 [[queues.consumers]]
 queue = "clawtalk-talk-runs-dlq"
 max_batch_size = 5
 max_batch_timeout = 30
-max_retries = 0
+max_retries = 3
 
 # ─── Cron triggers — job scheduler ────────────────────────────────────
 #
@@ -211,6 +221,6 @@ CLAWTALK_ALLOWED_ORIGINS = "https://clawtalk.jokim1.workers.dev,https://clawtalk
 # localhost here doesn't expand attack surface (evil.com can't forge
 # Origin: http://localhost:*).
 APP_ORIGIN = "https://clawtalk.app,http://localhost:5173,http://localhost:8788"
-SUPABASE_PROJECT_URL = "https://llklxclnredhtpxmhyea.supabase.co"
+SUPABASE_PROJECT_URL = "https://rnxkflekfhliradthulp.supabase.co"
 GOOGLE_OAUTH_REDIRECT_URI = "https://clawtalk.app/api/v1/auth/google/callback"
 SLACK_OAUTH_REDIRECT_URI = "https://clawtalk.app/api/v1/auth/slack/callback"

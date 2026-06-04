@@ -219,7 +219,7 @@ Seed with 3 defaults on workspace creation: Pricing crew, Research crew, Hiring 
 
 ### 1.8 Tools, Connectors, Context (3 distinct concepts — see §3)
 
-**Connectors are workspace-global** (§11 §6 + roadmap #5). The `Connector` row holds the OAuth wiring for a service at the workspace level (one row per service per workspace). Per-Talk exposure is a separate `ConnectorBinding` row that selects WHICH workspace-authorized connectors are available in a given Talk. Authorization happens once on the workspace-level Connectors page; per-Talk binding happens from the Talk header.
+**Connectors are workspace-global** (§11 §6 + roadmap #5). A `Connector` row holds workspace-level OAuth/config wiring for a service and explicit compatibility surface; some services have multiple rows for distinct surfaces such as Slack installs, Slack channels, Google tool OAuth, and Drive resource catalogs. Per-Talk exposure is a separate `ConnectorBinding` row that selects WHICH workspace-authorized connectors are available in a given Talk. Authorization happens once on the workspace-level Connectors page; per-Talk binding happens from the Talk header.
 
 ```ts
 type ToolToggle = Record<ToolId, boolean>;  // Talk-scoped + workspace default
@@ -239,6 +239,8 @@ type ConnectorBinding = {                   // per-Talk selection of workspace-a
   target?: string;                          // '#pricing', '/pricing-v2/', etc. — Talk-scoped override
   scope?: string[];                         // ['read','write']
   enabled: boolean;
+  displayName?: string;                     // target label when the binding points at a concrete channel/file/folder
+  meta?: Record<string, unknown>;           // target metadata, never OAuth secrets
 }
 
 type ContextSource = {                      // Talk-scoped
@@ -499,7 +501,7 @@ The canonical `tool_id` vocabulary that backs `talk_tools.tool_id` (§11 §6) an
 | `github-read`    | GitHub search     | `github`                             | read       |
 | `notion-read`    | Notion read       | `notion`                             | read       |
 
-A tool whose connector dependency is `null` runs without OAuth wiring. A tool with a connector dependency requires the workspace's `connectors` row for that service to be `authorized = true` AND the Talk's `talk_tools` row for that `tool_id` to be `enabled = true` (§11 §6 tool↔connector dependency). Cross-ref §11 §6 + §12 §3.
+A tool whose connector dependency is `null` runs without OAuth wiring. A tool with a connector dependency requires an authorized `connectors` row for that service in the current workspace AND the Talk's `talk_tools` row for that `tool_id` to be `enabled = true` (§11 §6 tool↔connector dependency). Google scheduled tools specifically require the job creator's own per-workspace `google_tools` connector secret, so one workspace member's OAuth does not authorize another member's jobs or another workspace's jobs. Cross-ref §11 §6 + §12 §3.
 
 ---
 
@@ -517,7 +519,7 @@ Full data model + scheduler semantics + UI flows live in **[12-jobs.md](./12-job
 
 Internal mechanics: rewriter + critic roles are `is_system` agents (DECISIONS D3); each scoring round calls SSR/Synthetical with a stable `idempotency_key`; held-out personas persist for reproducibility.
 
-Full PRD: **[09-improver-spec.md](./09-improver-spec.md)**. Design handoff: [10-improver-design.md](./10-improver-design.md). Schema: §11 §9 (`ssr_connections`, `forge_audiences`, `forge_personas`, `forge_reference_sets`, `forge_questions`, `forge_audience_personas`, `improvement_runs`, `improvement_run_held_out_personas`, `document_versions`). API surface: §04 §17.
+Full PRD: **[09-autonomous-content-improvement-prd.md](./09-autonomous-content-improvement-prd.md)**. Design handoff: [10-forge-design-handoff.md](./10-forge-design-handoff.md). Schema: §11 §9 (`ssr_connections`, `forge_audiences`, `forge_personas`, `forge_reference_sets`, `forge_questions`, `forge_audience_personas`, `improvement_runs`, `improvement_run_held_out_personas`, `document_versions`). API surface: §04 §17.
 
 Forge is **post-MVP** — it ships behind a feature flag and is not part of the v1 launch checklist. UI placement: as a Forge tab on the Document page (§4.7) for picking targets + reviewing past runs + gallery of winners, with an "Improve this with Forge" action surfaced from the document pane.
 

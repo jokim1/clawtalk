@@ -8,7 +8,7 @@
 // All inline HTML interpolation flows through `htmlSafeJson()` (D3) to
 // guarantee no user-controllable string can escape the <script> context.
 
-import { withUserContext } from '../../../db.js';
+import { getDbPg, withUserContext } from '../../../db.js';
 import { GOOGLE_OAUTH_REDIRECT_URI } from '../../config.js';
 import { getUserGoogleCredential } from '../../db/talk-tools-accessors.js';
 import {
@@ -25,6 +25,8 @@ import {
   GoogleToolCredentialError,
   buildGooglePickerSession,
 } from '../../identity/google-tools-service.js';
+import { resolveWorkspaceForUser } from '../../workspaces/accessors.js';
+import { ensureWorkspaceBootstrapForUser } from '../../workspaces/bootstrap.js';
 import { ApiEnvelope, AuthContext } from '../types.js';
 
 // ---------------------------------------------------------------------------
@@ -36,7 +38,9 @@ interface JsonRouteResult<T> {
   body: ApiEnvelope<T>;
 }
 
-const DEFAULT_TOOL_SCOPES = ['drive.readonly', 'documents'];
+const DEFAULT_TOOL_SCOPES = ['drive.readonly', 'documents', 'spreadsheets'];
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 function errorResult(
   statusCode: number,
@@ -48,6 +52,79 @@ function errorResult(
 
 function fromOAuthError(err: GoogleOAuthError): JsonRouteResult<never> {
   return errorResult(err.status, err.code, err.message);
+}
+
+async function withGoogleAccountWorkspace<T>(
+  auth: AuthContext,
+  requestedWorkspaceId: string | null | undefined,
+  fn: (workspaceId: string) => Promise<JsonRouteResult<T>>,
+  requestedTalkId?: string | null,
+): Promise<JsonRouteResult<T>> {
+  const workspaceIdInput =
+    typeof requestedWorkspaceId === 'string' ? requestedWorkspaceId.trim() : '';
+  const talkIdInput =
+    typeof requestedTalkId === 'string' ? requestedTalkId.trim() : '';
+  if (!workspaceIdInput && !talkIdInput) {
+    return errorResult(
+      400,
+      'workspace_scope_required',
+      'workspaceId or talkId is required.',
+    );
+  }
+  if (workspaceIdInput && !UUID_RE.test(workspaceIdInput)) {
+    return errorResult(
+      400,
+      'invalid_workspace_id',
+      'workspaceId must be a valid UUID.',
+    );
+  }
+  await ensureWorkspaceBootstrapForUser(auth.userId);
+  return withUserContext(auth.userId, async () => {
+    if (talkIdInput) {
+      if (!UUID_RE.test(talkIdInput)) {
+        return errorResult(
+          400,
+          'invalid_talk_id',
+          'talkId must be a valid UUID.',
+        );
+      }
+      const db = getDbPg();
+      const rows = await db<Array<{ workspace_id: string }>>`
+        select t.workspace_id
+        from public.talks t
+        join public.workspace_members wm
+          on wm.workspace_id = t.workspace_id
+         and wm.user_id = ${auth.userId}::uuid
+        where t.id = ${talkIdInput}::uuid
+        limit 1
+      `;
+      const workspaceId = rows[0]?.workspace_id;
+      if (!workspaceId) {
+        return errorResult(404, 'talk_not_found', 'Talk not found.');
+      }
+      if (workspaceIdInput && workspaceIdInput !== workspaceId) {
+        return errorResult(
+          400,
+          'workspace_mismatch',
+          'Requested workspace does not match the talk workspace.',
+        );
+      }
+      return fn(workspaceId);
+    }
+
+    const workspace = await resolveWorkspaceForUser({
+      userId: auth.userId,
+      requestedWorkspaceId: workspaceIdInput,
+    });
+    if (!workspace) {
+      return errorResult(
+        403,
+        'workspace_forbidden',
+        'Workspace is not available for this user.',
+      );
+    }
+    return fn(workspace.id);
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -76,31 +153,36 @@ const DISCONNECTED: UserGoogleAccount = {
 
 export async function getUserGoogleAccountRoute(
   auth: AuthContext,
+  requestedWorkspaceId?: string | null,
 ): Promise<JsonRouteResult<{ googleAccount: UserGoogleAccount }>> {
-  const cred = await withUserContext(auth.userId, () =>
-    getUserGoogleCredential(),
-  );
-  if (!cred) {
-    return {
-      statusCode: 200,
-      body: { ok: true, data: { googleAccount: DISCONNECTED } },
-    };
-  }
-  return {
-    statusCode: 200,
-    body: {
-      ok: true,
-      data: {
-        googleAccount: {
-          connected: true,
-          email: cred.email,
-          displayName: cred.displayName,
-          scopes: normalizeGoogleScopeAliases(cred.scopes),
-          accessExpiresAt: cred.accessExpiresAt,
+  return withGoogleAccountWorkspace(
+    auth,
+    requestedWorkspaceId,
+    async (workspaceId) => {
+      const cred = await getUserGoogleCredential({ workspaceId });
+      if (!cred) {
+        return {
+          statusCode: 200,
+          body: { ok: true, data: { googleAccount: DISCONNECTED } },
+        };
+      }
+      return {
+        statusCode: 200,
+        body: {
+          ok: true,
+          data: {
+            googleAccount: {
+              connected: true,
+              email: cred.email,
+              displayName: cred.displayName,
+              scopes: normalizeGoogleScopeAliases(cred.scopes),
+              accessExpiresAt: cred.accessExpiresAt,
+            },
+          },
         },
-      },
+      };
     },
-  };
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -110,6 +192,7 @@ export async function getUserGoogleAccountRoute(
 export async function startConnectRoute(
   auth: AuthContext,
   body: { returnTo?: unknown; scopes?: unknown },
+  requestedWorkspaceId?: string | null,
 ): Promise<
   JsonRouteResult<{ authorizationUrl: string; expiresInSec: number }>
 > {
@@ -136,15 +219,20 @@ export async function startConnectRoute(
       : null;
 
   try {
-    const result = await withUserContext(auth.userId, () =>
-      startGoogleOAuth({
-        userId: auth.userId,
-        scopes: finalScopes,
-        redirectUri: GOOGLE_OAUTH_REDIRECT_URI,
-        returnTo,
-      }),
+    return await withGoogleAccountWorkspace(
+      auth,
+      requestedWorkspaceId,
+      async (workspaceId) => {
+        const result = await startGoogleOAuth({
+          workspaceId,
+          userId: auth.userId,
+          scopes: finalScopes,
+          redirectUri: GOOGLE_OAUTH_REDIRECT_URI,
+          returnTo,
+        });
+        return { statusCode: 200, body: { ok: true, data: result } };
+      },
     );
-    return { statusCode: 200, body: { ok: true, data: result } };
   } catch (err) {
     if (err instanceof GoogleOAuthError) return fromOAuthError(err);
     throw err;
@@ -158,6 +246,7 @@ export async function startConnectRoute(
 export async function expandScopesRoute(
   auth: AuthContext,
   body: { returnTo?: unknown; scopes?: unknown },
+  requestedWorkspaceId?: string | null,
 ): Promise<
   JsonRouteResult<{ authorizationUrl: string; expiresInSec: number }>
 > {
@@ -190,24 +279,29 @@ export async function expandScopesRoute(
   // Require existing credential; merge persisted aliases into the request
   // (C8: persisted scopes never shrink, even if user re-consents with fewer).
   try {
-    const result = await withUserContext(auth.userId, async () => {
-      const cred = await getUserGoogleCredential();
-      if (!cred) {
-        throw new GoogleOAuthError(
-          'not_connected',
-          'Google account is not connected. Connect first, then expand scopes.',
-          403,
-        );
-      }
-      const merged = Array.from(new Set([...cred.scopes, ...requested]));
-      return startGoogleOAuth({
-        userId: auth.userId,
-        scopes: ensureOidcScopes(merged),
-        redirectUri: GOOGLE_OAUTH_REDIRECT_URI,
-        returnTo,
-      });
-    });
-    return { statusCode: 200, body: { ok: true, data: result } };
+    return await withGoogleAccountWorkspace(
+      auth,
+      requestedWorkspaceId,
+      async (workspaceId) => {
+        const cred = await getUserGoogleCredential({ workspaceId });
+        if (!cred) {
+          throw new GoogleOAuthError(
+            'not_connected',
+            'Google account is not connected. Connect first, then expand scopes.',
+            403,
+          );
+        }
+        const merged = Array.from(new Set([...cred.scopes, ...requested]));
+        const result = await startGoogleOAuth({
+          workspaceId,
+          userId: auth.userId,
+          scopes: ensureOidcScopes(merged),
+          redirectUri: GOOGLE_OAUTH_REDIRECT_URI,
+          returnTo,
+        });
+        return { statusCode: 200, body: { ok: true, data: result } };
+      },
+    );
   } catch (err) {
     if (err instanceof GoogleOAuthError) return fromOAuthError(err);
     throw err;
@@ -220,14 +314,19 @@ export async function expandScopesRoute(
 
 export async function disconnectGoogleAccountRoute(
   auth: AuthContext,
+  requestedWorkspaceId?: string | null,
 ): Promise<JsonRouteResult<{ disconnected: boolean }>> {
-  const removed = await withUserContext(auth.userId, () =>
-    disconnectGoogleAccount(),
+  return withGoogleAccountWorkspace(
+    auth,
+    requestedWorkspaceId,
+    async (workspaceId) => {
+      const removed = await disconnectGoogleAccount({ workspaceId });
+      return {
+        statusCode: 200,
+        body: { ok: true, data: { disconnected: removed } },
+      };
+    },
   );
-  return {
-    statusCode: 200,
-    body: { ok: true, data: { disconnected: removed } },
-  };
 }
 
 // ---------------------------------------------------------------------------
@@ -248,14 +347,23 @@ export async function disconnectGoogleAccountRoute(
  */
 export async function getGooglePickerTokenRoute(
   auth: AuthContext,
+  requestedWorkspaceId?: string | null,
+  requestedTalkId?: string | null,
 ): Promise<
   JsonRouteResult<{ oauthToken: string; developerKey: string; appId: string }>
 > {
   try {
-    const session = await withUserContext(auth.userId, () =>
-      buildGooglePickerSession(auth.userId),
+    return await withGoogleAccountWorkspace(
+      auth,
+      requestedWorkspaceId,
+      async (workspaceId) => {
+        const session = await buildGooglePickerSession(auth.userId, {
+          workspaceId,
+        });
+        return { statusCode: 200, body: { ok: true, data: session } };
+      },
+      requestedTalkId,
     );
-    return { statusCode: 200, body: { ok: true, data: session } };
   } catch (err) {
     if (err instanceof GoogleToolCredentialError) {
       const body: ApiEnvelope<never> = {

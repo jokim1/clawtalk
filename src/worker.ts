@@ -21,7 +21,11 @@
 // ack.
 
 import type { ExecutionContext } from 'hono';
-import { type RequestExecutionContext, withRequestScopedDb } from './db.js';
+import {
+  type RequestExecutionContext,
+  withNotifyQueueScope,
+  withRequestScopedDb,
+} from './db.js';
 import { logger } from './logger.js';
 import { getWorkerApp } from './clawtalk/web/worker-app.js';
 import {
@@ -199,9 +203,10 @@ export default {
   //     drops the message onto the DLQ.
   //
   // DLQ (`clawtalk-talk-runs-dlq`): processDlqMessage flips the
-  // corresponding talk_runs row to 'failed' with code 'dlq_exhausted'
-  // and emits a talk_run_failed outbox event. No retries on the DLQ
-  // itself (max_retries=0); unconditionally ack.
+  // corresponding run row to 'failed' with code 'dlq_exhausted'
+  // and emits a talk_run_failed outbox event. Returned normally → ack;
+  // infrastructure throws → retry the DLQ message with a delay so a
+  // transient DB/outbox outage does not strand the run.
   async queue(
     batch: MessageBatch,
     env: Env,
@@ -245,27 +250,30 @@ export default {
             ATTACHMENTS: env.ATTACHMENTS,
           },
           async () =>
-            isDlq
-              ? processDlqMessage({ runId: body.runId })
-              : processTalkRunMessage({
-                  runId: body.runId,
-                  attempts: message.attempts,
-                  maxRetries: QUEUE_MAX_RETRIES,
-                }),
+            withNotifyQueueScope(env, ctx, () =>
+              isDlq
+                ? processDlqMessage({ runId: body.runId })
+                : processTalkRunMessage({
+                    runId: body.runId,
+                    attempts: message.attempts,
+                    maxRetries: QUEUE_MAX_RETRIES,
+                  }),
+            ),
         );
         message.ack();
       } catch (err) {
         if (isDlq) {
-          // No DLQ retries — log and ack so the message doesn't loop.
+          const delaySeconds = 60;
           logger.error(
             {
               messageId: message.id,
               runId: body.runId,
               err: err instanceof Error ? err.message : String(err),
+              delaySeconds,
             },
-            'dlq message: processDlqMessage threw, acking',
+            'dlq message: processDlqMessage threw, retrying',
           );
-          message.ack();
+          message.retry({ delaySeconds });
           continue;
         }
         // Sibling-sequencing waits are NOT errors: a higher-sequence

@@ -24,13 +24,17 @@ import {
   patchTalkMetadata,
   reorderTalkSidebar,
   SessionUser,
+  switchWorkspace,
   Talk,
   TalkSidebarFolder,
   TalkSidebarItem,
   TalkSidebarTalk,
   UnauthorizedError,
 } from './lib/api';
-import { clearPersistedQueryCache } from './lib/queryClient';
+import {
+  clearPersistedQueryCache,
+  rememberActiveWorkspace,
+} from './lib/queryClient';
 import { isSupabaseConfigured } from './lib/supabase-client';
 import { installAuthStateListener } from './lib/supabase-cookie-shim';
 import { clearActiveThreadMemory } from './lib/useTalkSnapshot';
@@ -437,6 +441,7 @@ export function App() {
     try {
       const user = await getSessionMe();
       setAuth({ status: 'authenticated', user });
+      rememberActiveWorkspace(user.currentWorkspaceId ?? null);
     } catch (err) {
       if (err instanceof UnauthorizedError) {
         setAuth({ status: 'unauthenticated' });
@@ -462,6 +467,7 @@ export function App() {
       // cross-reads while persisted; this is the belt-and-braces wipe.
       await clearPersistedQueryCache();
       clearActiveThreadMemory();
+      rememberActiveWorkspace(null);
       setAuth({ status: 'unauthenticated' });
       setSignOutBusy(false);
     }
@@ -525,6 +531,35 @@ export function App() {
       document.removeEventListener('visibilitychange', handleVisibilityChange);
     };
   }, [auth.status, refreshSidebar]);
+
+  const handleSwitchWorkspace = useCallback(
+    async (workspaceId: string) => {
+      try {
+        await switchWorkspace(workspaceId);
+      } catch (err) {
+        if (err instanceof UnauthorizedError) {
+          handleUnauthorized();
+          return;
+        }
+        // Re-throw so the switcher surfaces the failure inline. The switch did
+        // not take effect, so the current workspace view is still valid.
+        throw err instanceof Error
+          ? err
+          : new Error('Failed to switch workspace');
+      }
+      // Switched server-side. A workspace switch is a cross-tenant boundary, so
+      // do a clean reload into the new workspace's Talk list. Recording the new
+      // active workspace folds it into the persist buster, so the fresh load
+      // drops the previous workspace's persisted cache on hydration (the
+      // talk-snapshot key is user-scoped, not workspace-scoped); the reload also
+      // discards any in-flight old-workspace requests that could otherwise
+      // repopulate stale data via last-write-wins.
+      rememberActiveWorkspace(workspaceId);
+      clearActiveThreadMemory();
+      window.location.assign('/app/talks');
+    },
+    [handleUnauthorized],
+  );
 
   const handleCreateTalk = useCallback(async () => {
     const talk = await createTalk('');
@@ -779,6 +814,7 @@ export function App() {
           error={sidebarError}
           user={auth.user}
           mainTalkId={mainTalkId}
+          onSwitchWorkspace={handleSwitchWorkspace}
           onSignOut={handleSignOut}
           signOutBusy={signOutBusy}
           onCreateTalk={handleCreateTalk}

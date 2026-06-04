@@ -127,8 +127,12 @@ const requestScopedDbStorage = new AsyncLocalStorage<RequestScopedDbStore>();
 interface UserContextStore {
   tx: postgres.TransactionSql;
   userId: string;
+  guardedSql?: Sql;
+  trustedWriteDepth?: number;
+  trustedWriteToken?: symbol | null;
 }
 const userContextStorage = new AsyncLocalStorage<UserContextStore>();
+const trustedWriteStorage = new AsyncLocalStorage<symbol>();
 
 const notifyQueueStorage = new AsyncLocalStorage<NotifyQueueEntry[]>();
 const outOfBandDbStorage = new AsyncLocalStorage<OutOfBandSlot>();
@@ -150,11 +154,55 @@ export function getDbPg(): Sql {
   // but exposes the tagged-template query API every accessor uses. Cast
   // is safe in practice — the missing methods aren't called inside
   // withUserContext.
-  if (fromUserContext) return fromUserContext.tx as unknown as Sql;
+  if (fromUserContext) return getUserScopedSql(fromUserContext);
   const fromRequest = requestScopedDbStorage.getStore();
   if (fromRequest) return fromRequest.sql;
   if (!nodeScopedDb) throw new Error('Postgres database not initialized');
   return nodeScopedDb;
+}
+
+function assertTrustedWriteQueryAllowed(store: UserContextStore): void {
+  if ((store.trustedWriteDepth ?? 0) === 0) return;
+  if (trustedWriteStorage.getStore() === store.trustedWriteToken) return;
+  throw new Error(
+    'Database query attempted while trusted DB writes are active outside the trusted callback',
+  );
+}
+
+function getUserScopedSql(store: UserContextStore): Sql {
+  if (store.guardedSql) return store.guardedSql;
+  const tx = store.tx as unknown as Sql;
+  const query = (...args: unknown[]) => {
+    assertTrustedWriteQueryAllowed(store);
+    return Reflect.apply(
+      tx as unknown as (...inner: unknown[]) => unknown,
+      tx,
+      args,
+    );
+  };
+  store.guardedSql = new Proxy(query, {
+    apply(_target, _thisArg, argArray) {
+      assertTrustedWriteQueryAllowed(store);
+      return Reflect.apply(
+        tx as unknown as (...inner: unknown[]) => unknown,
+        tx,
+        argArray,
+      );
+    },
+    get(_target, prop) {
+      const value = (tx as unknown as Record<PropertyKey, unknown>)[prop];
+      if (typeof value !== 'function') return value;
+      return (...args: unknown[]) => {
+        assertTrustedWriteQueryAllowed(store);
+        return Reflect.apply(
+          value as (...inner: unknown[]) => unknown,
+          tx,
+          args,
+        );
+      };
+    },
+  }) as unknown as Sql;
+  return store.guardedSql;
 }
 
 export function getCurrentNotifyQueue(): NotifyQueueEntry[] | null {
@@ -198,6 +246,61 @@ export function getStreamingCoalesceMap(): Map<string, PendingDrain> | null {
  */
 export function getCurrentUserId(): string | null {
   return userContextStorage.getStore()?.userId ?? null;
+}
+
+/**
+ * Temporarily restores the connection's session role inside the current
+ * user-scoped transaction. Use only for trusted runtime provenance writes
+ * after the surrounding route/accessor has already enforced user intent and
+ * workspace access under normal RLS.
+ */
+export async function withTrustedDbWrites<T>(fn: () => Promise<T>): Promise<T> {
+  const existing = userContextStorage.getStore();
+  if (!existing) return fn();
+
+  const activeToken = trustedWriteStorage.getStore();
+  if (
+    (existing.trustedWriteDepth ?? 0) > 0 &&
+    activeToken !== existing.trustedWriteToken
+  ) {
+    throw new Error(
+      'Concurrent trusted DB writes are not allowed inside one user transaction',
+    );
+  }
+
+  const token = activeToken ?? Symbol('trusted-db-writes');
+  existing.trustedWriteDepth = (existing.trustedWriteDepth ?? 0) + 1;
+  existing.trustedWriteToken = token;
+  let fnError: unknown;
+  try {
+    if (existing.trustedWriteDepth === 1) {
+      await existing.tx`set local role none`;
+    }
+    return await trustedWriteStorage.run(token, fn);
+  } catch (err) {
+    fnError = err;
+    throw err;
+  } finally {
+    try {
+      existing.trustedWriteDepth = Math.max(
+        (existing.trustedWriteDepth ?? 1) - 1,
+        0,
+      );
+      if (existing.trustedWriteDepth === 0) {
+        existing.trustedWriteToken = null;
+        const claims = JSON.stringify({
+          sub: existing.userId,
+          role: 'authenticated',
+        });
+        await existing.tx`set local role authenticated`;
+        await existing.tx`select set_config('request.jwt.claims', ${claims}, true)`;
+      }
+    } catch (restoreErr) {
+      existing.trustedWriteDepth = 0;
+      existing.trustedWriteToken = null;
+      if (fnError === undefined) throw restoreErr;
+    }
+  }
 }
 
 /**
@@ -539,6 +642,28 @@ export async function withNotifyQueueScope<T>(
       }
     }
   }
+}
+
+/**
+ * Flush and clear the current notify queue before the enclosing
+ * `withNotifyQueueScope` exits. Call this only after the outbox rows being
+ * announced have committed; it is for long-running queue work where callers
+ * need early UI state, e.g. `talk_run_started` before model execution.
+ */
+export async function flushCurrentNotifyQueue(): Promise<void> {
+  const queue = notifyQueueStorage.getStore();
+  if (!queue || queue.length === 0) return;
+  const entries = queue.splice(0, queue.length);
+  const requestScope = requestScopedDbStorage.getStore();
+  const flush = flushNotifyQueue(entries, requestScope?.env ?? null).catch(
+    (err) => {
+      console.error('[notify-queue] explicit flush failed', err);
+    },
+  );
+  if (requestScope?.ctx) {
+    requestScope.ctx.waitUntil(flush);
+  }
+  await flush;
 }
 
 /**

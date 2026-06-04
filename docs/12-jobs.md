@@ -14,6 +14,7 @@ The shipped feature established the real requirements; the redesign keeps these 
 - **Recurring single-agent prompt.** On a schedule, send a fixed prompt to one agent in a Talk and capture its answer. One job kind — not a general workflow engine.
 - **Three schedule shapes that cover the need:** every-N-hours (UTC interval), daily (local wall-clock + time), weekly (weekdays + time). **Timezone-aware, DST-safe** for wall-clock schedules. No raw cron in v1.
 - **Unattended + safe.** Job runs are **read-only by default** — no state or external mutation, web/browser tools off unless explicitly allowed. A scheduled run must not take side-effecting actions on its own.
+- **Document edits are a controlled output path, not a tool escape hatch.** The interactive `apply_content_edit` tool is not registered for scheduler/manual job runs. When job document output is enabled, it must go through the explicit `emit_document_append` executor path described in §3 rather than arbitrary agent tool calls.
 - **Reuse the run pipeline.** A fired job is just a row on the existing queue + executor + event stream — not a parallel execution path.
 - **Self-healing lifecycle.** active / paused / blocked; a job that loses its agent goes `blocked` (not a crash loop); a failed _run_ doesn't break the job — it fires again next time.
 - **Single-flight + no double-fire.** Never run two instances of the same job at once; never fire the same slot twice across scheduler ticks or queue replays.
@@ -31,7 +32,7 @@ A Job belongs to a **Talk** (and its Workspace) and targets **one agent** from t
 2. **No triggering `messages` row is written.** Conversation runs from `/chat` write a user message and reference it via `runs.trigger_message_id`; scheduler/manual runs leave `trigger_message_id = NULL`. The job's prompt lives in the snapshot, not in the Talk's message stream — there is nothing for `messages.author_kind` to be (user/agent are the only values). The agent's reply is the only message produced by a job fire.
 3. The run executes through the **standard queue → executor → event stream** (no special path). The executor reads the prompt from `runs.prompt_snapshot_id.prompt_text_redacted` — not from the live `jobs.prompt`, so editing the job mid-queue affects the NEXT fire, not the in-flight one.
 4. The result lands per the job's **output targets** (§3).
-5. Bookkeeping updates **only on terminal status** (`completed` / `failed`) via `markTalkJobRunFinished`: `last_run_at = run.finished_at`, `last_run_status`, `run_count++`, and the next slot's `next_due_at` (already advanced in the claim txn — see §5). An Inbox item is raised: `job_output_ready` on success (with `ref_id = run.id` for at-least-once dedup), `job_blocked` on dependency failure.
+5. Bookkeeping updates **only on terminal status** (`completed` / `failed` / `cancelled`) via terminal run handling: `last_run_at = run.finished_at`, `last_run_status`, `run_count++`, and the next slot's `next_due_at` (already advanced in the claim txn — see §5). An Inbox item is raised: `job_output_ready` on success (with `ref_id = run.id` for at-least-once dedup), `job_blocked` on dependency failure.
 
 A job is conceptually **"a saved run that fires itself."** No threads, no separate deliverable object — it produces a run, and runs already know how to land a message and/or propose a Document edit.
 
@@ -54,7 +55,7 @@ When the scheduler inserts a run, it sets every required column per the §3 sche
 
 The `runs` CHECK enforces this contract: `(trigger='user') OR (trigger in ('scheduler','manual') AND job_id is not null AND trigger_message_id is null AND prompt_snapshot_id is not null)`.
 
-The `run_prompt_snapshots` insert is required-column-mapped per `11` §4: `workspace_id = job.workspace_id`, `run_id` (the new run's id), `talk_id = job.talk_id`, `agent_snapshot_id` (the targeted snapshot), `model_id` (from snapshot), `provider = (SELECT provider FROM llm_models WHERE id = model_id)` — `talk_agent_snapshots` has no `provider` column; provider lives on `llm_models`. `prompt_text_redacted = jobs.prompt`. Optional provenance fields (`global_policy_version`, `role_template_version`, `context_manifest_json`, `tool_manifest_json`, `prompt_hash`) are left NULL by the scheduler; the executor or a follow-up backfill can populate them.
+The `run_prompt_snapshots` insert is required-column-mapped per `11` §4: `workspace_id = job.workspace_id`, `run_id` (the new run's id), `talk_id = job.talk_id`, `agent_snapshot_id` (the targeted snapshot), `model_id` (from snapshot), `provider = <provider selected for the model>`, `role_template_version = <target agent template version>`, `prompt_assembly_version = 1`, and `prompt_text_redacted = jobs.prompt`. The scheduler also writes `tool_manifest_json` with the frozen, source-scoped effective tool manifest plus `agentCredentialMode`; this is the executor-side enforcement point for the job's read-only `source_scope_json` and the targeted agent's credential path. Optional provenance fields (`global_policy_version`, `context_manifest_json`, `prompt_hash`) are left NULL by the scheduler; the executor or a follow-up backfill can populate them.
 
 ---
 
@@ -136,44 +137,46 @@ Driven by the existing every-minute cron tick (`scheduler.ts` mechanism is kept;
 
 ### Path A — Process due jobs
 
-`for update skip locked` read of jobs where `status='active' AND archived_at is null AND next_due_at <= now`. Per claimed job, ONE database transaction with the following ordered sub-steps; failure at any sub-step aborts the txn and leaves the job unchanged:
+The scheduler pages due candidate jobs where `status='active' AND archived_at is null AND next_due_at <= now`; the per-tick claim limit caps handled rows (enqueued, blocked, skipped, or catch-up-advanced), not the first raw due rows. A separate scan budget (10x the claim limit) bounds poison rows, lock races, Talk-busy rows, and other non-advancing attempts so one tick cannot walk the entire due set. Candidate selection is split into two bounded branches: unclaimed due rows use `jobs_due_unclaimed_idx`, while retry-ready backoff rows use `jobs_due_retry_ready_idx` keyed by `claimed_at`. Each candidate page reserves capacity for retry-ready rows, then orders normal pages with untouched due rows first; for `limit=1`, the page includes one retry-ready candidate plus one untouched candidate so a poison/busy retry cannot consume the only chance to reach fresh work. This prevents both failure modes: an old retry prefix cannot starve fresh untouched work, and a sustained untouched backlog cannot starve expired retry rows forever. Fresh backoff rows are skipped by an index range instead of filtered after walking an unbounded hot prefix. Busy rows are counted in TypeScript after the candidate page returns; later pages are still reached while scan budget remains. Non-advancing busy jobs and unexpected claim failures set `claimed_at=now()` as a short backoff, and the raw candidate query skips rows whose `claimed_at` is still fresh; this preserves the scan budget while preventing the same hot prefix from starving runnable jobs every tick. Per claimed job, ONE database transaction takes a `for update skip locked` row lock and runs the following ordered sub-steps; expected dependency failures block the job in-transaction, while unexpected exceptions abort the claim txn and only commit the short retry backoff:
 
 1. **Single-flight check.** If the partial unique index `runs_one_active_per_job` (`runs(job_id) where status in ('queued','running','awaiting')`) would reject because a non-terminal run already exists, this slot is being held by an earlier run that hasn't terminated yet. Behavior depends on `catch_up`:
    - **`catch_up = 'skip'` (default):** advance `next_due_at` to the next future slot (skipping all slots that elapsed while the prior run was in flight), clear `claimed_at`, COMMIT. No new run is inserted. This prevents a long-running run from causing its own catch-up fire when it finishes (a job whose run takes 3 hours on an hourly schedule should not fire 3 missed slots once the prior run completes).
-   - **`catch_up = 'run_once'`:** leave `next_due_at` unchanged and ABORT the txn. When the prior run terminates, the next tick re-evaluates and the missed slot fires per §4's `run_once` rule.
+   - **`catch_up = 'run_once'`:** leave `next_due_at` unchanged, commit a short `claimed_at=now()` backoff, and retry after the prior run terminates or the backoff expires. The missed slot then fires per §4's `run_once` rule.
 
-2. **Fire-time dependency check.** Verify:
+2. **Talk-level single-flight check.** Take a non-blocking `talks` row lock with `FOR UPDATE SKIP LOCKED`, then count active `runs` for the Talk. If the row lock is held by a concurrent chat/manual transaction, or an active Talk run already exists, set `claimed_at=now()` and return `busy` without inserting a run and without advancing `next_due_at` (unless step 1 already consumed a `catch_up='skip'` job-busy slot). This keeps cron ticks from waiting behind user work, delaying stuck-run sweeps, or rescanning the same busy prefix on the next tick.
+
+3. **Fire-time dependency check.** The scheduler still holds the Talk row lock here; Talk roster/tool writers participate in the same lock so dependency validation and the source-scoped tool snapshot cannot interleave with a concurrent Talk-tool revoke. Verify:
    - The targeted agent (`jobs.agent_id`) is in `talk_agents(workspace_id, talk_id, agent_id)`.
    - The agent's `model_id` references an enabled `llm_models` row.
    - If `emit_document_append = true`: `SELECT 1 FROM documents WHERE primary_talk_id = job.talk_id` returns a row.
-   - Every entry in `source_scope_json.tool_ids` has a matching enabled `talk_tools(workspace_id, talk_id, tool_id, enabled=true)` row.
-   - For each tool that the static `tool_id → required_service` catalog (`11` §6) says depends on a connector, the corresponding `connectors(workspace_id, service, authorized=true)` row exists. A tool that's toggled on in `talk_tools` but whose service connector is unauthorized would fail at executor time with no actionable signal; checking it here turns the failure into a deterministic block.
+   - `source_scope_json.allow_web=true` has at least one enabled Talk web-tool row, and every entry in `source_scope_json.tool_ids` has a matching enabled `talk_tools(workspace_id, talk_id, tool_id, enabled=true)` row.
+   - For each tool that the static `tool_id → required_service` catalog (`11` §6) says depends on a connector, the corresponding authorized `connectors` row exists in the job workspace. Google-family tool jobs require `config_json->>'compatSurface'='google_tools'`, a non-null `secret_ref`, and `config_json->>'authorizedByUserId' = jobs.created_by`; the Google credential writer materializes `gdrive` rows for Drive/Docs/Sheets scopes and `gmail` rows for Gmail scopes, backed by the same encrypted token when both services are granted. Resource-catalog rows such as `talk_resource` do not satisfy OAuth authorization. A tool that's toggled on in `talk_tools` but whose connector is unauthorized would fail at executor time with no actionable signal; checking it here turns the failure into a deterministic block. Until the greenfield Gmail runtime ships, `gmail-read` and `gmail-send` are rejected as job source-scope tools instead of being accepted and then disappearing at execution time.
 
    ANY failure → `UPDATE jobs SET status='blocked', block_reason=<the specific reason>, next_due_at=NULL, claimed_at=NULL` + `INSERT INTO home_inbox_items (workspace_id, type, ref_id, ...) VALUES (..., 'job_blocked', NULL, ...)` — both in the SAME transaction. COMMIT. No snapshots, no `runs` row, no queue dispatch. Path A ends for this job. The next tick will see `status='blocked'` and skip claim entirely.
 
    `block_reason` values: `agent_missing`, `model_disabled`, `no_primary_document`, `tool_not_enabled`, `connector_not_authorized`.
 
-3. **Pre-generate UUIDs.** `run_id`, `snapshot_id` (for `run_prompt_snapshots`), `snapshot_group_id`, and one `agent_snapshot_id` per agent currently in the Talk's roster.
-4. **Freeze roster.** Read current `talk_agents` for the Talk. For each agent, INSERT a `talk_agent_snapshots` row with the shared `snapshot_group_id`, a unique pre-generated `id`, `source_agent_id = <the live agent's id>`, and the snapshot fields per `11` §4 (role_key, model_id, temperature, persona, focus, name, handle, initials, accent — copied from the live agent). Required before the `runs` INSERT because the `runs(workspace_id, talk_id, snapshot_group_id, agent_snapshot_id)` composite FK is non-deferrable.
-5. *(No explicit `SET CONSTRAINTS ALL DEFERRED` needed — `runs.prompt_snapshot_id` is declared `DEFERRABLE INITIALLY DEFERRED` in §11 §3, so the back-edge already defers per-statement. The earlier draft of this step was a no-op and has been dropped.)*
-6. **INSERT `runs`** with the full §2 mapping: `id = run_id`, `prompt_snapshot_id = snapshot_id`, `snapshot_group_id`, `agent_snapshot_id = <targeted snapshot's id>`, `trigger='scheduler'`, `scheduled_for = slot`, `requested_by = jobs.created_by`, `round = max(round)+1 over (talk_id) or 1`, `trigger_message_id = NULL`, `job_id = job.id`, `model_id = <from snapshot>`, `response_group_id = <fresh>`, `sequence_index = 0`, `status = 'queued'`.
-7. **INSERT `run_prompt_snapshots`** with the required column mapping from §2 (workspace_id, run_id, talk_id, agent_snapshot_id, model_id, provider from `llm_models`, prompt_text_redacted = `jobs.prompt`). Optional provenance fields left NULL.
-8. **UPDATE `jobs`** set `next_due_at = <advance(slot)>`, `claimed_at = NULL`. Do NOT touch `last_run_status` here — bookkeeping is terminal-only (see §6).
-9. **COMMIT.** The deferred FK on `runs.prompt_snapshot_id` validates now that the snapshot row exists.
-10. **Dispatch to queue** (`TALK_RUN_QUEUE.send({ runId })`) OUTSIDE the transaction. If dispatch fails or the worker crashes between commit and dispatch, the existing stuck-`queued` sweep (Path B) catches the orphan run.
+4. **Pre-generate UUIDs.** `run_id`, `snapshot_id` (for `run_prompt_snapshots`), `snapshot_group_id`, and one `agent_snapshot_id` per agent currently in the Talk's roster.
+5. **Freeze roster.** Read current `talk_agents` for the Talk. For each agent, INSERT a `talk_agent_snapshots` row with the shared `snapshot_group_id`, a unique pre-generated `id`, `source_agent_id = <the live agent's id>`, and the snapshot fields per `11` §4 (role_key, model_id, temperature, persona, focus, name, handle, initials, accent — copied from the live agent). Required before the `runs` INSERT because the `runs(workspace_id, talk_id, snapshot_group_id, agent_snapshot_id)` composite FK is non-deferrable.
+6. _(No explicit `SET CONSTRAINTS ALL DEFERRED` needed — `runs.prompt_snapshot_id` is declared `DEFERRABLE INITIALLY DEFERRED` in §11 §3, so the back-edge already defers per-statement. The earlier draft of this step was a no-op and has been dropped.)_
+7. **INSERT `runs`** with the full §2 mapping: `id = run_id`, `prompt_snapshot_id = snapshot_id`, `snapshot_group_id`, `agent_snapshot_id = <targeted snapshot's id>`, `trigger='scheduler'`, `scheduled_for = slot`, `requested_by = jobs.created_by`, `round = max(round)+1 over (talk_id) or 1`, `trigger_message_id = NULL`, `job_id = job.id`, `model_id = <from snapshot>`, `response_group_id = <fresh>`, `sequence_index = 0`, `status = 'queued'`.
+8. **INSERT `run_prompt_snapshots`** with the required column mapping from §2 (workspace_id, run_id, talk_id, agent_snapshot_id, model_id, provider, role_template_version, prompt_assembly_version, prompt_text_redacted = `jobs.prompt`) plus `tool_manifest_json` containing the frozen job source-scope manifest and `agentCredentialMode`. Other optional provenance fields are left NULL.
+9. **UPDATE `jobs`** set `next_due_at = <advance(slot)>`, `claimed_at = NULL`. Do NOT touch `last_run_status` here — bookkeeping is terminal-only (see §6).
+10. **COMMIT.** The deferred FK on `runs.prompt_snapshot_id` validates now that the snapshot row exists.
+11. **Dispatch to queue** (`TALK_RUN_QUEUE.send({ runId })`) OUTSIDE the job transaction as soon as that committed run returns from the claim step. This keeps already committed runs from waiting behind later candidate-page failures. If dispatch fails or the worker crashes between commit and dispatch, the existing stuck-`queued` sweep (Path B) re-dispatches the orphan run.
 
-**No separate dropped-claim recovery.** Under this single-txn model, `claimed_at` is always cleared in the same commit that inserts the run. If the txn rolls back, `claimed_at` also rolls back — there is no committed-but-orphaned `claimed_at` to clean up. The stuck-queued sweep handles every remaining stuck-state class.
+**No long lease / dropped-claim sweeper.** A successful claim clears `claimed_at` in the same commit that inserts the run, and a rollback leaves no committed claim behind. The only intentionally committed `claimed_at` values are short backoffs for non-advancing busy rows (`run_once` job busy, Talk busy, lock contention) and unexpected claim exceptions; those rows re-enter via the retry-ready index after the backoff window. The stuck-queued sweep re-dispatches committed runs that were not dispatched or consumed.
 
 ### Path B — Stuck-run sweep
 
 Independent of Path A; runs every tick. Two thresholds:
 
-- `runs.status = 'queued'` AND `runs.created_at < now - 5 min` → transition to `failed`, set `error_json = '{"code":"stuck_queued_swept"}'`, `finished_at = now`. The 5-minute threshold is well past p99 queue fan-out latency.
+- `runs.status = 'queued'` AND `runs.created_at < now - 5 min` → re-dispatch `{runId}` to `TALK_RUN_QUEUE` and leave the row `queued`. The 5-minute threshold is well past p99 queue fan-out latency; the goal is lost-delivery recovery, not slot consumption.
 - `runs.status = 'running'` AND `runs.started_at < now - 1 hour` → transition to `failed`, set `error_json = '{"code":"stuck_running_swept"}'`, `finished_at = now`.
 
 `runs.status = 'awaiting'` is NEVER swept — `awaiting` means the user (or Forge) is intentionally holding the run, not that it's stuck. Sweep doesn't apply.
 
-Both sweep paths call `markTalkJobRunFinished` (terminal bookkeeping in §6) and emit the appropriate Inbox event.
+Only the `running` sweep performs terminal bookkeeping in §6 and emits the failed-run event. The `queued` sweep is a pure re-dispatch and does not increment job `run_count`.
 
 ### Queue idempotency
 
@@ -213,16 +216,16 @@ A schema CHECK enforces the invariant: `(archived_at is not null) OR (status='ac
 `archived_at timestamptz` is a separate lifecycle dimension. The UI "Delete" action calls an archive endpoint that sets `archived_at = now()` and `next_due_at = NULL`. Archived rows:
 
 - Are excluded from list endpoints via the `jobs_active` view (`WITH (security_invoker = true)` — RLS-preserving).
-- Are skipped by the scheduler's claim query (archive-aware index: `jobs(status, next_due_at) where status='active' and archived_at is null`).
+- Are skipped by the scheduler's claim query (archive-aware hot-path indexes: `jobs_due_unclaimed_idx` on `(next_due_at, created_at, id) include (workspace_id, talk_id) where status='active' and archived_at is null and claimed_at is null`, plus `jobs_due_retry_ready_idx` on `(claimed_at, next_due_at, created_at, id) include (workspace_id, talk_id) where status='active' and archived_at is null and claimed_at is not null`).
 - Are read-only — no further edits accepted.
 - Keep their run history queryable: `SELECT * FROM runs WHERE job_id = <archived_job.id>` still works because `runs.job_id` is `ON DELETE RESTRICT` (so hard-delete on a job with `run_count > 0` is rejected; the only path to removing run history is admin-only and out of scope here).
 
 ### Bookkeeping (terminal-only)
 
-`last_run_at`, `last_run_status`, and `run_count` are written **only** by `markTalkJobRunFinished` when a run reaches a terminal status (`completed` or `failed`, including stuck-swept failures). The scheduler does NOT touch them at run-insert time; in-flight state is observable via the `runs` table directly. Manual run-now follows the same rule.
+`last_run_at`, `last_run_status`, and `run_count` are written **only** when a run reaches a terminal status (`completed`, `failed` including stuck-swept failures, or `cancelled`). The scheduler does NOT touch them at run-insert time; in-flight state is observable via the `runs` table directly. Manual run-now follows the same rule.
 
 - `last_run_at = run.finished_at`.
-- `last_run_status` = `'completed'` or `'failed'` (no `'queued'`, no `'running'`).
+- `last_run_status` = `'completed'`, `'failed'`, or `'cancelled'` (no `'queued'`, no `'running'`).
 - `run_count` is incremented on every terminal status — including stuck-swept failures, which ARE terminal `failed` (no special case).
 
 ### Unblock path (event-driven for v1)
@@ -239,7 +242,7 @@ A dedicated route (`POST /api/v1/talks/{talkId}/jobs/{jobId}/run-now`) creates a
 
 - `trigger = 'manual'`, `scheduled_for = NULL` (manual runs don't claim a slot — the scheduler doesn't fire them).
 - `prompt_snapshot_id` is a fresh snapshot of the current `jobs.prompt` at run-now time (same path as scheduler, different trigger value).
-- `requested_by = <the calling user>` (not `jobs.created_by` — manual runs are real human triggers).
+- `requested_by = jobs.created_by`, same as scheduler runs, because the job creator is the execution principal whose Google tool credentials and frozen tool permissions are evaluated. The calling user must be `jobs.created_by`; workspace admins may create their own jobs in editable Talks but cannot trigger another user's credential principal.
 - `round = max(round)+1 over (talk_id)`.
 - `runs_one_active_per_job` enforces single-flight: if a non-terminal run already exists, the route returns 409 busy without creating a second run.
 - Allowed when `status in ('active','paused')`; rejected (400) when `status = 'blocked'` (fix the dep first).
@@ -252,7 +255,7 @@ A dedicated route (`POST /api/v1/talks/{talkId}/jobs/{jobId}/run-now`) creates a
 
 ### Permissions
 
-Jobs are managed by workspace members on the Talk: create / edit / pause / archive / manual run-now. RLS scopes by workspace membership like every other workspace-owned resource. The scheduler runs with service-role auth (no `auth.uid()`); accessors scope explicitly by `workspace_id`.
+Jobs are managed by Talk job editors: workspace owners/admins and the Talk creator can create, edit, pause, resume, and archive schedules. Manual run-now is narrower: only `jobs.created_by` can fire it, because the run executes as that creator's credential principal. RLS scopes by workspace membership like every other workspace-owned resource. The scheduler runs with service-role auth (no `auth.uid()`); accessors scope explicitly by `workspace_id`.
 
 ---
 
@@ -262,7 +265,7 @@ This doc owns behavior; `11` owns the DDL. Key column-deltas from the shipped `t
 
 - **Add to `jobs`** (`11` §8): `workspace_id` (replaces shipped `owner_id` for tenancy), `emit_talk_message bool`, `emit_document_append bool` + CHECK at-least-one, `archived_at timestamptz`, lifecycle CHECK per §6, `jobs_active` view with `security_invoker = true`.
 - **Drop from `jobs`**: `thread_id` (threads gone), `deliverable_kind`, `report_output_id`, `output_targets text[]`, `document_append_mode`, dead `connectorIds`/`channelBindingIds` keys inside `source_scope_json`.
-- **Tighten `source_scope_json`** to the typed shape `{ allow_web: bool, tool_ids: text[] }`. `tool_ids` validates against `talk_tools.tool_id text` at fire time (§5 Path A step 2).
+- **Tighten `source_scope_json`** to the typed shape `{ allow_web: bool, tool_ids: text[] }`. `allow_web` validates against the Talk web-tool family and `tool_ids` validates against `talk_tools.tool_id text` at fire time (§5 Path A step 2).
 - **`block_reason text`** — known values documented: `agent_missing`, `model_disabled`, `no_primary_document`, `tool_not_enabled`, `connector_not_authorized`. Free text allows future reasons without migration; the documented set is the UI contract.
 - **Add to `runs`** (`11` §3): `scheduled_for timestamptz`, the CHECK invariant for scheduler/manual runs, and a partial unique `(job_id, scheduled_for) where job_id is not null and scheduled_for is not null` for slot dedup. Change `runs.job_id` FK from `on delete set null (job_id)` to `on delete restrict` so history survives job archive.
 - **Add to `home_inbox_items`** (`11` §7): `ref_id uuid` + partial unique `(workspace_id, type, ref_id) where ref_id is not null`.
@@ -274,7 +277,7 @@ This doc owns behavior; `11` owns the DDL. Key column-deltas from the shipped `t
 ## 8. Reuse vs. rewrite
 
 - **Keep:** the every-minute cron tick, the run queue + executor + event stream, the read-only mutation lockdown for unattended runs, the timezone/DST-safe wall-clock stepping via `Intl.DateTimeFormat`, single-flight via `runs_one_active_per_job`, the existing `run_prompt_snapshots` table (reused for jobs unchanged), the existing `documents.primary_talk_id` reverse FK, the existing `document_edits` accept path used by Forge.
-- **Rewrite:** drop the per-job dedicated `talk_thread` (the shipped feature wrote one per job; now the run is tagged with `job_id` and that's the only grouping); replace per-user RLS with workspace-membership RLS; replace watermark-only claim with a single-transaction claim that inserts run + advances `next_due_at` + clears `claimed_at` atomically (no separate dropped-claim recovery sweep needed); sweep `queued` AND `running` in the stuck-sweep; drop the trigger-message convention (no `messages` row written for the fire; prompt lives only in `runs.prompt_snapshot_id`); drop the `talk_outputs` report path; drop `auto_accept` for doc appends (always pending); narrow `source_scope_json` to the typed `{allow_web, tool_ids}` shape and validate at fire time.
+- **Rewrite:** drop the per-job dedicated `talk_thread` (the shipped feature wrote one per job; now the run is tagged with `job_id` and that's the only grouping); replace per-user RLS with workspace-membership RLS plus narrow runtime/snapshot write policies; replace watermark-only claim with a single-transaction claim that inserts run + advances `next_due_at` + clears `claimed_at` atomically on success, while non-advancing busy/failure rows use a short `claimed_at` backoff; sweep `queued` AND `running` in the stuck-sweep; drop the trigger-message convention (no `messages` row written for the fire; prompt lives only in `runs.prompt_snapshot_id`); drop the `talk_outputs` report path; drop `auto_accept` for doc appends (always pending); narrow `source_scope_json` to the typed `{allow_web, tool_ids}` shape and validate at fire time.
 
 ---
 
@@ -295,7 +298,7 @@ This doc owns behavior; `11` owns the DDL. Key column-deltas from the shipped `t
 4. **Single-txn safety.** Kill the worker mid-claim-txn before commit; the txn rolls back (no run row, `claimed_at` rolled back, `next_due_at` unchanged); next tick re-claims naturally.
 5. **DST spring-forward gap.** A daily 02:30 job on a transition day skips the gap (next fire at 02:30 the following day).
 6. **DST fall-back overlap.** A daily 01:30 job on a fall-back day fires exactly ONCE at the earlier UTC instant; at the later UTC instant the scheduler finds `next_due_at > now` and does not claim.
-7. **Stuck-`queued` sweep.** Stuck queued past 5 min → `failed` with `error_json={"code":"stuck_queued_swept"}` and `finished_at = now`; `run_count++`, `last_run_status='failed'`.
+7. **Stuck-`queued` sweep.** Stuck queued past 5 min → re-dispatched to `TALK_RUN_QUEUE`; status remains `queued`, and job terminal bookkeeping is untouched.
 8. **Fire-time dependency blocking.** Remove the agent from `talk_agents`; next tick flips the job to `blocked` with `block_reason='agent_missing'`; no run inserted.
 9. **Multi-target all-or-nothing.** Unset `documents.primary_talk_id` for the Talk; next fire blocks with `block_reason='no_primary_document'`; no message posts.
 10. **Manual Run-now respects single-flight.** While a non-terminal run exists, `run-now` returns 409 busy without creating a second run.
@@ -303,7 +306,7 @@ This doc owns behavior; `11` owns the DDL. Key column-deltas from the shipped `t
 12. **Inbox idempotency for `job_output_ready`.** Replay the consumer's completion path; second `home_inbox_items` INSERT hits the unique `(workspace_id, type, ref_id)` index; no duplicate.
 13. **`block_reason='no_primary_document'` specifically.** Delete the primary doc; verify the exact `block_reason` value (not just a generic block).
 14. **Prompt snapshot immutability.** Insert a scheduler run with a snapshot; edit `jobs.prompt`; let the run execute; the executor reads the snapshot's `prompt_text_redacted`, not the new `jobs.prompt`.
-15. **Tool-id validation.** Configure a job with `source_scope_json.tool_ids` containing an entry not enabled in `talk_tools`; next fire blocks with `block_reason='tool_not_enabled'`.
+15. **Tool-id validation.** Configure a job with `source_scope_json.allow_web=true` while web tools are disabled, or with `tool_ids` containing an entry not enabled in `talk_tools`; next fire blocks with `block_reason='tool_not_enabled'`.
 16. **`runs.job_id RESTRICT`.** Attempt to hard-delete a job with `run_count > 0`; the FK rejects. The archive path succeeds (sets `archived_at`).
 17. **Empty primary tab append.** Primary doc has zero blocks in its primary tab; the executor emits `document_edits` with `after_block_id=NULL`; the row commits (op-shape check allows it); the accept path materializes the block as the tab's first.
 18. **Concurrent queue delivery.** Simulate two consumer workers delivering the same queued `run.id` concurrently; one consumer's atomic `update runs set status='running' where id=$1 and status='queued' returning *` returns a row; the other returns empty; only one executor proceeds.
@@ -312,5 +315,7 @@ This doc owns behavior; `11` owns the DDL. Key column-deltas from the shipped `t
 21. **Anchor block deleted between selection and edit insert.** The executor selects `after_block_id = <last block>`; that block is deleted before the `document_edits` INSERT; the composite FK at `11` §5 rejects; the run transitions to `failed` with `error_json={"code":"anchor_block_gone"}`. The next scheduled fire re-selects the new last block.
 22. **Connector unauthorized blocks the job.** Configure a job with `source_scope_json.tool_ids = ['gdrive-read']` and the `gdrive` connector NOT authorized (`connectors.authorized = false`); next fire blocks with `block_reason='connector_not_authorized'`; no run is inserted. Authorizing the connector + editing the job clears the block.
 23. **Long-running run + `catch_up='skip'` does not catch up.** Start a scheduled run on an hourly job; let it run for 3 hours; on every tick during the run, the scheduler advances `next_due_at` to the next future slot (skipping the missed ones) instead of holding the slot. When the run finally completes, the next fire is at the next future slot, not 3 backfilled slots.
-24. **Long-running run + `catch_up='run_once'` fires the missed slot.** Same setup but `catch_up='run_once'`. During the long run, ticks ABORT without advancing `next_due_at`. When the run terminates, the next tick fires the missed slot exactly once (with `scheduled_for = the original missed slot timestamp`), then advances past it.
+24. **Long-running run + `catch_up='run_once'` fires the missed slot.** Same setup but `catch_up='run_once'`. During the long run, ticks leave `next_due_at` unchanged and commit a short `claimed_at=now()` backoff. After the prior run terminates and terminal bookkeeping clears the claim (or the backoff expires), the next tick fires the missed slot exactly once (with `scheduled_for = the original missed slot timestamp`), then advances past it.
 25. **Disabled model blocks the job.** Set the targeted agent's `model_id` to point at an `llm_models` row with `enabled=false`; next fire blocks with `block_reason='model_disabled'`; no run is inserted. Re-enabling the model (or pointing the agent at an enabled model) + editing the job clears the block.
+26. **Busy/poison due rows consume scan budget without starving later due work.** Seed 10 due jobs whose Talks already have active runs or whose stored schedule is corrupted, then one later due idle job; with `limit=1`, the first scheduler claim reports 10 busy/failed rows and enqueues nothing, leaving the idle job for the next tick rather than walking past the 10x scan budget. The next tick skips the freshly deferred busy/failed rows via `claimed_at` and enqueues the idle job.
+27. **Talk row lock contention is non-blocking.** Hold `FOR UPDATE` on a due job's Talk row from another transaction; the scheduler claim path returns `busy`, leaves `next_due_at` unchanged, and inserts no run.

@@ -1,11 +1,13 @@
 import {
   getRegisteredAgent,
   type EffectiveToolAccess,
+  type RegisteredAgentRecord,
 } from '../db/agent-accessors.js';
 import { ensureRunnableModel } from './runtime-model-guard.js';
 import {
   resolveExecution,
   ExecutionResolverError,
+  type ExecutionCredentialScope,
 } from './execution-resolver.js';
 import {
   streamLlmResponse,
@@ -126,11 +128,10 @@ export interface AgentExecutionResult {
     incompleteReason?: 'truncated' | 'empty' | 'unknown' | null;
   };
   /**
-   * Provider-specific blobs to persist on the assistant message
-   * (talk_messages.metadata_json) so the next turn can replay them.
-   * Currently used by the codex_responses path to carry forward
-   * encrypted reasoning items + assistant message items for
-   * prefix-cache + chain-of-thought continuity.
+   * Provider-specific blobs to persist in the trusted replay store so
+   * the next turn can replay them. Currently used by the codex_responses
+   * path to carry forward encrypted reasoning items + assistant message
+   * items for prefix-cache + chain-of-thought continuity.
    */
   providerData?: {
     codexReasoningItems?: Array<Record<string, unknown>>;
@@ -138,17 +139,50 @@ export interface AgentExecutionResult {
   };
 }
 
+export interface AgentExecutionOptions {
+  runId: string;
+  userId: string;
+  signal?: AbortSignal;
+  emit?: (event: ExecutionEvent) => void;
+  executeToolCall?: (
+    toolName: string,
+    args: Record<string, unknown>,
+  ) => Promise<{ result: string; isError?: boolean }>;
+  alwaysAllowedContextToolNames?: string[];
+  maxToolIterations?: number;
+  toolIterationLimitFallback?: string;
+  /**
+   * When true, set provider-specific `tool_choice=required` on the
+   * FIRST iteration of the tool-calling loop. Subsequent iterations
+   * fall back to the default 'auto' — once the agent has been pushed
+   * into picking a tool, we let it decide whether to call more tools
+   * or settle on a final assistant turn.
+   */
+  forceToolUseOnFirstIteration?: boolean;
+  /**
+   * Snapshot of the credential kind the resolver should pick for this run.
+   * Null/undefined falls back to the live agent value.
+   */
+  credentialKindSnapshot?: 'api_key' | 'subscription' | null;
+  /**
+   * Explicit credential scope for provider secrets. Runtime paths fail closed
+   * for personal/workspace credentials when this is omitted.
+   */
+  credentialScope?: ExecutionCredentialScope | null;
+  /**
+   * The Talk's effective tool set for this turn. Absent => no non-internal
+   * tools are exposed.
+   */
+  effectiveTools?: EffectiveToolAccess[];
+}
+
 export const ALWAYS_ALLOWED_CONTEXT_TOOLS = new Set([
-  'list_state',
   'read_source',
-  'read_attachment',
-  'read_state',
   // Content-feature edit tool — registered by context-loader only when
   // the Talk has an attached Content doc (`hasContent === true`). Never
   // appears in any tool family, so
   // without this allowlist it gets silently filtered out for every
-  // agent. Talk-internal context tools by category — always allowed
-  // alongside read_state / list_state.
+  // agent.
   'apply_content_edit',
 ]);
 
@@ -242,50 +276,7 @@ export async function executeWithAgent(
   agentId: string,
   context: ExecutionContext | null,
   userMessage: string | LlmContentBlock[],
-  options: {
-    runId: string;
-    userId: string;
-    signal?: AbortSignal;
-    emit?: (event: ExecutionEvent) => void;
-    executeToolCall?: (
-      toolName: string,
-      args: Record<string, unknown>,
-    ) => Promise<{ result: string; isError?: boolean }>;
-    alwaysAllowedContextToolNames?: string[];
-    maxToolIterations?: number;
-    toolIterationLimitFallback?: string;
-    /**
-     * When true, set provider-specific `tool_choice=required` on the
-     * FIRST iteration of the tool-calling loop. Subsequent iterations
-     * fall back to the default 'auto' — once the agent has been pushed
-     * into picking a tool, we let it decide whether to call more tools
-     * or settle on a final assistant turn.
-     *
-     * Restored 2026-05-26 after Kimi 2.6 regressed to chat-rewrites on
-     * `@doc rewrite paragraph 2` without firing apply_content_edit.
-     * This is the locked-decision-#11 noted-risk fallback path the
-     * direct-edit redesign promised in its rollout plan.
-     */
-    forceToolUseOnFirstIteration?: boolean;
-    /**
-     * Snapshot of the credential kind the resolver should pick for
-     * THIS run (populated from `talk_runs.credential_kind_snapshot`
-     * at enqueue time — migration 0032 / PR B). Overrides the live
-     * `agent.credential_mode` so editing the agent's pin while a run
-     * is queued can't flip auth mid-flight. Null/undefined falls back
-     * to the live agent value.
-     */
-    credentialKindSnapshot?: 'api_key' | 'subscription' | null;
-    /**
-     * The Talk's effective tool set for this turn (talkActive ∩ light ∩
-     * userPermission), computed by getEffectiveToolsForAgent and passed by the
-     * executor. Drives which tool DEFINITIONS the model sees. Absent =>
-     * default to NO tools (D8): executeWithAgent is exported + test-called, so
-     * the fallback is explicit and safe rather than a crash or silently
-     * all-light.
-     */
-    effectiveTools?: EffectiveToolAccess[];
-  },
+  options: AgentExecutionOptions,
 ): Promise<AgentExecutionResult> {
   const emit = options.emit || (() => {});
 
@@ -314,7 +305,36 @@ export async function executeWithAgent(
   // for Talk runs (the executor already swapped via resolveTalkAgent, and we
   // re-load the upgraded row here) but makes executeWithAgent correct for any
   // caller that reaches it directly. See runtime-model-guard.ts.
-  await ensureRunnableModel(agent);
+  await ensureRunnableModel(agent, {
+    credentialScope: options.credentialScope ?? null,
+  });
+
+  return executeWithResolvedAgent(agent, context, userMessage, options);
+}
+
+/**
+ * Execute an already-resolved agent record.
+ *
+ * Greenfield Talk runs execute from immutable `talk_agent_snapshots`; this
+ * entry point lets that path reuse the router's credential resolution,
+ * tool-loop, streaming, and incomplete-response handling without reloading
+ * the mutable legacy registered-agent row.
+ */
+export async function executeWithResolvedAgent(
+  agent: RegisteredAgentRecord,
+  context: ExecutionContext | null,
+  userMessage: string | LlmContentBlock[],
+  options: AgentExecutionOptions,
+): Promise<AgentExecutionResult> {
+  const emit = options.emit || (() => {});
+  const agentId = agent.id;
+
+  if (!agent.enabled) {
+    const errorCode = 'AGENT_DISABLED';
+    const errorMessage = `Agent ${agentId} is disabled`;
+    emit({ type: 'failed', errorCode, errorMessage });
+    throw new Error(errorMessage);
+  }
 
   // -----------
   // Step 2: Resolve execution binding (provider config + credentials)
@@ -330,6 +350,7 @@ export async function executeWithAgent(
   try {
     const binding = await resolveExecution(agent, {
       credentialKindSnapshot: options.credentialKindSnapshot,
+      credentialScope: options.credentialScope,
     });
     providerConfig = binding.providerConfig;
     secret = binding.secret;
@@ -460,7 +481,7 @@ export async function executeWithAgent(
   let lastProviderStopReason: string | null = null;
   let usedToolIterationFallback = false;
   // Track the most recent turn's provider_data so the executor can
-  // persist it on the assistant talk_message. Only the FINAL turn's
+  // persist it in the trusted replay store. Only the FINAL turn's
   // codex items are kept (mid-loop tool-call turns get their reasoning
   // replaced on the next iteration anyway).
   let latestProviderData: AgentExecutionResult['providerData'] | undefined;

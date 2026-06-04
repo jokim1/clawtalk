@@ -306,7 +306,8 @@ A Message:
 - when `author_kind = 'agent'`: carries `agent_snapshot_id` (the immutable
   per-run roster snapshot of the speaking agent, §11 §4) and `run_id` (a
   back-edge to the run that produced it)
-- has an immutable `body` plus optional `attachments_json`
+- has an immutable `body`. Message attachments are deferred from the active
+  greenfield baseline; source files use Context rows instead.
 
 Composite FKs (§11 §3) tie every message to its parent Talk on
 `(workspace_id, talk_id)` and to its run on `(workspace_id, talk_id, run_id)`,
@@ -367,8 +368,8 @@ distinguishes `conversation` runs (chat) from `content_improvement` runs
 with `source='forge'` against the targeted `tab_id` / `target_block_id`; the
 user accepts/rejects through the normal pending-edit pane (§6.3).
 
-Cross-refs: §11 §9 (schema), `09-improver-spec.md` (PRD),
-`10-improver-design.md` (design handoff), §04 §17 (API).
+Cross-refs: §11 §9 (schema), `09-autonomous-content-improvement-prd.md` (PRD),
+`10-forge-design-handoff.md` (design handoff), §04 §17 (API).
 
 ## 4. Canonical Cardinalities
 
@@ -661,7 +662,6 @@ author_user_id uuid nullable         -- set when author_kind = 'user'
 agent_snapshot_id uuid nullable      -- set when author_kind = 'agent'
 run_id uuid nullable                 -- set when author_kind = 'agent' (back-edge)
 body text
-attachments_json jsonb
 created_at
 ```
 

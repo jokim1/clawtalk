@@ -1,12 +1,3 @@
-// Connectors refactor PR 1 — end-to-end tests for connectors-accessors.
-//
-// Mirrors the agent-accessors test scaffolding (test-helpers.ts contract).
-// Runs against the local supabase stack on 127.0.0.1:54432; expects
-// migrations 0019/0020/0021 to be applied.
-//
-// UUID prefix used for this file: 0c888888 (per the test-helpers prefix
-// registry convention).
-
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
 import {
@@ -15,20 +6,21 @@ import {
   initPgDatabase,
   withUserContext,
 } from '../../db.js';
+import { ensureWorkspaceBootstrapForUser } from '../workspaces/bootstrap.js';
 import {
   ConnectorConfigInvalidError,
   createWorkspaceChannel,
   createWorkspaceDataConnector,
-  decryptWorkspaceChannelCredential,
   deleteWorkspaceChannel,
   deleteWorkspaceDataConnector,
+  decryptWorkspaceChannelCredential,
+  decryptWorkspaceDataConnectorCredential,
   getTalkConnectorsView,
   getWorkspaceChannel,
   getWorkspaceDataConnector,
   linkTalkChannel,
   linkTalkDataConnector,
   listTalkChannelLinks,
-  listTalkDataConnectorLinks,
   listWorkspaceChannels,
   listWorkspaceDataConnectors,
   setWorkspaceChannelCredential,
@@ -38,681 +30,861 @@ import {
   updateWorkspaceChannel,
   updateWorkspaceDataConnector,
 } from './connectors-accessors.js';
+import { upsertWorkspaceSlackInstall } from './slack-installs-accessors.js';
 
-const ADMIN_ID = '0c888888-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
+const OWNER_ID = '0c888888-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
 const MEMBER_ID = '0c888888-bbbb-bbbb-bbbb-bbbbbbbbbbbb';
-const OTHER_MEMBER_ID = '0c888888-cccc-cccc-cccc-cccccccccccc';
+const OTHER_ID = '0c888888-cccc-cccc-cccc-cccccccccccc';
 
-async function seedUser(input: {
-  id: string;
-  email: string;
-  role: 'owner' | 'admin' | 'member';
-}): Promise<void> {
+async function seedAuthUser(id: string, email: string): Promise<void> {
   const db = getDbPg();
   await db`
     insert into auth.users (id, email, raw_user_meta_data)
     values (
-      ${input.id}::uuid,
-      ${input.email}::text,
-      jsonb_build_object('full_name', ${input.email}::text)
+      ${id}::uuid,
+      ${email}::text,
+      jsonb_build_object('full_name', ${email}::text)
     )
-    on conflict (id) do nothing
+    on conflict (id) do update set
+      email = excluded.email,
+      raw_user_meta_data = excluded.raw_user_meta_data
   `;
-  // The on_auth_user_created trigger inserts into public.users with
-  // role='member'. Promote admins / owners via direct update from the
-  // BYPASSRLS postgres role.
-  if (input.role !== 'member') {
-    await db`
-      update public.users set role = ${input.role}
-      where id = ${input.id}::uuid
-    `;
-  }
 }
 
-async function seedTalk(input: {
-  ownerId: string;
-  talkId?: string;
-}): Promise<string> {
+async function deleteFixtureUsers(): Promise<void> {
   const db = getDbPg();
-  const rows = await db<Array<{ id: string }>>`
-    insert into public.talks (id, owner_id, topic_title)
+  await db`
+    delete from public.workspaces
+    where owner_id in (${OWNER_ID}::uuid, ${MEMBER_ID}::uuid, ${OTHER_ID}::uuid)
+  `;
+  await db`
+    delete from auth.users
+    where id in (${OWNER_ID}::uuid, ${MEMBER_ID}::uuid, ${OTHER_ID}::uuid)
+  `;
+}
+
+async function createFixture(): Promise<{
+  workspaceId: string;
+  talkId: string;
+}> {
+  await seedAuthUser(OWNER_ID, 'connector-accessor-owner@clawtalk.local');
+  await seedAuthUser(MEMBER_ID, 'connector-accessor-member@clawtalk.local');
+  await seedAuthUser(OTHER_ID, 'connector-accessor-other@clawtalk.local');
+  const workspaceId = await ensureWorkspaceBootstrapForUser(OWNER_ID);
+  const db = getDbPg();
+  await db`
+    insert into public.workspace_members (workspace_id, user_id, role)
+    values (${workspaceId}::uuid, ${MEMBER_ID}::uuid, 'member')
+    on conflict (workspace_id, user_id) do update set role = excluded.role
+  `;
+  const talkRows = await db<Array<{ id: string }>>`
+    insert into public.talks (workspace_id, sort_order, title, created_by)
+    values (${workspaceId}::uuid, 0, 'Accessor Connector Talk', ${MEMBER_ID}::uuid)
+    returning id
+  `;
+  return { workspaceId, talkId: talkRows[0]!.id };
+}
+
+async function createTalkInWorkspace(input: {
+  workspaceId: string;
+  sortOrder: number;
+  createdBy: string;
+  title?: string;
+}): Promise<string> {
+  const rows = await getDbPg()<Array<{ id: string }>>`
+    insert into public.talks (workspace_id, sort_order, title, created_by)
     values (
-      coalesce(${input.talkId ?? null}::uuid, gen_random_uuid()),
-      ${input.ownerId}::uuid,
-      'Connectors test talk'
+      ${input.workspaceId}::uuid,
+      ${input.sortOrder},
+      ${input.title ?? 'Accessor Connector Talk 2'},
+      ${input.createdBy}::uuid
     )
     returning id
   `;
-  if (!rows[0]) throw new Error('seedTalk failed');
-  return rows[0].id;
+  return rows[0]!.id;
 }
 
-async function purgeConnectorsData(): Promise<void> {
-  const db = getDbPg();
-  // talks cascade to talk_*_links via FK; workspace_* rows are global
-  // (not user-scoped) — clear them explicitly between tests.
-  await db`
-    delete from public.talks
-    where owner_id in (${ADMIN_ID}::uuid, ${MEMBER_ID}::uuid,
-                       ${OTHER_MEMBER_ID}::uuid)
-  `;
-  await db`delete from public.workspace_channels`;
-  await db`delete from public.workspace_data_connectors`;
-}
-
-describe('connectors-accessors (postgres + RLS)', () => {
+describe('greenfield connector accessors', () => {
   beforeAll(async () => {
     await initPgDatabase();
-    await seedUser({
-      id: ADMIN_ID,
-      email: 'connectors-admin@clawtalk.local',
-      role: 'admin',
-    });
-    await seedUser({
-      id: MEMBER_ID,
-      email: 'connectors-member@clawtalk.local',
-      role: 'member',
-    });
-    await seedUser({
-      id: OTHER_MEMBER_ID,
-      email: 'connectors-other@clawtalk.local',
-      role: 'member',
-    });
-  });
-
-  afterAll(async () => {
-    const db = getDbPg();
-    await db`
-      delete from auth.users
-      where id in (${ADMIN_ID}::uuid, ${MEMBER_ID}::uuid,
-                   ${OTHER_MEMBER_ID}::uuid)
-    `;
-    await closePgDatabase();
   });
 
   beforeEach(async () => {
-    await purgeConnectorsData();
+    await deleteFixtureUsers();
   });
 
-  it('schema preconditions: RLS enabled + policies present on new tables', async () => {
-    const db = getDbPg();
-    const rows = await db<{ relname: string; relrowsecurity: boolean }[]>`
-      select c.relname, c.relrowsecurity
-      from pg_class c
-      join pg_namespace n on n.oid = c.relnamespace
-      where n.nspname = 'public'
-        and c.relname in (
-          'workspace_channels', 'talk_channel_links',
-          'workspace_data_connectors', 'talk_data_connector_links'
-        )
-    `;
-    expect(rows.length).toBe(4);
-    for (const row of rows) {
-      expect(row.relrowsecurity).toBe(true);
-    }
-    const policies = await db<{ tablename: string; policyname: string }[]>`
-      select tablename, policyname
-      from pg_policies
-      where schemaname = 'public'
-        and tablename in (
-          'workspace_channels', 'talk_channel_links',
-          'workspace_data_connectors', 'talk_data_connector_links'
-        )
-    `;
-    const tablesWithPolicy = new Set(policies.map((p) => p.tablename));
-    expect(tablesWithPolicy.has('workspace_channels')).toBe(true);
-    expect(tablesWithPolicy.has('talk_channel_links')).toBe(true);
-    expect(tablesWithPolicy.has('workspace_data_connectors')).toBe(true);
-    expect(tablesWithPolicy.has('talk_data_connector_links')).toBe(true);
+  afterAll(async () => {
+    await deleteFixtureUsers();
+    await closePgDatabase();
   });
 
-  it('T2: createWorkspaceChannel as admin succeeds', async () => {
-    const created = await withUserContext(ADMIN_ID, async () =>
+  it('creates and lists channel connectors from final connectors table', async () => {
+    const { workspaceId } = await createFixture();
+    const channel = await withUserContext(OWNER_ID, () =>
       createWorkspaceChannel({
-        kind: 'slack',
-        displayName: 'Engineering',
-        config: { workspace_id: 'W123', channel_id: 'C456' },
-        createdBy: ADMIN_ID,
-      }),
-    );
-    expect(created.kind).toBe('slack');
-    expect(created.display_name).toBe('Engineering');
-    expect(created.config_json).toMatchObject({
-      workspace_id: 'W123',
-      channel_id: 'C456',
-    });
-    expect(created.has_credential).toBe(false);
-    expect(created.enabled).toBe(true);
-    expect(created.bound_talk_count).toBe(0);
-  });
-
-  it('T1: listWorkspaceChannels returns rows for any auth user (member can read)', async () => {
-    await withUserContext(ADMIN_ID, async () =>
-      createWorkspaceChannel({
+        workspaceId,
         kind: 'slack',
         displayName: 'Eng',
-        createdBy: ADMIN_ID,
+        config: { workspace_id: 'W1', channel_id: 'C1' },
+        createdBy: OWNER_ID,
+        allowSlackChannelImport: true,
       }),
     );
-    const seen = await withUserContext(MEMBER_ID, async () =>
-      listWorkspaceChannels(),
-    );
-    expect(seen.map((c) => c.display_name)).toContain('Eng');
-  });
+    expect(channel).toMatchObject({
+      kind: 'slack',
+      display_name: 'Eng',
+      enabled: true,
+      has_credential: false,
+    });
 
-  it('T3: createWorkspaceChannel as member → RLS rejects', async () => {
+    const rows = await withUserContext(MEMBER_ID, () =>
+      listWorkspaceChannels({ workspaceId }),
+    );
+    expect(rows.map((row) => row.id)).toEqual([channel.id]);
+
     await expect(
-      withUserContext(MEMBER_ID, async () =>
+      withUserContext(MEMBER_ID, () =>
         createWorkspaceChannel({
+          workspaceId,
           kind: 'slack',
-          displayName: 'Should not insert',
+          displayName: 'Member write',
           createdBy: MEMBER_ID,
         }),
       ),
     ).rejects.toThrow();
   });
 
-  it('T4: createWorkspaceChannel without ciphertext stores has_credential=false', async () => {
-    const created = await withUserContext(ADMIN_ID, async () =>
-      createWorkspaceChannel({
-        kind: 'telegram',
-        displayName: 'Alerts',
-        config: { bot_id: 'B1', chat_id: 'C9' },
-        createdBy: ADMIN_ID,
-      }),
-    );
-    expect(created.has_credential).toBe(false);
-  });
-
-  it('T5: createWorkspaceChannel with invalid config_json → Zod rejects', async () => {
+  it('validates retired connector kinds and malformed configs', async () => {
+    const { workspaceId } = await createFixture();
     await expect(
-      withUserContext(ADMIN_ID, async () =>
+      withUserContext(OWNER_ID, () =>
         createWorkspaceChannel({
+          workspaceId,
+          kind: 'telegram',
+          displayName: 'Telegram',
+          createdBy: OWNER_ID,
+        }),
+      ),
+    ).rejects.toThrow('Unsupported channel kind');
+
+    await expect(
+      withUserContext(OWNER_ID, () =>
+        createWorkspaceChannel({
+          workspaceId,
           kind: 'slack',
-          displayName: 'Bad config',
-          // workspace_id must be string when present; pass a number to trip Zod
-          config: { workspace_id: 123 },
-          createdBy: ADMIN_ID,
+          displayName: 'Bad',
+          config: { workspace_id: 1234 },
+          createdBy: OWNER_ID,
+        }),
+      ),
+    ).rejects.toBeInstanceOf(ConnectorConfigInvalidError);
+
+    await expect(
+      withUserContext(OWNER_ID, () =>
+        createWorkspaceChannel({
+          workspaceId,
+          kind: 'slack',
+          displayName: 'Secret passthrough',
+          config: { apiKey: 'xoxb-should-not-store' },
+          createdBy: OWNER_ID,
+        }),
+      ),
+    ).rejects.toBeInstanceOf(ConnectorConfigInvalidError);
+
+    await expect(
+      withUserContext(OWNER_ID, () =>
+        createWorkspaceDataConnector({
+          workspaceId,
+          kind: 'google_docs',
+          displayName: 'Secret data config',
+          config: { folder_id: 'F1', token: 'google-should-not-store' },
+          createdBy: OWNER_ID,
         }),
       ),
     ).rejects.toBeInstanceOf(ConnectorConfigInvalidError);
   });
 
-  it('T6: updateWorkspaceChannel patches display_name', async () => {
-    const created = await withUserContext(ADMIN_ID, async () =>
-      createWorkspaceChannel({
-        kind: 'slack',
-        displayName: 'Original',
-        createdBy: ADMIN_ID,
-      }),
-    );
-    const updated = await withUserContext(ADMIN_ID, async () =>
-      updateWorkspaceChannel(created.id, {
-        displayName: 'Renamed',
-        updatedBy: ADMIN_ID,
-      }),
-    );
-    expect(updated?.display_name).toBe('Renamed');
-  });
+  it('rejects unvalidated Slack channel targets outside the Slack importer', async () => {
+    const { workspaceId } = await createFixture();
 
-  it('T7: deleteWorkspaceChannel cascades to talk_channel_links', async () => {
-    const channel = await withUserContext(ADMIN_ID, async () =>
-      createWorkspaceChannel({
-        kind: 'slack',
-        displayName: 'Cascade test',
-        createdBy: ADMIN_ID,
-      }),
-    );
-    const talkId = await seedTalk({ ownerId: MEMBER_ID });
-    await withUserContext(MEMBER_ID, async () =>
-      linkTalkChannel({
-        talkId,
-        channelId: channel.id,
-        ownerId: MEMBER_ID,
-      }),
-    );
-    expect(
-      (await withUserContext(MEMBER_ID, () => listTalkChannelLinks(talkId)))
-        .length,
-    ).toBe(1);
-
-    await withUserContext(ADMIN_ID, () => deleteWorkspaceChannel(channel.id));
-
-    expect(
-      (await withUserContext(MEMBER_ID, () => listTalkChannelLinks(talkId)))
-        .length,
-    ).toBe(0);
-  });
-
-  it('T8: linkTalkChannel is idempotent on conflict', async () => {
-    const channel = await withUserContext(ADMIN_ID, async () =>
-      createWorkspaceChannel({
-        kind: 'slack',
-        displayName: 'Idempotent',
-        createdBy: ADMIN_ID,
-      }),
-    );
-    const talkId = await seedTalk({ ownerId: MEMBER_ID });
-    await withUserContext(MEMBER_ID, async () =>
-      linkTalkChannel({
-        talkId,
-        channelId: channel.id,
-        ownerId: MEMBER_ID,
-      }),
-    );
-    // Second click must not throw and must not produce a duplicate row.
-    await withUserContext(MEMBER_ID, async () =>
-      linkTalkChannel({
-        talkId,
-        channelId: channel.id,
-        ownerId: MEMBER_ID,
-      }),
-    );
-    const links = await withUserContext(MEMBER_ID, () =>
-      listTalkChannelLinks(talkId),
-    );
-    expect(links.length).toBe(1);
-  });
-
-  it('T9: unlinkTalkChannel removes the row', async () => {
-    const channel = await withUserContext(ADMIN_ID, async () =>
-      createWorkspaceChannel({
-        kind: 'slack',
-        displayName: 'Toggle off',
-        createdBy: ADMIN_ID,
-      }),
-    );
-    const talkId = await seedTalk({ ownerId: MEMBER_ID });
-    await withUserContext(MEMBER_ID, async () => {
-      await linkTalkChannel({
-        talkId,
-        channelId: channel.id,
-        ownerId: MEMBER_ID,
-      });
-      const removed = await unlinkTalkChannel({
-        talkId,
-        channelId: channel.id,
-      });
-      expect(removed).toBe(true);
-      const links = await listTalkChannelLinks(talkId);
-      expect(links.length).toBe(0);
-    });
-  });
-
-  it('T10/T11: getTalkConnectorsView annotates linked + workspace.enabled', async () => {
-    const linked = await withUserContext(ADMIN_ID, async () =>
-      createWorkspaceChannel({
-        kind: 'slack',
-        displayName: 'Linked channel',
-        createdBy: ADMIN_ID,
-      }),
-    );
-    const unlinked = await withUserContext(ADMIN_ID, async () =>
-      createWorkspaceChannel({
-        kind: 'telegram',
-        displayName: 'Unlinked channel',
-        enabled: false,
-        createdBy: ADMIN_ID,
-      }),
-    );
-    const talkId = await seedTalk({ ownerId: MEMBER_ID });
-    await withUserContext(MEMBER_ID, async () =>
-      linkTalkChannel({
-        talkId,
-        channelId: linked.id,
-        ownerId: MEMBER_ID,
-      }),
-    );
-    const view = await withUserContext(MEMBER_ID, () =>
-      getTalkConnectorsView(talkId),
-    );
-    const linkedRow = view.channels.find((c) => c.id === linked.id);
-    const unlinkedRow = view.channels.find((c) => c.id === unlinked.id);
-    expect(linkedRow?.linked).toBe(true);
-    expect(linkedRow?.enabled).toBe(true);
-    expect(unlinkedRow?.linked).toBe(false);
-    expect(unlinkedRow?.enabled).toBe(false);
-  });
-
-  it('T12: linkTalkChannel rejects ownerId mismatch with auth.uid()', async () => {
-    // Talk-ownership enforcement is the ROUTE layer's job (see
-    // connectors.ts: lookup talk + reject if owner != caller). The RLS
-    // policy on `talk_channel_links` is `owner_id = auth.uid()`, which
-    // catches the simpler attack of stamping a different user's id as
-    // owner. Verify that the policy fires for that case here.
-    const channel = await withUserContext(ADMIN_ID, async () =>
-      createWorkspaceChannel({
-        kind: 'slack',
-        displayName: 'Owner check',
-        createdBy: ADMIN_ID,
-      }),
-    );
-    const talkId = await seedTalk({ ownerId: MEMBER_ID });
     await expect(
-      withUserContext(OTHER_MEMBER_ID, async () =>
+      withUserContext(OWNER_ID, () =>
+        createWorkspaceChannel({
+          workspaceId,
+          kind: 'slack',
+          displayName: 'Spoofed target',
+          config: { workspace_id: 'T1', channel_id: 'C1' },
+          createdBy: OWNER_ID,
+        }),
+      ),
+    ).rejects.toBeInstanceOf(ConnectorConfigInvalidError);
+
+    const channel = await withUserContext(OWNER_ID, () =>
+      createWorkspaceChannel({
+        workspaceId,
+        kind: 'slack',
+        displayName: 'Editable name only',
+        createdBy: OWNER_ID,
+      }),
+    );
+    await expect(
+      withUserContext(OWNER_ID, () =>
+        updateWorkspaceChannel(
+          channel.id,
+          {
+            config: { workspace_id: 'T1', channel_id: 'C1' },
+            updatedBy: OWNER_ID,
+          },
+          { workspaceId },
+        ),
+      ),
+    ).rejects.toBeInstanceOf(ConnectorConfigInvalidError);
+  });
+
+  it('round-trips connector credentials through connector_secrets', async () => {
+    const { workspaceId } = await createFixture();
+    const channel = await withUserContext(OWNER_ID, () =>
+      createWorkspaceChannel({
+        workspaceId,
+        kind: 'slack',
+        displayName: 'Secrets',
+        createdBy: OWNER_ID,
+      }),
+    );
+    const set = await withUserContext(OWNER_ID, () =>
+      setWorkspaceChannelCredential(
+        channel.id,
+        { apiKey: 'xoxb-secret', organizationId: 'W1' },
+        OWNER_ID,
+        { workspaceId },
+      ),
+    );
+    expect(set?.has_credential).toBe(true);
+    const decrypted = await withUserContext(OWNER_ID, () =>
+      decryptWorkspaceChannelCredential(channel.id, { workspaceId }),
+    );
+    expect(decrypted).toEqual({ apiKey: 'xoxb-secret', organizationId: 'W1' });
+    await expect(
+      decryptWorkspaceChannelCredential(channel.id, { workspaceId }),
+    ).resolves.toEqual({ apiKey: 'xoxb-secret', organizationId: 'W1' });
+    await expect(
+      withUserContext(MEMBER_ID, () =>
+        decryptWorkspaceChannelCredential(channel.id, { workspaceId }),
+      ),
+    ).resolves.toEqual({ apiKey: 'xoxb-secret', organizationId: 'W1' });
+    const foreignWorkspaceId = await ensureWorkspaceBootstrapForUser(OTHER_ID);
+    await expect(
+      decryptWorkspaceChannelCredential(channel.id, {
+        workspaceId: foreignWorkspaceId,
+      }),
+    ).resolves.toBeNull();
+    await expect(
+      withUserContext(OWNER_ID, () =>
+        decryptWorkspaceDataConnectorCredential(channel.id, { workspaceId }),
+      ),
+    ).resolves.toBeNull();
+
+    const withSecret = await getDbPg()<
+      Array<{ secret_ref: string | null; secret_count: number }>
+    >`
+      select c.secret_ref,
+             (
+               select count(*)::int
+               from public.connector_secrets cs
+               where cs.workspace_id = c.workspace_id
+                 and cs.id = c.secret_ref
+             ) as secret_count
+      from public.connectors c
+      where c.id = ${channel.id}::uuid
+    `;
+    expect(withSecret[0]?.secret_ref).toBeTruthy();
+    expect(withSecret[0]?.secret_count).toBe(1);
+
+    const cleared = await withUserContext(OWNER_ID, () =>
+      setWorkspaceChannelCredential(channel.id, null, OWNER_ID, {
+        workspaceId,
+      }),
+    );
+    expect(cleared?.has_credential).toBe(false);
+    await expect(
+      withUserContext(OWNER_ID, () =>
+        decryptWorkspaceChannelCredential(channel.id, { workspaceId }),
+      ),
+    ).resolves.toBeNull();
+    const withoutSecret = await getDbPg()<
+      Array<{ secret_ref: string | null; secret_count: number }>
+    >`
+      select c.secret_ref,
+             (
+               select count(*)::int
+               from public.connector_secrets cs
+               where cs.workspace_id = c.workspace_id
+             ) as secret_count
+      from public.connectors c
+      where c.id = ${channel.id}::uuid
+    `;
+    expect(withoutSecret[0]).toEqual({ secret_ref: null, secret_count: 0 });
+  });
+
+  it('uses trusted writes for per-Talk connector bindings after caller auth', async () => {
+    const { workspaceId, talkId } = await createFixture();
+    const channel = await withUserContext(OWNER_ID, async () => {
+      const row = await createWorkspaceChannel({
+        workspaceId,
+        kind: 'slack',
+        displayName: 'Bindable',
+        createdBy: OWNER_ID,
+      });
+      await setWorkspaceChannelCredential(
+        row.id,
+        { apiKey: 'xoxb' },
+        OWNER_ID,
+        {
+          workspaceId,
+        },
+      );
+      return row;
+    });
+
+    await withUserContext(MEMBER_ID, () =>
+      linkTalkChannel({
+        talkId,
+        channelId: channel.id,
+        ownerId: MEMBER_ID,
+      }),
+    );
+    await expect(
+      withUserContext(OTHER_ID, () =>
+        linkTalkChannel({
+          talkId,
+          channelId: channel.id,
+          ownerId: OTHER_ID,
+        }),
+      ),
+    ).resolves.toBe(false);
+    await expect(
+      withUserContext(MEMBER_ID, () =>
+        linkTalkChannel({
+          talkId,
+          channelId: channel.id,
+          ownerId: OWNER_ID,
+        }),
+      ),
+    ).resolves.toBe(false);
+    await expect(
+      withUserContext(MEMBER_ID, () =>
         linkTalkChannel({
           talkId,
           channelId: channel.id,
           ownerId: MEMBER_ID,
         }),
       ),
-    ).rejects.toThrow();
-  });
+    ).resolves.toBe(true);
 
-  it('T14: listWorkspaceChannels returns bound_talk_count', async () => {
-    const channel = await withUserContext(ADMIN_ID, async () =>
-      createWorkspaceChannel({
-        kind: 'slack',
-        displayName: 'Bound count',
-        createdBy: ADMIN_ID,
-      }),
-    );
-    const talkA = await seedTalk({ ownerId: MEMBER_ID });
-    const talkB = await seedTalk({ ownerId: OTHER_MEMBER_ID });
     await withUserContext(MEMBER_ID, () =>
       linkTalkChannel({
-        talkId: talkA,
+        talkId,
         channelId: channel.id,
         ownerId: MEMBER_ID,
       }),
     );
-    await withUserContext(OTHER_MEMBER_ID, () =>
-      linkTalkChannel({
-        talkId: talkB,
-        channelId: channel.id,
-        ownerId: OTHER_MEMBER_ID,
-      }),
+    await expect(
+      withUserContext(OWNER_ID, () =>
+        linkTalkChannel({
+          talkId,
+          channelId: channel.id,
+          ownerId: OWNER_ID,
+        }),
+      ),
+    ).resolves.toBe(true);
+
+    const links = await withUserContext(MEMBER_ID, () =>
+      listTalkChannelLinks(talkId),
     );
-    const channels = await withUserContext(ADMIN_ID, () =>
-      listWorkspaceChannels(),
+    expect(links).toHaveLength(1);
+    const bindingCreators = await getDbPg()<Array<{ created_by: string }>>`
+      select created_by_user_id::text as created_by
+      from public.connector_bindings
+      where talk_id = ${talkId}::uuid
+        and connector_id = ${channel.id}::uuid
+        and target is null
+    `;
+    expect(bindingCreators).toEqual([{ created_by: MEMBER_ID }]);
+
+    const view = await withUserContext(MEMBER_ID, () =>
+      getTalkConnectorsView({ workspaceId, talkId }),
     );
-    const row = channels.find((c) => c.id === channel.id);
-    expect(row?.bound_talk_count).toBe(2);
+    expect(view.channels).toMatchObject([
+      { id: channel.id, enabled: true, hasCredential: true, linked: true },
+    ]);
+
+    const listed = await withUserContext(OWNER_ID, () =>
+      listWorkspaceChannels({ workspaceId }),
+    );
+    expect(listed).toMatchObject([{ id: channel.id, bound_talk_count: 1 }]);
+
+    const secondTalkId = await createTalkInWorkspace({
+      workspaceId,
+      sortOrder: 1,
+      createdBy: MEMBER_ID,
+    });
+    await expect(
+      withUserContext(MEMBER_ID, () =>
+        linkTalkChannel({
+          talkId: secondTalkId,
+          channelId: channel.id,
+          ownerId: MEMBER_ID,
+        }),
+      ),
+    ).resolves.toBe(true);
+    await expect(
+      withUserContext(OWNER_ID, () => listWorkspaceChannels({ workspaceId })),
+    ).resolves.toMatchObject([{ id: channel.id, bound_talk_count: 2 }]);
+
+    await expect(
+      withUserContext(MEMBER_ID, () =>
+        unlinkTalkChannel({ talkId, channelId: channel.id }),
+      ),
+    ).resolves.toBe(true);
+    expect(
+      await withUserContext(MEMBER_ID, () => listTalkChannelLinks(talkId)),
+    ).toEqual([]);
   });
 
-  it('setWorkspaceChannelCredential round-trips through encryption pipeline', async () => {
-    const channel = await withUserContext(ADMIN_ID, async () =>
-      createWorkspaceChannel({
+  it('blocks guest talk creators from per-Talk connector bindings', async () => {
+    const { workspaceId, talkId } = await createFixture();
+    const channel = await withUserContext(OWNER_ID, async () => {
+      const row = await createWorkspaceChannel({
+        workspaceId,
         kind: 'slack',
-        displayName: 'Credential',
-        createdBy: ADMIN_ID,
+        displayName: 'Guest denied channel',
+        createdBy: OWNER_ID,
+      });
+      await setWorkspaceChannelCredential(
+        row.id,
+        { apiKey: 'xoxb' },
+        OWNER_ID,
+        {
+          workspaceId,
+        },
+      );
+      return row;
+    });
+
+    await expect(
+      withUserContext(MEMBER_ID, () =>
+        linkTalkChannel({
+          talkId,
+          channelId: channel.id,
+          ownerId: MEMBER_ID,
+        }),
+      ),
+    ).resolves.toBe(true);
+    await getDbPg()`
+      update public.workspace_members
+      set role = 'guest'
+      where workspace_id = ${workspaceId}::uuid
+        and user_id = ${MEMBER_ID}::uuid
+    `;
+
+    await expect(
+      withUserContext(MEMBER_ID, () =>
+        linkTalkChannel({
+          talkId,
+          channelId: channel.id,
+          ownerId: MEMBER_ID,
+        }),
+      ),
+    ).resolves.toBe(false);
+    await expect(
+      withUserContext(MEMBER_ID, () =>
+        unlinkTalkChannel({ talkId, channelId: channel.id }),
+      ),
+    ).resolves.toBe(false);
+  });
+
+  it('links Slack install-backed channels without a direct channel secret', async () => {
+    const { workspaceId, talkId } = await createFixture();
+    await upsertWorkspaceSlackInstall({
+      workspaceId,
+      teamId: 'T1',
+      teamName: 'Team One',
+      botUserId: 'U1',
+      appId: 'A1',
+      botToken: 'xoxb-team-one',
+      scopes: ['channels:read'],
+      installedBy: OWNER_ID,
+    });
+    const channel = await withUserContext(OWNER_ID, () =>
+      createWorkspaceChannel({
+        workspaceId,
+        kind: 'slack',
+        displayName: 'Slack delegated',
+        authorized: true,
+        config: {
+          workspace_id: 'T1',
+          channel_id: 'C1',
+        },
+        createdBy: OWNER_ID,
+        allowSlackChannelImport: true,
       }),
     );
-    const updated = await withUserContext(ADMIN_ID, () =>
-      setWorkspaceChannelCredential(
-        channel.id,
-        { apiKey: 'xoxb-secret-1234' },
-        ADMIN_ID,
+    expect(channel.has_credential).toBe(true);
+
+    await expect(
+      withUserContext(MEMBER_ID, () =>
+        linkTalkChannel({
+          talkId,
+          channelId: channel.id,
+          ownerId: MEMBER_ID,
+        }),
+      ),
+    ).resolves.toBe(true);
+
+    const links = await withUserContext(MEMBER_ID, () =>
+      listTalkChannelLinks(talkId),
+    );
+    expect(links).toMatchObject([{ channelId: channel.id }]);
+
+    await expect(
+      withUserContext(OWNER_ID, () =>
+        decryptWorkspaceChannelCredential(channel.id, { workspaceId }),
+      ),
+    ).resolves.toEqual({ apiKey: 'xoxb-team-one' });
+
+    await getDbPg()`
+      delete from public.connectors
+      where workspace_id = ${workspaceId}::uuid
+        and service = 'slack'
+        and config_json->>'compatSurface' = 'slack_install'
+        and config_json->>'teamId' = 'T1'
+    `;
+    await expect(
+      withUserContext(OWNER_ID, () =>
+        getWorkspaceChannel(channel.id, { workspaceId }),
+      ),
+    ).resolves.toMatchObject({ has_credential: false });
+  });
+
+  it('updates channels and cascades deleted channel links', async () => {
+    const { workspaceId, talkId } = await createFixture();
+    const channel = await withUserContext(OWNER_ID, async () => {
+      const row = await createWorkspaceChannel({
+        workspaceId,
+        kind: 'slack',
+        displayName: 'Cascade',
+        config: { workspace_id: 'T1', channel_id: 'C1' },
+        createdBy: OWNER_ID,
+        allowSlackChannelImport: true,
+      });
+      await setWorkspaceChannelCredential(
+        row.id,
+        { apiKey: 'xoxb' },
+        OWNER_ID,
+        {
+          workspaceId,
+        },
+      );
+      return row;
+    });
+
+    await withUserContext(MEMBER_ID, () =>
+      linkTalkChannel({
+        talkId,
+        channelId: channel.id,
+        ownerId: MEMBER_ID,
+      }),
+    );
+    await expect(
+      withUserContext(OWNER_ID, () =>
+        updateWorkspaceChannel(
+          channel.id,
+          {
+            displayName: 'Cascade renamed',
+            config: { workspace_id: 'T1', channel_id: 'C2' },
+            updatedBy: OWNER_ID,
+            allowSlackChannelImport: true,
+          },
+          { workspaceId },
+        ),
+      ),
+    ).resolves.toMatchObject({
+      display_name: 'Cascade renamed',
+      config_json: expect.objectContaining({ channel_id: 'C2' }),
+    });
+    await expect(
+      withUserContext(OWNER_ID, () =>
+        getWorkspaceChannel('00000000-0000-0000-0000-000000000000', {
+          workspaceId,
+        }),
+      ),
+    ).resolves.toBeNull();
+    await expect(
+      withUserContext(OWNER_ID, () =>
+        deleteWorkspaceChannel(channel.id, { workspaceId }),
+      ),
+    ).resolves.toBe(true);
+    await expect(
+      withUserContext(MEMBER_ID, () => listTalkChannelLinks(talkId)),
+    ).resolves.toEqual([]);
+  });
+
+  it('strips client-supplied Slack delegation without an authorized install', async () => {
+    const { workspaceId } = await createFixture();
+    const channel = await withUserContext(OWNER_ID, () =>
+      createWorkspaceChannel({
+        workspaceId,
+        kind: 'slack',
+        displayName: 'Injected',
+        authorized: true,
+        config: {
+          workspace_id: 'T-missing',
+          channel_id: 'C1',
+          credentialSource: 'workspace_slack_install',
+        },
+        createdBy: OWNER_ID,
+        allowSlackChannelImport: true,
+      }),
+    );
+
+    expect(channel.has_credential).toBe(false);
+    expect(channel.config_json.credentialSource).toBeUndefined();
+  });
+
+  it('keeps duplicate Slack channel creates idempotent without clobbering display config', async () => {
+    const { workspaceId } = await createFixture();
+    const first = await withUserContext(OWNER_ID, () =>
+      createWorkspaceChannel({
+        workspaceId,
+        kind: 'slack',
+        displayName: 'Original channel',
+        config: {
+          workspace_id: 'T1',
+          channel_id: 'C1',
+          channel_name: 'original',
+        },
+        createdBy: OWNER_ID,
+        allowSlackChannelImport: true,
+      }),
+    );
+    await upsertWorkspaceSlackInstall({
+      workspaceId,
+      teamId: 'T1',
+      teamName: 'Team One',
+      botUserId: 'U1',
+      appId: 'A1',
+      botToken: 'xoxb-team-one',
+      scopes: ['channels:read'],
+      installedBy: OWNER_ID,
+    });
+
+    const second = await withUserContext(OWNER_ID, () =>
+      createWorkspaceChannel({
+        workspaceId,
+        kind: 'slack',
+        displayName: 'Attempted rename',
+        config: {
+          workspace_id: 'T1',
+          channel_id: 'C1',
+          channel_name: 'renamed',
+        },
+        createdBy: OWNER_ID,
+        allowSlackChannelImport: true,
+      }),
+    );
+
+    expect(second.id).toBe(first.id);
+    expect(second).toMatchObject({
+      display_name: 'Original channel',
+      has_credential: true,
+      config_json: expect.objectContaining({
+        displayName: 'Original channel',
+        channel_name: 'original',
+        credentialSource: 'workspace_slack_install',
+      }),
+    });
+  });
+
+  it('maps Google Docs/Sheets compatibility rows to gdrive connectors', async () => {
+    const { workspaceId, talkId } = await createFixture();
+    const docs = await withUserContext(OWNER_ID, () =>
+      createWorkspaceDataConnector({
+        workspaceId,
+        kind: 'google_docs',
+        displayName: 'Docs',
+        config: { folder_id: 'F1' },
+        createdBy: OWNER_ID,
+      }),
+    );
+    expect(docs).toMatchObject({
+      kind: 'google_docs',
+      display_name: 'Docs',
+      has_credential: true,
+    });
+    await withUserContext(MEMBER_ID, () =>
+      linkTalkDataConnector({
+        talkId,
+        dataConnectorId: docs.id,
+        ownerId: MEMBER_ID,
+      }),
+    );
+    const authorized = await withUserContext(OWNER_ID, () =>
+      setWorkspaceDataConnectorCredential(
+        docs.id,
+        { apiKey: 'google-token' },
+        OWNER_ID,
+        { workspaceId },
       ),
     );
-    expect(updated?.has_credential).toBe(true);
-    const decrypted = await withUserContext(ADMIN_ID, () =>
-      decryptWorkspaceChannelCredential(channel.id),
-    );
-    expect(decrypted?.apiKey).toBe('xoxb-secret-1234');
-
-    // Clearing the credential
-    const cleared = await withUserContext(ADMIN_ID, () =>
-      setWorkspaceChannelCredential(channel.id, null, ADMIN_ID),
-    );
-    expect(cleared?.has_credential).toBe(false);
-  });
-
-  it('getWorkspaceChannel returns null for unknown id', async () => {
-    const row = await withUserContext(ADMIN_ID, () =>
-      getWorkspaceChannel('00000000-0000-0000-0000-000000000000'),
-    );
-    expect(row).toBeNull();
-  });
-
-  // ── T13: Same set parameterized for workspace_data_connectors ────────
-
-  it('T13a: createWorkspaceDataConnector as admin succeeds', async () => {
-    const created = await withUserContext(ADMIN_ID, async () =>
+    expect(authorized?.has_credential).toBe(true);
+    const sheets = await withUserContext(OWNER_ID, () =>
       createWorkspaceDataConnector({
-        kind: 'posthog',
-        displayName: 'Prod analytics',
-        config: { project_id: '250736', host: 'https://app.posthog.com' },
-        createdBy: ADMIN_ID,
+        workspaceId,
+        kind: 'google_sheets',
+        displayName: 'Sheets',
+        config: { folder_id: 'F2' },
+        createdBy: OWNER_ID,
       }),
     );
-    expect(created.kind).toBe('posthog');
-    expect(created.display_name).toBe('Prod analytics');
-    expect(created.bound_talk_count).toBe(0);
-  });
-
-  it('T13b: createWorkspaceDataConnector as member → RLS rejects', async () => {
+    expect(sheets).toMatchObject({
+      kind: 'google_sheets',
+      display_name: 'Sheets',
+    });
+    const connectorRows = await getDbPg()<
+      Array<{ id: string; service: string; surface: string }>
+    >`
+      select id, service, config_json->>'compatSurface' as surface
+      from public.connectors
+      where id in (${docs.id}::uuid, ${sheets.id}::uuid)
+      order by config_json->>'dataConnectorKind' asc
+    `;
+    expect(connectorRows).toEqual([
+      { id: docs.id, service: 'gdrive', surface: 'data_connector' },
+      { id: sheets.id, service: 'gdrive', surface: 'data_connector' },
+    ]);
     await expect(
-      withUserContext(MEMBER_ID, async () =>
+      withUserContext(MEMBER_ID, () =>
+        decryptWorkspaceDataConnectorCredential(docs.id, { workspaceId }),
+      ),
+    ).resolves.toEqual({ apiKey: 'google-token' });
+    const foreignWorkspaceId = await ensureWorkspaceBootstrapForUser(OTHER_ID);
+    await expect(
+      decryptWorkspaceDataConnectorCredential(docs.id, {
+        workspaceId: foreignWorkspaceId,
+      }),
+    ).resolves.toBeNull();
+    await expect(
+      withUserContext(OWNER_ID, () =>
+        decryptWorkspaceChannelCredential(docs.id, { workspaceId }),
+      ),
+    ).resolves.toBeNull();
+
+    const cleared = await withUserContext(OWNER_ID, () =>
+      setWorkspaceDataConnectorCredential(docs.id, null, OWNER_ID, {
+        workspaceId,
+      }),
+    );
+    expect(cleared?.has_credential).toBe(true);
+    await expect(
+      withUserContext(OWNER_ID, () =>
+        decryptWorkspaceDataConnectorCredential(docs.id, { workspaceId }),
+      ),
+    ).resolves.toBeNull();
+    const view = await withUserContext(MEMBER_ID, () =>
+      getTalkConnectorsView({ workspaceId, talkId }),
+    );
+    expect(view.dataConnectors).toMatchObject([
+      {
+        id: docs.id,
+        kind: 'google_docs',
+        enabled: true,
+        hasCredential: true,
+        linked: true,
+      },
+      {
+        id: sheets.id,
+        kind: 'google_sheets',
+        enabled: true,
+        hasCredential: true,
+        linked: false,
+      },
+    ]);
+
+    const secondTalkId = await createTalkInWorkspace({
+      workspaceId,
+      sortOrder: 1,
+      createdBy: MEMBER_ID,
+    });
+    await expect(
+      withUserContext(MEMBER_ID, () =>
+        linkTalkDataConnector({
+          talkId: secondTalkId,
+          dataConnectorId: docs.id,
+          ownerId: MEMBER_ID,
+        }),
+      ),
+    ).resolves.toBe(true);
+    await expect(
+      withUserContext(OWNER_ID, () =>
+        listWorkspaceDataConnectors({ workspaceId }),
+      ),
+    ).resolves.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: docs.id, bound_talk_count: 2 }),
+        expect.objectContaining({ id: sheets.id, bound_talk_count: 0 }),
+      ]),
+    );
+
+    await expect(
+      withUserContext(MEMBER_ID, () =>
+        unlinkTalkDataConnector({ talkId, dataConnectorId: docs.id }),
+      ),
+    ).resolves.toBe(true);
+    await expect(
+      withUserContext(OWNER_ID, () =>
+        updateWorkspaceDataConnector(
+          sheets.id,
+          { displayName: 'Sheets renamed', updatedBy: OWNER_ID },
+          { workspaceId },
+        ),
+      ),
+    ).resolves.toMatchObject({
+      display_name: 'Sheets renamed',
+      has_credential: true,
+    });
+    await expect(
+      withUserContext(OWNER_ID, () =>
+        getWorkspaceDataConnector('00000000-0000-0000-0000-000000000000', {
+          workspaceId,
+        }),
+      ),
+    ).resolves.toBeNull();
+    await expect(
+      withUserContext(OWNER_ID, () =>
+        deleteWorkspaceDataConnector(sheets.id, { workspaceId }),
+      ),
+    ).resolves.toBe(true);
+
+    await expect(
+      withUserContext(OWNER_ID, () =>
         createWorkspaceDataConnector({
+          workspaceId,
           kind: 'posthog',
-          displayName: 'Should not insert',
+          displayName: 'PostHog',
+          createdBy: OWNER_ID,
+        }),
+      ),
+    ).rejects.toThrow('Unsupported data connector kind');
+
+    await expect(
+      withUserContext(MEMBER_ID, () =>
+        createWorkspaceDataConnector({
+          workspaceId,
+          kind: 'google_docs',
+          displayName: 'Member Docs',
           createdBy: MEMBER_ID,
         }),
       ),
     ).rejects.toThrow();
-  });
-
-  it('T13c: createWorkspaceDataConnector with bad host URL → Zod rejects', async () => {
-    await expect(
-      withUserContext(ADMIN_ID, async () =>
-        createWorkspaceDataConnector({
-          kind: 'posthog',
-          displayName: 'Bad host',
-          config: { host: 'not-a-url' },
-          createdBy: ADMIN_ID,
-        }),
-      ),
-    ).rejects.toBeInstanceOf(ConnectorConfigInvalidError);
-  });
-
-  it('T13d: updateWorkspaceDataConnector patches display_name', async () => {
-    const created = await withUserContext(ADMIN_ID, async () =>
-      createWorkspaceDataConnector({
-        kind: 'google_docs',
-        displayName: 'Original docs',
-        createdBy: ADMIN_ID,
-      }),
-    );
-    const updated = await withUserContext(ADMIN_ID, async () =>
-      updateWorkspaceDataConnector(created.id, {
-        displayName: 'Renamed docs',
-        updatedBy: ADMIN_ID,
-      }),
-    );
-    expect(updated?.display_name).toBe('Renamed docs');
-  });
-
-  it('T13e: deleteWorkspaceDataConnector cascades to talk_data_connector_links', async () => {
-    const dc = await withUserContext(ADMIN_ID, async () =>
-      createWorkspaceDataConnector({
-        kind: 'google_sheets',
-        displayName: 'Sheets cascade',
-        createdBy: ADMIN_ID,
-      }),
-    );
-    const talkId = await seedTalk({ ownerId: MEMBER_ID });
-    await withUserContext(MEMBER_ID, () =>
-      linkTalkDataConnector({
-        talkId,
-        dataConnectorId: dc.id,
-        ownerId: MEMBER_ID,
-      }),
-    );
-    await withUserContext(ADMIN_ID, () => deleteWorkspaceDataConnector(dc.id));
-    const links = await withUserContext(MEMBER_ID, () =>
-      listTalkDataConnectorLinks(talkId),
-    );
-    expect(links.length).toBe(0);
-  });
-
-  it('T13f: linkTalkDataConnector is idempotent', async () => {
-    const dc = await withUserContext(ADMIN_ID, async () =>
-      createWorkspaceDataConnector({
-        kind: 'posthog',
-        displayName: 'Idempotent DC',
-        createdBy: ADMIN_ID,
-      }),
-    );
-    const talkId = await seedTalk({ ownerId: MEMBER_ID });
-    await withUserContext(MEMBER_ID, async () => {
-      await linkTalkDataConnector({
-        talkId,
-        dataConnectorId: dc.id,
-        ownerId: MEMBER_ID,
-      });
-      await linkTalkDataConnector({
-        talkId,
-        dataConnectorId: dc.id,
-        ownerId: MEMBER_ID,
-      });
-    });
-    const links = await withUserContext(MEMBER_ID, () =>
-      listTalkDataConnectorLinks(talkId),
-    );
-    expect(links.length).toBe(1);
-  });
-
-  it('T13g: unlinkTalkDataConnector removes the row', async () => {
-    const dc = await withUserContext(ADMIN_ID, async () =>
-      createWorkspaceDataConnector({
-        kind: 'posthog',
-        displayName: 'Toggle off DC',
-        createdBy: ADMIN_ID,
-      }),
-    );
-    const talkId = await seedTalk({ ownerId: MEMBER_ID });
-    await withUserContext(MEMBER_ID, async () => {
-      await linkTalkDataConnector({
-        talkId,
-        dataConnectorId: dc.id,
-        ownerId: MEMBER_ID,
-      });
-      const removed = await unlinkTalkDataConnector({
-        talkId,
-        dataConnectorId: dc.id,
-      });
-      expect(removed).toBe(true);
-    });
-    const links = await withUserContext(MEMBER_ID, () =>
-      listTalkDataConnectorLinks(talkId),
-    );
-    expect(links.length).toBe(0);
-  });
-
-  it('T13h: linkTalkDataConnector rejects ownerId mismatch with auth.uid()', async () => {
-    // Parallel to T12 — RLS owner_id = auth.uid() catches the spoof.
-    // Talk-ownership enforcement is at the route layer.
-    const dc = await withUserContext(ADMIN_ID, async () =>
-      createWorkspaceDataConnector({
-        kind: 'posthog',
-        displayName: 'Owner check DC',
-        createdBy: ADMIN_ID,
-      }),
-    );
-    const talkId = await seedTalk({ ownerId: MEMBER_ID });
-    await expect(
-      withUserContext(OTHER_MEMBER_ID, async () =>
-        linkTalkDataConnector({
-          talkId,
-          dataConnectorId: dc.id,
-          ownerId: MEMBER_ID,
-        }),
-      ),
-    ).rejects.toThrow();
-  });
-
-  it('T13i: setWorkspaceDataConnectorCredential clears via null', async () => {
-    const dc = await withUserContext(ADMIN_ID, async () =>
-      createWorkspaceDataConnector({
-        kind: 'posthog',
-        displayName: 'Cred DC',
-        createdBy: ADMIN_ID,
-      }),
-    );
-    const set = await withUserContext(ADMIN_ID, () =>
-      setWorkspaceDataConnectorCredential(
-        dc.id,
-        { apiKey: 'ph_api_key_secret' },
-        ADMIN_ID,
-      ),
-    );
-    expect(set?.has_credential).toBe(true);
-    const cleared = await withUserContext(ADMIN_ID, () =>
-      setWorkspaceDataConnectorCredential(dc.id, null, ADMIN_ID),
-    );
-    expect(cleared?.has_credential).toBe(false);
-  });
-
-  it('T13j: getTalkConnectorsView merges channels + data connectors', async () => {
-    const channel = await withUserContext(ADMIN_ID, () =>
-      createWorkspaceChannel({
-        kind: 'slack',
-        displayName: 'Combined slack',
-        createdBy: ADMIN_ID,
-      }),
-    );
-    const dc = await withUserContext(ADMIN_ID, () =>
-      createWorkspaceDataConnector({
-        kind: 'posthog',
-        displayName: 'Combined posthog',
-        createdBy: ADMIN_ID,
-      }),
-    );
-    const talkId = await seedTalk({ ownerId: MEMBER_ID });
-    await withUserContext(MEMBER_ID, async () => {
-      await linkTalkChannel({
-        talkId,
-        channelId: channel.id,
-        ownerId: MEMBER_ID,
-      });
-      await linkTalkDataConnector({
-        talkId,
-        dataConnectorId: dc.id,
-        ownerId: MEMBER_ID,
-      });
-    });
-    const view = await withUserContext(MEMBER_ID, () =>
-      getTalkConnectorsView(talkId),
-    );
-    expect(view.channels.find((c) => c.id === channel.id)?.linked).toBe(true);
-    expect(view.dataConnectors.find((d) => d.id === dc.id)?.linked).toBe(true);
-  });
-
-  it('listWorkspaceDataConnectors returns bound_talk_count', async () => {
-    const dc = await withUserContext(ADMIN_ID, () =>
-      createWorkspaceDataConnector({
-        kind: 'posthog',
-        displayName: 'DC count',
-        createdBy: ADMIN_ID,
-      }),
-    );
-    const talkA = await seedTalk({ ownerId: MEMBER_ID });
-    const talkB = await seedTalk({ ownerId: OTHER_MEMBER_ID });
-    await withUserContext(MEMBER_ID, () =>
-      linkTalkDataConnector({
-        talkId: talkA,
-        dataConnectorId: dc.id,
-        ownerId: MEMBER_ID,
-      }),
-    );
-    await withUserContext(OTHER_MEMBER_ID, () =>
-      linkTalkDataConnector({
-        talkId: talkB,
-        dataConnectorId: dc.id,
-        ownerId: OTHER_MEMBER_ID,
-      }),
-    );
-    const all = await withUserContext(ADMIN_ID, () =>
-      listWorkspaceDataConnectors(),
-    );
-    expect(all.find((d) => d.id === dc.id)?.bound_talk_count).toBe(2);
-  });
-
-  it('getWorkspaceDataConnector returns null for unknown id', async () => {
-    const row = await withUserContext(ADMIN_ID, () =>
-      getWorkspaceDataConnector('00000000-0000-0000-0000-000000000000'),
-    );
-    expect(row).toBeNull();
   });
 });

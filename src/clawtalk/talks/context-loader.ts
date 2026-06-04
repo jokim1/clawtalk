@@ -5,15 +5,14 @@
  * Builds a ContextPackage from a Talk ID for consumption by the agent router.
  *
  * Handles:
- * 1. Fetching goal, rules, and rolling summary
+ * 1. Fetching goal and rules from final greenfield context rows
  * 2. Building source manifest with inline small sources
  * 3. Building connector tools (currently stub)
  * 4. Loading message history with token budgeting
  * 5. Assembling into a ContextPackage with metadata
  */
 
-import { getDbPg, type Sql } from '../../db.js';
-import { listTalkStateEntries } from '../db/context-accessors.js';
+import { getDbPg, type Sql, withTrustedDbWrites } from '../../db.js';
 import { getContentByTalkId, type Content } from '../db/content-accessors.js';
 import {
   ALLOWED_TAGS,
@@ -46,6 +45,21 @@ import {
   loadGoogleDriveBindings,
 } from './google-drive-tools.js';
 import { extractSourceReferences } from './source-reference-detection.js';
+import {
+  buildAllowedRuntimeToolSet,
+  filterRuntimeToolDefinitions,
+} from './runtime-tool-filter.js';
+import {
+  CONTEXT_SOURCE_FILE_SIZE_SQL,
+  CONTEXT_SOURCE_STATUS_SQL,
+  CONTEXT_SOURCE_TEXT_SQL,
+  CONTEXT_SOURCE_TITLE_SLUG_SQL,
+} from './context-source-status-sql.js';
+import {
+  extractAssistantProviderData,
+  selectProviderReplayMessageIds,
+  type ProviderReplayScope,
+} from './provider-replay-scope.js';
 
 const WEB_TOOL_DEFINITIONS: LlmToolDefinition[] = [
   {
@@ -299,6 +313,7 @@ export {
 // bottom on really long docs. Read-block tool is the v2 escape hatch.
 const CONTENT_OUTLINE_BUDGET_BYTES = 20_480;
 const CHARS_TO_TOKENS = 0.25; // Simple estimation: 1 char ≈ 0.25 tokens
+const EMPTY_HISTORY_MESSAGE_CONTENT = '[No text content in this turn]';
 const MAX_RETRIEVED_STATE_ENTRIES = 3;
 
 const STOPWORDS = new Set([
@@ -426,21 +441,20 @@ function estimateTokens(text: string): number {
  * Load Talk context for agent execution.
  *
  * Canonical context build order (documented contract — not ad hoc):
- *   1. Goal (talk_context_goal)
- *   2. Rolling summary (talk_context_summary) — disabled for threaded runs
- *      because a single talk-level summary injected into every thread leaks
- *      cross-thread context. Per-thread summaries are a future concern.
- *   3. Rules (talk_context_rules, active only)
- *   4. State snapshot (talk_state_entries, bounded by dedicated token budget)
- *   5. Source manifest (talk_context_sources, inline small sources)
+ *   1. Goal (`context_sources.kind='rule'`, `meta_json.compatKind='goal'`)
+ *   2. Rolling summary — currently absent in the final greenfield schema.
+ *      Per-thread summaries are a future concern.
+ *   3. Rules (`context_sources.kind='rule'`, active only)
+ *   4. State snapshot — currently an empty compatibility surface.
+ *   5. Source manifest (`context_sources`, inline small sources)
  *   6. Bound Google Drive resources manifest (talk_resource_bindings)
  *   7. Connector tools (verified connectors only)
- *   8. Message history (thread-scoped when threadId provided, with token budgeting)
+ *   8. Message history (Talk-scoped final messages, with token budgeting)
  *
  * @param talkId - The Talk to load context for
  * @param modelContextWindow - The model's context window in tokens
- * @param threadId - Optional thread to scope message history to. When provided,
- *   only messages from this thread are loaded and summary injection is skipped.
+ * @param threadId - Legacy compatibility parameter. Final greenfield message
+ *   history is Talk-scoped; this value no longer filters transcript rows.
  */
 export async function loadTalkContext(
   talkId: string,
@@ -477,6 +491,11 @@ export async function loadTalkContext(
      * vision-but-not-doc path. Undefined ⇒ no notably-low cap.
      */
     maxImages?: number;
+    providerReplayScope?: {
+      sourceAgentId: string | null;
+      providerId: string;
+      modelId: string;
+    };
   },
 ): Promise<ContextPackage> {
   const db = getDbPg();
@@ -486,7 +505,15 @@ export async function loadTalkContext(
   // Step 1: Fetch goal, rules, state, and rolling summary
   const goal = await fetchGoal(db, talkId);
   const rules = await fetchRules(db, talkId);
-  const stateEntries = await listTalkStateEntries(talkId);
+  // Final greenfield removed mutable Talk state. Keep the context snapshot
+  // shape stable for old UI/run metadata readers, but do not query retired
+  // `talk_state_entries`.
+  const stateEntries: Array<{
+    key: string;
+    value: unknown;
+    version: number;
+    updatedAt: string;
+  }> = [];
 
   // When loading for a specific thread, skip talk-level summary to avoid
   // leaking cross-thread context. A stale/wrong summary is worse than no
@@ -548,11 +575,11 @@ export async function loadTalkContext(
     forcedInjectionRefs,
     forcedInjectionSlugs,
   );
-  const upperRefs = forcedInjectionRefs.map((r) => r.toUpperCase());
+  const lookupRefs = forcedInjectionRefs.map(normalizeSourceRefLookupKey);
   const lowerSlugs = forcedInjectionSlugs.map((s) => s.toLowerCase());
   const atRefResolutions = resolveAtRefRequestsForRender(
     atRefRows,
-    upperRefs,
+    lookupRefs,
     lowerSlugs,
     {
       agentSupportsDocuments,
@@ -738,9 +765,10 @@ export async function loadTalkContext(
   // facts" stanza for agents that actually have web_search available. An
   // agent without web access can't act on the rule, so the stanza is pure
   // token cost for those — skip it.
-  const webEnabled = !options?.effectiveTools || enabledToolFamilies.has('web');
-  const includeWebFreshnessStanza =
-    webEnabled && (!options?.jobPolicy || options.jobPolicy.allowWeb);
+  const includeWebFreshnessStanza = shouldIncludeWebFreshnessStanza(
+    options?.effectiveTools,
+    options?.jobPolicy,
+  );
 
   // Step 3: Build connector tools (currently empty stub)
   const connectorTools = buildConnectorTools(talkId, options?.jobPolicy);
@@ -749,7 +777,11 @@ export async function loadTalkContext(
   // the Talk actually having an attached doc. One per Talk by schema,
   // so this is at most one row.
   const content = await getContentByTalkId(talkId);
-  const contentOutline = content ? buildContentOutline(content) : null;
+  const contentOutline = content
+    ? buildContentOutline(content, CONTENT_OUTLINE_BUDGET_BYTES, {
+        allowEdits: !options?.jobPolicy,
+      })
+    : null;
 
   // Step 4: Assemble system prompt
   const systemPrompt = assembleSystemPrompt(
@@ -789,6 +821,7 @@ export async function loadTalkContext(
     availableBudget,
     threadId,
     historyThroughMessageId,
+    options?.providerReplayScope,
   );
   const history = historySelection.messages;
 
@@ -896,34 +929,48 @@ export async function loadTalkContext(
 // Step 1: Fetch Goal, Rules, and Summary
 // ---------------------------------------------------------------------------
 
-async function fetchGoal(db: Sql, talkId: string): Promise<string | null> {
-  const rows = await db<Array<{ goal_text: string }>>`
-    select goal_text
-    from public.talk_context_goal
+export async function fetchGoal(
+  db: Sql,
+  talkId: string,
+): Promise<string | null> {
+  const rows = await db<Array<{ goal_text: string | null }>>`
+    select
+      case
+        when nullif(trim(coalesce(extracted_text, '')), '') is not null
+          then extracted_text
+        else nullif(trim(coalesce(name, '')), '')
+      end as goal_text
+    from public.context_sources
     where talk_id = ${talkId}::uuid
+      and kind = 'rule'
+      and meta_json->>'compatKind' = 'goal'
+      and include_in_prompt = true
+    order by sort_order asc nulls last, created_at asc, id asc
     limit 1
   `;
   return rows[0]?.goal_text ?? null;
 }
 
 async function fetchRules(db: Sql, talkId: string): Promise<string[]> {
-  const rows = await db<Array<{ rule_text: string }>>`
-    select rule_text
-    from public.talk_context_rules
-    where talk_id = ${talkId}::uuid and is_active = true
-    order by sort_order asc, created_at asc
+  const rows = await db<Array<{ rule_text: string | null }>>`
+    select
+      case
+        when nullif(trim(coalesce(extracted_text, '')), '') is not null
+          then extracted_text
+        else nullif(trim(coalesce(name, '')), '')
+      end as rule_text
+    from public.context_sources
+    where talk_id = ${talkId}::uuid
+      and kind = 'rule'
+      and coalesce(meta_json->>'compatKind', 'rule') <> 'goal'
+      and include_in_prompt = true
+    order by sort_order asc nulls last, created_at asc, id asc
   `;
-  return rows.map((r) => r.rule_text);
+  return rows.flatMap((r) => (r.rule_text ? [r.rule_text] : []));
 }
 
-async function fetchSummary(db: Sql, talkId: string): Promise<string | null> {
-  const rows = await db<Array<{ summary_text: string }>>`
-    select summary_text
-    from public.talk_context_summary
-    where talk_id = ${talkId}::uuid
-    limit 1
-  `;
-  return rows[0]?.summary_text ?? null;
+async function fetchSummary(_db: Sql, _talkId: string): Promise<string | null> {
+  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -982,40 +1029,54 @@ export async function fetchSources(
   return await db<SourceRow[]>`
     select
       s.id,
-      s.source_ref,
-      s.source_type,
-      s.title,
-      s.title_slug,
-      s.note,
-      s.source_url,
-      s.file_name,
-      s.file_size,
-      s.mime_type,
-      s.storage_key,
-      s.extracted_text,
-      s.status,
+      s.id::text as source_ref,
+      coalesce(
+        s.meta_json->>'sourceType',
+        case
+          when s.kind = 'url' then 'url'
+          when s.kind = 'file' then 'file'
+          else 'text'
+        end
+      ) as source_type,
+      s.name as title,
+      ${db.unsafe(CONTEXT_SOURCE_TITLE_SLUG_SQL)} as title_slug,
+      s.meta_json->>'note' as note,
+      coalesce(
+        s.meta_json->>'sourceUrl',
+        case when s.kind = 'url' then s.payload_ref else null end
+      ) as source_url,
+      s.meta_json->>'fileName' as file_name,
+      ${db.unsafe(CONTEXT_SOURCE_FILE_SIZE_SQL)} as file_size,
+      s.meta_json->>'mimeType' as mime_type,
+      s.payload_ref as storage_key,
+      ${db.unsafe(CONTEXT_SOURCE_TEXT_SQL)} as extracted_text,
+      ${db.unsafe(CONTEXT_SOURCE_STATUS_SQL)} as status,
       s.updated_at,
       s.expected_page_count,
       coalesce(p.page_count, 0) as page_image_count,
       coalesce(p.total_bytes, 0) as page_image_total_bytes
-    from public.talk_context_sources s
-    left join (
+    from public.context_sources s
+    left join lateral (
       select source_id,
              count(*)::int as page_count,
              sum(byte_size)::int as total_bytes
-      from public.talk_context_source_pages
+      from public.context_source_pages
+      where source_id = s.id
       group by source_id
-    ) p on p.source_id = s.id
+    ) p on true
     where s.talk_id = ${talkId}::uuid
+      and s.kind <> 'rule'
+      and s.include_in_prompt = true
       and (
-        s.status = 'ready'
+        ${db.unsafe(CONTEXT_SOURCE_STATUS_SQL)} = 'ready'
         or (
-          s.mime_type = 'application/pdf'
+          s.meta_json->>'mimeType' = 'application/pdf'
           and s.expected_page_count is not null
+          and s.expected_page_count > 0
           and coalesce(p.page_count, 0) = s.expected_page_count
         )
       )
-    order by s.sort_order asc
+    order by s.sort_order asc nulls last, s.created_at asc
   `;
 }
 
@@ -1188,7 +1249,7 @@ export function buildSourceManifest(
     }
 
     // Index-only manifest line:
-    //   [S1] Title (note text) — url-or-filename — preview: "first 200 chars…"
+    //   [source-uuid] Title (note text) — url-or-filename — preview: "first 200 chars…"
     // The note and locator and preview clauses are each omitted when empty.
     const parts: string[] = [`[${ref}] ${source.title}`];
     if (source.note && source.note.trim().length > 0) {
@@ -1271,6 +1332,7 @@ const FORCED_INJECTION_FOOTER_RESERVE_BYTES = 96;
 
 export interface AtRefCandidateRow {
   source_ref: string;
+  legacy_source_ref: string | null;
   title: string;
   title_slug: string | null;
   status: string;
@@ -1284,7 +1346,7 @@ export interface AtRefCandidateRow {
   source_url: string | null;
   updated_at: string;
   // Rasterized-page metadata (PDF page-image path). Joined from
-  // talk_context_source_pages in fetchAtRefCandidateRows. page_indices
+  // context_source_pages in fetchAtRefCandidateRows. page_indices
   // and page_byte_sizes are parallel arrays in ascending page order; the
   // raster budget guard walks them in order. expected_page_count is null
   // until the webapp begins uploading pages.
@@ -1415,7 +1477,7 @@ function renderForcedInjectionResolution(
     case 'ambiguous-slug':
       return `[@${res.requestedSlug}] (ambiguous slug — multiple sources match: ${res.readyRefs.join(
         ', ',
-      )}. Use the @S<n> form instead.)`;
+      )}. Use one of the listed source ids instead.)`;
   }
 }
 
@@ -1449,6 +1511,14 @@ function rowIsPdfWithStorage(row: AtRefCandidateRow): boolean {
 function rowFileSizeBytesAt(row: AtRefCandidateRow): number {
   if (typeof row.file_size === 'string') return Number(row.file_size) || 0;
   return row.file_size ?? 0;
+}
+
+function normalizeSourceRefLookupKey(ref: string): string {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+    ref,
+  )
+    ? ref.toLowerCase()
+    : ref.toUpperCase();
 }
 
 /**
@@ -1561,10 +1631,15 @@ function resolveAtRefRequests(
   slugs: string[],
   options: AtRefResolveOptions = {},
 ): ForcedInjectionResolution[] {
-  const byRef = new Map<string, AtRefCandidateRow>();
+  const byRawRef = new Map<string, AtRefCandidateRow>();
+  const byLegacyRef = new Map<string, AtRefCandidateRow>();
   const bySlug = new Map<string, AtRefCandidateRow[]>();
   for (const row of rows) {
-    byRef.set(row.source_ref, row);
+    byRawRef.set(normalizeSourceRefLookupKey(row.source_ref), row);
+    byRawRef.set(normalizeSourceRefLookupKey(row.id), row);
+    if (row.legacy_source_ref) {
+      byLegacyRef.set(normalizeSourceRefLookupKey(row.legacy_source_ref), row);
+    }
     if (row.title_slug) {
       const list = bySlug.get(row.title_slug) ?? [];
       list.push(row);
@@ -1576,13 +1651,18 @@ function resolveAtRefRequests(
   const resolutions: ForcedInjectionResolution[] = [];
 
   for (const ref of refs) {
-    if (claimedRefs.has(ref)) continue;
-    const row = byRef.get(ref);
+    const lookupRef = normalizeSourceRefLookupKey(ref);
+    if (claimedRefs.has(lookupRef)) continue;
+    const row = byRawRef.get(lookupRef) ?? byLegacyRef.get(lookupRef);
     if (!row) {
       resolutions.push({ kind: 'missing-ref', requestedRef: ref });
       continue;
     }
-    claimedRefs.add(row.source_ref);
+    claimedRefs.add(normalizeSourceRefLookupKey(row.source_ref));
+    claimedRefs.add(normalizeSourceRefLookupKey(row.id));
+    if (row.legacy_source_ref) {
+      claimedRefs.add(normalizeSourceRefLookupKey(row.legacy_source_ref));
+    }
     resolutions.push(resolveSingleRowForRef(row, options));
   }
 
@@ -1597,7 +1677,7 @@ function resolveAtRefRequests(
     // (and non-doc-capable) paths keep the prior text-readiness check.
     const ready = matches.filter((m) => {
       if (options.agentSupportsDocuments && rowIsPdfWithStorage(m)) {
-        return m.status === 'ready';
+        return true;
       }
       // vision-but-not-doc: a PDF with a complete page set is "ready" for
       // the raster path even when text extraction failed (status='failed').
@@ -1621,8 +1701,9 @@ function resolveAtRefRequests(
     }
     if (ready.length === 0) {
       const first = matches[0];
-      if (claimedRefs.has(first.source_ref)) continue;
-      claimedRefs.add(first.source_ref);
+      const firstRef = normalizeSourceRefLookupKey(first.source_ref);
+      if (claimedRefs.has(firstRef)) continue;
+      claimedRefs.add(firstRef);
       resolutions.push({
         kind: 'pending',
         sourceRef: first.source_ref,
@@ -1631,8 +1712,13 @@ function resolveAtRefRequests(
       continue;
     }
     const row = ready[0];
-    if (claimedRefs.has(row.source_ref)) continue;
-    claimedRefs.add(row.source_ref);
+    const rowRef = normalizeSourceRefLookupKey(row.source_ref);
+    if (claimedRefs.has(rowRef)) continue;
+    claimedRefs.add(rowRef);
+    claimedRefs.add(normalizeSourceRefLookupKey(row.id));
+    if (row.legacy_source_ref) {
+      claimedRefs.add(normalizeSourceRefLookupKey(row.legacy_source_ref));
+    }
     resolutions.push(resolveSingleRowForRef(row, options));
   }
 
@@ -1748,7 +1834,8 @@ export function buildAtRefForcedInjectionFromRows(
  * refs/slugs are present or none could be resolved.
  *
  * Behaviors:
- * - `@S1` → exact source_ref match.
+ * - `@<source-uuid>` → exact source id match.
+ * - `@S1` → legacy sourceRef alias when present.
  * - `@design-notes` → title_slug match. Ambiguity (two ready rows
  *   sharing a slug) emits a manifest note and skips the injection.
  * - Missing ref/slug → "(no such source)" note.
@@ -1767,12 +1854,12 @@ export async function buildAtRefForcedInjection(
   if (refs.length === 0 && slugs.length === 0) {
     return { text: null, forcedPdfDocuments: [] };
   }
-  const upperRefs = refs.map((r) => r.toUpperCase());
+  const lookupRefs = refs.map(normalizeSourceRefLookupKey);
   const lowerSlugs = slugs.map((s) => s.toLowerCase());
   const rows = await fetchAtRefCandidateRows(db, talkId, refs, slugs);
   return buildAtRefForcedInjectionFromRows(
     rows,
-    upperRefs,
+    lookupRefs,
     lowerSlugs,
     options,
   );
@@ -1799,6 +1886,7 @@ export async function fetchAtRefCandidateRows(
 ): Promise<AtRefCandidateRow[]> {
   if (refs.length === 0 && slugs.length === 0) return [];
   const upperRefs = refs.map((r) => r.toUpperCase());
+  const lowerRefs = refs.map((r) => r.toLowerCase());
   const lowerSlugs = slugs.map((s) => s.toLowerCase());
   // LEFT JOIN aggregated page metadata so the raster path can decide
   // page-image attachment without a second query. page_indices +
@@ -1807,35 +1895,50 @@ export async function fetchAtRefCandidateRows(
   return await db<AtRefCandidateRow[]>`
     select
       s.id,
-      s.source_ref,
-      s.title,
-      s.title_slug,
-      s.status,
-      s.extracted_text,
-      s.mime_type,
-      s.storage_key,
-      s.file_size,
-      s.file_name,
-      s.source_type,
-      s.source_url,
+      s.id::text as source_ref,
+      upper(s.meta_json->>'sourceRef') as legacy_source_ref,
+      s.name as title,
+      ${db.unsafe(CONTEXT_SOURCE_TITLE_SLUG_SQL)} as title_slug,
+      ${db.unsafe(CONTEXT_SOURCE_STATUS_SQL)} as status,
+      ${db.unsafe(CONTEXT_SOURCE_TEXT_SQL)} as extracted_text,
+      s.meta_json->>'mimeType' as mime_type,
+      s.payload_ref as storage_key,
+      ${db.unsafe(CONTEXT_SOURCE_FILE_SIZE_SQL)} as file_size,
+      s.meta_json->>'fileName' as file_name,
+      coalesce(
+        s.meta_json->>'sourceType',
+        case
+          when s.kind = 'url' then 'url'
+          when s.kind = 'file' then 'file'
+          else 'text'
+        end
+      ) as source_type,
+      coalesce(
+        s.meta_json->>'sourceUrl',
+        case when s.kind = 'url' then s.payload_ref else null end
+      ) as source_url,
       s.updated_at,
       s.expected_page_count,
       coalesce(p.page_count, 0) as page_image_count,
       coalesce(p.page_indices, '{}'::int[]) as page_indices,
       coalesce(p.page_byte_sizes, '{}'::int[]) as page_byte_sizes
-    from public.talk_context_sources s
-    left join (
+    from public.context_sources s
+    left join lateral (
       select source_id,
              count(*)::int as page_count,
              array_agg(page_index order by page_index) as page_indices,
              array_agg(byte_size order by page_index) as page_byte_sizes
-      from public.talk_context_source_pages
+      from public.context_source_pages
+      where source_id = s.id
       group by source_id
-    ) p on p.source_id = s.id
+    ) p on true
     where s.talk_id = ${talkId}::uuid
+      and s.kind <> 'rule'
+      and s.include_in_prompt = true
       and (
-        s.source_ref = any(${upperRefs}::text[])
-        or s.title_slug = any(${lowerSlugs}::text[])
+        upper(s.meta_json->>'sourceRef') = any(${upperRefs}::text[])
+        or s.id::text = any(${lowerRefs}::text[])
+        or ${db.unsafe(CONTEXT_SOURCE_TITLE_SLUG_SQL)} = any(${lowerSlugs}::text[])
       )
   `;
 }
@@ -1941,8 +2044,10 @@ function buildHtmlOutlineBlocks(bodyHtml: string): OutlineBlock[] {
 export function buildContentOutline(
   content: Content,
   budgetBytes: number = CONTENT_OUTLINE_BUDGET_BYTES,
+  options?: { allowEdits?: boolean },
 ): string {
   const isHtml = content.contentFormat === 'html';
+  const allowEdits = options?.allowEdits !== false;
 
   const blocks = isHtml
     ? buildHtmlOutlineBlocks(content.bodyHtml ?? '')
@@ -1957,27 +2062,34 @@ export function buildContentOutline(
     'This Talk has exactly one long-form document attached, and the block listing below IS that document — full prose, in order, prefixed with the block kind and anchor ID for each. When the user says "the doc", "the document", "this doc", "summarize the doc", or anything similar, they mean THIS document. The user can also reference it explicitly with the literal token `@doc` in their message — when you see `@doc` anywhere in the latest user turn, treat it as a deterministic reference to THIS section. Do NOT look for a Google Doc binding. Do NOT search [S1]/[S2]/etc. Do NOT inspect chat attachments whose filename happens to match this title (the user often uploads a draft .md before promoting it into the doc — those are stale source material, not the live document). The blocks below are the canonical, current copy.',
   ].join('\n');
 
-  const formatStanza = isHtml
-    ? [
-        '',
-        '**HTML payload required for THIS doc.** This doc is HTML format — the `markdown` field of `apply_content_edit` carries HTML, not markdown. Wrap every block in real tags: paragraphs `<p>...</p>`, headings `<h1>...</h1>`–`<h6>`, lists `<ul><li>...</li></ul>` / `<ol>`, blockquotes `<blockquote>...</blockquote>`, code `<pre><code>...</code></pre>`. Plain text or markdown is rejected.',
-        '',
-        `Allowed tags (server allowlist): ${ALLOWED_TAGS.join(', ')}. Inline \`<style>\` blocks + CSS animations + the sanitized SVG subset are allowed. **Banned**: \`<script>\`, \`<iframe>\`, \`<form>\`, \`on*\` event handlers, \`javascript:\` URLs, \`<foreignObject>\`, \`<animate>\` SVG elements — these are stripped server-side. Use \`data-anchor-id="..."\` on the target block (copied verbatim from the listing above) to address an edit.`,
-      ].join('\n')
-    : '';
+  const formatStanza =
+    isHtml && allowEdits
+      ? [
+          '',
+          '**HTML payload required for THIS doc.** This doc is HTML format — the `markdown` field of `apply_content_edit` carries HTML, not markdown. Wrap every block in real tags: paragraphs `<p>...</p>`, headings `<h1>...</h1>`–`<h6>`, lists `<ul><li>...</li></ul>` / `<ol>`, blockquotes `<blockquote>...</blockquote>`, code `<pre><code>...</code></pre>`. Plain text or markdown is rejected.',
+          '',
+          `Allowed tags (server allowlist): ${ALLOWED_TAGS.join(', ')}. Inline \`<style>\` blocks + CSS animations + the sanitized SVG subset are allowed. **Banned**: \`<script>\`, \`<iframe>\`, \`<form>\`, \`on*\` event handlers, \`javascript:\` URLs, \`<foreignObject>\`, \`<animate>\` SVG elements — these are stripped server-side. Use \`data-anchor-id="..."\` on the target block (copied verbatim from the listing above) to address an edit.`,
+        ].join('\n')
+      : '';
 
-  const footer = [
-    'To change this document, call `apply_content_edit({ kind, anchor?, markdown, rationale? })`. Your edit lands in the doc immediately as a *pending change* the user can Accept or Reject from the doc pane. There is no propose step, no card to wait on — you edit, the user reviews afterward.',
-    '',
-    "Pick `kind`: `'append'` to add new block(s) after `anchor` (omit `anchor` to prepend at top); `'replace'` to overwrite the single block at `anchor`; `'delete'` to remove the block at `anchor`; `'bulk'` to swap the entire body (`markdown` is the COMPLETE new doc, omit `anchor`). Anchors come verbatim from the block listing above.",
-    '',
-    'Call the tool as many times as you need in one turn — every edit you make this turn is grouped into one pending edit run the user accepts or rejects as a single unit. Smaller, targeted edits review better than one giant bulk; reserve bulk for when most of the doc actually changes.',
-    '',
-    'When `@doc` appears in the latest user turn AND the request is to change the document (add, append, extend, draft, continue, rewrite, edit, fix, polish, expand, shorten, delete, etc.), you MUST call `apply_content_edit` — do NOT write substantive new prose into chat as a workaround. Rhetorical questions count as instructions: "Can you add a summary?", "Could you fix the intro?", "Want to rewrite this section?" are all explicit edit requests.',
-    '',
-    'NEVER narrate your capabilities ("I can only modify through tools", "I cannot directly edit @doc", etc.). Your reply in chat for an edit request should be a single short acknowledgement after the call ("Replaced paragraph 2 and added a closing CTA — review in the doc pane.") OR a clarifying question only if the request is genuinely ambiguous.',
-    formatStanza,
-  ]
+  const footer = (
+    allowEdits
+      ? [
+          'To change this document, call `apply_content_edit({ kind, anchor?, markdown, rationale? })`. Your edit lands in the doc immediately as a *pending change* the user can Accept or Reject from the doc pane. There is no propose step, no card to wait on — you edit, the user reviews afterward.',
+          '',
+          "Pick `kind`: `'append'` to add new block(s) after `anchor` (omit `anchor` to prepend at top); `'replace'` to overwrite the single block at `anchor`; `'delete'` to remove the block at `anchor`; `'bulk'` to swap the entire body (`markdown` is the COMPLETE new doc, omit `anchor`). Anchors come verbatim from the block listing above.",
+          '',
+          'Call the tool as many times as you need in one turn — every edit you make this turn is grouped into one pending edit run the user accepts or rejects as a single unit. Smaller, targeted edits review better than one giant bulk; reserve bulk for when most of the doc actually changes.',
+          '',
+          'When `@doc` appears in the latest user turn AND the request is to change the document (add, append, extend, draft, continue, rewrite, edit, fix, polish, expand, shorten, delete, etc.), you MUST call `apply_content_edit` — do NOT write substantive new prose into chat as a workaround. Rhetorical questions count as instructions: "Can you add a summary?", "Could you fix the intro?", "Want to rewrite this section?" are all explicit edit requests.',
+          '',
+          'NEVER narrate your capabilities ("I can only modify through tools", "I cannot directly edit @doc", etc.). Your reply in chat for an edit request should be a single short acknowledgement after the call ("Replaced paragraph 2 and added a closing CTA — review in the doc pane.") OR a clarifying question only if the request is genuinely ambiguous.',
+          formatStanza,
+        ]
+      : [
+          'This scheduled job may read and summarize the document, but scheduled jobs cannot modify the Talk document. If the prompt asks for a document edit, explain that interactive document edits must be made from a normal Talk turn.',
+        ]
+  )
     .filter((s) => s.length > 0)
     .join('\n');
 
@@ -2128,7 +2240,7 @@ function buildOmissionNote(
   const keyList = shownKeys.join(', ') + (extra > 0 ? `, +${extra} more` : '');
   return `- ${omittedCount} state entr${
     omittedCount === 1 ? 'y' : 'ies'
-  } omitted (keys: ${keyList}). Use list_state(prefix) to discover keys or read_state(key) to fetch one directly.`;
+  } omitted (keys: ${keyList}). Mutable Talk state is unavailable in this runtime.`;
 }
 
 function buildStateSnapshot(
@@ -2187,7 +2299,7 @@ function buildStateSnapshot(
         ? omissionNote
         : `- ${entries.length} state entr${
             entries.length === 1 ? 'y' : 'ies'
-          } omitted. Use list_state(prefix) to discover keys or read_state(key) to fetch one directly.`;
+          } omitted. Mutable Talk state is unavailable in this runtime.`;
     return {
       promptText: `**State Snapshot:**\n${noteToUse}`,
       includedEntries: [],
@@ -2204,7 +2316,7 @@ function buildStateSnapshot(
       lines.push(
         `- ${omittedKeys.length} additional state entr${
           omittedKeys.length === 1 ? 'y' : 'ies'
-        } omitted. Use list_state(prefix) to discover keys or read_state(key) to fetch one directly.`,
+        } omitted. Mutable Talk state is unavailable in this runtime.`,
       );
     }
   }
@@ -2220,7 +2332,20 @@ function buildStateSnapshot(
 // Step 5: Build Context Tools
 // ---------------------------------------------------------------------------
 
-function buildContextTools(
+export function shouldIncludeWebFreshnessStanza(
+  effectiveTools?: EffectiveToolAccess[],
+  jobPolicy?: TalkJobExecutionPolicy | null,
+): boolean {
+  const enabledToolFamilies = new Set(
+    (effectiveTools ?? [])
+      .filter((tool) => tool.enabled)
+      .map((tool) => tool.toolFamily),
+  );
+  const webEnabled = !effectiveTools || enabledToolFamilies.has('web');
+  return webEnabled && (!jobPolicy || jobPolicy.allowWeb);
+}
+
+export function buildContextTools(
   talkId: string,
   userId?: string | null,
   jobPolicy?: TalkJobExecutionPolicy | null,
@@ -2231,128 +2356,54 @@ function buildContextTools(
     {
       name: 'read_source',
       description:
-        'Read the full extracted text of a saved source by its stable ref (e.g. S1, S2). The Sources manifest in the system prompt gives you a one-line preview per source — call this tool when the preview suggests the source is relevant and you need its full content. Do not guess the rest from the title or preview.',
+        'Read the full extracted text of a saved source by its source id. Legacy S-number aliases are accepted only when an imported source still has one. The Sources manifest in the system prompt gives you a one-line preview per source — call this tool when the preview suggests the source is relevant and you need its full content. Do not guess the rest from the title or preview.',
       inputSchema: {
         type: 'object',
         properties: {
           sourceRef: {
             type: 'string',
-            description: 'Stable source ref like S1, S2, etc.',
+            description:
+              'The source id, or a legacy S-number alias if present.',
           },
         },
         required: ['sourceRef'],
       },
     },
-    {
-      name: 'read_attachment',
-      description: 'Read a message attachment by ID',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          attachmentId: {
-            type: 'string',
-            description: 'Attachment ID',
-          },
-        },
-        required: ['attachmentId'],
-      },
-    },
   ];
 
-  tools.push({
-    name: 'list_state',
-    description:
-      'List Talk state entries, optionally filtered by a key prefix. Returns matching keys, values, versions, and update timestamps.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        prefix: {
-          type: 'string',
-          description:
-            'Optional key prefix filter. Use this to discover entries inside a namespace.',
-        },
-      },
-    },
-  });
-
-  tools.push({
-    name: 'read_state',
-    description:
-      'Read a single Talk state entry by key. Returns the current value and version. Use this to fetch entries omitted from the snapshot, or to get the latest value before an update.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        key: {
-          type: 'string',
-          description: 'State entry key to read',
-        },
-      },
-      required: ['key'],
-    },
-  });
-
-  if (!jobPolicy || jobPolicy.allowStateMutation) {
-    tools.push(
-      {
-        name: 'update_state',
-        description:
-          'Persist a structured JSON state entry for this Talk using compare-and-swap versioning. Create new keys with expectedVersion 0. Update existing keys with their current version from the state snapshot. On conflict, the tool returns the current stored value as an error so you can retry.',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            key: {
-              type: 'string',
-              description: 'State entry key',
-            },
-            value: {
-              description:
-                'JSON value to store for this key. Can be an object, array, string, number, boolean, or null.',
-            },
-            expectedVersion: {
-              type: 'number',
-              description:
-                'Use 0 to create a new key. For updates, use the current version from the state snapshot.',
-            },
-          },
-          required: ['key', 'value', 'expectedVersion'],
-        },
-      },
-      {
-        name: 'delete_state',
-        description:
-          'Delete a Talk state entry by key using compare-and-swap versioning. Provide the current version to prevent accidental deletes of stale data.',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            key: {
-              type: 'string',
-              description: 'State entry key to delete',
-            },
-            expectedVersion: {
-              type: 'number',
-              description: 'Current version of the entry',
-            },
-          },
-          required: ['key', 'expectedVersion'],
-        },
-      },
-    );
-  }
+  // Final greenfield has no mutable Talk state table. Do not advertise the
+  // legacy state tools from this compatibility loader; they are backed by
+  // retired `talk_state_entries` accessors in new-executor.ts.
+  // Message attachments are likewise retired from this loader contract:
+  // current-turn source/file context is represented by `context_sources`, and
+  // the active greenfield executor rejects deferred `read_attachment` calls
+  // before they can reach legacy storage.
 
   const enabledToolFamilies = new Set(
     (effectiveTools ?? [])
       .filter((tool) => tool.enabled)
       .map((tool) => tool.toolFamily),
   );
+  const allowedRuntimeTools = buildAllowedRuntimeToolSet(effectiveTools);
   const webEnabled = !effectiveTools || enabledToolFamilies.has('web');
   const browserEnabled = !effectiveTools || enabledToolFamilies.has('browser');
 
   if ((!jobPolicy || jobPolicy.allowWeb) && webEnabled) {
-    tools.push(...WEB_TOOL_DEFINITIONS);
+    tools.push(
+      ...filterRuntimeToolDefinitions(
+        WEB_TOOL_DEFINITIONS,
+        allowedRuntimeTools,
+      ),
+    );
   }
 
   if ((!jobPolicy || jobPolicy.allowWeb) && browserEnabled) {
-    tools.push(...BROWSER_TOOL_DEFINITIONS);
+    tools.push(
+      ...filterRuntimeToolDefinitions(
+        BROWSER_TOOL_DEFINITIONS,
+        allowedRuntimeTools,
+      ),
+    );
   }
 
   // D4 — always advertise Google Drive/Docs tools when the agent's family
@@ -2365,19 +2416,20 @@ function buildContextTools(
   const googleWriteEnabled =
     !effectiveTools || enabledToolFamilies.has('google_write');
   if (googleReadEnabled || googleWriteEnabled) {
+    const googleTools = buildGoogleDriveContextTools({
+      readEnabled: googleReadEnabled,
+      writeEnabled: googleWriteEnabled,
+      hasAttachedContent: hasContent && !jobPolicy,
+    });
     tools.push(
-      ...buildGoogleDriveContextTools({
-        readEnabled: googleReadEnabled,
-        writeEnabled: googleWriteEnabled,
-        hasAttachedContent: hasContent,
-      }),
+      ...filterRuntimeToolDefinitions(googleTools, allowedRuntimeTools),
     );
   }
 
   // Content document tools — only register when this Talk has an
   // attached doc, so agents in chat-only Talks aren't tempted to call
   // them and fall into "no document" errors.
-  if (hasContent) {
+  if (hasContent && !jobPolicy) {
     tools.push({
       name: 'apply_content_edit',
       description: [
@@ -2574,70 +2626,110 @@ function buildRetrievedContext(input: {
 
 interface MessageRow {
   id: string;
-  role: string;
-  content: string;
+  workspace_id: string;
+  role: 'user' | 'assistant';
+  content: string | null;
   agent_id: string | null;
+  source_agent_id: string | null;
   created_at: string;
-  // postgres.js parses jsonb columns on read; this is the parsed
-  // object, not the serialized string.
-  metadata_json: Record<string, unknown> | null;
+  snapshot_provider_id: string | null;
+  snapshot_model_id: string | null;
+  replay_provider_id: string | null;
+  replay_model_id: string | null;
+  provider_data_json: Record<string, unknown> | null;
 }
 
-function extractAssistantProviderData(
-  metadata: Record<string, unknown> | null,
-): LlmMessage['providerData'] | undefined {
-  if (!metadata) return undefined;
-  const reasoning = metadata.codexReasoningItems;
-  const message = metadata.codexMessageItems;
-  const out: LlmMessage['providerData'] = {};
-  if (Array.isArray(reasoning) && reasoning.length > 0) {
-    out.codexReasoningItems = reasoning as Array<Record<string, unknown>>;
-  }
-  if (Array.isArray(message) && message.length > 0) {
-    out.codexMessageItems = message as Array<Record<string, unknown>>;
-  }
-  return Object.keys(out).length > 0 ? out : undefined;
+interface ProviderReplayRow {
+  message_id: string;
+  provider_id: string;
+  model_id: string;
+  provider_data_json: Record<string, unknown>;
+}
+
+async function loadProviderReplayRowsForMessages(
+  db: Sql,
+  workspaceId: string,
+  talkId: string,
+  messageIds: string[],
+): Promise<Map<string, ProviderReplayRow>> {
+  if (messageIds.length === 0) return new Map();
+  const rows = await withTrustedDbWrites(
+    () =>
+      db<ProviderReplayRow[]>`
+      select
+        message_id::text,
+        provider_id,
+        model_id,
+        provider_data_json
+      from public.message_provider_replay
+      where workspace_id = ${workspaceId}::uuid
+        and talk_id = ${talkId}::uuid
+        and message_id = any(${messageIds}::uuid[])
+    `,
+  );
+  return new Map(rows.map((row) => [row.message_id, row]));
 }
 
 async function loadMessageHistory(
   db: Sql,
   talkId: string,
   budgetTokens: number,
-  threadId?: string | null,
+  _threadId?: string | null,
   historyThroughMessageId?: string | null,
+  providerReplayScope?: ProviderReplayScope,
 ): Promise<{ messages: LlmMessage[]; messageIds: string[] }> {
-  const threadIdArg = threadId ?? null;
   const cutoff = historyThroughMessageId
     ? (
         await db<Array<{ id: string; created_at: string }>>`
           select id, created_at
-          from public.talk_messages
+          from public.messages
           where id = ${historyThroughMessageId}::uuid
             and talk_id = ${talkId}::uuid
-            and (${threadIdArg}::uuid is null or thread_id = ${threadIdArg}::uuid)
           limit 1
         `
       )[0]
     : undefined;
+  if (historyThroughMessageId && !cutoff) {
+    return { messages: [], messageIds: [] };
+  }
   const cutoffId = cutoff?.id ?? null;
   const cutoffCreatedAt = cutoff?.created_at ?? null;
 
-  // When threadId is provided, only load messages from that thread.
-  // Otherwise load all messages for the Talk (legacy/pre-thread behavior).
+  // Final greenfield messages are Talk-scoped; legacy thread-scoped history
+  // was retired with `public.talk_messages`.
   // The cutoff predicate matches messages strictly before the cutoff time,
   // PLUS messages at the same created_at with id <= cutoff.id — this keeps
   // tie-breaking semantics identical to the sqlite era.
   const rows = await db<MessageRow[]>`
-    select id, role, content, agent_id, created_at, metadata_json
-    from public.talk_messages
-    where talk_id = ${talkId}::uuid
-      and (${threadIdArg}::uuid is null or thread_id = ${threadIdArg}::uuid)
+    select
+      m.id,
+      m.workspace_id::text as workspace_id,
+      case m.author_kind
+        when 'user' then 'user'
+        when 'agent' then 'assistant'
+      end as role,
+      m.body as content,
+      m.agent_snapshot_id::text as agent_id,
+      tas.source_agent_id::text as source_agent_id,
+      m.created_at,
+      tas.provider_id as snapshot_provider_id,
+      tas.model_id as snapshot_model_id,
+      null::text as replay_provider_id,
+      null::text as replay_model_id,
+      null::jsonb as provider_data_json
+    from public.messages m
+    left join public.talk_agent_snapshots tas
+      on tas.workspace_id = m.workspace_id
+     and tas.talk_id = m.talk_id
+     and tas.id = m.agent_snapshot_id
+    where m.talk_id = ${talkId}::uuid
+      and m.author_kind in ('user', 'agent')
       and (
         ${cutoffId}::uuid is null
-        or created_at < ${cutoffCreatedAt}::timestamptz
-        or (created_at = ${cutoffCreatedAt}::timestamptz and id <= ${cutoffId}::uuid)
+        or m.created_at < ${cutoffCreatedAt}::timestamptz
+        or (m.created_at = ${cutoffCreatedAt}::timestamptz and m.id <= ${cutoffId}::uuid)
       )
-    order by created_at desc
+    order by m.created_at desc, m.id desc
   `;
 
   // Walk backward through messages, accumulating token count
@@ -2645,7 +2737,9 @@ async function loadMessageHistory(
   const selectedRows: MessageRow[] = [];
 
   for (const row of rows) {
-    const messageTokens = Math.ceil(row.content.length * CHARS_TO_TOKENS);
+    const messageTokens = Math.ceil(
+      (row.content?.length ?? 0) * CHARS_TO_TOKENS,
+    );
     if (accumulatedTokens + messageTokens > budgetTokens) {
       break; // Budget exceeded, stop here
     }
@@ -2655,26 +2749,53 @@ async function loadMessageHistory(
 
   // Reverse to chronological order
   selectedRows.reverse();
+  if (providerReplayScope && selectedRows.length > 0) {
+    const workspaceId = selectedRows[0]!.workspace_id;
+    const providerReplayRows = await loadProviderReplayRowsForMessages(
+      db,
+      workspaceId,
+      talkId,
+      selectedRows.map((row) => row.id),
+    );
+    for (const row of selectedRows) {
+      const providerReplay = providerReplayRows.get(row.id);
+      if (!providerReplay) continue;
+      row.replay_provider_id = providerReplay.provider_id;
+      row.replay_model_id = providerReplay.model_id;
+      row.provider_data_json = providerReplay.provider_data_json;
+    }
+  }
 
-  // Convert to LlmMessage format. Codex provider_data (encrypted
-  // reasoning + replayable message items) was stashed in
-  // metadata_json by the executor's buildResponseMetadataJson — surface
-  // it on assistant messages so the codex_responses adapter can replay
-  // it to the backend on the next turn.
+  // Convert to LlmMessage format. Codex provider_data (encrypted reasoning
+  // and replayable message items) is stored in the trusted
+  // message_provider_replay table so member-readable message metadata stays
+  // client-safe, while the codex_responses adapter can replay it to the
+  // backend on the next turn.
+  // Replay is scoped to the same source agent + provider + model and bounded
+  // by a total byte budget. Other assistant transcript text remains visible,
+  // but encrypted provider items do not cross agent/model boundaries.
+  const providerReplayMessageIds = selectProviderReplayMessageIds(
+    selectedRows,
+    providerReplayScope,
+  );
+  const messages: LlmMessage[] = [];
+  const messageIds: string[] = [];
+  for (const row of selectedRows) {
+    const content =
+      row.content && row.content.length > 0
+        ? row.content
+        : EMPTY_HISTORY_MESSAGE_CONTENT;
+    const includeProviderData = providerReplayMessageIds.has(row.id);
+    const message: LlmMessage = { role: row.role, content };
+    if (includeProviderData) {
+      const providerData = extractAssistantProviderData(row.provider_data_json);
+      if (providerData) message.providerData = providerData;
+    }
+    messages.push(message);
+    messageIds.push(row.id);
+  }
   return {
-    messages: selectedRows.map((row) => {
-      const message: LlmMessage = {
-        role: row.role as 'user' | 'assistant' | 'system' | 'tool',
-        content: row.content,
-      };
-      if (row.role === 'assistant') {
-        const providerData = extractAssistantProviderData(row.metadata_json);
-        if (providerData) {
-          message.providerData = providerData;
-        }
-      }
-      return message;
-    }),
-    messageIds: selectedRows.map((row) => row.id),
+    messages,
+    messageIds,
   };
 }

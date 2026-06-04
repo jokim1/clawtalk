@@ -16,7 +16,7 @@
 // `target_anchor_id` against the same `anchor_map_json` column the
 // markdown path uses (PR B).
 
-import { getDbPg } from '../../db.js';
+import { getDbPg, type Sql } from '../../db.js';
 import {
   type AnchorEntry,
   type AnchorMap,
@@ -88,6 +88,17 @@ export interface Content {
   createdByUserId: string | null;
   updatedByUserId: string | null;
   updatedByRunId: string | null;
+}
+
+let contentsTableExists: boolean | null = null;
+
+async function hasContentsTable(db: Sql): Promise<boolean> {
+  if (contentsTableExists !== null) return contentsTableExists;
+  const rows = await db<{ exists: boolean }[]>`
+    select to_regclass('public.contents') is not null as exists
+  `;
+  contentsTableExists = rows[0]?.exists === true;
+  return contentsTableExists;
 }
 
 function toContent(row: ContentRecord): Content {
@@ -197,6 +208,12 @@ export async function createContent(input: {
   const initialMarkdown = '';
   const initialHtml: string | null = format === 'html' ? '' : null;
   const db = getDbPg();
+  // Final greenfield does not mount a legacy Content creation route. Reads
+  // degrade because mounted compatibility surfaces may still ask whether a doc
+  // exists; writes fail loudly so an accidental retired writer is caught.
+  if (!(await hasContentsTable(db))) {
+    throw new Error('legacy_contents_not_available');
+  }
   const rows = await db<ContentRecord[]>`
     insert into public.contents
       (owner_id, talk_id, thread_id, title, content_kind, content_format,
@@ -227,6 +244,7 @@ export async function listContentsForSidebar(): Promise<
   ContentSidebarRecord[]
 > {
   const db = getDbPg();
+  if (!(await hasContentsTable(db))) return [];
   const rows = await db<ContentSidebarRecord[]>`
     select id, talk_id, thread_id, title, updated_at
     from public.contents
@@ -243,6 +261,7 @@ export async function getContentByThreadId(
   threadId: string,
 ): Promise<Content | null> {
   const db = getDbPg();
+  if (!(await hasContentsTable(db))) return null;
   const rows = await db<ContentRecord[]>`
     select ${db.unsafe(CONTENT_RECORD_COLUMNS)}
     from public.contents
@@ -263,6 +282,7 @@ export async function getContentByTalkId(
   talkId: string,
 ): Promise<Content | null> {
   const db = getDbPg();
+  if (!(await hasContentsTable(db))) return null;
   const rows = await db<ContentRecord[]>`
     select ${db.unsafe(CONTENT_RECORD_COLUMNS)}
     from public.contents
@@ -276,6 +296,7 @@ export async function getContentById(
   contentId: string,
 ): Promise<Content | null> {
   const db = getDbPg();
+  if (!(await hasContentsTable(db))) return null;
   const rows = await db<ContentRecord[]>`
     select ${db.unsafe(CONTENT_RECORD_COLUMNS)}
     from public.contents
@@ -320,6 +341,9 @@ export async function updateContentBody(input: {
   }
 
   const db = getDbPg();
+  if (!(await hasContentsTable(db))) {
+    throw new Error('legacy_contents_not_available');
+  }
   const existingRows = await db<ContentRecord[]>`
     select ${db.unsafe(CONTENT_RECORD_COLUMNS)}
     from public.contents

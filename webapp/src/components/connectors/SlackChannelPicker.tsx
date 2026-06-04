@@ -9,6 +9,7 @@ import {
 
 type SlackChannelPickerProps = {
   installs: WorkspaceSlackInstall[];
+  workspaceId?: string | null;
   onAdded: (count: number) => void;
   onCancel: () => void;
 };
@@ -21,6 +22,7 @@ type LoadState =
 
 export function SlackChannelPicker({
   installs,
+  workspaceId,
   onAdded,
   onCancel,
 }: SlackChannelPickerProps): JSX.Element {
@@ -43,7 +45,7 @@ export function SlackChannelPicker({
     let cancelled = false;
     setState({ kind: 'loading' });
     setSelectedIds(new Set());
-    listSlackInstallChannels(teamId)
+    listSlackInstallChannels(teamId, { workspaceId })
       .then((channels) => {
         if (cancelled) return;
         setState({ kind: 'ready', channels });
@@ -58,7 +60,7 @@ export function SlackChannelPicker({
     return () => {
       cancelled = true;
     };
-  }, [teamId]);
+  }, [teamId, workspaceId]);
 
   const filtered = useMemo(() => {
     if (state.kind !== 'ready') return [];
@@ -68,7 +70,7 @@ export function SlackChannelPicker({
   }, [state, search]);
 
   const selectableCount = useMemo(
-    () => filtered.filter((c) => !c.alreadyAdded).length,
+    () => filtered.filter((c) => !c.alreadyAdded && c.isMember).length,
     [filtered],
   );
 
@@ -97,14 +99,13 @@ export function SlackChannelPicker({
           isPrivate: c.isPrivate,
         }));
       const created = await bulkAddSlackChannels({
+        workspaceId,
         teamId,
         channels: picks,
       });
       onAdded(created.length);
     } catch (err) {
-      setError(
-        err instanceof Error ? err.message : 'Failed to add channels.',
-      );
+      setError(err instanceof Error ? err.message : 'Failed to add channels.');
     } finally {
       setSubmitting(false);
     }
@@ -172,7 +173,7 @@ export function SlackChannelPicker({
             {state.kind === 'ready' && filtered.length > 0 ? (
               <ul className="slack-channel-picker-options">
                 {filtered.map((channel) => {
-                  const disabled = channel.alreadyAdded;
+                  const disabled = channel.alreadyAdded || !channel.isMember;
                   return (
                     <li key={channel.id}>
                       <label

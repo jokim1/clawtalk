@@ -4,14 +4,20 @@ import {
   closePgDatabase,
   type DbScopeEnvBindings,
   getDbPg,
+  getOutOfBandSql,
   initPgDatabase,
   type RequestExecutionContext,
+  type Sql,
   withNotifyQueueScope,
   withRequestScopedDb,
   withUserContext,
 } from '../../db.js';
 import { getOutboxEventsForTopics } from '../db/accessors.js';
-import { emitOutboxEvent, emitOutboxEventOutsideTx } from './outbox-emit.js';
+import {
+  emitOutboxEvent,
+  emitOutboxEventOnSql,
+  emitOutboxEventOutsideTx,
+} from './outbox-emit.js';
 
 const TEST_DB_URL = 'postgresql://postgres:postgres@127.0.0.1:54432/postgres';
 const OUTBOX_TOPIC_PREFIXES = ['talk-', 'talk-streaming-', 'startup-'];
@@ -192,6 +198,32 @@ describe('emitOutboxEvent (in-tx path)', () => {
     expect(rows[0].event_id).toBe(eventId);
   });
 
+  it('does not flush implicit in-tx emits when the user tx rolls back', async () => {
+    const { env, fetchCalls } = makeMockEventHub();
+    const { ctx, drain } = makeMockCtx();
+    const userId = uniqueUserId();
+    const topic = uniqueTopic('talk');
+
+    await withRequestScopedDb(TEST_DB_URL, ctx, env, async () => {
+      await expect(
+        withUserContext(userId, async () => {
+          await emitOutboxEvent({
+            topic,
+            eventType: 'message_appended',
+            payload: { sentinel: 'rollback' },
+            ownerIds: [userId],
+          });
+          throw new Error('force rollback after implicit outbox insert');
+        }),
+      ).rejects.toThrow('force rollback');
+    });
+    await drain();
+
+    expect(fetchCalls).toHaveLength(0);
+    const rows = await getOutboxEventsForTopics([topic], 0);
+    expect(rows).toHaveLength(0);
+  });
+
   it('without a queue scope: INSERT still lands (no notify path remaining)', async () => {
     // After U6 the Node-mode in-process SSE notifier is gone; there is
     // no scope-less notify path. The outbox INSERT must still succeed
@@ -271,6 +303,34 @@ describe('emitOutboxEvent (in-tx path)', () => {
     const owners = new Set(fetchCalls.map((c) => c.ownerId));
     expect(owners).toEqual(new Set([userA, userB]));
   });
+
+  it('does not queue notifies for explicit-sql emits until the tx commits', async () => {
+    const { env, fetchCalls } = makeMockEventHub();
+    const { ctx, drain } = makeMockCtx();
+    const userId = uniqueUserId();
+    const topic = uniqueTopic('talk');
+
+    await withRequestScopedDb(TEST_DB_URL, ctx, env, async (sql) => {
+      await expect(
+        withNotifyQueueScope(env, ctx, async () => {
+          await sql.begin(async (tx) => {
+            await emitOutboxEventOnSql(tx as unknown as Sql, {
+              topic,
+              eventType: 'message_appended',
+              payload: { sentinel: 'rollback' },
+              ownerIds: [userId],
+            });
+            throw new Error('force rollback after explicit outbox insert');
+          });
+        }),
+      ).rejects.toThrow('force rollback');
+    });
+    await drain();
+
+    expect(fetchCalls).toHaveLength(0);
+    const rows = await getOutboxEventsForTopics([topic], 0);
+    expect(rows).toHaveLength(0);
+  });
 });
 
 describe('emitOutboxEventOutsideTx (G1 streaming path)', () => {
@@ -291,9 +351,15 @@ describe('emitOutboxEventOutsideTx (G1 streaming path)', () => {
           payload: { i: 1 },
           ownerIds: [userId],
         });
-        // SELECT via the module-scoped sql (separate connection from
-        // the userContext tx). The OOB row must be visible.
-        const rows = await getOutboxEventsForTopics([topic], 0);
+        // SELECT via an admin out-of-band connection, separate from the
+        // authenticated userContext tx. The OOB row must be visible.
+        const oobSql = getOutOfBandSql();
+        const rows = await oobSql<Array<{ event_id: number }>>`
+          select event_id::int as event_id
+          from public.event_outbox
+          where topic = ${topic}
+            and event_id = ${oobEventId}
+        `;
         oobRowSeenMidTx = rows.some((r) => r.event_id === oobEventId);
       });
     });
