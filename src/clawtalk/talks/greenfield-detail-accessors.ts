@@ -1,4 +1,9 @@
-import { getDbPg, withTrustedDbWrites, type Sql } from '../../db.js';
+import {
+  getDbPg,
+  getOutOfBandSql,
+  withTrustedDbWrites,
+  type Sql,
+} from '../../db.js';
 
 export interface GreenfieldMessageRecord {
   id: string;
@@ -271,6 +276,41 @@ export async function getGreenfieldThreadMetrics(input: {
     limit 1
   `;
   return rows[0];
+}
+
+/**
+ * Per-talk outbox high-water mark — `coalesce(max(event_id), 0)` over the
+ * talk's `talk:<id>` topic. This is the snapshot's `snapshotVersion`: the
+ * webapp's `applyMessageAppendedDelta` drops any streamed `message_appended`
+ * whose outbox `eventId` is <= this cursor (already folded into the
+ * snapshot's `messages`) and appends the rest. It therefore MUST live on the
+ * same monotonic scale as the streamed `eventId` (`event_outbox.event_id`),
+ * NOT a wall-clock timestamp — a timestamp-scaled version is astronomically
+ * larger than any outbox id, so every streamed delta would be dropped and
+ * the just-persisted reply would vanish from the live thread until a reload.
+ *
+ * Read on the BYPASSRLS out-of-band connection: migration 0001 revokes
+ * SELECT on `public.event_outbox` from `authenticated`, so the RLS-scoped
+ * request connection (`getDbPg`) can't read it. Mirrors the retired legacy
+ * `public.get_talk_snapshot_version` SECURITY DEFINER helper.
+ *
+ * Callers MUST read this BEFORE loading the snapshot's messages so the
+ * cursor stays a lower bound consistent with (a subset-time of) the returned
+ * messages — every event counted here committed atomically with its message,
+ * so a later message load is a superset. Reading it after the load could
+ * raise the cursor past a message a concurrent commit added mid-load, which
+ * the client would then drop.
+ */
+export async function getTalkSnapshotVersion(input: {
+  talkId: string;
+}): Promise<number> {
+  const db = getOutOfBandSql();
+  const rows = await db<{ event_id: number }[]>`
+    select coalesce(max(event_id), 0)::int as event_id
+    from public.event_outbox
+    where topic = ${`talk:${input.talkId}`}
+  `;
+  return rows[0]?.event_id ?? 0;
 }
 
 export async function listGreenfieldRuns(input: {
