@@ -12,13 +12,5 @@ process.on('uncaughtException', (err) => {
 });
 
 process.on('unhandledRejection', (reason) => {
-  // TEMP cutover-debug instrumentation — remove after diagnosis.
-  const r = reason as { message?: unknown; stack?: unknown; code?: unknown };
-  console.error(
-    '[REJECT-DEBUG]',
-    String(reason),
-    JSON.stringify({ code: r?.code, message: r?.message }),
-    r?.stack,
-  );
   logger.error({ err: reason }, 'Unhandled rejection');
 });
