@@ -28,7 +28,7 @@
   },
   "dependencies": {
     "@types/sanitize-html": "^2.16.1",
-    "hono": "^4.12.18",
+    "hono": "^4.12.21",
     "jose": "^5.10.0",
     "linkedom": "^0.18.12",
     "mammoth": "^1.11.0",
