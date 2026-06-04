@@ -15,7 +15,7 @@
  * observations in memory and compute exact percentiles.
  */
 
-import { getDbPg, withTrustedDbWrites } from '../../db.js';
+import { getDbPg, getOutOfBandSql } from '../../db.js';
 import { logger } from '../../logger.js';
 
 // ---------------------------------------------------------------------------
@@ -87,7 +87,15 @@ export async function recordTtftObservation(
   ttftMs: number,
 ): Promise<void> {
   try {
-    const db = getDbPg();
+    // Out-of-band auto-commit connection (BYPASSRLS), NOT the caller's
+    // transaction. recordTtftObservation is invoked fire-and-forget from
+    // llm-client's onFirstChunk while a request/turn `withUserContext` tx is
+    // still open. Routing the stats write through that tx would mutate its
+    // shared trusted-write depth from a floating promise — tripping the
+    // trusted-write guard on the caller's NEXT query — and contend on the
+    // single tx connection. Same detached-write pattern as
+    // autoUpgradeAgentModelOutsideTx.
+    const db = getOutOfBandSql();
 
     const existingRows = await db<ExistingStatsRow[]>`
       select sample_count, p50_ms, p95_ms, p99_ms, max_ms
@@ -98,17 +106,14 @@ export async function recordTtftObservation(
 
     if (!existing) {
       // First observation for this (provider, model)
-      await withTrustedDbWrites(async () => {
-        const trustedDb = getDbPg();
-        await trustedDb`
-          insert into public.llm_ttft_stats
-            (provider_id, model_id, sample_count,
-             p50_ms, p95_ms, p99_ms, max_ms, last_updated_at)
-          values
-            (${providerId}, ${modelId}, 1,
-             ${ttftMs}, ${ttftMs}, ${ttftMs}, ${ttftMs}, now())
-        `;
-      });
+      await db`
+        insert into public.llm_ttft_stats
+          (provider_id, model_id, sample_count,
+           p50_ms, p95_ms, p99_ms, max_ms, last_updated_at)
+        values
+          (${providerId}, ${modelId}, 1,
+           ${ttftMs}, ${ttftMs}, ${ttftMs}, ${ttftMs}, now())
+      `;
       return;
     }
 
@@ -127,19 +132,16 @@ export async function recordTtftObservation(
     const p99 = updatePercentile(existing.p99_ms, ttftMs, 0.99, alpha);
     const max = Math.max(existing.max_ms, ttftMs);
 
-    await withTrustedDbWrites(async () => {
-      const trustedDb = getDbPg();
-      await trustedDb`
-        update public.llm_ttft_stats
-        set sample_count = ${n},
-            p50_ms = ${p50},
-            p95_ms = ${p95},
-            p99_ms = ${p99},
-            max_ms = ${max},
-            last_updated_at = now()
-        where provider_id = ${providerId} and model_id = ${modelId}
-      `;
-    });
+    await db`
+      update public.llm_ttft_stats
+      set sample_count = ${n},
+          p50_ms = ${p50},
+          p95_ms = ${p95},
+          p99_ms = ${p99},
+          max_ms = ${max},
+          last_updated_at = now()
+      where provider_id = ${providerId} and model_id = ${modelId}
+    `;
   } catch (err) {
     // Recording failures must never break the streaming pipeline
     logger.warn(

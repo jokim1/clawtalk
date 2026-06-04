@@ -164,21 +164,6 @@ export function getDbPg(): Sql {
 function assertTrustedWriteQueryAllowed(store: UserContextStore): void {
   if ((store.trustedWriteDepth ?? 0) === 0) return;
   if (trustedWriteStorage.getStore() === store.trustedWriteToken) return;
-  // TEMP cutover-debug instrumentation — remove after diagnosis.
-  const als = trustedWriteStorage.getStore();
-  console.error(
-    '[GUARD-DEBUG]',
-    JSON.stringify({
-      depth: store.trustedWriteDepth ?? 0,
-      als:
-        als === undefined
-          ? 'UNDEFINED'
-          : als === store.trustedWriteToken
-            ? 'MATCH'
-            : 'DIFFERENT',
-    }),
-    new Error('guard-trace').stack,
-  );
   throw new Error(
     'Database query attempted while trusted DB writes are active outside the trusted callback',
   );
@@ -286,11 +271,6 @@ export async function withTrustedDbWrites<T>(fn: () => Promise<T>): Promise<T> {
   const token = activeToken ?? Symbol('trusted-db-writes');
   existing.trustedWriteDepth = (existing.trustedWriteDepth ?? 0) + 1;
   existing.trustedWriteToken = token;
-  // TEMP cutover-debug — remove after diagnosis.
-  console.error(
-    '[TW-DEBUG] enter d=' + existing.trustedWriteDepth,
-    (new Error().stack ?? '').split('\n').slice(2, 4).join(' << '),
-  );
   let fnError: unknown;
   try {
     if (existing.trustedWriteDepth === 1) {
@@ -306,8 +286,6 @@ export async function withTrustedDbWrites<T>(fn: () => Promise<T>): Promise<T> {
         (existing.trustedWriteDepth ?? 1) - 1,
         0,
       );
-      // TEMP cutover-debug — remove after diagnosis.
-      console.error('[TW-DEBUG] exit d=' + existing.trustedWriteDepth);
       if (existing.trustedWriteDepth === 0) {
         existing.trustedWriteToken = null;
         const claims = JSON.stringify({
