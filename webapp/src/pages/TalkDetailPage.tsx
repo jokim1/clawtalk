@@ -32,34 +32,24 @@ import {
   getThreadContent,
   patchContent,
   createTalkThread,
-  createTalkJob,
   deleteTalkMessages,
   deleteTalkThread,
-  deleteTalkJob,
   getAiAgents,
   getTalk,
   getTalkAgents,
   getTalkContent,
-  getTalkJob,
   getTalkContext,
-  getTalkTools,
   getTalkRunContext,
   getTalkRuns,
-  listTalkJobRuns,
-  listTalkJobs,
   listTalkThreads,
   listTalkMessages,
   searchTalkMessages,
   patchTalkMetadata,
-  patchTalkJob,
   sendTalkMessage,
   Talk,
   TalkAgent,
   TalkJob,
   TalkJobRunSummary,
-  TalkJobSchedule,
-  TalkJobScope,
-  TalkJobWeekday,
   TalkMessage,
   TalkMessageSearchResult,
   TalkMessageAttachment,
@@ -67,13 +57,9 @@ import {
   TalkSnapshot,
   TalkRunContextSnapshot,
   TalkThread,
-  TalkToolsState,
   uploadTalkAttachment,
   updateTalkAgents,
   updateTalkThread,
-  pauseTalkJob,
-  resumeTalkJob,
-  runTalkJobNow,
   listRegisteredAgents,
   type RegisteredAgent,
   UnauthorizedError,
@@ -93,6 +79,14 @@ import {
   TalkContextPanel,
   type ContextStatusState,
 } from '../components/TalkContextPanel';
+import {
+  TalkJobsPanel,
+  buildDefaultJobDraft,
+  type JobAgentOption,
+  type JobLoadStatus,
+  type TalkJobDraft,
+  type TalkJobsStatusState,
+} from '../components/TalkJobsPanel';
 import {
   SourceMentionPicker,
   buildSourceMentionOptions,
@@ -308,20 +302,6 @@ type ThreadListState = {
   error: string | null;
 };
 
-type TalkJobDraft = {
-  title: string;
-  prompt: string;
-  targetAgentId: string;
-  scheduleKind: TalkJobSchedule['kind'];
-  everyHours: number;
-  weekdays: TalkJobWeekday[];
-  hour: number;
-  minute: number;
-  timezone: string;
-  toolIds: string[];
-  allowWeb: boolean;
-};
-
 // PR C (talk-load architecture refactor): server data — talk, messages,
 // threads, content — moved to React Query (snapshotQuery). This reducer
 // holds only UI state + live streaming/runs state that the WS event
@@ -343,163 +323,6 @@ type DetailState = {
   };
   hasUnreadBelow: boolean;
 };
-
-const JOB_WEEKDAY_ORDER: TalkJobWeekday[] = [
-  'sun',
-  'mon',
-  'tue',
-  'wed',
-  'thu',
-  'fri',
-  'sat',
-];
-
-const JOB_WEEKDAY_LABELS: Record<TalkJobWeekday, string> = {
-  sun: 'Sun',
-  mon: 'Mon',
-  tue: 'Tue',
-  wed: 'Wed',
-  thu: 'Thu',
-  fri: 'Fri',
-  sat: 'Sat',
-};
-
-const JOB_TOOL_SCOPE_OPTIONS: ReadonlyArray<{
-  toolId: string;
-  family: string;
-  label: string;
-}> = [
-  { toolId: 'gdrive-read', family: 'google_read', label: 'Google Drive read' },
-  { toolId: 'linear', family: 'connectors', label: 'Linear' },
-  { toolId: 'github-read', family: 'connectors', label: 'GitHub read' },
-  { toolId: 'notion-read', family: 'connectors', label: 'Notion read' },
-];
-
-const JOB_TOOL_LABEL_BY_ID = new Map(
-  JOB_TOOL_SCOPE_OPTIONS.map((option) => [option.toolId, option.label]),
-);
-
-function getDefaultJobTimezone(): string {
-  try {
-    return Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
-  } catch {
-    return 'UTC';
-  }
-}
-
-function buildDefaultJobDraft(input?: {
-  targetAgentId?: string;
-  timezone?: string;
-}): TalkJobDraft {
-  return {
-    title: '',
-    prompt: '',
-    targetAgentId: input?.targetAgentId ?? '',
-    scheduleKind: 'weekly',
-    everyHours: 24,
-    weekdays: ['mon', 'tue', 'wed', 'thu', 'fri'],
-    hour: 9,
-    minute: 0,
-    timezone: input?.timezone ?? getDefaultJobTimezone(),
-    toolIds: [],
-    allowWeb: false,
-  };
-}
-
-function buildJobDraftFromJob(job: TalkJob): TalkJobDraft {
-  const clock =
-    job.schedule.kind === 'hourly_interval'
-      ? { hour: 9, minute: 0 }
-      : { hour: job.schedule.hour, minute: job.schedule.minute };
-  return {
-    title: job.title,
-    prompt: job.prompt,
-    targetAgentId: job.targetAgentId ?? '',
-    scheduleKind: job.schedule.kind,
-    everyHours:
-      job.schedule.kind === 'hourly_interval' ? job.schedule.everyHours : 24,
-    weekdays:
-      job.schedule.kind === 'weekly'
-        ? [...job.schedule.weekdays]
-        : ['mon', 'tue', 'wed', 'thu', 'fri'],
-    hour: clock.hour,
-    minute: clock.minute,
-    timezone: job.timezone,
-    toolIds: [...job.sourceScope.toolIds],
-    allowWeb: job.sourceScope.allowWeb,
-  };
-}
-
-function draftToTalkJobSchedule(draft: TalkJobDraft): TalkJobSchedule {
-  if (draft.scheduleKind === 'hourly_interval') {
-    return {
-      kind: 'hourly_interval',
-      everyHours: Math.max(1, Math.min(24, Math.trunc(draft.everyHours || 1))),
-    };
-  }
-  if (draft.scheduleKind === 'daily') {
-    return {
-      kind: 'daily',
-      hour: Math.max(0, Math.min(23, Math.trunc(draft.hour || 0))),
-      minute: Math.max(0, Math.min(59, Math.trunc(draft.minute || 0))),
-    };
-  }
-  return {
-    kind: 'weekly',
-    weekdays:
-      draft.weekdays.length > 0
-        ? draft.weekdays
-        : ['mon', 'tue', 'wed', 'thu', 'fri'],
-    hour: Math.max(0, Math.min(23, Math.trunc(draft.hour || 0))),
-    minute: Math.max(0, Math.min(59, Math.trunc(draft.minute || 0))),
-  };
-}
-
-function draftToTalkJobScope(draft: TalkJobDraft): TalkJobScope {
-  return {
-    toolIds: [...draft.toolIds],
-    allowWeb: draft.allowWeb,
-  };
-}
-
-function formatTalkJobSchedule(schedule: TalkJobSchedule): string {
-  if (schedule.kind === 'hourly_interval') {
-    return `Every ${schedule.everyHours} hour${schedule.everyHours === 1 ? '' : 's'}`;
-  }
-  if (schedule.kind === 'daily') {
-    return `Daily at ${String(schedule.hour).padStart(2, '0')}:${String(
-      schedule.minute,
-    ).padStart(2, '0')}`;
-  }
-  const days = schedule.weekdays
-    .map((day) => JOB_WEEKDAY_LABELS[day])
-    .join(', ');
-  return `${days} at ${String(schedule.hour).padStart(2, '0')}:${String(
-    schedule.minute,
-  ).padStart(2, '0')}`;
-}
-
-function formatJobToolId(toolId: string): string {
-  return (
-    JOB_TOOL_LABEL_BY_ID.get(toolId) ||
-    toolId
-      .split(/[-_]/)
-      .filter(Boolean)
-      .map((part) => part[0]?.toUpperCase() + part.slice(1))
-      .join(' ')
-  );
-}
-
-function summarizeTalkJobScope(scope: TalkJobScope): string {
-  const parts: string[] = [];
-  if (scope.allowWeb) {
-    parts.push('web access');
-  }
-  if (scope.toolIds.length > 0) {
-    parts.push(scope.toolIds.map(formatJobToolId).join(', '));
-  }
-  return parts.length > 0 ? parts.join(' · ') : 'Default Talk context only.';
-}
 
 type DetailAction =
   | { type: 'TALK_RESET' }
@@ -2401,32 +2224,27 @@ export function TalkDetailPage({
   const [goalDraft, setGoalDraft] = useState<string | null>(null);
   const [newRuleText, setNewRuleText] = useState('');
   const [ruleDrafts, setRuleDrafts] = useState<Record<string, string>>({});
+  // Page-owned Jobs state. TalkJobsPanel is presentational: every piece an async
+  // mutation writes — the list, selection, draft, runs, and mutation status —
+  // lives here so a save/run that resolves after the panel unmounts (tab switch)
+  // still updates the live state, not an orphaned copy, and the half-filled form
+  // survives the round-trip. The panel self-fetches only the read-only tool
+  // scope. See TalkJobsPanel.
   const [talkJobs, setTalkJobs] = useState<TalkJob[]>([]);
   const [talkJobsLoaded, setTalkJobsLoaded] = useState(false);
-  const [talkJobsStatus, setTalkJobsStatus] = useState<{
-    status: 'idle' | 'loading' | 'saving' | 'error' | 'success';
-    message?: string;
-  }>({ status: 'idle' });
+  const [talkJobsStatus, setTalkJobsStatus] = useState<TalkJobsStatusState>({
+    status: 'idle',
+  });
   const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
-  const [selectedJobRuns, setSelectedJobRuns] = useState<TalkJobRunSummary[]>(
-    [],
-  );
-  const [selectedJobRunsStatus, setSelectedJobRunsStatus] = useState<{
-    status: 'idle' | 'loading' | 'error';
-    message?: string;
-  }>({ status: 'idle' });
   const [creatingJob, setCreatingJob] = useState(false);
   const [jobDraft, setJobDraft] = useState<TalkJobDraft>(() =>
     buildDefaultJobDraft(),
   );
-  const [jobToolsState, setJobToolsState] = useState<TalkToolsState | null>(
-    null,
+  const [selectedJobRuns, setSelectedJobRuns] = useState<TalkJobRunSummary[]>(
+    [],
   );
-  const [jobToolsLoaded, setJobToolsLoaded] = useState(false);
-  const [jobToolsStatus, setJobToolsStatus] = useState<{
-    status: 'idle' | 'loading' | 'error';
-    message?: string;
-  }>({ status: 'idle' });
+  const [selectedJobRunsStatus, setSelectedJobRunsStatus] =
+    useState<JobLoadStatus>({ status: 'idle' });
 
   const titleInputRef = useRef<HTMLInputElement | null>(null);
   const messageElementRefs = useRef<Map<string, HTMLElement>>(new Map());
@@ -3220,117 +3038,16 @@ export function TalkDetailPage({
     [talkId],
   );
 
-  const loadSelectedJobRuns = useCallback(
-    async (jobId: string, options?: { showLoading?: boolean }) => {
-      if (options?.showLoading) {
-        setSelectedJobRunsStatus({ status: 'loading' });
-      }
-      const runs = await listTalkJobRuns({ talkId, jobId, limit: 20 });
-      setSelectedJobRuns(runs);
-      setSelectedJobRunsStatus({ status: 'idle' });
-      return runs;
-    },
-    [talkId],
-  );
-
-  const refreshTalkJobs = useCallback(
-    async (options?: {
-      showLoading?: boolean;
-      preserveSelection?: boolean;
-      preferredJobId?: string | null;
-    }) => {
-      if (options?.showLoading) {
-        setTalkJobsStatus({ status: 'loading' });
-      }
-      const jobs = await listTalkJobs(talkId);
-      setTalkJobs(jobs);
-      setTalkJobsLoaded(true);
-      setTalkJobsStatus({ status: 'idle' });
-
-      const nextSelectedId =
-        (options?.preferredJobId &&
-          jobs.some((job) => job.id === options.preferredJobId) &&
-          options.preferredJobId) ||
-        (options?.preserveSelection &&
-          selectedJobId &&
-          jobs.some((job) => job.id === selectedJobId) &&
-          selectedJobId) ||
-        jobs[0]?.id ||
-        null;
-
-      if (!nextSelectedId) {
-        setSelectedJobId(null);
-        setCreatingJob(false);
-        setJobDraft(
-          buildDefaultJobDraft({
-            targetAgentId:
-              agents.find((agent) => agent.isPrimary)?.id || agents[0]?.id,
-          }),
-        );
-        setSelectedJobRuns([]);
-        setSelectedJobRunsStatus({ status: 'idle' });
-        return jobs;
-      }
-
-      const job = jobs.find((candidate) => candidate.id === nextSelectedId);
-      if (!job) {
-        return jobs;
-      }
-
-      setCreatingJob(false);
-      setSelectedJobId(job.id);
-      setJobDraft(buildJobDraftFromJob(job));
-      await loadSelectedJobRuns(job.id, { showLoading: false });
-      return jobs;
-    },
-    [agents, loadSelectedJobRuns, selectedJobId, talkId],
-  );
-
-  const refreshJobTools = useCallback(
-    async (options?: { showLoading?: boolean }) => {
-      if (options?.showLoading) {
-        setJobToolsStatus({ status: 'loading' });
-      }
-      try {
-        const tools = await getTalkTools(talkId);
-        setJobToolsState(tools);
-        setJobToolsLoaded(true);
-        setJobToolsStatus({ status: 'idle' });
-        return tools;
-      } catch (err) {
-        if (err instanceof UnauthorizedError) {
-          handleUnauthorized();
-          return null;
-        }
-        setJobToolsStatus({
-          status: 'error',
-          message:
-            err instanceof Error ? err.message : 'Failed to load job tools.',
-        });
-        return null;
+  // After a Run-Now settles in TalkJobsPanel: if the job's thread is the active
+  // thread, resync the thread/run views. Encapsulates the page-private
+  // activeThreadIdRef + resyncTalkState so the panel needs neither.
+  const handleJobRunSettled = useCallback(
+    async (jobThreadId: string | null) => {
+      if (jobThreadId === activeThreadIdRef.current) {
+        await resyncTalkState({ refreshThreads: true });
       }
     },
-    [handleUnauthorized, talkId],
-  );
-
-  const refreshSelectedJobExecutionState = useCallback(
-    async (jobId: string) => {
-      const [job, runs] = await Promise.all([
-        getTalkJob({ talkId, jobId }),
-        listTalkJobRuns({ talkId, jobId, limit: 20 }),
-      ]);
-      setTalkJobs((current) =>
-        current.map((candidate) => (candidate.id === job.id ? job : candidate)),
-      );
-      if (selectedJobId === job.id) {
-        setSelectedJobId(job.id);
-        setJobDraft(buildJobDraftFromJob(job));
-        setSelectedJobRuns(runs);
-      }
-      setSelectedJobRunsStatus({ status: 'idle' });
-      return { job, runs };
-    },
-    [selectedJobId, talkId],
+    [resyncTalkState],
   );
 
   // Tracks the last (talkId, activeThreadId) we fully hydrated from the
@@ -3373,17 +3090,15 @@ export function TalkDetailPage({
     setGoalDraft(null);
     setNewRuleText('');
     setRuleDrafts({});
+    // Page-owned Jobs state (TalkJobsPanel self-fetches only the tool scope).
     setTalkJobs([]);
     setTalkJobsLoaded(false);
     setTalkJobsStatus({ status: 'idle' });
     setSelectedJobId(null);
-    setSelectedJobRuns([]);
-    setSelectedJobRunsStatus({ status: 'idle' });
     setCreatingJob(false);
     setJobDraft(buildDefaultJobDraft());
-    setJobToolsState(null);
-    setJobToolsLoaded(false);
-    setJobToolsStatus({ status: 'idle' });
+    setSelectedJobRuns([]);
+    setSelectedJobRunsStatus({ status: 'idle' });
     setTalkContent(null);
     setTalkContentPendingEdits([]);
     setTalkContentError(null);
@@ -4099,33 +3814,20 @@ export function TalkDetailPage({
     accessRole === 'owner' || accessRole === 'admin' || accessRole === 'editor';
   const canEditJobs = canEditAgents;
   const canEditDoc = canEditAgents;
-  const jobToolOptions = useMemo(
+  // Pre-built agent options for TalkJobsPanel's target-agent picker (the panel
+  // owns neither the roster nor buildAgentLabel).
+  const jobAgentOptions = useMemo<JobAgentOption[]>(
     () =>
-      JOB_TOOL_SCOPE_OPTIONS.filter(
-        (option) => jobToolsState?.available.includes(option.family) !== false,
-      ),
-    [jobToolsState],
+      agents.map((agent) => ({
+        id: agent.id,
+        label: buildAgentLabel(agent),
+        isPrimary: agent.isPrimary,
+      })),
+    [agents],
   );
-  const jobToolFamilyEnabled = useCallback(
-    (family: string): boolean => jobToolsState?.active[family] === true,
-    [jobToolsState],
-  );
-  const jobWebEnabled = jobToolFamilyEnabled('web');
 
   const canManageTalkConnectors =
     accessRole === 'owner' || accessRole === 'admin';
-  const selectedJob = useMemo(
-    () => talkJobs.find((job) => job.id === selectedJobId) ?? null,
-    [selectedJobId, talkJobs],
-  );
-  const hasUnsavedJobChanges = useMemo(() => {
-    if (creatingJob) {
-      return Boolean(jobDraft.title.trim() || jobDraft.prompt.trim());
-    }
-    if (!selectedJob) return false;
-    const original = buildJobDraftFromJob(selectedJob);
-    return JSON.stringify(original) !== JSON.stringify(jobDraft);
-  }, [creatingJob, jobDraft, selectedJob]);
 
   const configuredProviders = useMemo(
     () => getConfiguredProviders(aiAgentsData),
@@ -4826,36 +4528,6 @@ export function TalkDetailPage({
   }, [contextLoaded, currentTab, handleUnauthorized, refreshContext, pageKind]);
 
   useEffect(() => {
-    if (pageKind !== 'ready' || currentTab !== 'jobs') {
-      return;
-    }
-
-    if (!talkJobsLoaded) {
-      void refreshTalkJobs({ showLoading: true }).catch((err) => {
-        if (err instanceof UnauthorizedError) {
-          handleUnauthorized();
-          return;
-        }
-        setTalkJobsStatus({
-          status: 'error',
-          message: err instanceof Error ? err.message : 'Failed to load jobs.',
-        });
-      });
-    }
-    if (!jobToolsLoaded) {
-      void refreshJobTools({ showLoading: true });
-    }
-  }, [
-    currentTab,
-    handleUnauthorized,
-    jobToolsLoaded,
-    pageKind,
-    refreshJobTools,
-    refreshTalkJobs,
-    talkJobsLoaded,
-  ]);
-
-  useEffect(() => {
     if (pageKind !== 'ready' || currentTab !== 'context' || !contextLoaded) {
       return;
     }
@@ -4892,289 +4564,6 @@ export function TalkDetailPage({
     handleUnauthorized,
     refreshContext,
     pageKind,
-  ]);
-
-  // Context handlers
-  const handleCreateJobDraft = useCallback(() => {
-    setCreatingJob(true);
-    setSelectedJobId(null);
-    setSelectedJobRuns([]);
-    setSelectedJobRunsStatus({ status: 'idle' });
-    setTalkJobsStatus({ status: 'idle' });
-    setJobDraft(
-      buildDefaultJobDraft({
-        targetAgentId:
-          agents.find((agent) => agent.isPrimary)?.id || agents[0]?.id,
-      }),
-    );
-  }, [agents]);
-
-  const handleSelectJob = useCallback(
-    async (jobId: string) => {
-      const job = talkJobs.find((candidate) => candidate.id === jobId);
-      if (!job) return;
-      setCreatingJob(false);
-      setSelectedJobId(job.id);
-      setJobDraft(buildJobDraftFromJob(job));
-      try {
-        await loadSelectedJobRuns(job.id, { showLoading: true });
-        setTalkJobsStatus({ status: 'idle' });
-      } catch (err) {
-        if (err instanceof UnauthorizedError) {
-          handleUnauthorized();
-          return;
-        }
-        setSelectedJobRunsStatus({
-          status: 'error',
-          message:
-            err instanceof Error ? err.message : 'Failed to load job runs.',
-        });
-      }
-    },
-    [handleUnauthorized, loadSelectedJobRuns, talkJobs],
-  );
-
-  const handleToggleJobWeekday = useCallback((weekday: TalkJobWeekday) => {
-    setJobDraft((current) => {
-      const exists = current.weekdays.includes(weekday);
-      return {
-        ...current,
-        weekdays: exists
-          ? current.weekdays.filter((value) => value !== weekday)
-          : [...current.weekdays, weekday],
-      };
-    });
-  }, []);
-
-  const handleToggleJobTool = useCallback((toolId: string) => {
-    setJobDraft((current) => {
-      const exists = current.toolIds.includes(toolId);
-      return {
-        ...current,
-        toolIds: exists
-          ? current.toolIds.filter((value) => value !== toolId)
-          : [...current.toolIds, toolId],
-      };
-    });
-  }, []);
-
-  const handleSaveJob = useCallback(async () => {
-    if (!canEditJobs) return;
-    if (!creatingJob && !selectedJob) return;
-
-    setTalkJobsStatus({ status: 'saving' });
-    try {
-      const sourceScope = draftToTalkJobScope(jobDraft);
-      const schedule = draftToTalkJobSchedule(jobDraft);
-
-      const saved = creatingJob
-        ? await createTalkJob({
-            talkId,
-            title: jobDraft.title,
-            prompt: jobDraft.prompt,
-            targetAgentId: jobDraft.targetAgentId,
-            schedule,
-            timezone: jobDraft.timezone,
-            sourceScope,
-          })
-        : await patchTalkJob({
-            talkId,
-            jobId: selectedJob!.id,
-            title: jobDraft.title,
-            prompt: jobDraft.prompt,
-            targetAgentId: jobDraft.targetAgentId,
-            schedule,
-            timezone: jobDraft.timezone,
-            sourceScope,
-          });
-
-      await refreshTalkJobs({
-        preferredJobId: saved.id,
-        preserveSelection: true,
-      });
-      setTalkJobsStatus({
-        status: 'success',
-        message: creatingJob ? 'Job created.' : 'Job saved.',
-      });
-    } catch (err) {
-      if (err instanceof UnauthorizedError) {
-        handleUnauthorized();
-        return;
-      }
-      setTalkJobsStatus({
-        status: 'error',
-        message: err instanceof Error ? err.message : 'Failed to save job.',
-      });
-    }
-  }, [
-    canEditJobs,
-    creatingJob,
-    handleUnauthorized,
-    jobDraft,
-    refreshTalkJobs,
-    selectedJob,
-    talkId,
-  ]);
-
-  const handleDeleteJob = useCallback(async () => {
-    if (!selectedJob || !canEditJobs) return;
-    const confirmed = window.confirm(
-      `Delete "${selectedJob.title}"? This cannot be undone.`,
-    );
-    if (!confirmed) return;
-
-    setTalkJobsStatus({ status: 'saving' });
-    try {
-      await deleteTalkJob({ talkId, jobId: selectedJob.id });
-      const remaining = talkJobs.filter((job) => job.id !== selectedJob.id);
-      setTalkJobs(remaining);
-      setTalkJobsLoaded(true);
-      if (remaining.length > 0) {
-        const next = remaining[0]!;
-        setCreatingJob(false);
-        setSelectedJobId(next.id);
-        setJobDraft(buildJobDraftFromJob(next));
-        await loadSelectedJobRuns(next.id, { showLoading: false });
-      } else {
-        setSelectedJobId(null);
-        setSelectedJobRuns([]);
-        setSelectedJobRunsStatus({ status: 'idle' });
-        setCreatingJob(false);
-        setJobDraft(
-          buildDefaultJobDraft({
-            targetAgentId:
-              agents.find((agent) => agent.isPrimary)?.id || agents[0]?.id,
-          }),
-        );
-      }
-      setTalkJobsStatus({ status: 'success', message: 'Job deleted.' });
-    } catch (err) {
-      if (err instanceof UnauthorizedError) {
-        handleUnauthorized();
-        return;
-      }
-      setTalkJobsStatus({
-        status: 'error',
-        message: err instanceof Error ? err.message : 'Failed to delete job.',
-      });
-    }
-  }, [
-    agents,
-    canEditJobs,
-    handleUnauthorized,
-    loadSelectedJobRuns,
-    selectedJob,
-    talkId,
-    talkJobs,
-  ]);
-
-  const handlePauseJob = useCallback(async () => {
-    if (!selectedJob || !canEditJobs) return;
-    setTalkJobsStatus({ status: 'saving' });
-    try {
-      const paused = await pauseTalkJob({ talkId, jobId: selectedJob.id });
-      setTalkJobs((current) =>
-        current.map((job) => (job.id === paused.id ? paused : job)),
-      );
-      setTalkJobsStatus({ status: 'success', message: 'Job paused.' });
-    } catch (err) {
-      if (err instanceof UnauthorizedError) {
-        handleUnauthorized();
-        return;
-      }
-      setTalkJobsStatus({
-        status: 'error',
-        message: err instanceof Error ? err.message : 'Failed to pause job.',
-      });
-    }
-  }, [canEditJobs, handleUnauthorized, selectedJob, talkId]);
-
-  const handleResumeJob = useCallback(async () => {
-    if (!selectedJob || !canEditJobs) return;
-    setTalkJobsStatus({ status: 'saving' });
-    try {
-      const resumed = await resumeTalkJob({ talkId, jobId: selectedJob.id });
-      setTalkJobs((current) =>
-        current.map((job) => (job.id === resumed.id ? resumed : job)),
-      );
-      setTalkJobsStatus({ status: 'success', message: 'Job resumed.' });
-    } catch (err) {
-      if (err instanceof UnauthorizedError) {
-        handleUnauthorized();
-        return;
-      }
-      setTalkJobsStatus({
-        status: 'error',
-        message: err instanceof Error ? err.message : 'Failed to resume job.',
-      });
-    }
-  }, [canEditJobs, handleUnauthorized, selectedJob, talkId]);
-
-  const handleRunJobNow = useCallback(async () => {
-    if (!selectedJob || !canEditJobs) return;
-    setTalkJobsStatus({ status: 'saving' });
-    try {
-      const queued = await runTalkJobNow({ talkId, jobId: selectedJob.id });
-      await refreshSelectedJobExecutionState(selectedJob.id);
-      setTalkJobsStatus({ status: 'success', message: 'Job queued.' });
-
-      void (async () => {
-        const isTerminal = (status: TalkJobRunSummary['status']) =>
-          status === 'completed' ||
-          status === 'failed' ||
-          status === 'cancelled';
-
-        for (let attempt = 0; attempt < 15; attempt += 1) {
-          await new Promise((resolve) => window.setTimeout(resolve, 1000));
-          try {
-            const { runs } = await refreshSelectedJobExecutionState(
-              selectedJob.id,
-            );
-            const latest =
-              runs.find((run) => run.id === queued.runId) ?? runs[0] ?? null;
-            if (!latest || !isTerminal(latest.status)) {
-              continue;
-            }
-            if (selectedJob.threadId === activeThreadIdRef.current) {
-              await resyncTalkState({ refreshThreads: true });
-            }
-            setTalkJobsStatus(
-              latest.status === 'completed'
-                ? { status: 'success', message: 'Job completed.' }
-                : {
-                    status: 'error',
-                    message:
-                      latest.errorMessage ||
-                      latest.cancelReason ||
-                      `Job ${latest.status}.`,
-                  },
-            );
-            return;
-          } catch (pollErr) {
-            if (pollErr instanceof UnauthorizedError) {
-              handleUnauthorized();
-            }
-            return;
-          }
-        }
-      })();
-    } catch (err) {
-      if (err instanceof UnauthorizedError) {
-        handleUnauthorized();
-        return;
-      }
-      setTalkJobsStatus({
-        status: 'error',
-        message: err instanceof Error ? err.message : 'Failed to queue job.',
-      });
-    }
-  }, [
-    canEditJobs,
-    handleUnauthorized,
-    refreshSelectedJobExecutionState,
-    resyncTalkState,
-    selectedJob,
-    talkId,
   ]);
 
   const openHistoryEditor = useCallback(() => {
@@ -7096,520 +6485,30 @@ export function TalkDetailPage({
           ) : null}
 
           {currentTab === 'jobs' ? (
-            <section className="talk-tab-panel" aria-label="Talk jobs">
-              <div className="agents-panel-header">
-                <div>
-                  <h2>Jobs</h2>
-                  <p className="policy-muted">
-                    Schedule recurring Talk runs with a read-only tool scope.
-                  </p>
-                </div>
-                <div className="connector-attach-row">
-                  <button
-                    type="button"
-                    className="secondary-btn"
-                    onClick={() =>
-                      void refreshTalkJobs({ showLoading: true }).catch(
-                        (err) => {
-                          if (err instanceof UnauthorizedError) {
-                            handleUnauthorized();
-                            return;
-                          }
-                          setTalkJobsStatus({
-                            status: 'error',
-                            message:
-                              err instanceof Error
-                                ? err.message
-                                : 'Failed to load jobs.',
-                          });
-                        },
-                      )
-                    }
-                  >
-                    Refresh
-                  </button>
-                  <button
-                    type="button"
-                    className="secondary-btn"
-                    onClick={handleCreateJobDraft}
-                    disabled={
-                      !canEditJobs || talkJobsStatus.status === 'saving'
-                    }
-                  >
-                    New Job
-                  </button>
-                </div>
-              </div>
-
-              {talkJobsStatus.status === 'loading' && !talkJobsLoaded ? (
-                <p className="page-state">Loading jobs…</p>
-              ) : (
-                <div className="talk-llm-card-list">
-                  <article className="talk-llm-card">
-                    <div className="connector-card-header">
-                      <div>
-                        <h3>Scheduled jobs</h3>
-                        <p className="talk-llm-meta">
-                          {talkJobs.length} configured
-                        </p>
-                      </div>
-                    </div>
-                    {talkJobs.length > 0 ? (
-                      <div className="talk-rule-list">
-                        {talkJobs.map((job) => (
-                          <button
-                            key={job.id}
-                            type="button"
-                            className={`secondary-btn${
-                              selectedJobId === job.id ? ' btn-primary' : ''
-                            }`}
-                            onClick={() => void handleSelectJob(job.id)}
-                          >
-                            {job.title}
-                            <span className="talk-llm-meta">
-                              {job.status} ·{' '}
-                              {formatTalkJobSchedule(job.schedule)}
-                            </span>
-                          </button>
-                        ))}
-                      </div>
-                    ) : (
-                      <p className="page-state">No jobs yet.</p>
-                    )}
-                  </article>
-
-                  <form
-                    className="talk-llm-card"
-                    onSubmit={(event) => {
-                      event.preventDefault();
-                      void handleSaveJob();
-                    }}
-                  >
-                    <div className="connector-card-header">
-                      <div>
-                        <h3>
-                          {creatingJob
-                            ? 'New job'
-                            : selectedJob
-                              ? selectedJob.title
-                              : 'Job details'}
-                        </h3>
-                        <p className="talk-llm-meta">
-                          {selectedJob
-                            ? summarizeTalkJobScope(selectedJob.sourceScope)
-                            : 'Create or select a job to edit.'}
-                        </p>
-                      </div>
-                      {selectedJob ? (
-                        <span className="talk-agent-chip">
-                          {selectedJob.status}
-                        </span>
-                      ) : null}
-                    </div>
-
-                    {creatingJob || selectedJob ? (
-                      <>
-                        <label>
-                          <span>Title</span>
-                          <input
-                            type="text"
-                            value={jobDraft.title}
-                            onChange={(event) =>
-                              setJobDraft((current) => ({
-                                ...current,
-                                title: event.target.value,
-                              }))
-                            }
-                            disabled={
-                              !canEditJobs || talkJobsStatus.status === 'saving'
-                            }
-                          />
-                        </label>
-                        <label>
-                          <span>Prompt</span>
-                          <textarea
-                            rows={5}
-                            value={jobDraft.prompt}
-                            onChange={(event) =>
-                              setJobDraft((current) => ({
-                                ...current,
-                                prompt: event.target.value,
-                              }))
-                            }
-                            disabled={
-                              !canEditJobs || talkJobsStatus.status === 'saving'
-                            }
-                          />
-                        </label>
-                        <div className="connector-attach-row">
-                          <label>
-                            <span>Agent</span>
-                            <select
-                              value={jobDraft.targetAgentId}
-                              onChange={(event) =>
-                                setJobDraft((current) => ({
-                                  ...current,
-                                  targetAgentId: event.target.value,
-                                }))
-                              }
-                              disabled={
-                                !canEditJobs ||
-                                talkJobsStatus.status === 'saving'
-                              }
-                            >
-                              <option value="" disabled>
-                                Choose an agent…
-                              </option>
-                              {agents.map((agent) => (
-                                <option key={agent.id} value={agent.id}>
-                                  {buildAgentLabel(agent)}
-                                </option>
-                              ))}
-                            </select>
-                          </label>
-                          <label>
-                            <span>Schedule</span>
-                            <select
-                              value={jobDraft.scheduleKind}
-                              onChange={(event) =>
-                                setJobDraft((current) => ({
-                                  ...current,
-                                  scheduleKind: event.target
-                                    .value as TalkJobSchedule['kind'],
-                                }))
-                              }
-                              disabled={
-                                !canEditJobs ||
-                                talkJobsStatus.status === 'saving'
-                              }
-                            >
-                              <option value="hourly_interval">Hourly</option>
-                              <option value="daily">Daily</option>
-                              <option value="weekly">Weekly</option>
-                            </select>
-                          </label>
-                        </div>
-
-                        {jobDraft.scheduleKind === 'hourly_interval' ? (
-                          <label>
-                            <span>Every hours</span>
-                            <input
-                              type="number"
-                              min={1}
-                              max={24}
-                              value={jobDraft.everyHours}
-                              onChange={(event) =>
-                                setJobDraft((current) => ({
-                                  ...current,
-                                  everyHours: Number(event.target.value),
-                                }))
-                              }
-                              disabled={
-                                !canEditJobs ||
-                                talkJobsStatus.status === 'saving'
-                              }
-                            />
-                          </label>
-                        ) : (
-                          <>
-                            {jobDraft.scheduleKind === 'weekly' ? (
-                              <div className="connector-attach-row">
-                                {JOB_WEEKDAY_ORDER.map((weekday) => (
-                                  <label
-                                    key={weekday}
-                                    className="policy-primary-toggle"
-                                  >
-                                    <input
-                                      type="checkbox"
-                                      checked={jobDraft.weekdays.includes(
-                                        weekday,
-                                      )}
-                                      onChange={() =>
-                                        handleToggleJobWeekday(weekday)
-                                      }
-                                      disabled={
-                                        !canEditJobs ||
-                                        talkJobsStatus.status === 'saving'
-                                      }
-                                    />
-                                    <span>{JOB_WEEKDAY_LABELS[weekday]}</span>
-                                  </label>
-                                ))}
-                              </div>
-                            ) : null}
-                            <div className="connector-attach-row">
-                              <label>
-                                <span>Hour</span>
-                                <input
-                                  type="number"
-                                  min={0}
-                                  max={23}
-                                  value={jobDraft.hour}
-                                  onChange={(event) =>
-                                    setJobDraft((current) => ({
-                                      ...current,
-                                      hour: Number(event.target.value),
-                                    }))
-                                  }
-                                  disabled={
-                                    !canEditJobs ||
-                                    talkJobsStatus.status === 'saving'
-                                  }
-                                />
-                              </label>
-                              <label>
-                                <span>Minute</span>
-                                <input
-                                  type="number"
-                                  min={0}
-                                  max={59}
-                                  value={jobDraft.minute}
-                                  onChange={(event) =>
-                                    setJobDraft((current) => ({
-                                      ...current,
-                                      minute: Number(event.target.value),
-                                    }))
-                                  }
-                                  disabled={
-                                    !canEditJobs ||
-                                    talkJobsStatus.status === 'saving'
-                                  }
-                                />
-                              </label>
-                            </div>
-                          </>
-                        )}
-
-                        <label>
-                          <span>Timezone</span>
-                          <input
-                            type="text"
-                            value={jobDraft.timezone}
-                            onChange={(event) =>
-                              setJobDraft((current) => ({
-                                ...current,
-                                timezone: event.target.value,
-                              }))
-                            }
-                            disabled={
-                              !canEditJobs || talkJobsStatus.status === 'saving'
-                            }
-                          />
-                        </label>
-
-                        <div className="talk-llm-card-list talk-llm-card-list-compact">
-                          <div>
-                            <h4>Tool scope</h4>
-                            {jobToolsStatus.status === 'loading' &&
-                            !jobToolsLoaded ? (
-                              <p className="talk-llm-meta">
-                                Loading job tools…
-                              </p>
-                            ) : null}
-                            {jobToolsStatus.status === 'error' ? (
-                              <div
-                                className="inline-banner inline-banner-error"
-                                role="alert"
-                              >
-                                {jobToolsStatus.message}
-                              </div>
-                            ) : null}
-                            <label
-                              className="policy-primary-toggle"
-                              title={
-                                jobWebEnabled
-                                  ? undefined
-                                  : 'Web must be enabled in Talk tools.'
-                              }
-                            >
-                              <input
-                                type="checkbox"
-                                checked={jobDraft.allowWeb}
-                                onChange={(event) =>
-                                  setJobDraft((current) => ({
-                                    ...current,
-                                    allowWeb: event.target.checked,
-                                  }))
-                                }
-                                disabled={
-                                  !canEditJobs ||
-                                  talkJobsStatus.status === 'saving' ||
-                                  !jobWebEnabled
-                                }
-                              />
-                              <span>Allow web search</span>
-                            </label>
-                            {jobToolOptions.map((option) => {
-                              const enabled = jobToolFamilyEnabled(
-                                option.family,
-                              );
-                              return (
-                                <label
-                                  key={option.toolId}
-                                  className="policy-primary-toggle"
-                                  title={
-                                    enabled
-                                      ? undefined
-                                      : `${option.label} must be enabled in Talk tools.`
-                                  }
-                                >
-                                  <input
-                                    type="checkbox"
-                                    checked={jobDraft.toolIds.includes(
-                                      option.toolId,
-                                    )}
-                                    onChange={() =>
-                                      handleToggleJobTool(option.toolId)
-                                    }
-                                    disabled={
-                                      !canEditJobs ||
-                                      talkJobsStatus.status === 'saving' ||
-                                      !enabled
-                                    }
-                                  />
-                                  <span>{option.label}</span>
-                                </label>
-                              );
-                            })}
-                            {jobDraft.toolIds
-                              .filter(
-                                (toolId) => !JOB_TOOL_LABEL_BY_ID.has(toolId),
-                              )
-                              .map((toolId) => (
-                                <label
-                                  key={toolId}
-                                  className="policy-primary-toggle"
-                                >
-                                  <input type="checkbox" checked disabled />
-                                  <span>{formatJobToolId(toolId)}</span>
-                                </label>
-                              ))}
-                          </div>
-                          <div>
-                            <h4>Recent runs</h4>
-                            {selectedJobRunsStatus.status === 'loading' ? (
-                              <p className="talk-llm-meta">Loading runs…</p>
-                            ) : selectedJobRunsStatus.status === 'error' ? (
-                              <div
-                                className="inline-banner inline-banner-error"
-                                role="alert"
-                              >
-                                {selectedJobRunsStatus.message}
-                              </div>
-                            ) : selectedJobRuns.length > 0 ? (
-                              <ul className="talk-llm-card-list talk-llm-card-list-compact">
-                                {selectedJobRuns.map((run) => (
-                                  <li key={run.id} className="talk-llm-meta">
-                                    {run.status} ·{' '}
-                                    {formatDateTime(run.createdAt)}
-                                    {run.responseExcerpt
-                                      ? ` · ${run.responseExcerpt}`
-                                      : ''}
-                                  </li>
-                                ))}
-                              </ul>
-                            ) : (
-                              <p className="talk-llm-meta">No runs yet.</p>
-                            )}
-                          </div>
-                        </div>
-
-                        <p className="talk-llm-meta">
-                          Scope:{' '}
-                          {summarizeTalkJobScope({
-                            toolIds: jobDraft.toolIds,
-                            allowWeb: jobDraft.allowWeb,
-                          })}
-                        </p>
-
-                        <div className="connector-attach-row">
-                          <button
-                            type="submit"
-                            className="secondary-btn"
-                            disabled={
-                              !canEditJobs ||
-                              talkJobsStatus.status === 'saving' ||
-                              !jobDraft.title.trim() ||
-                              !jobDraft.prompt.trim() ||
-                              !jobDraft.targetAgentId ||
-                              (!creatingJob && !hasUnsavedJobChanges)
-                            }
-                          >
-                            {talkJobsStatus.status === 'saving'
-                              ? 'Saving…'
-                              : 'Save Job'}
-                          </button>
-                          {selectedJob ? (
-                            <>
-                              <button
-                                type="button"
-                                className="secondary-btn"
-                                onClick={
-                                  selectedJob.status === 'paused'
-                                    ? handleResumeJob
-                                    : handlePauseJob
-                                }
-                                disabled={
-                                  !canEditJobs ||
-                                  talkJobsStatus.status === 'saving' ||
-                                  selectedJob.status === 'blocked'
-                                }
-                              >
-                                {selectedJob.status === 'paused'
-                                  ? 'Resume'
-                                  : 'Pause'}
-                              </button>
-                              <button
-                                type="button"
-                                className="secondary-btn"
-                                onClick={handleRunJobNow}
-                                disabled={
-                                  !canEditJobs ||
-                                  talkJobsStatus.status === 'saving' ||
-                                  selectedJob.status !== 'active'
-                                }
-                              >
-                                Run Now
-                              </button>
-                              <button
-                                type="button"
-                                className="secondary-btn"
-                                onClick={handleDeleteJob}
-                                disabled={
-                                  !canEditJobs ||
-                                  talkJobsStatus.status === 'saving'
-                                }
-                              >
-                                Delete
-                              </button>
-                            </>
-                          ) : null}
-                        </div>
-                      </>
-                    ) : (
-                      <p className="page-state">Select or create a job.</p>
-                    )}
-
-                    {talkJobsStatus.status === 'error' ? (
-                      <div
-                        className="inline-banner inline-banner-error"
-                        role="alert"
-                      >
-                        {talkJobsStatus.message}
-                      </div>
-                    ) : null}
-                    {talkJobsStatus.status === 'success' ? (
-                      <div
-                        className="inline-banner inline-banner-success"
-                        role="status"
-                      >
-                        {talkJobsStatus.message}
-                      </div>
-                    ) : null}
-                  </form>
-                </div>
-              )}
-            </section>
+            <TalkJobsPanel
+              key={talkId}
+              talkId={talkId}
+              canEditJobs={canEditJobs}
+              agentOptions={jobAgentOptions}
+              jobDraft={jobDraft}
+              setJobDraft={setJobDraft}
+              creatingJob={creatingJob}
+              setCreatingJob={setCreatingJob}
+              selectedJobId={selectedJobId}
+              setSelectedJobId={setSelectedJobId}
+              talkJobs={talkJobs}
+              setTalkJobs={setTalkJobs}
+              talkJobsLoaded={talkJobsLoaded}
+              setTalkJobsLoaded={setTalkJobsLoaded}
+              selectedJobRuns={selectedJobRuns}
+              setSelectedJobRuns={setSelectedJobRuns}
+              selectedJobRunsStatus={selectedJobRunsStatus}
+              setSelectedJobRunsStatus={setSelectedJobRunsStatus}
+              status={talkJobsStatus}
+              setStatus={setTalkJobsStatus}
+              onUnauthorized={handleUnauthorized}
+              onJobRunSettled={handleJobRunSettled}
+            />
           ) : null}
 
           {currentTab === 'runs' ? (
