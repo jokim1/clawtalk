@@ -8,6 +8,7 @@ import {
   getGreenfieldDocumentForTalk,
   getGreenfieldRunContextSnapshotRecord,
   getGreenfieldThreadMetrics,
+  getTalkSnapshotVersion,
   listGreenfieldMessages,
   listGreenfieldRuns,
   rejectGreenfieldDocumentEdit,
@@ -1661,6 +1662,15 @@ export async function getGreenfieldSnapshotRoute(input: {
         talkId: input.talkId,
       });
       if ('statusCode' in talk) return talk;
+      // Outbox cursor for the client's streamed-message dedup. Read BEFORE
+      // the message load so it stays a lower bound consistent with the
+      // returned messages (see getTalkSnapshotVersion). MUST be the
+      // event_outbox high-water (same scale as the streamed eventId), not a
+      // wall-clock timestamp — otherwise every streamed reply is dropped and
+      // vanishes from the live thread until a reload.
+      const snapshotVersion = await getTalkSnapshotVersion({
+        talkId: input.talkId,
+      });
       const [metrics, rawMessages, document, runs, agents] = await Promise.all([
         getGreenfieldThreadMetrics({
           workspaceId: ctx.workspace.id,
@@ -1705,7 +1715,7 @@ export async function getGreenfieldSnapshotRoute(input: {
         pendingEdits: content.pendingEdits,
         runs: runs.map(toSnapshotRunApi),
         agents: agents.map(toSnapshotAgent),
-        snapshotVersion: Date.parse(talk.updated_at) || 1,
+        snapshotVersion,
       });
     },
   );
