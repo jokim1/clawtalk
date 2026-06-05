@@ -98,12 +98,18 @@ import {
   TalkRunsPanel,
   type RunContextPanelState,
 } from '../components/TalkRunsPanel';
+import { TalkComposer } from '../components/TalkComposer';
 import { ThreadContextMenu } from '../components/ThreadContextMenu';
 import { ThreadRowTitleEditor } from '../components/ThreadRowTitleEditor';
 import { ThreadStartButton } from '../components/ThreadStartButton';
 import { TalkHistoryEditor } from '../components/TalkHistoryEditor';
 import { stripInternalAssistantText } from '../lib/assistantText';
-import { formatTalkRole, type AgentCreationDraft } from '../lib/talkAgents';
+import {
+  formatTalkRole,
+  buildAgentLabel,
+  type AgentCreationDraft,
+  type TalkAgentExecutionGuardrail,
+} from '../lib/talkAgents';
 import {
   getContentSplitRatio,
   setContentSplitRatio,
@@ -1348,54 +1354,6 @@ function OrchestrationCheckIcon(): JSX.Element {
   );
 }
 
-function ComposerAttachIcon(): JSX.Element {
-  return (
-    <svg viewBox="0 0 16 16" focusable="false" aria-hidden="true">
-      <path
-        d="M9.95 3.05a2.75 2.75 0 0 1 3.89 3.89L7.42 13.37a4 4 0 1 1-5.66-5.66l6.19-6.19a2.5 2.5 0 1 1 3.53 3.53L5.64 10.9a1.25 1.25 0 1 1-1.77-1.77l5.13-5.13"
-        fill="none"
-        stroke="currentColor"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        strokeWidth="1.4"
-      />
-    </svg>
-  );
-}
-
-function ComposerCancelRunsIcon(): JSX.Element {
-  return (
-    <svg viewBox="0 0 16 16" focusable="false" aria-hidden="true">
-      <circle
-        cx="8"
-        cy="8"
-        r="5.25"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="1.4"
-      />
-      <path
-        d="M5.4 5.4 10.6 10.6M10.6 5.4 5.4 10.6"
-        fill="none"
-        stroke="currentColor"
-        strokeLinecap="round"
-        strokeWidth="1.4"
-      />
-    </svg>
-  );
-}
-
-function ComposerSendIcon(): JSX.Element {
-  return (
-    <svg viewBox="0 0 16 16" focusable="false" aria-hidden="true">
-      <path
-        d="M2 13.2 14 8 2 2.8l1.53 4.08L9.2 8l-5.67 1.12L2 13.2Z"
-        fill="currentColor"
-      />
-    </svg>
-  );
-}
-
 function formatThreadLabel(thread: TalkThread): string {
   return displayThreadTitle(thread.title);
 }
@@ -1410,14 +1368,6 @@ function buildThreadHref(
       ? `/app/talks/${talkId}/${tab}`
       : `/app/talks/${talkId}`;
   return `${base}?thread=${encodeURIComponent(threadId)}`;
-}
-
-function buildAgentLabel(agent: Pick<TalkAgent, 'nickname' | 'role'>): string {
-  return `${agent.nickname} (${formatTalkRole(agent.role)})`;
-}
-
-function buildAgentChipLabel(agent: Pick<TalkAgent, 'nickname'>): string {
-  return agent.nickname;
 }
 
 function isRenderableImageAttachment(mimeType: string): boolean {
@@ -1644,12 +1594,6 @@ function buildTargetSelection(
   const primary = agents.find((agent) => agent.isPrimary);
   return primary ? [primary.id] : agents[0] ? [agents[0].id] : [];
 }
-
-type TalkAgentExecutionGuardrail = {
-  kind: 'direct_safe' | 'unavailable';
-  badgeLabel: string | null;
-  message: string | null;
-};
 
 function summarizeAgentLabels(labels: string[]): string {
   if (labels.length === 0) return 'One or more selected agents';
@@ -6730,301 +6674,49 @@ export function TalkDetailPage({
                       refreshKey={toolsRefreshKey}
                     />
 
-                    <form
-                      className="composer talk-workspace-composer"
-                      onSubmit={handleSend}
-                    >
-                      <input
-                        ref={fileInputRef}
-                        type="file"
-                        multiple
-                        accept={ALLOWED_ATTACHMENT_EXTENSIONS}
-                        onChange={handleFileInputChange}
-                        disabled={!GREENFIELD_MESSAGE_ATTACHMENTS_ENABLED}
-                        style={{ display: 'none' }}
-                      />
-                      <div
-                        className="composer-targets"
-                        role="group"
-                        aria-label="Selected agents"
-                      >
-                        {effectiveAgents.map((agent) => {
-                          const selected = targetAgentIds.includes(agent.id);
-                          const guardrail =
-                            talkAgentExecutionGuardrailsById[agent.id];
-                          const hasGuardrailViolation =
-                            selectedGuardrailAgentIds.has(agent.id);
-                          return (
-                            <button
-                              key={agent.id}
-                              type="button"
-                              className={`composer-target-chip${
-                                selected ? ' composer-target-chip-selected' : ''
-                              }${
-                                hasGuardrailViolation
-                                  ? ' composer-target-chip-warning'
-                                  : ''
-                              }`}
-                              onClick={() => handleToggleTarget(agent.id)}
-                              disabled={state.sendState.status === 'posting'}
-                              aria-pressed={selected}
-                              aria-label={
-                                agent.isPrimary
-                                  ? `${buildAgentLabel(agent)} Primary`
-                                  : buildAgentLabel(agent)
-                              }
-                              title={guardrail?.message || undefined}
-                            >
-                              <span
-                                className={`talk-status-dot talk-status-dot-${agent.health}`}
-                                aria-hidden="true"
-                              />
-                              <span>{buildAgentChipLabel(agent)}</span>
-                              {guardrail?.badgeLabel ? (
-                                <span
-                                  className={`talk-status-constraint talk-status-constraint-${guardrail.kind}`}
-                                >
-                                  {guardrail.badgeLabel}
-                                </span>
-                              ) : null}
-                              {agent.isPrimary ? (
-                                <span className="talk-status-primary">
-                                  Primary
-                                </span>
-                              ) : null}
-                            </button>
-                          );
-                        })}
-                      </div>
-                      <div className="composer-meta-row">
-                        <p className="composer-target-help">
-                          {composerTargetHelp}
-                        </p>
-                        <span className="composer-count">
-                          {draft.length}/{TALK_MESSAGE_MAX_CHARS}
-                        </span>
-                      </div>
-                      {composerGuardrailMessage ? (
-                        <div
-                          className="inline-banner inline-banner-warning"
-                          role="status"
-                          aria-live="polite"
-                        >
-                          {composerGuardrailMessage}
-                        </div>
-                      ) : null}
-
-                      <div
-                        className="composer-input-shell"
-                        style={{ position: 'relative' }}
-                      >
-                        {mentionState && mentionOptions.length > 0 ? (
-                          <SourceMentionPicker
-                            options={mentionOptions}
-                            selectedIndex={mentionState.selectedIndex}
-                            onSelect={(option) => insertMentionOption(option)}
-                            onDismiss={() => setMentionState(null)}
-                          />
-                        ) : null}
-                        <textarea
-                          ref={textareaRef}
-                          value={draft}
-                          onChange={(event) =>
-                            handleDraftChange(event.target.value)
-                          }
-                          onKeyDown={handleComposerKeyDown}
-                          placeholder={
-                            talkContent ||
-                            contextSources.some((s) => s.status === 'ready')
-                              ? 'Send a message to this thread. Type @ to reference a saved source or the doc.'
-                              : 'Send a message to this thread.'
-                          }
-                          rows={1}
-                          maxLength={TALK_MESSAGE_MAX_CHARS}
-                          disabled={
-                            state.sendState.status === 'posting' ||
-                            activeRound ||
-                            hasUnsavedAgentChanges ||
-                            !activeThreadId
-                          }
-                        />
-
-                        {pendingAttachments.length > 0 ? (
-                          <div className="composer-attachments">
-                            {pendingAttachments.map((att) => (
-                              <span
-                                key={att.localId}
-                                className={`composer-attachment-chip composer-attachment-${att.status}`}
-                                title={
-                                  att.status === 'error'
-                                    ? att.errorMessage
-                                    : att.fileName
-                                }
-                              >
-                                {att.isImage && att.previewUrl ? (
-                                  <img
-                                    src={att.previewUrl}
-                                    alt={att.fileName}
-                                    className="composer-attachment-preview"
-                                  />
-                                ) : null}
-                                <span className="composer-attachment-name">
-                                  {att.fileName}
-                                </span>
-                                {att.status === 'uploading' ? (
-                                  <span className="composer-attachment-status">
-                                    {' '}
-                                    uploading…
-                                  </span>
-                                ) : null}
-                                {att.status === 'error' ? (
-                                  <span className="composer-attachment-status">
-                                    {' '}
-                                    failed
-                                  </span>
-                                ) : null}
-                                <button
-                                  type="button"
-                                  className="composer-attachment-remove"
-                                  onClick={() =>
-                                    handleRemoveAttachment(att.localId)
-                                  }
-                                  aria-label={`Remove ${att.fileName}`}
-                                >
-                                  ×
-                                </button>
-                              </span>
-                            ))}
-                          </div>
-                        ) : null}
-
-                        <div className="composer-controls">
-                          <div className="composer-tool-buttons">
-                            <button
-                              type="button"
-                              className="composer-icon-btn composer-attach-btn"
-                              onClick={handleAttachButtonClick}
-                              disabled={
-                                state.sendState.status === 'posting' ||
-                                activeRound ||
-                                hasUnsavedAgentChanges ||
-                                !activeThreadId ||
-                                !GREENFIELD_MESSAGE_ATTACHMENTS_ENABLED
-                              }
-                              aria-label="Attach"
-                              title={
-                                GREENFIELD_MESSAGE_ATTACHMENTS_ENABLED
-                                  ? 'Attach files'
-                                  : 'Attachments unavailable'
-                              }
-                            >
-                              <ComposerAttachIcon />
-                            </button>
-                            {canEditAgents && activeRound ? (
-                              <button
-                                type="button"
-                                className="composer-icon-btn composer-cancel-btn"
-                                onClick={handleCancelRuns}
-                                disabled={
-                                  state.cancelState.status === 'posting'
-                                }
-                                aria-label="Cancel Runs"
-                                title={
-                                  state.cancelState.status === 'posting'
-                                    ? 'Cancelling runs…'
-                                    : 'Cancel runs'
-                                }
-                              >
-                                <ComposerCancelRunsIcon />
-                              </button>
-                            ) : null}
-                          </div>
-                          <button
-                            type="submit"
-                            className="composer-icon-btn composer-send-btn"
-                            disabled={
-                              state.sendState.status === 'posting' ||
-                              activeRound ||
-                              hasUnsavedAgentChanges ||
-                              !activeThreadId ||
-                              sendBlockedByGuardrail
-                            }
-                            aria-label="Send"
-                            title={
-                              state.sendState.status === 'posting'
-                                ? 'Sending…'
-                                : 'Send'
-                            }
-                          >
-                            <ComposerSendIcon />
-                          </button>
-                        </div>
-                      </div>
-
-                      {activeRound ? (
-                        <div
-                          className="inline-banner inline-banner-warning"
-                          role="status"
-                        >
-                          Wait for the current round to finish or cancel it
-                          before sending another message.
-                        </div>
-                      ) : null}
-
-                      {!activeRound && hasUnsavedAgentChanges ? (
-                        <div
-                          className="inline-banner inline-banner-warning"
-                          role="status"
-                        >
-                          Save agent changes before sending a message.
-                        </div>
-                      ) : null}
-
-                      {state.sendState.status === 'error' ? (
-                        <div
-                          className="inline-banner inline-banner-error"
-                          role="alert"
-                        >
-                          {state.sendState.error || 'Unable to send message.'}
-                        </div>
-                      ) : null}
-
-                      {historyEditState.status === 'success' ? (
-                        <div
-                          className="inline-banner inline-banner-success"
-                          role="status"
-                        >
-                          {historyEditState.message}
-                        </div>
-                      ) : null}
-
-                      {historyEditState.status === 'error' ? (
-                        <div
-                          className="inline-banner inline-banner-error"
-                          role="alert"
-                        >
-                          {historyEditState.message}
-                        </div>
-                      ) : null}
-
-                      {state.cancelState.status === 'success' ? (
-                        <div
-                          className="inline-banner inline-banner-success"
-                          role="status"
-                        >
-                          {state.cancelState.message}
-                        </div>
-                      ) : null}
-
-                      {state.cancelState.status === 'error' ? (
-                        <div
-                          className="inline-banner inline-banner-error"
-                          role="alert"
-                        >
-                          {state.cancelState.message}
-                        </div>
-                      ) : null}
-                    </form>
+                    <TalkComposer
+                      handleSend={handleSend}
+                      fileInputRef={fileInputRef}
+                      ALLOWED_ATTACHMENT_EXTENSIONS={
+                        ALLOWED_ATTACHMENT_EXTENSIONS
+                      }
+                      handleFileInputChange={handleFileInputChange}
+                      GREENFIELD_MESSAGE_ATTACHMENTS_ENABLED={
+                        GREENFIELD_MESSAGE_ATTACHMENTS_ENABLED
+                      }
+                      effectiveAgents={effectiveAgents}
+                      targetAgentIds={targetAgentIds}
+                      talkAgentExecutionGuardrailsById={
+                        talkAgentExecutionGuardrailsById
+                      }
+                      selectedGuardrailAgentIds={selectedGuardrailAgentIds}
+                      handleToggleTarget={handleToggleTarget}
+                      sendState={state.sendState}
+                      composerTargetHelp={composerTargetHelp}
+                      draft={draft}
+                      TALK_MESSAGE_MAX_CHARS={TALK_MESSAGE_MAX_CHARS}
+                      composerGuardrailMessage={composerGuardrailMessage}
+                      mentionState={mentionState}
+                      mentionOptions={mentionOptions}
+                      insertMentionOption={insertMentionOption}
+                      setMentionState={setMentionState}
+                      textareaRef={textareaRef}
+                      handleDraftChange={handleDraftChange}
+                      handleComposerKeyDown={handleComposerKeyDown}
+                      talkContent={talkContent}
+                      contextSources={contextSources}
+                      activeRound={activeRound}
+                      hasUnsavedAgentChanges={hasUnsavedAgentChanges}
+                      activeThreadId={activeThreadId}
+                      pendingAttachments={pendingAttachments}
+                      handleRemoveAttachment={handleRemoveAttachment}
+                      handleAttachButtonClick={handleAttachButtonClick}
+                      canEditAgents={canEditAgents}
+                      handleCancelRuns={handleCancelRuns}
+                      cancelState={state.cancelState}
+                      sendBlockedByGuardrail={sendBlockedByGuardrail}
+                      historyEditState={historyEditState}
+                    />
                   </div>
                   {threadMenu && menuThread ? (
                     <ThreadContextMenu
