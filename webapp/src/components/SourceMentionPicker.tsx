@@ -1,9 +1,15 @@
 import { useEffect, useMemo, useRef } from 'react';
 import type { ContextSource } from '../lib/api';
+import { getSourceDisplayRef } from './sourceDisplay';
 
 export type SourceMentionOption =
   | { kind: 'doc'; insertion: string; title: string }
-  | { kind: 'source'; insertion: string; source: ContextSource };
+  | {
+      kind: 'source';
+      insertion: string;
+      source: ContextSource;
+      displayRef: string;
+    };
 
 type SourceMentionPickerProps = {
   options: SourceMentionOption[];
@@ -74,7 +80,7 @@ function SourceMentionMenuItem({
   onSelect: (option: SourceMentionOption) => void;
 }): JSX.Element {
   const title = option.kind === 'doc' ? option.title : option.source.title;
-  const refLabel = option.kind === 'doc' ? '@doc' : option.source.sourceRef;
+  const refLabel = option.kind === 'doc' ? '@doc' : option.displayRef;
   const note =
     option.kind === 'doc'
       ? 'Attached document'
@@ -120,8 +126,9 @@ type BuildOptionsInput = {
  * Insertion form:
  * - `@doc` for the attached doc.
  * - `@<title_slug>` for a source when its slug is unique within the
- *   Talk's READY sources. Falls back to `@S<n>` when the slug collides
- *   with another ready source — that's the deterministic resolver form.
+ *   Talk's READY sources. Falls back to `@<source_ref>` when the slug
+ *   collides with another ready source — that's the deterministic
+ *   resolver form.
  *
  * Only `status === 'ready'` sources are listed; pending/failed sources
  * have no useful content to inline and would emit a placeholder rather
@@ -131,10 +138,15 @@ export function buildSourceMentionOptions(
   input: BuildOptionsInput,
 ): SourceMentionOption[] {
   const filter = input.filter.toLowerCase().trim();
-  const readySources = input.sources.filter((s) => s.status === 'ready');
+  const readySources = input.sources
+    .map((source, sourceIndex) => ({
+      source,
+      displayRef: getSourceDisplayRef(source, sourceIndex),
+    }))
+    .filter(({ source }) => source.status === 'ready');
 
   const slugCounts = new Map<string, number>();
-  for (const source of readySources) {
+  for (const { source } of readySources) {
     const slug = deriveDisplaySlug(source);
     if (slug) {
       slugCounts.set(slug, (slugCounts.get(slug) ?? 0) + 1);
@@ -151,30 +163,28 @@ export function buildSourceMentionOptions(
     });
   }
 
-  for (const source of readySources) {
+  for (const { source, displayRef } of readySources) {
     const slug = deriveDisplaySlug(source);
     const haystacks = [
       source.title,
       source.sourceRef,
       source.note ?? '',
       slug,
+      displayRef,
     ];
-    const filterHits = haystacks.some((h) =>
-      h.toLowerCase().includes(filter),
-    );
+    const filterHits = haystacks.some((h) => h.toLowerCase().includes(filter));
     if (filter && !filterHits) continue;
 
     // Insert slug-form when unique; fall back to ref-form on collision.
     const useSlug =
       !!slug && (slugCounts.get(slug) ?? 0) === 1 && slug !== 'doc';
-    const insertion = useSlug
-      ? `@${slug} `
-      : `@${source.sourceRef} `;
+    const insertion = useSlug ? `@${slug} ` : `@${source.sourceRef} `;
 
     options.push({
       kind: 'source',
       insertion,
       source,
+      displayRef,
     });
   }
 
@@ -194,8 +204,7 @@ function deriveDisplaySlug(source: ContextSource): string {
 function matchesFilter(slug: string, title: string, filter: string): boolean {
   if (!filter) return true;
   return (
-    slug.toLowerCase().includes(filter) ||
-    title.toLowerCase().includes(filter)
+    slug.toLowerCase().includes(filter) || title.toLowerCase().includes(filter)
   );
 }
 
@@ -204,9 +213,8 @@ function matchesFilter(slug: string, title: string, filter: string): boolean {
 export function useSourceMentionOptions(
   input: BuildOptionsInput,
 ): SourceMentionOption[] {
-  return useMemo(() => buildSourceMentionOptions(input), [
-    input.sources,
-    input.filter,
-    input.contentTitle,
-  ]);
+  return useMemo(
+    () => buildSourceMentionOptions(input),
+    [input.sources, input.filter, input.contentTitle],
+  );
 }

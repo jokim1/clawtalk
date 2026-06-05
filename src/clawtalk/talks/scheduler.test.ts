@@ -1199,7 +1199,7 @@ describe('greenfield scheduled tick safety sweeps', () => {
       expect(inboxRows[0]).toMatchObject({
         type: 'job_blocked',
         severity: 'blocking',
-        summary: 'The selected agent model is not available.',
+        summary: 'The selected agent model or provider is not available.',
         reason: 'block_reason=model_disabled',
         job_id: job.id,
         ref_id: null,

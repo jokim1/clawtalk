@@ -16,6 +16,7 @@ import {
   type ContextSource,
 } from '../lib/api';
 import { isRasterizablePdf, renderAndUploadPdfPages } from '../lib/pdf-raster';
+import { getSourceDisplayRef } from './sourceDisplay';
 
 // Per-source client-side PDF rasterization progress (this session only).
 // A PDF is rasterized on upload so vision-but-not-PDF agents can read its
@@ -313,8 +314,8 @@ export function SavedSourcesPanel({
           <h3>Saved Sources</h3>
           <p className="talk-llm-meta">
             Files, URLs, and text snippets agents can reference. Each source
-            contributes a one-line preview to every turn. Use <code>@S1</code>{' '}
-            or <code>@title-slug</code> in a message to inline a source's full
+            contributes a one-line preview to every turn. Use the @ picker or{' '}
+            <code>@title-slug</code> in a message to inline a source's full
             content for one turn.
           </p>
         </div>
@@ -415,10 +416,11 @@ export function SavedSourcesPanel({
 
       {sources.length > 0 ? (
         <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>
-          {sources.map((source) => (
+          {sources.map((source, index) => (
             <SavedSourceRow
               key={source.id}
               source={source}
+              displayIndex={index}
               canEdit={canEdit}
               hasVisionNonDocAgent={hasVisionNonDocAgent}
               renderState={renderStates[source.id]}
@@ -505,6 +507,7 @@ export function SavedSourcesPanel({
 
 type SavedSourceRowProps = {
   source: ContextSource;
+  displayIndex: number;
   canEdit: boolean;
   hasVisionNonDocAgent: boolean;
   renderState: RenderState | undefined;
@@ -517,6 +520,7 @@ type SavedSourceRowProps = {
 
 function SavedSourceRow({
   source,
+  displayIndex,
   canEdit,
   hasVisionNonDocAgent,
   renderState,
@@ -542,15 +546,16 @@ function SavedSourceRow({
     source.extractedTextLength != null
       ? `${source.extractedTextLength} chars extracted`
       : null;
+  const displayRef = getSourceDisplayRef(source, displayIndex);
 
   return (
     <li className="context-source-item">
       <div className="context-source-item-row">
         <span
           className="context-source-ref"
-          title="Use @S1 or @title-slug in your message to inline this source's full content for one turn."
+          title="Pick this source from the @ menu or use @title-slug to inline its full content for one turn."
         >
-          {source.sourceRef}
+          {displayRef}
         </span>
         <span className="context-source-type-badge">
           {source.sourceType === 'file'

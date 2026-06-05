@@ -5,6 +5,10 @@ import {
   selectProviderReplayMessageIds,
   type ProviderReplayCandidate,
 } from './provider-replay-scope.js';
+import {
+  MAX_PROVIDER_REPLAY_BYTES,
+  providerReplaySizeBytes,
+} from './provider-replay-budget.js';
 
 function candidate(
   id: string,
@@ -55,5 +59,42 @@ describe('provider replay scope', () => {
     ).toEqual({
       codexReasoningItems: [{ encrypted_content: 'cipher' }],
     });
+  });
+
+  it('stops selecting older replay rows once the remaining byte budget is exceeded', () => {
+    const newestProviderData = {
+      codexReasoningItems: [{ encrypted_content: 'cipher-newest-small' }],
+    };
+    const newestSize = providerReplaySizeBytes(newestProviderData);
+    const middleProviderData = {
+      codexReasoningItems: [
+        {
+          encrypted_content: 'x'.repeat(MAX_PROVIDER_REPLAY_BYTES - newestSize),
+        },
+      ],
+    };
+    const middleSize = providerReplaySizeBytes(middleProviderData);
+
+    expect(middleSize).toBeLessThanOrEqual(MAX_PROVIDER_REPLAY_BYTES);
+    expect(middleSize).toBeGreaterThan(MAX_PROVIDER_REPLAY_BYTES - newestSize);
+
+    const selected = selectProviderReplayMessageIds(
+      [
+        candidate('oldest-small'),
+        candidate('middle-too-large', {
+          provider_data_json: middleProviderData,
+        }),
+        candidate('newest-small', {
+          provider_data_json: newestProviderData,
+        }),
+      ],
+      {
+        sourceAgentId: 'agent-a',
+        providerId: 'provider.codex',
+        modelId: 'codex-model',
+      },
+    );
+
+    expect(selected).toEqual(new Set(['newest-small']));
   });
 });

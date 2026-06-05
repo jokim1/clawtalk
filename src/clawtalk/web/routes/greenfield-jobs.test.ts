@@ -282,6 +282,59 @@ async function assignDisabledModelToAgent(input: {
   `;
 }
 
+async function assignDisabledProviderModelToAgent(input: {
+  workspaceId: string;
+  agentId: string;
+}): Promise<void> {
+  const db = getDbPg();
+  const suffix = input.agentId.slice(0, 8);
+  const providerId = `test.disabled-job-provider-${suffix}`;
+  const modelId = `disabled-job-provider-model-${suffix}`;
+  await db`
+    insert into public.llm_providers (
+      id, name, provider_kind, api_format, base_url, auth_scheme, enabled
+    )
+    values (
+      ${providerId},
+      'Disabled job provider',
+      'custom',
+      'openai_chat_completions',
+      'mock://disabled-job-provider',
+      'bearer',
+      false
+    )
+    on conflict (id) do update set
+      enabled = false,
+      name = excluded.name
+  `;
+  await db`
+    insert into public.llm_provider_models (
+      provider_id, model_id, display_name, context_window_tokens,
+      default_max_output_tokens, default_ttft_timeout_ms, enabled,
+      capabilities_json
+    )
+    values (
+      ${providerId},
+      ${modelId},
+      'Disabled-provider job regression model',
+      128000,
+      4096,
+      30000,
+      true,
+      '{}'::jsonb
+    )
+    on conflict (provider_id, model_id) do update set
+      enabled = true,
+      display_name = excluded.display_name
+  `;
+  await db`
+    update public.agents
+    set model_id = ${modelId}
+    where workspace_id = ${input.workspaceId}::uuid
+      and id = ${input.agentId}::uuid
+  `;
+}
+
 async function listRunSnapshotAgentIds(input: {
   workspaceId: string;
   runId: string;
@@ -827,6 +880,53 @@ describe('greenfield jobs compatibility routes', () => {
     });
   });
 
+  it('blocks manual jobs when the target agent provider is disabled', async () => {
+    const { workspaceId, talkId, agentIds } = await createTalkFixture();
+    const targetAgentId = agentIds[0]!;
+
+    const created = await createGreenfieldTalkJobRoute({
+      auth: auth(),
+      workspaceId,
+      talkId,
+      title: 'Run with disabled provider',
+      prompt: 'Target provider gets disabled after creation.',
+      targetAgentId,
+      schedule: { kind: 'hourly_interval', everyHours: 1 },
+      timezone: 'UTC',
+    });
+    if (!created.body.ok) {
+      throw new Error(JSON.stringify(created.body.error));
+    }
+
+    await assignDisabledProviderModelToAgent({
+      workspaceId,
+      agentId: targetAgentId,
+    });
+
+    const blocked = await runGreenfieldTalkJobNowRoute({
+      auth: auth(),
+      workspaceId,
+      talkId,
+      jobId: created.body.data.job.id,
+    });
+    expect(blocked.statusCode).toBe(409);
+    expect(blocked.body.ok ? null : blocked.body.error).toMatchObject({
+      code: 'job_blocked',
+    });
+
+    const detail = await getGreenfieldTalkJobRoute({
+      auth: auth(),
+      workspaceId,
+      talkId,
+      jobId: created.body.data.job.id,
+    });
+    expect(detail.body.ok && detail.body.data.job).toMatchObject({
+      status: 'blocked',
+      blockReason: 'model_disabled',
+      nextDueAt: null,
+    });
+  });
+
   it('blocks scheduled claims when the target agent model is disabled', async () => {
     const { workspaceId, talkId, agentIds } = await createTalkFixture();
     const targetAgentId = agentIds[0]!;
@@ -850,6 +950,63 @@ describe('greenfield jobs compatibility routes', () => {
     // Disable the TARGET agent's model and mark the slot due. The fire-time
     // claim guard must block instead of enqueuing a run on a disabled model.
     await assignDisabledModelToAgent({ workspaceId, agentId: targetAgentId });
+    await db`
+      update public.jobs
+      set next_due_at = now() - interval '30 seconds'
+      where workspace_id = ${workspaceId}::uuid
+        and talk_id = ${talkId}::uuid
+        and id = ${jobId}::uuid
+    `;
+
+    const { ctx, drain } = makeMockCtx();
+    const { env } = makeMockEventHub();
+    let enqueuedRunIds: string[] = [];
+    await withRequestScopedDb(TEST_DB_URL, ctx, env, async () => {
+      const result = await withNotifyQueueScope(env, ctx, () =>
+        claimDueGreenfieldJobRuns({ limit: 1 }),
+      );
+      enqueuedRunIds = result.enqueuedRunIds;
+    });
+    await drain();
+
+    expect(enqueuedRunIds).toEqual([]);
+
+    const detail = await getGreenfieldTalkJobRoute({
+      auth: auth(),
+      workspaceId,
+      talkId,
+      jobId,
+    });
+    expect(detail.body.ok && detail.body.data.job).toMatchObject({
+      status: 'blocked',
+      blockReason: 'model_disabled',
+    });
+  });
+
+  it('blocks scheduled claims when the target agent provider is disabled', async () => {
+    const { workspaceId, talkId, agentIds } = await createTalkFixture();
+    const targetAgentId = agentIds[0]!;
+    const db = getDbPg();
+
+    const created = await createGreenfieldTalkJobRoute({
+      auth: auth(),
+      workspaceId,
+      talkId,
+      title: 'Scheduled with disabled provider',
+      prompt: 'Target provider gets disabled before the slot fires.',
+      targetAgentId,
+      schedule: { kind: 'hourly_interval', everyHours: 1 },
+      timezone: 'UTC',
+    });
+    if (!created.body.ok) {
+      throw new Error(JSON.stringify(created.body.error));
+    }
+    const jobId = created.body.data.job.id;
+
+    await assignDisabledProviderModelToAgent({
+      workspaceId,
+      agentId: targetAgentId,
+    });
     await db`
       update public.jobs
       set next_due_at = now() - interval '30 seconds'
