@@ -1,4 +1,10 @@
-import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
+import {
+  cleanup,
+  render,
+  screen,
+  waitFor,
+  within,
+} from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter } from 'react-router-dom';
@@ -180,6 +186,72 @@ describe('SettingsPage', () => {
     });
   });
 
+  it('keeps Personal API key drafts when switching API key sub-tabs', async () => {
+    const user = userEvent.setup();
+    installSettingsFetch();
+
+    render(
+      <MemoryRouter initialEntries={['/app/settings?tab=api-keys']}>
+        <SettingsPage
+          user={buildSessionUser()}
+          userRole="owner"
+          onUnauthorized={vi.fn()}
+          onUserUpdated={vi.fn()}
+        />
+      </MemoryRouter>,
+    );
+
+    await screen.findByRole('heading', { name: 'Personal API Keys' });
+    const personalSection = screen
+      .getByRole('heading', { name: 'Personal API Keys' })
+      .closest('section');
+    if (!personalSection) throw new Error('Personal section not found');
+    const anthropicCard = within(personalSection)
+      .getByRole('heading', { name: 'Claude (Anthropic)' })
+      .closest('article');
+    if (!anthropicCard) throw new Error('Anthropic card not found');
+
+    const input = within(anthropicCard).getByPlaceholderText('sk-ant-...');
+    await user.type(input, 'sk-ant-unsaved-draft');
+
+    await user.click(screen.getByRole('tab', { name: 'Workspace' }));
+    await screen.findByRole('heading', { name: 'Workspace API Keys' });
+    await user.click(screen.getByRole('tab', { name: 'Personal' }));
+    await screen.findByRole('heading', { name: 'Personal API Keys' });
+
+    expect(screen.getByDisplayValue('sk-ant-unsaved-draft')).toBeTruthy();
+  });
+
+  it('keeps ChatGPT subscription device flow when switching API key sub-tabs', async () => {
+    const user = userEvent.setup();
+    installSettingsFetch();
+    vi.spyOn(window, 'open').mockReturnValue(null);
+
+    render(
+      <MemoryRouter initialEntries={['/app/settings?tab=api-keys']}>
+        <SettingsPage
+          user={buildSessionUser()}
+          userRole="owner"
+          onUnauthorized={vi.fn()}
+          onUserUpdated={vi.fn()}
+        />
+      </MemoryRouter>,
+    );
+
+    await screen.findByRole('heading', { name: 'Personal API Keys' });
+    await user.click(
+      screen.getByRole('button', { name: 'Connect with ChatGPT' }),
+    );
+    expect(await screen.findByText('CT-1234')).toBeTruthy();
+
+    await user.click(screen.getByRole('tab', { name: 'Workspace' }));
+    await screen.findByRole('heading', { name: 'Workspace API Keys' });
+    await user.click(screen.getByRole('tab', { name: 'Personal' }));
+    await screen.findByRole('heading', { name: 'Personal API Keys' });
+
+    expect(screen.getByText('CT-1234')).toBeTruthy();
+  });
+
   it('opens the Agents tab and lists registered agents from the panel', async () => {
     installSettingsFetch();
 
@@ -203,12 +275,76 @@ describe('SettingsPage', () => {
       await screen.findByRole('heading', { name: 'Main Agent' }),
     ).toBeTruthy();
   });
+
+  it('saves the selected Main Agent from the Agents tab', async () => {
+    const user = userEvent.setup();
+    const helpers = installSettingsFetch();
+
+    render(
+      <MemoryRouter initialEntries={['/app/settings?tab=agents']}>
+        <SettingsPage
+          user={buildSessionUser()}
+          userRole="owner"
+          onUnauthorized={vi.fn()}
+          onUserUpdated={vi.fn()}
+        />
+      </MemoryRouter>,
+    );
+
+    await screen.findByRole('heading', { name: 'Main Agent' });
+    await user.selectOptions(
+      screen.getByLabelText('Select main agent'),
+      'agent-research',
+    );
+    await user.click(screen.getByRole('button', { name: 'Set as Main Agent' }));
+
+    expect(await screen.findByText('Main agent updated.')).toBeTruthy();
+    expect(helpers.getMainAgentUpdateCalls()).toEqual(['agent-research']);
+  });
+
+  it('keeps a disabled current Main Agent visible in the selector', async () => {
+    const registeredAgents = buildRegisteredAgents().map((agent) =>
+      agent.id === 'agent-main' ? { ...agent, enabled: false } : agent,
+    );
+    installSettingsFetch({
+      registeredAgents,
+      mainAgent: registeredAgents[0],
+    });
+
+    render(
+      <MemoryRouter initialEntries={['/app/settings?tab=agents']}>
+        <SettingsPage
+          user={buildSessionUser()}
+          userRole="owner"
+          onUnauthorized={vi.fn()}
+          onUserUpdated={vi.fn()}
+        />
+      </MemoryRouter>,
+    );
+
+    await screen.findByRole('heading', { name: 'Main Agent' });
+
+    const select = screen.getByLabelText(
+      'Select main agent',
+    ) as HTMLSelectElement;
+    expect(select.value).toBe('agent-main');
+    expect(
+      screen.getByRole('option', {
+        name: 'Claude Main (claude-sonnet-4-6) (disabled)',
+      }),
+    ).toBeTruthy();
+  });
 });
 
-function installSettingsFetch() {
+function installSettingsFetch(options?: {
+  registeredAgents?: RegisteredAgent[];
+  mainAgent?: RegisteredAgent | null;
+}) {
   let snapshot = buildAiAgentsData();
-  let registeredAgents = buildRegisteredAgents();
-  let mainAgent: RegisteredAgent | null = registeredAgents[0] ?? null;
+  let registeredAgents = options?.registeredAgents ?? buildRegisteredAgents();
+  let mainAgent: RegisteredAgent | null =
+    options?.mainAgent ?? registeredAgents[0] ?? null;
+  const mainAgentUpdateCalls: string[] = [];
   const providerSaveCalls: Record<
     string,
     Array<{
@@ -249,6 +385,50 @@ function installSettingsFetch() {
           });
         }
         return jsonResponse(200, { ok: true, data: mainAgent });
+      }
+
+      if (path === '/api/v1/registered-agents/main' && method === 'PUT') {
+        const body = JSON.parse(String(init?.body || '{}')) as {
+          agentId: string;
+        };
+        mainAgentUpdateCalls.push(body.agentId);
+        const nextMain =
+          registeredAgents.find((agent) => agent.id === body.agentId) ?? null;
+        if (!nextMain) {
+          return jsonResponse(404, {
+            ok: false,
+            error: { code: 'not_found', message: 'Agent not found' },
+          });
+        }
+        mainAgent = nextMain;
+        return jsonResponse(200, { ok: true, data: nextMain });
+      }
+
+      if (
+        path ===
+          '/api/v1/agents/providers/provider.openai_codex/oauth/initiate' &&
+        method === 'POST'
+      ) {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            state: 'openai-state-1',
+            userCode: 'CT-1234',
+            verificationUrl: 'https://openai.example/device',
+            pollIntervalSeconds: 60,
+            expiresAt: '2026-05-16T12:05:00.000Z',
+          },
+        });
+      }
+
+      if (
+        path === '/api/v1/agents/providers/provider.openai_codex/oauth/poll' &&
+        method === 'POST'
+      ) {
+        return jsonResponse(200, {
+          ok: true,
+          data: { status: 'pending' },
+        });
       }
 
       const providerSaveMatch = path.match(
@@ -310,6 +490,7 @@ function installSettingsFetch() {
   return {
     getProviderSaveCalls: (providerId: string) =>
       providerSaveCalls[providerId] || [],
+    getMainAgentUpdateCalls: () => mainAgentUpdateCalls,
   };
 }
 
@@ -321,8 +502,7 @@ function buildSessionUser(overrides?: Partial<SessionUser>): SessionUser {
     role: 'owner',
     createdAt: '2026-01-01T00:00:00.000Z',
     currentWorkspaceId:
-      overrides?.currentWorkspaceId ??
-      '00000000-0000-4000-8000-000000000001',
+      overrides?.currentWorkspaceId ?? '00000000-0000-4000-8000-000000000001',
     workspaces: [
       {
         id: '00000000-0000-4000-8000-000000000001',
@@ -378,6 +558,31 @@ function buildAiAgentsData(): AiAgentsPageData {
             defaultMaxOutputTokens: 8192,
           },
         ],
+      },
+      {
+        id: 'provider.openai_codex',
+        name: 'ChatGPT Codex',
+        providerKind: 'openai',
+        credentialMode: 'subscription_only',
+        apiFormat: 'openai_chat_completions',
+        baseUrl: 'https://api.openai.com/v1',
+        authScheme: 'bearer',
+        enabled: true,
+        hasCredential: false,
+        credentialHint: null,
+        verificationStatus: 'missing',
+        lastVerifiedAt: null,
+        lastVerificationError: null,
+        workspaceHasCredential: false,
+        workspaceCredentialHint: null,
+        workspaceVerificationStatus: 'missing',
+        workspaceLastVerifiedAt: null,
+        workspaceLastVerificationError: null,
+        hasPersonalSubscription: false,
+        personalSubscriptionExpiresAt: null,
+        hasWorkspaceSubscription: false,
+        workspaceSubscriptionExpiresAt: null,
+        modelSuggestions: [],
       },
       {
         id: 'provider.openai',
@@ -503,6 +708,35 @@ function buildRegisteredAgents(): RegisteredAgent[] {
         routeReason: 'normal',
         ready: true,
         message: 'Main will use Anthropic direct HTTP with an API key.',
+      },
+      supportsVision: true,
+      modelAutoUpgradedFrom: null,
+      modelAutoUpgradedAt: null,
+      modelUpdateAvailable: null,
+    },
+    {
+      id: 'agent-research',
+      name: 'Research Agent',
+      providerId: 'provider.anthropic',
+      modelId: 'claude-sonnet-4-6',
+      personaRole: 'researcher',
+      systemPrompt: null,
+      description: null,
+      enabled: true,
+      credentialMode: null,
+      createdAt: '2026-03-06T00:00:00.000Z',
+      updatedAt: '2026-03-06T00:00:00.000Z',
+      executionPreview: {
+        surface: 'main',
+        backend: 'direct_http',
+        authPath: 'api_key',
+        selectedMode: 'api',
+        transport: 'direct',
+        reasonCode: null,
+        routeReason: 'normal',
+        ready: true,
+        message:
+          'Research Agent will use Anthropic direct HTTP with an API key.',
       },
       supportsVision: true,
       modelAutoUpgradedFrom: null,
@@ -1007,10 +1241,7 @@ function installConnectorsFetch(seed: {
           data: { channels },
         });
       }
-      if (
-        path === '/api/v1/workspace/data-connectors' &&
-        method === 'GET'
-      ) {
+      if (path === '/api/v1/workspace/data-connectors' && method === 'GET') {
         return jsonResponse(200, {
           ok: true,
           data: { dataConnectors },
@@ -1051,19 +1282,21 @@ function installConnectorsFetch(seed: {
   };
 }
 
-function installConnectorsFetchByWorkspace(seed: Record<
-  string,
-  {
-    channels: WorkspaceChannelFixture[];
-    dataConnectors: WorkspaceDataConnectorFixture[];
-    slackInstalls?: Array<{
-      teamId: string;
-      teamName: string;
-      installedAt: string;
-      boundChannelCount: number;
-    }>;
-  }
->) {
+function installConnectorsFetchByWorkspace(
+  seed: Record<
+    string,
+    {
+      channels: WorkspaceChannelFixture[];
+      dataConnectors: WorkspaceDataConnectorFixture[];
+      slackInstalls?: Array<{
+        teamId: string;
+        teamName: string;
+        installedAt: string;
+        boundChannelCount: number;
+      }>;
+    }
+  >,
+) {
   const workspaceIds: string[] = [];
 
   vi.stubGlobal(
@@ -1093,10 +1326,7 @@ function installConnectorsFetchByWorkspace(seed: Record<
           data: { channels: dataset.channels },
         });
       }
-      if (
-        path === '/api/v1/workspace/data-connectors' &&
-        method === 'GET'
-      ) {
+      if (path === '/api/v1/workspace/data-connectors' && method === 'GET') {
         return jsonResponse(200, {
           ok: true,
           data: { dataConnectors: dataset.dataConnectors },
