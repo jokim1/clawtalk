@@ -42,3 +42,16 @@ export function formatTalkRole(role: TalkAgent['role']): string {
       return role;
   }
 }
+
+export function buildAgentLabel(
+  agent: Pick<TalkAgent, 'nickname' | 'role'>,
+): string {
+  return `${agent.nickname} (${formatTalkRole(agent.role)})`;
+}
+
+/** Per-agent execution guardrail surfaced on composer target chips. */
+export type TalkAgentExecutionGuardrail = {
+  kind: 'direct_safe' | 'unavailable';
+  badgeLabel: string | null;
+  message: string | null;
+};
