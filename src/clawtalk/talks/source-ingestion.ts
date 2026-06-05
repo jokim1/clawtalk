@@ -323,6 +323,31 @@ async function readBodyWithCap(res: Response, cap: number): Promise<string> {
 }
 
 /**
+ * Plain-language explanation of a non-2xx response for the saved-source UI.
+ * Uses just the host (the final redirect URL — e.g. Google's `/sorry/index?…`
+ * bot-block interstitial — is noise) and explains blocking statuses so a user
+ * understands *why* a page (like google.com) can't be saved.
+ */
+function describeHttpStatus(status: number, url: string): string {
+  let host = url;
+  try {
+    host = new URL(url).host;
+  } catch {
+    // Fall back to the raw URL if it somehow doesn't parse.
+  }
+  if (status === 404 || status === 410) {
+    return `${host} returned HTTP ${status} — the page wasn't found. Check the URL.`;
+  }
+  if (status === 401) {
+    return `${host} requires sign-in (HTTP 401), so its content can't be fetched automatically. Paste the text with "Add Text" instead.`;
+  }
+  if (status === 403 || status === 429 || status === 451 || status === 503) {
+    return `${host} blocked an automated request (HTTP ${status}). This site doesn't allow its pages to be saved as a source — try a specific article URL, or paste the text with "Add Text".`;
+  }
+  return `${host} returned HTTP ${status}.`;
+}
+
+/**
  * Fetches a URL with SSRF-safe validation, using the global `fetch()` so it
  * runs on the Cloudflare Workers runtime.
  *
@@ -401,7 +426,7 @@ export async function safeFetchUrl(
       await res.body?.cancel().catch(() => undefined);
       throw new SourceIngestionError(
         'fetch_http_error',
-        `HTTP ${res.status} from ${currentUrl}`,
+        describeHttpStatus(res.status, currentUrl),
       );
     }
 
