@@ -1,4 +1,10 @@
+import type { TalkThread } from './api';
+
 const MAX_THREAD_TITLE_CHARS = 48;
+
+export function formatThreadLabel(thread: TalkThread): string {
+  return displayThreadTitle(thread.title);
+}
 
 export function displayThreadTitle(
   title: string | null | undefined,
