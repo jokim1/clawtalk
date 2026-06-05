@@ -2019,7 +2019,7 @@ export function TalkDetailPage({
 
   const titleInputRef = useRef<HTMLInputElement | null>(null);
   const messageElementRefs = useRef<Map<string, HTMLElement>>(new Map());
-  const autoStickToBottomRef = useRef(false);
+  const autoStickToBottomRef = useRef<ScrollBehavior | null>(null);
   const onUnauthorizedRef = useRef(onUnauthorized);
 
   useEffect(() => {
@@ -2779,7 +2779,7 @@ export function TalkDetailPage({
           });
         }
         dispatch({ type: 'MERGE_HISTORICAL_RUNS', runs });
-        autoStickToBottomRef.current = true;
+        autoStickToBottomRef.current = 'smooth';
       } catch (err) {
         if (err instanceof UnauthorizedError) {
           handleUnauthorized();
@@ -3224,7 +3224,7 @@ export function TalkDetailPage({
         }
         const nearBottom = isNearBottom();
         if (nearBottom) {
-          autoStickToBottomRef.current = true;
+          autoStickToBottomRef.current = 'auto';
         }
         dispatch({
           type: 'MESSAGE_LANDED',
@@ -3278,7 +3278,7 @@ export function TalkDetailPage({
         // send), stay stuck so the "Thinking…" placeholder is visible
         // when the agent starts streaming. Mirrors onResponseDelta.
         const nearBottom = isNearBottom();
-        if (nearBottom) autoStickToBottomRef.current = true;
+        if (nearBottom) autoStickToBottomRef.current = 'auto';
         dispatch({ type: 'RESPONSE_STARTED', event });
       },
       onProgressUpdate: (event: TalkProgressUpdateEvent) => {
@@ -3290,7 +3290,7 @@ export function TalkDetailPage({
         if (event.talkId !== talkId) return;
         if (event.threadId !== activeThreadIdRef.current) return;
         const nearBottom = isNearBottom();
-        if (nearBottom) autoStickToBottomRef.current = true;
+        if (nearBottom) autoStickToBottomRef.current = 'auto';
         dispatch({ type: 'RESPONSE_DELTA', event });
       },
       onResponseUsage: (_event: TalkResponseUsageEvent) => {
@@ -3562,9 +3562,16 @@ export function TalkDetailPage({
 
   useEffect(() => {
     if (pageKind !== 'ready') return;
-    if (!autoStickToBottomRef.current) return;
-    autoStickToBottomRef.current = false;
-    scrollToBottom('smooth');
+    // autoStickToBottomRef carries the scroll BEHAVIOR, not just a boolean:
+    // 'smooth' for one-shot discrete scrolls (user send, history load) and
+    // 'auto' (instant) for the streaming follow. Instant matters during
+    // streaming — a 'smooth' animation chases a bottom that keeps growing as
+    // tokens arrive, so isNearBottom() reads false mid-animation, the stick
+    // disarms, and the view lands short of the true bottom.
+    const stickBehavior = autoStickToBottomRef.current;
+    if (!stickBehavior) return;
+    autoStickToBottomRef.current = null;
+    scrollToBottom(stickBehavior);
     dispatch({ type: 'CLEAR_UNREAD' });
     // Also depends on liveResponsesByRunId so the effect re-runs on
     // RESPONSE_STARTED (placeholder appears) and on each RESPONSE_DELTA
@@ -4877,7 +4884,7 @@ export function TalkDetailPage({
       // even if they were scrolled up reading earlier history. Subsequent
       // agent responses go through the usual nearBottom gate so a user
       // who scrolls away mid-stream won't get yanked back.
-      autoStickToBottomRef.current = true;
+      autoStickToBottomRef.current = 'smooth';
       appendTalkMessageToSnapshot({
         queryClient,
         userId,
