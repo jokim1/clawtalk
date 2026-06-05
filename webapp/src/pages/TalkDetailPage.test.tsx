@@ -1340,6 +1340,30 @@ describe('TalkDetailPage', () => {
     });
   });
 
+  it('removes an agent from the Agents tab and promotes a new primary', async () => {
+    const user = userEvent.setup();
+    installTalkDetailFetch();
+
+    renderDetailPage('/app/talks/talk-1/agents');
+    await screen.findByRole('heading', { name: 'Agents' });
+
+    expect(screen.getAllByLabelText('Registered Agent')).toHaveLength(2);
+    const removeButtons = screen.getAllByRole('button', { name: 'Remove' });
+    expect(removeButtons).toHaveLength(2);
+
+    // Claude (row 0) is the primary; removing it promotes GPT-5 Mini.
+    await user.click(removeButtons[0]);
+
+    const rows = screen.getAllByLabelText(
+      'Registered Agent',
+    ) as HTMLSelectElement[];
+    expect(rows).toHaveLength(1);
+    expect(rows[0].value).toBe('agent-openai');
+    // Surviving agent becomes primary; Remove is disabled at one agent.
+    expect(screen.getByLabelText('Primary Agent')).toBeChecked();
+    expect(screen.getByRole('button', { name: 'Remove' })).toBeDisabled();
+  });
+
   it('auto-adds a pending footer agent when saving talk agents', async () => {
     const user = userEvent.setup();
     let savedRequest: SavedTalkAgentRequest | undefined;
