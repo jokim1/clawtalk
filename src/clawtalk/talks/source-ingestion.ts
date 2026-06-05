@@ -35,14 +35,18 @@ const ALLOWED_CONTENT_TYPES = new Set([
   'text/html',
   'application/pdf',
 ]);
+// Markers of an ACTUAL bot-challenge / JS interstitial (Cloudflare "Just a
+// moment", Turnstile, etc.). Deliberately specific: bare words like
+// "cloudflare" or "captcha" appear in plenty of normal pages served through
+// Cloudflare, and flagging those falsely routed good content to the (disabled)
+// browser fallback and failed the source. Since the browser path cannot
+// succeed, a false positive only ever loses good content, so prefer precision.
 const CHALLENGE_MARKERS = [
-  'enable javascript',
-  'verify you are human',
-  'captcha',
-  'access denied',
-  'attention required',
-  'bot detection',
-  'cloudflare',
+  '<title>just a moment', // CF interstitial title — not bare prose
+  'checking your browser before accessing',
+  'enable javascript and cookies to continue',
+  'cf-browser-verification',
+  'attention required! | cloudflare',
 ];
 
 // ---------------------------------------------------------------------------
@@ -709,6 +713,7 @@ export async function ingestUrlSource(
   let httpFallback: {
     extractedText: string;
     contentType: string;
+    isChallenge: boolean;
   } | null = null;
   let shouldPreferBrowser = false;
 
@@ -718,6 +723,11 @@ export async function ingestUrlSource(
     httpFallback = {
       extractedText: extracted,
       contentType: result.contentType,
+      // Classify on the RAW body once; the fallback gate below reuses this so
+      // its decision matches shouldAttemptBrowserFallback (which also inspects
+      // the raw body) instead of re-scanning stripped text, where tag-context
+      // markers like `<title>just a moment` can no longer match.
+      isChallenge: looksLikeChallengePage(result.body),
     };
     shouldPreferBrowser = shouldAttemptBrowserFallback({
       url,
@@ -798,9 +808,7 @@ export async function ingestUrlSource(
 
   if (
     httpFallback &&
-    !CHALLENGE_MARKERS.some((marker) =>
-      httpFallback.extractedText.toLowerCase().includes(marker),
-    ) &&
+    !httpFallback.isChallenge &&
     httpFallback.extractedText.trim().length >= MIN_USEFUL_EXTRACTED_TEXT
   ) {
     await updateExtractionFn({
