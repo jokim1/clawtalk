@@ -27,7 +27,7 @@
 import {
   appendOutboxEvent,
   appendOutboxEventOutsideTx,
-} from '../db/accessors.js';
+} from '../db/core-accessors.js';
 import {
   getCurrentNotifyQueue,
   type Sql,

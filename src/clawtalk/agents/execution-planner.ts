@@ -4,7 +4,7 @@ import {
   type EffectiveToolAccess,
   type RegisteredAgentRecord,
 } from '../db/agent-accessors.js';
-import { getSettingValue } from '../db/accessors.js';
+import { getSettingValue } from '../db/core-accessors.js';
 import { decryptProviderSecret } from '../llm/provider-secret-store.js';
 import type { LlmProviderRecord } from '../llm/types.js';
 import {

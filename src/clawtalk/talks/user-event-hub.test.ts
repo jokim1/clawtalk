@@ -29,7 +29,7 @@ import {
 import postgres from 'postgres';
 
 import { closePgDatabase, initPgDatabase } from '../../db.js';
-import { appendOutboxEvent } from '../db/accessors.js';
+import { appendOutboxEvent } from '../db/core-accessors.js';
 import {
   buildAttachmentFilter,
   type SocketAttachment,
