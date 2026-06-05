@@ -1,11 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('../config.js', () => ({
-  TALK_CONTEXT_BROWSER_DISABLE_HOSTS: [],
-  TALK_CONTEXT_BROWSER_PREFER_HOSTS: ['substack.com'],
-  TALK_CONTEXT_BROWSER_TIMEOUT_MS: 30_000,
-  TALK_CONTEXT_MANAGED_FETCH_ENABLED: false,
-  TALK_CONTEXT_MANAGED_FETCH_TIMEOUT_MS: 30_000,
   TALK_CONTEXT_DOH_ENDPOINT: 'https://doh.test/dns-query',
 }));
 
@@ -32,23 +27,27 @@ describe('source-ingestion', () => {
     updateExtraction.mockReset();
   });
 
-  it('stores HTTP extraction when the fast path is good enough', async () => {
+  type ExtractionCall = {
+    extractedText: string | null;
+    extractionError: string | null;
+    fetchStrategy?: string | null;
+    mimeType?: string;
+  };
+  const firstPayload = (): ExtractionCall =>
+    updateExtraction.mock.calls[0][0] as ExtractionCall;
+
+  it('stores HTTP extraction when the page yields useful text', async () => {
     const httpFetcher = vi.fn().mockResolvedValue({
       body: '<html><body><main>' + 'A'.repeat(800) + '</main></body></html>',
       contentType: 'text/html',
       finalUrl: 'https://example.com/post',
     });
-    const browserFetcher = {
-      fetch: vi.fn(),
-    };
 
     await ingestUrlSource('source-1', 'https://example.com/post', {
       httpFetcher,
-      browserFetcher,
       updateExtraction,
     });
 
-    expect(browserFetcher.fetch).not.toHaveBeenCalled();
     expect(updateExtraction).toHaveBeenCalledWith(
       expect.objectContaining({
         sourceId: 'source-1',
@@ -59,169 +58,28 @@ describe('source-ingestion', () => {
     );
   });
 
-  it('prefers the browser path for Substack URLs even after HTTP success', async () => {
-    const httpFetcher = vi.fn().mockResolvedValue({
-      body:
-        '<html><body><article>' + 'B'.repeat(1200) + '</article></body></html>',
-      contentType: 'text/html',
-      finalUrl: 'https://example.substack.com/p/test-post',
-    });
-    const browserFetcher = {
-      fetch: vi.fn().mockResolvedValue({
-        finalUrl: 'https://example.substack.com/p/test-post',
-        pageTitle: 'Substack Post',
-        extractedText: 'Browser extracted article body',
-        contentType: 'text/html' as const,
-        strategy: 'browser' as const,
-      }),
-    };
-
-    await ingestUrlSource(
-      'source-2',
-      'https://example.substack.com/p/test-post',
-      {
-        httpFetcher,
-        browserFetcher,
-        updateExtraction,
-      },
-    );
-
-    expect(browserFetcher.fetch).toHaveBeenCalledTimes(1);
-    expect(updateExtraction).toHaveBeenCalledWith(
-      expect.objectContaining({
-        sourceId: 'source-2',
-        extractionError: null,
-        fetchStrategy: 'browser',
-      }),
-    );
-  });
-
-  it('falls back to the browser path after HTTP fetch failures', async () => {
-    const httpFetcher = vi
-      .fn()
-      .mockRejectedValue(
-        new SourceIngestionError(
-          'fetch_http_error',
-          'HTTP 403 from https://example.com/article',
-        ),
-      );
-    const browserFetcher = {
-      fetch: vi.fn().mockResolvedValue({
-        finalUrl: 'https://example.com/article',
-        pageTitle: 'Recovered',
-        extractedText: 'Recovered in browser',
-        contentType: 'text/html' as const,
-        strategy: 'browser' as const,
-      }),
-    };
-
-    await ingestUrlSource('source-3', 'https://example.com/article', {
-      httpFetcher,
-      browserFetcher,
-      updateExtraction,
-    });
-
-    expect(browserFetcher.fetch).toHaveBeenCalledTimes(1);
-    expect(updateExtraction).toHaveBeenCalledWith(
-      expect.objectContaining({
-        sourceId: 'source-3',
-        extractionError: null,
-        fetchStrategy: 'browser',
-      }),
-    );
-  });
-
-  it('keeps useful HTTP content when browser fallback fails', async () => {
-    const httpFetcher = vi.fn().mockResolvedValue({
-      body:
-        '<html><body><article>' + 'C'.repeat(1200) + '</article></body></html>',
-      contentType: 'text/html',
-      finalUrl: 'https://example.substack.com/p/fallback',
-    });
-    const browserFetcher = {
-      fetch: vi
-        .fn()
-        .mockRejectedValue(new Error('Browser container unavailable')),
-    };
-
-    await ingestUrlSource(
-      'source-4',
-      'https://example.substack.com/p/fallback',
-      {
-        httpFetcher,
-        browserFetcher,
-        updateExtraction,
-      },
-    );
-
-    expect(browserFetcher.fetch).toHaveBeenCalledTimes(1);
-    expect(updateExtraction).toHaveBeenCalledWith(
-      expect.objectContaining({
-        sourceId: 'source-4',
-        extractionError: null,
-        fetchStrategy: 'http',
-      }),
-    );
-  });
-
-  it('stores a failure when all ingestion tiers fail', async () => {
-    const httpFetcher = vi
-      .fn()
-      .mockRejectedValue(
-        new SourceIngestionError('fetch_error', 'Network down'),
-      );
-    const browserFetcher = {
-      fetch: vi.fn().mockRejectedValue(new Error('Browser failed')),
-    };
-
-    await ingestUrlSource('source-5', 'https://example.com/post', {
-      httpFetcher,
-      browserFetcher,
-      updateExtraction,
-    });
-
-    expect(updateExtraction).toHaveBeenCalledWith(
-      expect.objectContaining({
-        sourceId: 'source-5',
-        extractedText: null,
-        fetchStrategy: 'browser',
-      }),
-    );
-    const payload = updateExtraction.mock.calls[0][0] as {
-      extractionError: string;
-    };
-    expect(payload.extractionError).toContain(
-      'http: fetch_error: Network down',
-    );
-    expect(payload.extractionError).toContain('browser: Browser failed');
-  });
-
-  it('ingests a Cloudflare-fronted page via HTTP without touching the browser path', async () => {
-    // A real 200 page whose body merely mentions "cloudflare"/"captcha" (CF
-    // infra refs) must NOT be misread as a bot challenge and routed to the
-    // disabled browser fallback. Regression for the gamemakers.com report.
+  it('ingests a Cloudflare-fronted page via HTTP — CF infra words / "just a moment" in prose are not a challenge', async () => {
+    // Regression for the gamemakers.com report: a real 200 page whose body
+    // merely mentions "cloudflare"/"captcha" (CF infra refs) or has "just a
+    // moment" in prose must NOT be misread as a bot challenge. Only the CF
+    // interstitial <title> markers do.
     const httpFetcher = vi.fn().mockResolvedValue({
       body:
         '<html><body><main>' +
-        // "Just a moment" in prose must NOT trigger the challenge heuristic —
-        // only the CF interstitial <title> does.
         'Real article body content. Just a moment, here is the point. '.repeat(
           30,
         ) +
         '<footer>Protected by Cloudflare. Solve the captcha to comment.</footer>' +
         '</main></body></html>',
       contentType: 'text/html',
-      finalUrl: 'https://www.gamemakers.com/',
+      finalUrl: 'https://www.gamemakers.com/p/post',
     });
-    const browserFetcher = { fetch: vi.fn() };
 
-    await ingestUrlSource('source-cf', 'https://www.gamemakers.com/', {
+    await ingestUrlSource('source-cf', 'https://www.gamemakers.com/p/post', {
       httpFetcher,
-      browserFetcher,
       updateExtraction,
     });
 
-    expect(browserFetcher.fetch).not.toHaveBeenCalled();
     expect(updateExtraction).toHaveBeenCalledWith(
       expect.objectContaining({
         sourceId: 'source-cf',
@@ -231,7 +89,55 @@ describe('source-ingestion', () => {
     );
   });
 
-  it('routes a genuine challenge interstitial to the browser path', async () => {
+  it('passes non-HTML content (plain text) through regardless of length', async () => {
+    // The thin-content gate is HTML-only (a JS-shell concern); short plain-text
+    // and PDF sources must still ingest.
+    const httpFetcher = vi.fn().mockResolvedValue({
+      body: 'short note',
+      contentType: 'text/plain',
+      finalUrl: 'https://example.com/notes.txt',
+    });
+
+    await ingestUrlSource('source-txt', 'https://example.com/notes.txt', {
+      httpFetcher,
+      updateExtraction,
+    });
+
+    expect(updateExtraction).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sourceId: 'source-txt',
+        extractedText: 'short note',
+        extractionError: null,
+        fetchStrategy: 'http',
+      }),
+    );
+  });
+
+  it('fails with an honest insufficient_content error for a thin JS shell (no chassis leak)', async () => {
+    // The gamemakers.com publication HOME page: HTTP 200 with a JS body but
+    // only a sliver of static text (a subscribe wall). With no browser
+    // fallback, this must fail with an actionable message — never the internal
+    // "browser disabled / chassis removed" leak.
+    const httpFetcher = vi.fn().mockResolvedValue({
+      body: '<html><body><main>Subscribe to GameMakers</main></body></html>',
+      contentType: 'text/html',
+      finalUrl: 'https://www.gamemakers.com/',
+    });
+
+    await ingestUrlSource('source-thin', 'https://www.gamemakers.com/', {
+      httpFetcher,
+      updateExtraction,
+    });
+
+    const payload = firstPayload();
+    expect(payload.extractedText).toBeNull();
+    expect(payload.fetchStrategy).toBe('http');
+    expect(payload.extractionError).toContain('insufficient_content');
+    expect(payload.extractionError).not.toContain('browser');
+    expect(payload.extractionError).not.toContain('chassis');
+  });
+
+  it('fails with challenge_page for a genuine interstitial (no chassis leak)', async () => {
     const httpFetcher = vi.fn().mockResolvedValue({
       body:
         '<html><head><title>Just a moment...</title></head><body>' +
@@ -240,54 +146,41 @@ describe('source-ingestion', () => {
       contentType: 'text/html',
       finalUrl: 'https://protected.example.com/',
     });
-    const browserFetcher = {
-      fetch: vi.fn().mockResolvedValue({
-        finalUrl: 'https://protected.example.com/',
-        pageTitle: 'Rendered',
-        extractedText: 'Rendered by the browser path',
-        contentType: 'text/html' as const,
-        strategy: 'browser' as const,
-      }),
-    };
 
     await ingestUrlSource('source-chal', 'https://protected.example.com/', {
       httpFetcher,
-      browserFetcher,
       updateExtraction,
     });
 
-    expect(browserFetcher.fetch).toHaveBeenCalledTimes(1);
+    const payload = firstPayload();
+    expect(payload.extractedText).toBeNull();
+    expect(payload.extractionError).toContain('challenge_page');
+    expect(payload.extractionError).not.toContain('browser');
+    expect(payload.extractionError).not.toContain('chassis');
   });
 
-  it('does not store a long challenge interstitial as HTTP content when the browser path fails', async () => {
-    // A <title>just a moment interstitial with >400 chars of body text must
-    // stay classified as a challenge (raw-body classification carried into the
-    // fallback gate) — not stored as real content — when the browser fails.
-    const httpFetcher = vi.fn().mockResolvedValue({
-      body:
-        '<html><head><title>Just a moment...</title></head><body><main>' +
-        'Please wait while we check your connection and security. '.repeat(20) +
-        '</main></body></html>',
-      contentType: 'text/html',
-      finalUrl: 'https://walled.example.com/',
-    });
-    const browserFetcher = {
-      fetch: vi.fn().mockRejectedValue(new Error('Browser disabled')),
-    };
+  it('stores a failure carrying the HTTP error when the fetch fails (no chassis leak)', async () => {
+    const httpFetcher = vi
+      .fn()
+      .mockRejectedValue(
+        new SourceIngestionError(
+          'fetch_http_error',
+          'HTTP 429 from https://www.google.com/sorry/index',
+        ),
+      );
 
-    await ingestUrlSource('source-wall', 'https://walled.example.com/', {
+    await ingestUrlSource('source-429', 'https://google.com', {
       httpFetcher,
-      browserFetcher,
       updateExtraction,
     });
 
-    expect(browserFetcher.fetch).toHaveBeenCalledTimes(1);
-    expect(updateExtraction).toHaveBeenCalledWith(
-      expect.objectContaining({
-        sourceId: 'source-wall',
-        extractedText: null,
-      }),
-    );
+    const payload = firstPayload();
+    expect(payload.extractedText).toBeNull();
+    expect(payload.fetchStrategy).toBe('http');
+    expect(payload.extractionError).toContain('fetch_http_error');
+    expect(payload.extractionError).toContain('HTTP 429');
+    expect(payload.extractionError).not.toContain('browser');
+    expect(payload.extractionError).not.toContain('chassis');
   });
 });
 
