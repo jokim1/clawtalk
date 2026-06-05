@@ -195,6 +195,100 @@ describe('source-ingestion', () => {
     );
     expect(payload.extractionError).toContain('browser: Browser failed');
   });
+
+  it('ingests a Cloudflare-fronted page via HTTP without touching the browser path', async () => {
+    // A real 200 page whose body merely mentions "cloudflare"/"captcha" (CF
+    // infra refs) must NOT be misread as a bot challenge and routed to the
+    // disabled browser fallback. Regression for the gamemakers.com report.
+    const httpFetcher = vi.fn().mockResolvedValue({
+      body:
+        '<html><body><main>' +
+        // "Just a moment" in prose must NOT trigger the challenge heuristic —
+        // only the CF interstitial <title> does.
+        'Real article body content. Just a moment, here is the point. '.repeat(
+          30,
+        ) +
+        '<footer>Protected by Cloudflare. Solve the captcha to comment.</footer>' +
+        '</main></body></html>',
+      contentType: 'text/html',
+      finalUrl: 'https://www.gamemakers.com/',
+    });
+    const browserFetcher = { fetch: vi.fn() };
+
+    await ingestUrlSource('source-cf', 'https://www.gamemakers.com/', {
+      httpFetcher,
+      browserFetcher,
+      updateExtraction,
+    });
+
+    expect(browserFetcher.fetch).not.toHaveBeenCalled();
+    expect(updateExtraction).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sourceId: 'source-cf',
+        extractionError: null,
+        fetchStrategy: 'http',
+      }),
+    );
+  });
+
+  it('routes a genuine challenge interstitial to the browser path', async () => {
+    const httpFetcher = vi.fn().mockResolvedValue({
+      body:
+        '<html><head><title>Just a moment...</title></head><body>' +
+        '<p>Verify you are human by completing the action below.</p>' +
+        '</body></html>',
+      contentType: 'text/html',
+      finalUrl: 'https://protected.example.com/',
+    });
+    const browserFetcher = {
+      fetch: vi.fn().mockResolvedValue({
+        finalUrl: 'https://protected.example.com/',
+        pageTitle: 'Rendered',
+        extractedText: 'Rendered by the browser path',
+        contentType: 'text/html' as const,
+        strategy: 'browser' as const,
+      }),
+    };
+
+    await ingestUrlSource('source-chal', 'https://protected.example.com/', {
+      httpFetcher,
+      browserFetcher,
+      updateExtraction,
+    });
+
+    expect(browserFetcher.fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not store a long challenge interstitial as HTTP content when the browser path fails', async () => {
+    // A <title>just a moment interstitial with >400 chars of body text must
+    // stay classified as a challenge (raw-body classification carried into the
+    // fallback gate) — not stored as real content — when the browser fails.
+    const httpFetcher = vi.fn().mockResolvedValue({
+      body:
+        '<html><head><title>Just a moment...</title></head><body><main>' +
+        'Please wait while we check your connection and security. '.repeat(20) +
+        '</main></body></html>',
+      contentType: 'text/html',
+      finalUrl: 'https://walled.example.com/',
+    });
+    const browserFetcher = {
+      fetch: vi.fn().mockRejectedValue(new Error('Browser disabled')),
+    };
+
+    await ingestUrlSource('source-wall', 'https://walled.example.com/', {
+      httpFetcher,
+      browserFetcher,
+      updateExtraction,
+    });
+
+    expect(browserFetcher.fetch).toHaveBeenCalledTimes(1);
+    expect(updateExtraction).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sourceId: 'source-wall',
+        extractedText: null,
+      }),
+    );
+  });
 });
 
 describe('extractTextFromHtml', () => {
