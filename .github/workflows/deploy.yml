@@ -57,9 +57,10 @@ jobs:
           VITE_GOOGLE_TOOLS_ENABLED: 'true'
         run: npm --prefix webapp run build
 
-      - uses: supabase/setup-cli@v1
+      - uses: supabase/setup-cli@v2.1.1
         with:
           version: latest
+          github-token: ${{ github.token }}
 
       # W7-evtsse predeploy gate. Aborts the deploy if migration 0006
       # is in the tree but DB_EVENT_HUB_URL is unset. No-op otherwise.
