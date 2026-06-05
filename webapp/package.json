@@ -37,7 +37,7 @@
     "pdfjs-dist": "^5.7.284",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
-    "react-router-dom": "^6.28.0",
+    "react-router-dom": "^6.30.4",
     "turndown": "^7.2.4"
   },
   "devDependencies": {
@@ -54,7 +54,7 @@
     "msw": "^2.6.4",
     "typescript": "^5.7.0",
     "vite": "^7.3.2",
-    "vitest": "^4.0.18"
+    "vitest": "^4.1.0"
   },
   "engines": {
     "node": ">=24 <25"
