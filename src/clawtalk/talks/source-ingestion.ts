@@ -25,6 +25,19 @@ const ALLOWED_CONTENT_TYPES = new Set([
   'text/html',
   'application/pdf',
 ]);
+// RSS/Atom feed content types — accepted only for the feed sub-fetch that
+// rescues a thin HTML page (a JS shell / index) by following its linked feed.
+const FEED_CONTENT_TYPES = new Set([
+  'application/xml',
+  'application/rss+xml',
+  'application/atom+xml',
+  'application/rdf+xml',
+  'text/xml',
+]);
+// Bound the linked-feed rescue so one feed can't pull unbounded text. The
+// storage layer truncates at 50k; stop accumulating a little above that.
+const MAX_FEED_ITEMS = 10;
+const MAX_FEED_TEXT_CHARS = 60_000;
 // Markers of an ACTUAL bot-challenge / JS interstitial (Cloudflare "Just a
 // moment", Turnstile, etc.). Deliberately specific: bare words like
 // "cloudflare" or "captcha" appear in plenty of normal pages served through
@@ -320,7 +333,12 @@ async function readBodyWithCap(res: Response, cap: number): Promise<string> {
  *
  * Returns the raw text body and content type.
  */
-export async function safeFetchUrl(inputUrl: string): Promise<FetchResult> {
+export async function safeFetchUrl(
+  inputUrl: string,
+  options?: { allowedContentTypes?: Set<string> },
+): Promise<FetchResult> {
+  const allowedContentTypes =
+    options?.allowedContentTypes ?? ALLOWED_CONTENT_TYPES;
   let currentUrl = inputUrl;
 
   for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
@@ -390,12 +408,12 @@ export async function safeFetchUrl(inputUrl: string): Promise<FetchResult> {
     // Validate content type.
     const rawContentType = res.headers.get('content-type') ?? '';
     const mimeType = rawContentType.split(';')[0].trim().toLowerCase();
-    if (!ALLOWED_CONTENT_TYPES.has(mimeType)) {
+    if (!allowedContentTypes.has(mimeType)) {
       clearTimeout(timer);
       await res.body?.cancel().catch(() => undefined);
       throw new SourceIngestionError(
         'unsupported_content_type',
-        `Content type "${mimeType}" is not supported. Allowed: ${[...ALLOWED_CONTENT_TYPES].join(', ')}.`,
+        `Content type "${mimeType}" is not supported. Allowed: ${[...allowedContentTypes].join(', ')}.`,
       );
     }
 
@@ -524,6 +542,188 @@ function formatStageError(err: unknown): string {
 }
 
 // ---------------------------------------------------------------------------
+// Linked RSS/Atom feed rescue
+// ---------------------------------------------------------------------------
+//
+// Many thin HTML pages (a JS shell, a publication index/home) declare a real
+// RSS/Atom feed in <head> that carries the actual article text. When direct
+// extraction is too thin, follow that feed (through the same SSRF-safe fetcher)
+// and ingest the recent items' text instead of failing.
+
+/**
+ * Inner text of the first `<tag ...>...</tag>` (case-insensitive), or null.
+ * The open tag is bounded by `>` (no nested quantifier) and the close is found
+ * by a single forward scan — so a hostile unterminated body can't trigger the
+ * catastrophic backtracking a lazy `<tag>([\s\S]*?)</tag>` match would.
+ */
+function matchFeedTag(xml: string, tag: string): string | null {
+  const open = new RegExp(`<${tag}(?=[\\s/>])[^>]*>`, 'i').exec(xml);
+  if (!open) return null;
+  const rest = xml.slice(open.index + open[0].length);
+  const close = new RegExp(`</${tag}\\s*>`, 'i').exec(rest);
+  if (!close) return null;
+  const inner = rest.slice(0, close.index).trim();
+  return inner ? inner : null;
+}
+
+/** Decodes a feed title/body (CDATA HTML or entity-encoded HTML) to plain text. */
+function feedNodeText(raw: string): string {
+  const cdata = /<!\[CDATA\[([\s\S]*?)\]\]>/.exec(raw);
+  const html = cdata ? cdata[1] : decodeHtmlEntities(raw);
+  return extractTextFromHtml(html);
+}
+
+/**
+ * Finds the first RSS/Atom autodiscovery link in HTML and resolves it against
+ * the page URL. Returns null when the page declares no feed.
+ */
+export function findFeedUrl(html: string, baseUrl: string): string | null {
+  const linkTags = html.match(/<link\b[^>]*>/gi);
+  if (!linkTags) return null;
+  for (const tag of linkTags) {
+    const lower = tag.toLowerCase();
+    if (!/\brel\s*=\s*["']?[^"'>]*\balternate\b/.test(lower)) continue;
+    if (
+      !/\btype\s*=\s*["'](?:application\/(?:rss|atom|rdf)\+xml|application\/xml|text\/xml)["']/.test(
+        lower,
+      )
+    ) {
+      continue;
+    }
+    const rawHref = /\bhref\s*=\s*["']([^"']+)["']/i.exec(tag)?.[1];
+    if (!rawHref) continue;
+    try {
+      // Attribute values are HTML-escaped (e.g. `&amp;` between query params),
+      // so decode before resolving — otherwise the sub-fetch requests a literal
+      // `amp;` URL instead of the feed a browser would load.
+      return new URL(decodeHtmlEntities(rawHref), baseUrl).toString();
+    } catch {
+      continue;
+    }
+  }
+  return null;
+}
+
+/**
+ * Extracts readable text from an RSS 2.0 or Atom feed: the feed title plus, for
+ * the first MAX_FEED_ITEMS items, the item title and richest available body
+ * (content:encoded > description > content > summary). Returns '' when the XML
+ * carries no items (e.g. the autodiscovery link pointed at a non-feed).
+ */
+export function extractTextFromFeed(xml: string): string {
+  // Linear presence check — a feed with no items yields '' (the autodiscovery
+  // link pointed at a non-feed, or an empty channel).
+  const firstStart = /<(?:item|entry)(?=[\s/>])/i.exec(xml);
+  if (!firstStart) return '';
+
+  const parts: string[] = [];
+  const feedTitle = matchFeedTag(xml.slice(0, firstStart.index), 'title');
+  if (feedTitle) parts.push(feedNodeText(feedTitle.slice(0, 2_000)));
+
+  let total = parts[0]?.length ?? 0;
+  let count = 0;
+  // Split on item/entry CLOSE tags (linear) so each item block is isolated
+  // without a lazy `<item>[\s\S]*?</item>` match, which backtracks
+  // catastrophically on a hostile unterminated feed body. Per-node inputs to
+  // feedNodeText are sliced so one giant node can't blow up text extraction.
+  for (const segment of xml.split(/<\/(?:item|entry)\s*>/i)) {
+    if (count >= MAX_FEED_ITEMS || total >= MAX_FEED_TEXT_CHARS) break;
+    const startIdx = segment.search(/<(?:item|entry)(?=[\s/>])/i);
+    if (startIdx < 0) continue;
+    const item = segment.slice(startIdx);
+    const title = matchFeedTag(item, 'title');
+    const body =
+      matchFeedTag(item, 'content:encoded') ??
+      matchFeedTag(item, 'description') ??
+      matchFeedTag(item, 'content') ??
+      matchFeedTag(item, 'summary');
+    const itemParts: string[] = [];
+    if (title) itemParts.push(feedNodeText(title.slice(0, 2_000)));
+    if (body) itemParts.push(feedNodeText(body.slice(0, MAX_FEED_TEXT_CHARS)));
+    if (itemParts.length === 0) continue;
+    const itemText = itemParts.join('\n');
+    parts.push(itemText);
+    total += itemText.length;
+    count++;
+  }
+  return parts.join('\n\n').trim();
+}
+
+/**
+/** Query keys that are pure tracking decoration, never content-addressing. */
+const TRACKING_QUERY_KEYS = new Set([
+  'fbclid',
+  'gclid',
+  'msclkid',
+  'yclid',
+  'dclid',
+  'twclid',
+  'igshid',
+  'gbraid',
+  'wbraid',
+  'mc_cid',
+  'mc_eid',
+]);
+
+function isTrackingQueryKey(key: string): boolean {
+  const k = key.toLowerCase();
+  return (
+    k.startsWith('utm_') || k.startsWith('_hs') || TRACKING_QUERY_KEYS.has(k)
+  );
+}
+
+/**
+ * True when a URL points at a site/section root, where a linked feed's recent
+ * items are appropriate content. A thin *leaf* URL (a specific article that
+ * rendered as a JS shell) must NOT be rescued from the site feed — the feed
+ * lists other posts, not necessarily the requested one — so it fails honestly
+ * instead of being stored with unrelated content. Index-like requires every
+ * content-addressing URL component to be empty: root/empty path, no hash route
+ * (`#/p/123`), and no content-addressing query (a WordPress `?p=123` permalink
+ * is a leaf). Unknown query keys are treated as content-addressing (fail-safe);
+ * only well-known tracking params (utm_*, click IDs) are ignored.
+ */
+function isIndexLikeUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    if (parsed.hash) return false; // a hash route (#/p/123) addresses an item
+    if (parsed.pathname.replace(/\/+$/, '') !== '') return false;
+    for (const key of parsed.searchParams.keys()) {
+      if (!isTrackingQueryKey(key)) return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Rescues a thin HTML page by following its declared RSS/Atom feed. Reuses the
+ * SSRF-safe fetcher (the feed URL comes from page HTML, so it MUST be
+ * re-validated) with feed content types allowed. Returns the feed text, or null
+ * when there is no feed, the fetch fails, or the feed yields no items.
+ */
+async function extractViaLinkedFeed(
+  page: FetchResult,
+  httpFetcher: typeof safeFetchUrl,
+): Promise<string | null> {
+  const feedUrl = findFeedUrl(page.body, page.finalUrl);
+  if (!feedUrl) return null;
+  try {
+    const feed = await httpFetcher(feedUrl, {
+      allowedContentTypes: FEED_CONTENT_TYPES,
+    });
+    const text = extractTextFromFeed(feed.body);
+    return text.length > 0 ? text : null;
+  } catch (err) {
+    logger.warn(
+      `[source-ingestion] Linked feed fetch failed for ${feedUrl}: ${formatStageError(err)}`,
+    );
+    return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Ingestion entry point
 // ---------------------------------------------------------------------------
 
@@ -570,18 +770,31 @@ export async function ingestUrlSource(
       );
     }
 
-    const extracted = extractText(result.body, result.contentType);
+    let extracted = extractText(result.body, result.contentType);
 
     if (
       result.contentType === 'text/html' &&
       extracted.trim().length < MIN_USEFUL_EXTRACTED_TEXT
     ) {
-      throw new SourceIngestionError(
-        'insufficient_content',
-        'Could not extract readable text from this page — it may be a ' +
-          'JavaScript-rendered app or a thin landing page. Try referencing a ' +
-          'specific article or page rather than a site homepage.',
-      );
+      // Thin HTML (a JS shell, or a publication index/home page). Many such
+      // pages link a real RSS/Atom feed that carries the article text — follow
+      // it before giving up, but only for index/root URLs: a thin *article* URL
+      // must not be rescued from the site feed (which lists other posts). Gate
+      // on the ORIGINAL pasted url (user intent) so a leaf URL that redirects to
+      // the homepage isn't rescued; feed-href resolution still uses finalUrl.
+      const feedText = isIndexLikeUrl(url)
+        ? await extractViaLinkedFeed(result, httpFetcher)
+        : null;
+      if (feedText && feedText.trim().length >= MIN_USEFUL_EXTRACTED_TEXT) {
+        extracted = feedText;
+      } else {
+        throw new SourceIngestionError(
+          'insufficient_content',
+          'Could not extract readable text from this page — it may be a ' +
+            'JavaScript-rendered app or a thin landing page. Try referencing a ' +
+            'specific article or page rather than a site homepage.',
+        );
+      }
     }
 
     await updateExtractionFn({
