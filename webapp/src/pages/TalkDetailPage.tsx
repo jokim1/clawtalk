@@ -70,7 +70,6 @@ import { DocPaneHeader, type DocPaneMode } from '../components/DocPaneHeader';
 import { DocPaneEdgeTab } from '../components/DocPaneEdgeTab';
 import { PendingEditDocSurface } from '../components/PendingEditDocSurface';
 import { SafeHtml } from '../components/SafeHtml';
-import { ExecutionDecisionSummary } from '../components/ExecutionDecisionSummary';
 import { LiveResponsePanel } from '../components/LiveResponsePanel';
 import { InlineEditableTitle } from '../components/InlineEditableTitle';
 import { TalkToolsPanel } from '../components/TalkToolsPanel';
@@ -95,6 +94,10 @@ import {
 import { ToolChipsBar } from '../components/ToolChipsBar';
 import { TalkConnectorsPanel } from '../components/connectors/TalkConnectorsPanel';
 import { TalkAgentsPanel } from '../components/TalkAgentsPanel';
+import {
+  TalkRunsPanel,
+  type RunContextPanelState,
+} from '../components/TalkRunsPanel';
 import { ThreadContextMenu } from '../components/ThreadContextMenu';
 import { ThreadRowTitleEditor } from '../components/ThreadRowTitleEditor';
 import { ThreadStartButton } from '../components/ThreadStartButton';
@@ -268,13 +271,6 @@ type OrderedRoundSummary = {
   retryRunId: string | null;
 };
 
-type RunContextPanelState = {
-  open: boolean;
-  status: 'idle' | 'loading' | 'loaded' | 'error';
-  snapshot: TalkRunContextSnapshot | null;
-  message?: string;
-};
-
 type TalkTimelineEntry =
   | {
       kind: 'message';
@@ -427,107 +423,6 @@ const COMPOSER_TEXTAREA_MIN_HEIGHT_PX = 48;
 const COMPOSER_TEXTAREA_MAX_HEIGHT_PX = 240;
 const GREENFIELD_MESSAGE_ATTACHMENTS_ENABLED = false;
 
-function formatPersonaRoleLabel(
-  role: TalkRunContextSnapshot['personaRole'],
-): string {
-  if (!role) return 'Unspecified';
-  return role
-    .split('-')
-    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
-    .join(' ');
-}
-
-function renderRunContextSnapshot(
-  snapshot: TalkRunContextSnapshot,
-): JSX.Element {
-  return (
-    <div className="run-context-panel">
-      <p className="run-context-meta">
-        Role: <strong>{formatPersonaRoleLabel(snapshot.personaRole)}</strong>
-        {' · '}
-        Estimated context: <code>{snapshot.estimatedTokens}</code> tokens
-        {' · '}
-        History messages: <code>{snapshot.history.turnCount}</code>
-      </p>
-      {snapshot.roleHint ? (
-        <p className="run-context-note">{snapshot.roleHint}</p>
-      ) : null}
-      {snapshot.activeRules.length > 0 ? (
-        <div className="run-context-section">
-          <strong>Rules</strong>
-          <ul>
-            {snapshot.activeRules.map((rule, index) => (
-              <li key={`${index}-${rule}`}>{rule}</li>
-            ))}
-          </ul>
-        </div>
-      ) : null}
-      {snapshot.stateSnapshot.included.length > 0 ? (
-        <div className="run-context-section">
-          <strong>State Snapshot</strong>
-          <ul>
-            {snapshot.stateSnapshot.included.map((entry) => (
-              <li key={`${entry.key}-${entry.version}`}>
-                <code>{entry.key}</code> v{entry.version}:{' '}
-                <code>{JSON.stringify(entry.value)}</code>
-              </li>
-            ))}
-          </ul>
-        </div>
-      ) : null}
-      {snapshot.retrieval.state.length > 0 ? (
-        <div className="run-context-section">
-          <strong>Retrieved State</strong>
-          <ul>
-            {snapshot.retrieval.state.map((entry) => (
-              <li key={`${entry.key}-${entry.version}`}>
-                <code>{entry.key}</code> v{entry.version}:{' '}
-                <code>{JSON.stringify(entry.value)}</code>
-              </li>
-            ))}
-          </ul>
-        </div>
-      ) : null}
-      {snapshot.retrieval.sources.length > 0 ? (
-        <div className="run-context-section">
-          <strong>Retrieved Sources</strong>
-          <ul>
-            {snapshot.retrieval.sources.map((source) => (
-              <li key={source.ref}>
-                <span>
-                  [{source.ref}] {source.title}
-                </span>
-                <p>{source.excerpt}</p>
-              </li>
-            ))}
-          </ul>
-        </div>
-      ) : null}
-      {snapshot.sources.manifest.length > 0 ? (
-        <div className="run-context-section">
-          <strong>Source Manifest</strong>
-          <p className="run-context-meta">
-            {snapshot.sources.manifest
-              .map((source) => `[${source.ref}] ${source.title}`)
-              .join(', ')}
-          </p>
-        </div>
-      ) : null}
-      <div className="run-context-section">
-        <strong>Available Tools</strong>
-        <p className="run-context-meta">
-          Context:{' '}
-          <code>{snapshot.tools.contextToolNames.join(', ') || 'none'}</code>
-        </p>
-        <p className="run-context-meta">
-          Connectors:{' '}
-          <code>{snapshot.tools.connectorToolNames.join(', ') || 'none'}</code>
-        </p>
-      </div>
-    </div>
-  );
-}
-
 type TalkAgentSourceOption = {
   id: string;
   label: string;
@@ -545,16 +440,6 @@ function createInitialDetailState(): DetailState {
     cancelState: { status: 'idle' },
     hasUnreadBelow: false,
   };
-}
-
-function summarizeMessageForRun(
-  message: TalkMessage | undefined,
-  messageId: string,
-): string {
-  if (!message) return messageId;
-  const compact = message.content.trim().replace(/\s+/g, ' ');
-  const preview = compact.length > 42 ? `${compact.slice(0, 42)}…` : compact;
-  return `${message.role}: ${preview || '(empty)'}`;
 }
 
 function toRunView(run: TalkRun): RunView {
@@ -6235,128 +6120,16 @@ export function TalkDetailPage({
           ) : null}
 
           {currentTab === 'runs' ? (
-            <section
-              className="talk-tab-panel run-history-panel"
-              aria-label="Run history"
-            >
-              <h2>Run History</h2>
-              {runHistory.length === 0 ? (
-                <p className="page-state">No runs yet.</p>
-              ) : (
-                <ul className="run-history-list">
-                  {runHistory.map((run) => {
-                    const runContextPanel = runContextPanels[run.id];
-                    return (
-                      <li
-                        key={run.id}
-                        id={`run-${run.id}`}
-                        className="run-history-item"
-                      >
-                        <div className="run-history-main">
-                          <span
-                            className={`run-history-status run-history-status-${run.status}`}
-                          >
-                            {run.status}
-                          </span>
-                          <code>{run.id}</code>
-                        </div>
-                        {run.targetAgentNickname ? (
-                          <p className="run-history-meta">
-                            Agent: {run.targetAgentNickname}
-                          </p>
-                        ) : null}
-                        <div className="run-history-links">
-                          {run.triggerMessageId ? (
-                            <button
-                              type="button"
-                              className="run-history-link"
-                              onClick={() => handleOpenRunTrigger(run)}
-                            >
-                              Trigger:{' '}
-                              {summarizeMessageForRun(
-                                messageLookup.get(run.triggerMessageId),
-                                run.triggerMessageId,
-                              )}
-                            </button>
-                          ) : (
-                            <span className="run-history-muted">
-                              Trigger: not available
-                            </span>
-                          )}
-                          <button
-                            type="button"
-                            className="secondary-btn run-history-context-toggle"
-                            onClick={() => void handleToggleRunContext(run.id)}
-                          >
-                            {runContextPanel?.status === 'loading'
-                              ? 'Loading context…'
-                              : runContextPanel?.open
-                                ? 'Hide context'
-                                : 'View context'}
-                          </button>
-                        </div>
-                        {run.browserBlock ? (
-                          <BrowserBlockedRunCard
-                            runId={run.id}
-                            browserBlock={run.browserBlock}
-                            executionDecision={run.executionDecision}
-                            talkId={talkId}
-                            onUnauthorized={handleUnauthorized}
-                            onStateChanged={refreshBrowserRuns}
-                          />
-                        ) : null}
-                        {run.status === 'failed' ? (
-                          <ExecutionDecisionSummary
-                            executionDecision={run.executionDecision}
-                          />
-                        ) : null}
-                        {runContextPanel?.open ? (
-                          <section
-                            className="run-context-shell"
-                            aria-label={`Context used for run ${run.id}`}
-                          >
-                            {runContextPanel.status === 'loading' ? (
-                              <div className="run-context-panel">
-                                <p className="run-context-note">
-                                  Loading context snapshot…
-                                </p>
-                              </div>
-                            ) : runContextPanel.status === 'error' ? (
-                              <div className="run-context-panel">
-                                <p className="run-context-note" role="alert">
-                                  {runContextPanel.message ||
-                                    'Failed to load run context.'}
-                                </p>
-                              </div>
-                            ) : runContextPanel.snapshot ? (
-                              renderRunContextSnapshot(runContextPanel.snapshot)
-                            ) : (
-                              <div className="run-context-panel">
-                                <p className="run-context-note">
-                                  No saved context snapshot is available for
-                                  this run.
-                                </p>
-                              </div>
-                            )}
-                          </section>
-                        ) : null}
-                        {run.status === 'failed' && run.errorMessage ? (
-                          <p className="run-history-error">
-                            {run.errorCode ? `${run.errorCode}: ` : ''}
-                            {run.errorMessage}
-                          </p>
-                        ) : null}
-                        {run.status === 'cancelled' && run.cancelReason ? (
-                          <p className="run-history-muted">
-                            Cancel reason: {run.cancelReason}
-                          </p>
-                        ) : null}
-                      </li>
-                    );
-                  })}
-                </ul>
-              )}
-            </section>
+            <TalkRunsPanel
+              runHistory={runHistory}
+              runContextPanels={runContextPanels}
+              messageLookup={messageLookup}
+              talkId={talkId}
+              handleOpenRunTrigger={handleOpenRunTrigger}
+              handleToggleRunContext={handleToggleRunContext}
+              handleUnauthorized={handleUnauthorized}
+              refreshBrowserRuns={refreshBrowserRuns}
+            />
           ) : null}
 
           {currentTab === 'talk' ? (
