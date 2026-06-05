@@ -13,7 +13,9 @@ vi.mock('../../logger.js', () => ({
 }));
 
 import {
+  extractTextFromFeed,
   extractTextFromHtml,
+  findFeedUrl,
   ingestUrlSource,
   isBlockedIp,
   safeFetchUrl,
@@ -25,6 +27,13 @@ describe('source-ingestion', () => {
 
   beforeEach(() => {
     updateExtraction.mockReset();
+  });
+
+  // One test below drives the real safeFetchUrl (default httpFetcher) and stubs
+  // global fetch via installFetch; unstub after each so the injected-fetcher
+  // tests are unaffected.
+  afterEach(() => {
+    vi.unstubAllGlobals();
   });
 
   type ExtractionCall = {
@@ -181,6 +190,342 @@ describe('source-ingestion', () => {
     expect(payload.extractionError).toContain('HTTP 429');
     expect(payload.extractionError).not.toContain('browser');
     expect(payload.extractionError).not.toContain('chassis');
+  });
+
+  it('rescues a thin HTML page by following its linked RSS feed', async () => {
+    const page = {
+      body:
+        '<html><head>' +
+        '<link rel="alternate" type="application/rss+xml" href="/feed" title="GameMakers"/>' +
+        '</head><body><main>Subscribe to GameMakers</main></body></html>',
+      contentType: 'text/html',
+      finalUrl: 'https://www.gamemakers.com/',
+    };
+    const feed = {
+      body:
+        '<?xml version="1.0"?><rss><channel><title>GameMakers</title>' +
+        '<item><title>The Last 20%</title><content:encoded><![CDATA[<p>' +
+        'Real long-form article body. '.repeat(40) +
+        '</p>]]></content:encoded></item></channel></rss>',
+      contentType: 'application/xml',
+      finalUrl: 'https://www.gamemakers.com/feed',
+    };
+    const httpFetcher = vi
+      .fn()
+      .mockResolvedValueOnce(page)
+      .mockResolvedValueOnce(feed);
+
+    await ingestUrlSource('source-feed', 'https://www.gamemakers.com/', {
+      httpFetcher,
+      updateExtraction,
+    });
+
+    // Direct extraction was thin -> followed the resolved feed URL.
+    expect(httpFetcher).toHaveBeenCalledTimes(2);
+    expect(httpFetcher.mock.calls[1][0]).toBe(
+      'https://www.gamemakers.com/feed',
+    );
+    const payload = firstPayload();
+    expect(payload.extractionError).toBeNull();
+    expect(payload.fetchStrategy).toBe('http');
+    expect(payload.extractedText).toContain('The Last 20%');
+    expect(payload.extractedText).toContain('Real long-form article body');
+    expect(payload.extractedText).not.toContain('content:encoded');
+    expect(payload.extractedText).not.toContain('CDATA');
+  });
+
+  it('fails insufficient_content when a thin page declares no feed', async () => {
+    const httpFetcher = vi.fn().mockResolvedValue({
+      body: '<html><body><main>Subscribe to GameMakers</main></body></html>',
+      contentType: 'text/html',
+      finalUrl: 'https://www.gamemakers.com/',
+    });
+
+    await ingestUrlSource('source-nofeed', 'https://www.gamemakers.com/', {
+      httpFetcher,
+      updateExtraction,
+    });
+
+    expect(httpFetcher).toHaveBeenCalledTimes(1); // no feed sub-fetch
+    const payload = firstPayload();
+    expect(payload.extractedText).toBeNull();
+    expect(payload.extractionError).toContain('insufficient_content');
+  });
+
+  it('fails insufficient_content when the linked feed yields no usable text', async () => {
+    const page = {
+      body:
+        '<html><head>' +
+        '<link rel="alternate" type="application/rss+xml" href="https://feeds.example.com/x"/>' +
+        '</head><body><main>thin</main></body></html>',
+      contentType: 'text/html',
+      finalUrl: 'https://thin.example.com/',
+    };
+    const emptyFeed = {
+      body: '<?xml version="1.0"?><rss><channel><title>Empty</title></channel></rss>',
+      contentType: 'application/xml',
+      finalUrl: 'https://feeds.example.com/x',
+    };
+    const httpFetcher = vi
+      .fn()
+      .mockResolvedValueOnce(page)
+      .mockResolvedValueOnce(emptyFeed);
+
+    await ingestUrlSource('source-emptyfeed', 'https://thin.example.com/', {
+      httpFetcher,
+      updateExtraction,
+    });
+
+    expect(httpFetcher).toHaveBeenCalledTimes(2);
+    const payload = firstPayload();
+    expect(payload.extractedText).toBeNull();
+    expect(payload.extractionError).toContain('insufficient_content');
+  });
+
+  it('does not feed-rescue a thin non-index (article) URL', async () => {
+    const httpFetcher = vi.fn().mockResolvedValue({
+      body:
+        '<html><head>' +
+        '<link rel="alternate" type="application/rss+xml" href="/feed"/>' +
+        '</head><body><main>thin shell</main></body></html>',
+      contentType: 'text/html',
+      finalUrl: 'https://www.gamemakers.com/p/old-post',
+    });
+
+    await ingestUrlSource(
+      'source-leaf',
+      'https://www.gamemakers.com/p/old-post',
+      { httpFetcher, updateExtraction },
+    );
+
+    // A leaf URL must not pull the site feed's unrelated recent posts.
+    expect(httpFetcher).toHaveBeenCalledTimes(1);
+    const payload = firstPayload();
+    expect(payload.extractedText).toBeNull();
+    expect(payload.extractionError).toContain('insufficient_content');
+  });
+
+  it('does not feed-rescue when a leaf URL redirects to a root finalUrl', async () => {
+    const httpFetcher = vi.fn().mockResolvedValue({
+      body:
+        '<html><head>' +
+        '<link rel="alternate" type="application/rss+xml" href="/feed"/>' +
+        '</head><body><main>thin</main></body></html>',
+      contentType: 'text/html',
+      finalUrl: 'https://blog.test/', // redirected to the homepage
+    });
+
+    await ingestUrlSource('source-redir', 'https://blog.test/p/old-post', {
+      httpFetcher,
+      updateExtraction,
+    });
+
+    // The user pasted a leaf URL; a redirect to root must not trigger rescue.
+    expect(httpFetcher).toHaveBeenCalledTimes(1);
+    const payload = firstPayload();
+    expect(payload.extractedText).toBeNull();
+    expect(payload.extractionError).toContain('insufficient_content');
+  });
+
+  it('does not feed-rescue a hash-routed (SPA) URL', async () => {
+    const httpFetcher = vi.fn().mockResolvedValue({
+      body:
+        '<html><head>' +
+        '<link rel="alternate" type="application/rss+xml" href="/feed"/>' +
+        '</head><body><main>thin</main></body></html>',
+      contentType: 'text/html',
+      finalUrl: 'https://blog.test/#/p/old-post',
+    });
+
+    await ingestUrlSource('source-hash', 'https://blog.test/#/p/old-post', {
+      httpFetcher,
+      updateExtraction,
+    });
+
+    expect(httpFetcher).toHaveBeenCalledTimes(1);
+    const payload = firstPayload();
+    expect(payload.extractedText).toBeNull();
+    expect(payload.extractionError).toContain('insufficient_content');
+  });
+
+  it('does not feed-rescue a root URL with a content-addressing query (?p=123)', async () => {
+    const httpFetcher = vi.fn().mockResolvedValue({
+      body:
+        '<html><head>' +
+        '<link rel="alternate" type="application/rss+xml" href="/feed"/>' +
+        '</head><body><main>thin shell</main></body></html>',
+      contentType: 'text/html',
+      finalUrl: 'https://blog.test/?p=123',
+    });
+
+    await ingestUrlSource('source-querylf', 'https://blog.test/?p=123', {
+      httpFetcher,
+      updateExtraction,
+    });
+
+    // ?p=123 addresses a specific post — treat as a leaf, not an index.
+    expect(httpFetcher).toHaveBeenCalledTimes(1);
+    const payload = firstPayload();
+    expect(payload.extractedText).toBeNull();
+    expect(payload.extractionError).toContain('insufficient_content');
+  });
+
+  it('feed-rescues a root URL bearing only tracking query params', async () => {
+    const page = {
+      body:
+        '<html><head>' +
+        '<link rel="alternate" type="application/rss+xml" href="/feed"/>' +
+        '</head><body><main>Subscribe</main></body></html>',
+      contentType: 'text/html',
+      finalUrl: 'https://blog.test/?utm_source=newsletter',
+    };
+    const feed = {
+      body:
+        '<?xml version="1.0"?><rss><channel><title>Blog</title>' +
+        '<item><title>Recent Post</title><description>' +
+        'Real article body content. '.repeat(40) +
+        '</description></item></channel></rss>',
+      contentType: 'application/xml',
+      finalUrl: 'https://blog.test/feed',
+    };
+    const httpFetcher = vi
+      .fn()
+      .mockResolvedValueOnce(page)
+      .mockResolvedValueOnce(feed);
+
+    await ingestUrlSource(
+      'source-utm',
+      'https://blog.test/?utm_source=newsletter',
+      { httpFetcher, updateExtraction },
+    );
+
+    // utm-only query is still index-like → rescue proceeds.
+    expect(httpFetcher).toHaveBeenCalledTimes(2);
+    const payload = firstPayload();
+    expect(payload.extractionError).toBeNull();
+    expect(payload.extractedText).toContain('Recent Post');
+  });
+
+  it('blocks an SSRF feed link (feed host resolves to a private IP)', async () => {
+    // The feed URL comes from page HTML, so it MUST be re-validated by the same
+    // SSRF gate. A feed link pointing at a private/metadata host is rejected,
+    // degrading to the honest insufficient_content failure (not an SSRF).
+    installFetch({
+      doh: (type, name) =>
+        type !== 'A'
+          ? aRecords()
+          : name === 'thin.example.com'
+            ? aRecords('93.184.216.34')
+            : aRecords('169.254.169.254'),
+      page: () =>
+        pageResponse({
+          contentType: 'text/html',
+          body:
+            '<html><head>' +
+            '<link rel="alternate" type="application/rss+xml" href="http://metadata.evil.test/feed"/>' +
+            '</head><body><main>thin</main></body></html>',
+        }),
+    });
+
+    await ingestUrlSource('source-ssrf-feed', 'https://thin.example.com/', {
+      updateExtraction,
+    });
+
+    const payload = firstPayload();
+    expect(payload.extractedText).toBeNull();
+    expect(payload.extractionError).toContain('insufficient_content');
+  });
+});
+
+describe('findFeedUrl', () => {
+  it('resolves a relative RSS autodiscovery href against the page URL', () => {
+    const html =
+      '<head><link rel="alternate" type="application/rss+xml" href="/feed" title="X"/></head>';
+    expect(findFeedUrl(html, 'https://www.gamemakers.com/')).toBe(
+      'https://www.gamemakers.com/feed',
+    );
+  });
+
+  it('finds an Atom feed with attributes in any order / single quotes', () => {
+    const html =
+      "<link type='application/atom+xml' rel='alternate' href='https://blog.test/atom.xml'>";
+    expect(findFeedUrl(html, 'https://blog.test/')).toBe(
+      'https://blog.test/atom.xml',
+    );
+  });
+
+  it('ignores rel=alternate links that are not feeds (alternate languages)', () => {
+    const html =
+      '<link rel="alternate" hreflang="fr" type="text/html" href="/fr"/>';
+    expect(findFeedUrl(html, 'https://site.test/')).toBeNull();
+  });
+
+  it('returns null when no feed link is present', () => {
+    expect(
+      findFeedUrl('<head><title>No feed</title></head>', 'https://x.test/'),
+    ).toBeNull();
+  });
+
+  it('decodes HTML entities in the href before resolving', () => {
+    const html =
+      '<link rel="alternate" type="application/rss+xml" href="/feed?format=rss&amp;lang=en"/>';
+    expect(findFeedUrl(html, 'https://blog.test/')).toBe(
+      'https://blog.test/feed?format=rss&lang=en',
+    );
+  });
+});
+
+describe('extractTextFromFeed', () => {
+  it('extracts item title + CDATA content from RSS, stripping tags', () => {
+    const xml =
+      '<rss><channel><title>Feed Name</title>' +
+      '<item><title>Post One</title>' +
+      '<content:encoded><![CDATA[<p>Hello <strong>world</strong> today</p>]]></content:encoded>' +
+      '</item></channel></rss>';
+    const text = extractTextFromFeed(xml);
+    expect(text).toContain('Feed Name');
+    expect(text).toContain('Post One');
+    expect(text).toContain('Hello world today');
+    expect(text).not.toContain('<p>');
+    expect(text).not.toContain('<strong>');
+    expect(text).not.toContain('content:encoded');
+  });
+
+  it('prefers content:encoded over description', () => {
+    const xml =
+      '<rss><channel><item><title>T</title>' +
+      '<description>short summary</description>' +
+      '<content:encoded><![CDATA[the full body]]></content:encoded>' +
+      '</item></channel></rss>';
+    const text = extractTextFromFeed(xml);
+    expect(text).toContain('the full body');
+    expect(text).not.toContain('short summary');
+  });
+
+  it('decodes an entity-encoded description', () => {
+    const xml =
+      '<rss><channel><item><title>T</title>' +
+      '<description>&lt;p&gt;Body &amp; more.&lt;/p&gt;</description>' +
+      '</item></channel></rss>';
+    expect(extractTextFromFeed(xml)).toContain('Body & more.');
+  });
+
+  it('extracts Atom entries (title + content)', () => {
+    const xml =
+      '<feed><title>Atom Feed</title>' +
+      '<entry><title>Entry One</title>' +
+      '<content type="html">&lt;p&gt;Atom body text.&lt;/p&gt;</content>' +
+      '</entry></feed>';
+    const text = extractTextFromFeed(xml);
+    expect(text).toContain('Atom Feed');
+    expect(text).toContain('Entry One');
+    expect(text).toContain('Atom body text.');
+  });
+
+  it('returns empty string when there are no items', () => {
+    expect(
+      extractTextFromFeed('<rss><channel><title>x</title></channel></rss>'),
+    ).toBe('');
   });
 });
 
