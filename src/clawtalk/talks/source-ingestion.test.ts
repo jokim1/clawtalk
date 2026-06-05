@@ -889,6 +889,23 @@ describe('source-ingestion SSRF gate', () => {
       });
     });
 
+    it('explains a blocking HTTP status (429) in plain language', async () => {
+      installFetch({
+        doh: (type) => (type === 'A' ? aRecords('93.184.216.34') : aRecords()),
+        page: () => pageResponse({ status: 429, body: 'Too Many Requests' }),
+      });
+      const err = (await safeFetchUrl('https://busy.test/').catch(
+        (e: unknown) => e,
+      )) as SourceIngestionError;
+      expect(err.code).toBe('fetch_http_error');
+      expect(err.message).toContain('429');
+      expect(err.message).toContain('busy.test');
+      expect(err.message.toLowerCase()).toContain('blocked');
+      // Uses the host, not the full URL — the ugly redirect/query noise (e.g.
+      // Google's /sorry/index?...) must not leak into the user message.
+      expect(err.message).not.toContain('https://');
+    });
+
     it('rejects a disallowed scheme without any fetch', async () => {
       const fetchMock = installFetch({});
       await expect(safeFetchUrl('ftp://example.com/')).rejects.toMatchObject({
