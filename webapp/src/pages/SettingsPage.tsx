@@ -453,6 +453,12 @@ const PROVIDER_SAVE_POLL_DELAYS_MS = [
   1_500, 1_500, 2_500, 3_500, 5_000, 5_000, 5_000,
 ];
 
+export const settingsPageNavigation = {
+  reload: (): void => {
+    window.location.reload();
+  },
+};
+
 function updateOauthRecord<T>(
   current: Record<string, T>,
   key: string,
@@ -711,7 +717,7 @@ function ApiKeysTab({
           if (cancelled) return;
           if (result.status === 'authorized') {
             setOpenAiOauthByKey(key, { pending: null, polling: false });
-            window.location.reload();
+            settingsPageNavigation.reload();
             return;
           }
           scheduleTick();

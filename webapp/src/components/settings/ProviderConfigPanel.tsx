@@ -1,3 +1,5 @@
+import type { KeyboardEvent } from 'react';
+
 import {
   type AgentProviderCard,
   type ProviderCredentialScope,
@@ -218,6 +220,38 @@ export function ProviderConfigPanel({
   const personalPanelId = 'api-keys-personal-panel';
   const workspacePanelId = 'api-keys-workspace-panel';
 
+  const activateSubTab = (nextSubTab: ApiKeysSubTab): void => {
+    onSubTabChange(nextSubTab);
+    const nextTabId =
+      nextSubTab === 'personal' ? personalTabId : workspaceTabId;
+    document.getElementById(nextTabId)?.focus();
+  };
+
+  const handleSubTabKeyDown = (
+    event: KeyboardEvent<HTMLButtonElement>,
+    currentSubTab: ApiKeysSubTab,
+  ): void => {
+    let nextSubTab: ApiKeysSubTab | null = null;
+    switch (event.key) {
+      case 'ArrowLeft':
+        nextSubTab = currentSubTab === 'personal' ? 'workspace' : 'personal';
+        break;
+      case 'ArrowRight':
+        nextSubTab = currentSubTab === 'personal' ? 'workspace' : 'personal';
+        break;
+      case 'Home':
+        nextSubTab = 'personal';
+        break;
+      case 'End':
+        nextSubTab = 'workspace';
+        break;
+      default:
+        return;
+    }
+    event.preventDefault();
+    activateSubTab(nextSubTab);
+  };
+
   return (
     <>
       <div
@@ -231,12 +265,14 @@ export function ProviderConfigPanel({
           id={personalTabId}
           aria-selected={subTab === 'personal'}
           aria-controls={personalPanelId}
+          tabIndex={subTab === 'personal' ? 0 : -1}
           className={
             subTab === 'personal'
               ? 'settings-subtab settings-subtab-active'
               : 'settings-subtab'
           }
-          onClick={() => onSubTabChange('personal')}
+          onClick={() => activateSubTab('personal')}
+          onKeyDown={(event) => handleSubTabKeyDown(event, 'personal')}
         >
           Personal
         </button>
@@ -246,72 +282,73 @@ export function ProviderConfigPanel({
           id={workspaceTabId}
           aria-selected={subTab === 'workspace'}
           aria-controls={workspacePanelId}
+          tabIndex={subTab === 'workspace' ? 0 : -1}
           className={
             subTab === 'workspace'
               ? 'settings-subtab settings-subtab-active'
               : 'settings-subtab'
           }
-          onClick={() => onSubTabChange('workspace')}
+          onClick={() => activateSubTab('workspace')}
+          onKeyDown={(event) => handleSubTabKeyDown(event, 'workspace')}
         >
           Workspace
         </button>
       </div>
 
-      {subTab === 'personal' ? (
-        <ProviderScopePanel
-          id={personalPanelId}
-          labelledBy={personalTabId}
-          scope="user"
-          title="Personal API Keys"
-          description="Personal keys override the workspace key when set. Use these when you want to bill against your own provider account."
-          providers={providers}
-          drafts={drafts}
-          busyKey={busyKey}
-          anthropicOauth={anthropicOauth}
-          openAiCodexOauth={openAiCodexOauth}
-          canManage
-          onDraftChange={onDraftChange}
-          onSave={onSave}
-          onClear={onClear}
-          onVerify={onVerify}
-          onConfigureAgents={onConfigureAgents}
-          onStartAnthropicSubscription={onStartAnthropicSubscription}
-          onCompleteAnthropicSubscription={onCompleteAnthropicSubscription}
-          onCancelAnthropicSubscription={onCancelAnthropicSubscription}
-          onAnthropicCodeDraftChange={onAnthropicCodeDraftChange}
-          onStartOpenAiCodexSubscription={onStartOpenAiCodexSubscription}
-          onCancelOpenAiCodexSubscription={onCancelOpenAiCodexSubscription}
-        />
-      ) : (
-        <ProviderScopePanel
-          id={workspacePanelId}
-          labelledBy={workspaceTabId}
-          scope="workspace"
-          title="Workspace API Keys"
-          description={
-            isAdmin
-              ? "Workspace-shared keys are visible to every member and used when a member hasn't supplied a personal key of their own. Set them here as the workspace admin."
-              : "Workspace-shared keys are visible to every member and used when a member hasn't supplied a personal key of their own. Only workspace admins can change these."
-          }
-          providers={providers}
-          drafts={drafts}
-          busyKey={busyKey}
-          anthropicOauth={anthropicOauth}
-          openAiCodexOauth={openAiCodexOauth}
-          canManage={isAdmin}
-          onDraftChange={onDraftChange}
-          onSave={onSave}
-          onClear={onClear}
-          onVerify={onVerify}
-          onConfigureAgents={onConfigureAgents}
-          onStartAnthropicSubscription={onStartAnthropicSubscription}
-          onCompleteAnthropicSubscription={onCompleteAnthropicSubscription}
-          onCancelAnthropicSubscription={onCancelAnthropicSubscription}
-          onAnthropicCodeDraftChange={onAnthropicCodeDraftChange}
-          onStartOpenAiCodexSubscription={onStartOpenAiCodexSubscription}
-          onCancelOpenAiCodexSubscription={onCancelOpenAiCodexSubscription}
-        />
-      )}
+      <ProviderScopePanel
+        id={personalPanelId}
+        labelledBy={personalTabId}
+        hidden={subTab !== 'personal'}
+        scope="user"
+        title="Personal API Keys"
+        description="Personal keys override the workspace key when set. Use these when you want to bill against your own provider account."
+        providers={providers}
+        drafts={drafts}
+        busyKey={busyKey}
+        anthropicOauth={anthropicOauth}
+        openAiCodexOauth={openAiCodexOauth}
+        canManage
+        onDraftChange={onDraftChange}
+        onSave={onSave}
+        onClear={onClear}
+        onVerify={onVerify}
+        onConfigureAgents={onConfigureAgents}
+        onStartAnthropicSubscription={onStartAnthropicSubscription}
+        onCompleteAnthropicSubscription={onCompleteAnthropicSubscription}
+        onCancelAnthropicSubscription={onCancelAnthropicSubscription}
+        onAnthropicCodeDraftChange={onAnthropicCodeDraftChange}
+        onStartOpenAiCodexSubscription={onStartOpenAiCodexSubscription}
+        onCancelOpenAiCodexSubscription={onCancelOpenAiCodexSubscription}
+      />
+      <ProviderScopePanel
+        id={workspacePanelId}
+        labelledBy={workspaceTabId}
+        hidden={subTab !== 'workspace'}
+        scope="workspace"
+        title="Workspace API Keys"
+        description={
+          isAdmin
+            ? "Workspace-shared keys are visible to every member and used when a member hasn't supplied a personal key of their own. Set them here as the workspace admin."
+            : "Workspace-shared keys are visible to every member and used when a member hasn't supplied a personal key of their own. Only workspace admins can change these."
+        }
+        providers={providers}
+        drafts={drafts}
+        busyKey={busyKey}
+        anthropicOauth={anthropicOauth}
+        openAiCodexOauth={openAiCodexOauth}
+        canManage={isAdmin}
+        onDraftChange={onDraftChange}
+        onSave={onSave}
+        onClear={onClear}
+        onVerify={onVerify}
+        onConfigureAgents={onConfigureAgents}
+        onStartAnthropicSubscription={onStartAnthropicSubscription}
+        onCompleteAnthropicSubscription={onCompleteAnthropicSubscription}
+        onCancelAnthropicSubscription={onCancelAnthropicSubscription}
+        onAnthropicCodeDraftChange={onAnthropicCodeDraftChange}
+        onStartOpenAiCodexSubscription={onStartOpenAiCodexSubscription}
+        onCancelOpenAiCodexSubscription={onCancelOpenAiCodexSubscription}
+      />
     </>
   );
 }
@@ -319,6 +356,7 @@ export function ProviderConfigPanel({
 function ProviderScopePanel({
   id,
   labelledBy,
+  hidden,
   scope,
   title,
   description,
@@ -342,6 +380,7 @@ function ProviderScopePanel({
 }: {
   id: string;
   labelledBy: string;
+  hidden: boolean;
   scope: ProviderCredentialScope;
   title: string;
   description: string;
@@ -392,6 +431,7 @@ function ProviderScopePanel({
       role="tabpanel"
       id={id}
       aria-labelledby={labelledBy}
+      hidden={hidden}
     >
       <h2>{title}</h2>
       <p className="settings-copy">{description}</p>

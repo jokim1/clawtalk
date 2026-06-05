@@ -1,5 +1,7 @@
 import {
+  act,
   cleanup,
+  fireEvent,
   render,
   screen,
   waitFor,
@@ -9,7 +11,7 @@ import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter } from 'react-router-dom';
 
-import { SettingsPage } from './SettingsPage';
+import { settingsPageNavigation, SettingsPage } from './SettingsPage';
 import type {
   AgentProviderCard,
   AiAgentsPageData,
@@ -93,6 +95,54 @@ describe('SettingsPage', () => {
     expect(
       within(workspaceCards[0]).getByPlaceholderText('sk-ant-...'),
     ).toBeTruthy();
+  });
+
+  it('supports keyboard navigation between API key sub-tabs without dangling tab panels', async () => {
+    installSettingsFetch();
+
+    render(
+      <MemoryRouter initialEntries={['/app/settings?tab=api-keys']}>
+        <SettingsPage
+          user={buildSessionUser()}
+          userRole="owner"
+          onUnauthorized={vi.fn()}
+          onUserUpdated={vi.fn()}
+        />
+      </MemoryRouter>,
+    );
+
+    await screen.findByRole('heading', { name: 'Personal API Keys' });
+    const personalTab = screen.getByRole('tab', { name: 'Personal' });
+    const workspaceTab = screen.getByRole('tab', { name: 'Workspace' });
+    const personalPanel = document.getElementById('api-keys-personal-panel');
+    const workspacePanel = document.getElementById('api-keys-workspace-panel');
+
+    expect(personalPanel).toBeTruthy();
+    expect(workspacePanel).toBeTruthy();
+    expect(personalPanel?.hidden).toBe(false);
+    expect(workspacePanel?.hidden).toBe(true);
+    expect(personalTab.getAttribute('aria-controls')).toBe(
+      'api-keys-personal-panel',
+    );
+    expect(workspaceTab.getAttribute('aria-controls')).toBe(
+      'api-keys-workspace-panel',
+    );
+    expect(personalTab.tabIndex).toBe(0);
+    expect(workspaceTab.tabIndex).toBe(-1);
+
+    fireEvent.keyDown(personalTab, { key: 'ArrowRight' });
+    await screen.findByRole('heading', { name: 'Workspace API Keys' });
+    expect(document.activeElement).toBe(workspaceTab);
+    expect(personalPanel?.hidden).toBe(true);
+    expect(workspacePanel?.hidden).toBe(false);
+    expect(personalTab.tabIndex).toBe(-1);
+    expect(workspaceTab.tabIndex).toBe(0);
+
+    fireEvent.keyDown(workspaceTab, { key: 'Home' });
+    await screen.findByRole('heading', { name: 'Personal API Keys' });
+    expect(document.activeElement).toBe(personalTab);
+    expect(personalPanel?.hidden).toBe(false);
+    expect(workspacePanel?.hidden).toBe(true);
   });
 
   it('saves a Personal API key with scope=user', async () => {
@@ -252,6 +302,106 @@ describe('SettingsPage', () => {
     expect(screen.getByText('CT-1234')).toBeTruthy();
   });
 
+  it('polls ChatGPT device flow until authorization completes', async () => {
+    const helpers = installSettingsFetch({
+      openAiPollIntervalSeconds: 1,
+      openAiPollResponses: [
+        { status: 'pending' },
+        {
+          status: 'authorized',
+          scope: 'user',
+          expiresAt: '2026-05-16T12:05:00.000Z',
+        },
+      ],
+    });
+    vi.spyOn(window, 'open').mockReturnValue(null);
+    const reloadSpy = vi
+      .spyOn(settingsPageNavigation, 'reload')
+      .mockImplementation(() => undefined);
+
+    render(
+      <MemoryRouter initialEntries={['/app/settings?tab=api-keys']}>
+        <SettingsPage
+          user={buildSessionUser()}
+          userRole="owner"
+          onUnauthorized={vi.fn()}
+          onUserUpdated={vi.fn()}
+        />
+      </MemoryRouter>,
+    );
+
+    await screen.findByRole('heading', { name: 'Personal API Keys' });
+    vi.useFakeTimers();
+    await act(async () => {
+      fireEvent.click(
+        screen.getByRole('button', { name: 'Connect with ChatGPT' }),
+      );
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(screen.getByText('CT-1234')).toBeTruthy();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1000);
+    });
+    expect(helpers.getOpenAiPollCalls()).toEqual(['openai-state-1']);
+    expect(screen.getByText('CT-1234')).toBeTruthy();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1000);
+    });
+    expect(helpers.getOpenAiPollCalls()).toEqual([
+      'openai-state-1',
+      'openai-state-1',
+    ]);
+    expect(reloadSpy).toHaveBeenCalledTimes(1);
+    expect(screen.queryByText('CT-1234')).toBeNull();
+  });
+
+  it('stops ChatGPT device polling and surfaces poll errors', async () => {
+    const helpers = installSettingsFetch({
+      openAiPollIntervalSeconds: 1,
+      openAiPollResponses: [{ status: 'error', message: 'Polling failed.' }],
+    });
+    vi.spyOn(window, 'open').mockReturnValue(null);
+
+    render(
+      <MemoryRouter initialEntries={['/app/settings?tab=api-keys']}>
+        <SettingsPage
+          user={buildSessionUser()}
+          userRole="owner"
+          onUnauthorized={vi.fn()}
+          onUserUpdated={vi.fn()}
+        />
+      </MemoryRouter>,
+    );
+
+    await screen.findByRole('heading', { name: 'Personal API Keys' });
+    vi.useFakeTimers();
+    await act(async () => {
+      fireEvent.click(
+        screen.getByRole('button', { name: 'Connect with ChatGPT' }),
+      );
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(screen.getByText('CT-1234')).toBeTruthy();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1000);
+    });
+    expect(helpers.getOpenAiPollCalls()).toEqual(['openai-state-1']);
+    expect(screen.getByText('Polling failed.')).toBeTruthy();
+    expect(
+      screen.getByText('Polling stopped. Restart connection to try again.'),
+    ).toBeTruthy();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1000);
+    });
+    expect(helpers.getOpenAiPollCalls()).toEqual(['openai-state-1']);
+  });
+
   it('opens the Agents tab and lists registered agents from the panel', async () => {
     installSettingsFetch();
 
@@ -339,12 +489,24 @@ describe('SettingsPage', () => {
 function installSettingsFetch(options?: {
   registeredAgents?: RegisteredAgent[];
   mainAgent?: RegisteredAgent | null;
+  openAiPollIntervalSeconds?: number;
+  openAiPollResponses?: Array<
+    | { status: 'pending' }
+    | {
+        status: 'authorized';
+        scope: 'user' | 'workspace';
+        expiresAt: string;
+      }
+    | { status: 'error'; message: string }
+  >;
 }) {
   let snapshot = buildAiAgentsData();
   let registeredAgents = options?.registeredAgents ?? buildRegisteredAgents();
   let mainAgent: RegisteredAgent | null =
     options?.mainAgent ?? registeredAgents[0] ?? null;
   const mainAgentUpdateCalls: string[] = [];
+  const openAiPollCalls: string[] = [];
+  const openAiPollResponses = [...(options?.openAiPollResponses ?? [])];
   const providerSaveCalls: Record<
     string,
     Array<{
@@ -415,7 +577,7 @@ function installSettingsFetch(options?: {
             state: 'openai-state-1',
             userCode: 'CT-1234',
             verificationUrl: 'https://openai.example/device',
-            pollIntervalSeconds: 60,
+            pollIntervalSeconds: options?.openAiPollIntervalSeconds ?? 60,
             expiresAt: '2026-05-16T12:05:00.000Z',
           },
         });
@@ -425,9 +587,25 @@ function installSettingsFetch(options?: {
         path === '/api/v1/agents/providers/provider.openai_codex/oauth/poll' &&
         method === 'POST'
       ) {
+        const body = JSON.parse(String(init?.body || '{}')) as {
+          state: string;
+        };
+        openAiPollCalls.push(body.state);
+        const response = openAiPollResponses.shift() ?? {
+          status: 'pending',
+        };
+        if (response.status === 'error') {
+          return jsonResponse(500, {
+            ok: false,
+            error: {
+              code: 'poll_failed',
+              message: response.message,
+            },
+          });
+        }
         return jsonResponse(200, {
           ok: true,
-          data: { status: 'pending' },
+          data: response,
         });
       }
 
@@ -491,6 +669,7 @@ function installSettingsFetch(options?: {
     getProviderSaveCalls: (providerId: string) =>
       providerSaveCalls[providerId] || [],
     getMainAgentUpdateCalls: () => mainAgentUpdateCalls,
+    getOpenAiPollCalls: () => openAiPollCalls,
   };
 }
 
