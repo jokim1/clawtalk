@@ -202,7 +202,7 @@ export function stripAnchors(html: string): HtmlAnchorResult<string> {
  *
  * Blocks without an anchor are SKIPPED — callers that want a guaranteed
  * outline after an edit cycle should pipe their HTML through
- * `insertAnchors` first (the context-loader already does this so the
+ * `insertAnchors` first (the outline builder does this so the
  * AI sees fresh anchors even if a recent user-edit stripped some).
  *
  * `textExcerpt` is the first 80 characters of the block's plain text

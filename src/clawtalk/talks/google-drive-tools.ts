@@ -7,7 +7,7 @@
 //     the system prompt. Lists each bound resource by ref + kind + name, or
 //     a "no bindings" hint pointing the agent at the Tools tab.
 //   - `buildGoogleDriveContextTools({ readEnabled, writeEnabled })` —
-//     LlmToolDefinition[] for context-loader to merge in. D4: schemas are
+//     LlmToolDefinition[] for the executor to merge in. D4: schemas are
 //     ALWAYS emitted when the agent's family is enabled, regardless of
 //     credential or binding state. Gating on credential/binding happens at
 //     call time via typed errors returned to the LLM.

@@ -27,7 +27,7 @@ import {
   type GreenfieldRunRecord,
   type GreenfieldThreadMetrics,
 } from '../../talks/greenfield-detail-accessors.js';
-import type { TalkRunContextSnapshot } from '../../talks/context-loader.js';
+import type { TalkRunContextSnapshot } from '../../talks/talk-run-context-snapshot.js';
 import { emitOutboxEvent } from '../../talks/outbox-emit.js';
 import {
   getGreenfieldTalk,
