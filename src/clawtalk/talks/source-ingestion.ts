@@ -7,18 +7,8 @@
  *  - Status updates via an injected extraction updater
  */
 
-import {
-  TALK_CONTEXT_BROWSER_DISABLE_HOSTS,
-  TALK_CONTEXT_BROWSER_PREFER_HOSTS,
-  TALK_CONTEXT_BROWSER_TIMEOUT_MS,
-  TALK_CONTEXT_DOH_ENDPOINT,
-  TALK_CONTEXT_MANAGED_FETCH_ENABLED,
-  TALK_CONTEXT_MANAGED_FETCH_TIMEOUT_MS,
-} from '../config.js';
-import {
-  type ContextSourceFetchStrategy,
-  updateSourceExtraction,
-} from '../db/context-accessors.js';
+import { TALK_CONTEXT_DOH_ENDPOINT } from '../config.js';
+import { updateSourceExtraction } from '../db/context-accessors.js';
 import { logger } from '../../logger.js';
 
 // ---------------------------------------------------------------------------
@@ -38,9 +28,9 @@ const ALLOWED_CONTENT_TYPES = new Set([
 // Markers of an ACTUAL bot-challenge / JS interstitial (Cloudflare "Just a
 // moment", Turnstile, etc.). Deliberately specific: bare words like
 // "cloudflare" or "captcha" appear in plenty of normal pages served through
-// Cloudflare, and flagging those falsely routed good content to the (disabled)
-// browser fallback and failed the source. Since the browser path cannot
-// succeed, a false positive only ever loses good content, so prefer precision.
+// Cloudflare. There is no browser fallback to recover a flagged page (the
+// chassis was removed), so a false positive only ever loses good content by
+// failing the source — prefer precision.
 const CHALLENGE_MARKERS = [
   '<title>just a moment', // CF interstitial title — not bare prose
   'checking your browser before accessing',
@@ -264,61 +254,13 @@ interface FetchResult {
   finalUrl: string;
 }
 
-export interface BrowserSourceFetchResult {
-  finalUrl: string;
-  pageTitle: string | null;
-  extractedText: string;
-  contentType: 'text/html';
-  strategy: 'browser';
-}
-
-export interface BrowserSourceFetcher {
-  fetch(input: {
-    url: string;
-    timeoutMs: number;
-  }): Promise<BrowserSourceFetchResult>;
-}
-
-export interface ManagedSourceFetchResult {
-  finalUrl: string;
-  pageTitle: string | null;
-  extractedText: string;
-  contentType: string;
-  strategy: 'managed';
-}
-
-export interface ManagedSourceFetcher {
-  fetch(input: {
-    url: string;
-    timeoutMs: number;
-  }): Promise<ManagedSourceFetchResult>;
-}
-
 export interface UrlSourceIngestionDependencies {
   httpFetcher?: typeof safeFetchUrl;
-  browserFetcher?: BrowserSourceFetcher;
-  managedFetcher?: ManagedSourceFetcher | null;
   updateExtraction?: typeof updateSourceExtraction;
 }
 
 export interface TalkContextSourceIngestionService {
   enqueueUrlSource(sourceId: string, url: string): void;
-}
-
-const DEFAULT_BROWSER_SOURCE_FETCHER: BrowserSourceFetcher = {
-  fetch: async () => {
-    throw new Error(
-      'Browser source fetching is disabled in this build (ClawTalk chassis was removed).',
-    );
-  },
-};
-
-function getConfiguredManagedSourceFetcher(): ManagedSourceFetcher | null {
-  if (!TALK_CONTEXT_MANAGED_FETCH_ENABLED) return null;
-  logger.warn(
-    '[source-ingestion] Managed source fetch is enabled, but no managed provider is configured.',
-  );
-  return null;
 }
 
 export function createDefaultTalkContextSourceIngestionService(
@@ -568,63 +510,9 @@ function extractText(body: string, contentType: string): string {
   }
 }
 
-function hostnameMatches(hostname: string, candidates: string[]): boolean {
-  return candidates.some(
-    (candidate) => hostname === candidate || hostname.endsWith(`.${candidate}`),
-  );
-}
-
-function shouldPreferBrowserForUrl(url: string): boolean {
-  try {
-    const hostname = new URL(url).hostname.toLowerCase();
-    return hostnameMatches(hostname, TALK_CONTEXT_BROWSER_PREFER_HOSTS);
-  } catch {
-    return false;
-  }
-}
-
-function shouldDisableBrowserForUrl(url: string): boolean {
-  try {
-    const hostname = new URL(url).hostname.toLowerCase();
-    return hostnameMatches(hostname, TALK_CONTEXT_BROWSER_DISABLE_HOSTS);
-  } catch {
-    return false;
-  }
-}
-
 function looksLikeChallengePage(html: string): boolean {
   const normalized = html.toLowerCase();
   return CHALLENGE_MARKERS.some((marker) => normalized.includes(marker));
-}
-
-function shouldAttemptBrowserFallback(input: {
-  url: string;
-  fetchResult?: FetchResult | null;
-  extractedText?: string | null;
-  httpError?: SourceIngestionError | Error | null;
-}): boolean {
-  if (shouldDisableBrowserForUrl(input.url)) return false;
-  if (shouldPreferBrowserForUrl(input.url)) return true;
-
-  if (input.httpError) {
-    if (
-      input.httpError instanceof SourceIngestionError &&
-      ['invalid_scheme', 'ssrf_blocked', 'dns_resolution_failed'].includes(
-        input.httpError.code,
-      )
-    ) {
-      return false;
-    }
-    return true;
-  }
-
-  if (!input.fetchResult || input.fetchResult.contentType !== 'text/html') {
-    return false;
-  }
-
-  if (looksLikeChallengePage(input.fetchResult.body)) return true;
-
-  return (input.extractedText?.trim().length ?? 0) < MIN_USEFUL_EXTRACTED_TEXT;
 }
 
 function formatStageError(err: unknown): string {
@@ -635,64 +523,25 @@ function formatStageError(err: unknown): string {
   return String(err);
 }
 
-function finalStrategyForFailure(input: {
-  managedAttempted: boolean;
-  browserAttempted: boolean;
-}): ContextSourceFetchStrategy | null {
-  if (input.managedAttempted) return 'managed';
-  if (input.browserAttempted) return 'browser';
-  return 'http';
-}
-
-export async function ingestUrlSourceWithBrowser(
-  sourceId: string,
-  url: string,
-  options?: {
-    browserFetcher?: BrowserSourceFetcher;
-    updateExtraction?: typeof updateSourceExtraction;
-    fetchedAt?: string;
-  },
-): Promise<BrowserSourceFetchResult> {
-  const browserFetcher =
-    options?.browserFetcher || DEFAULT_BROWSER_SOURCE_FETCHER;
-  const updateExtractionFn =
-    options?.updateExtraction || updateSourceExtraction;
-  const fetchedAt = options?.fetchedAt ?? new Date().toISOString();
-  const result = await browserFetcher.fetch({
-    url,
-    timeoutMs: TALK_CONTEXT_BROWSER_TIMEOUT_MS,
-  });
-
-  if (!result.extractedText.trim()) {
-    throw new SourceIngestionError(
-      'browser_empty',
-      'Browser fallback rendered the page, but extracted no useful text.',
-    );
-  }
-
-  await updateExtractionFn({
-    sourceId,
-    extractedText: result.extractedText,
-    extractionError: null,
-    mimeType: result.contentType,
-    fetchStrategy: 'browser',
-    fetchedAt,
-  });
-
-  return result;
-}
-
 // ---------------------------------------------------------------------------
 // Ingestion entry point
 // ---------------------------------------------------------------------------
 
 /**
- * Fetches a URL source, extracts text, and updates the database record.
- * This is designed to be called from a background queue/worker.
+ * Fetches a URL source over HTTP, extracts text, and updates the database
+ * record.
  *
- * On success: source status → ready, extracted text stored.
- * On failure: extraction_error written; if last-good content exists,
- * status stays ready; otherwise status → failed.
+ * There is no browser / headless-render fallback in this build (the ClawTalk
+ * chassis was removed), so a page that HTTP can't turn into useful text — an
+ * HTTP error, a bot-challenge interstitial, or a thin JavaScript-rendered
+ * shell — fails with an actionable message instead of being stored as junk or
+ * hard-failing with an internal "browser disabled" error. Content-rich pages
+ * (articles, docs, plain text, PDFs) are served as real HTML/text and ingest
+ * directly over HTTP.
+ *
+ * On success: extracted text stored, source status → ready.
+ * On failure: extraction_error written; status → failed unless the accessor
+ * still has last-good content to preserve.
  */
 export async function ingestUrlSource(
   sourceId: string,
@@ -700,152 +549,67 @@ export async function ingestUrlSource(
   deps?: UrlSourceIngestionDependencies,
 ): Promise<void> {
   const httpFetcher = deps?.httpFetcher ?? safeFetchUrl;
-  const browserFetcher = deps?.browserFetcher ?? DEFAULT_BROWSER_SOURCE_FETCHER;
-  const managedFetcher =
-    deps?.managedFetcher ?? getConfiguredManagedSourceFetcher();
   const updateExtractionFn = deps?.updateExtraction ?? updateSourceExtraction;
   const fetchedAt = new Date().toISOString();
-  let httpError: SourceIngestionError | Error | null = null;
-  let browserError: Error | null = null;
-  let managedError: Error | null = null;
-  let browserAttempted = false;
-  let managedAttempted = false;
-  let httpFallback: {
-    extractedText: string;
-    contentType: string;
-    isChallenge: boolean;
-  } | null = null;
-  let shouldPreferBrowser = false;
 
   try {
     const result = await httpFetcher(url);
+
+    // An HTML response can be a bot-challenge interstitial or a thin JS shell
+    // that carries no real article text (a SPA, or a publication home page).
+    // With no browser to render it, classify those as honest failures rather
+    // than storing the interstitial / boilerplate as content. Plain-text and
+    // PDF responses are passed through as-is (no JS-shell concern).
+    if (
+      result.contentType === 'text/html' &&
+      looksLikeChallengePage(result.body)
+    ) {
+      throw new SourceIngestionError(
+        'challenge_page',
+        'The site returned a bot-challenge or JavaScript interstitial instead of readable content, so no text could be extracted.',
+      );
+    }
+
     const extracted = extractText(result.body, result.contentType);
-    httpFallback = {
-      extractedText: extracted,
-      contentType: result.contentType,
-      // Classify on the RAW body once; the fallback gate below reuses this so
-      // its decision matches shouldAttemptBrowserFallback (which also inspects
-      // the raw body) instead of re-scanning stripped text, where tag-context
-      // markers like `<title>just a moment` can no longer match.
-      isChallenge: looksLikeChallengePage(result.body),
-    };
-    shouldPreferBrowser = shouldAttemptBrowserFallback({
-      url,
-      fetchResult: result,
-      extractedText: extracted,
-    });
 
-    if (!shouldPreferBrowser) {
-      await updateExtractionFn({
-        sourceId,
-        extractedText: extracted,
-        extractionError: null,
-        mimeType: result.contentType,
-        fetchStrategy: 'http',
-        fetchedAt,
-      });
-
-      logger.info(
-        `[source-ingestion] URL source ${sourceId} ingested successfully ` +
-          `(${extracted.length} chars, type=${result.contentType}, strategy=http).`,
+    if (
+      result.contentType === 'text/html' &&
+      extracted.trim().length < MIN_USEFUL_EXTRACTED_TEXT
+    ) {
+      throw new SourceIngestionError(
+        'insufficient_content',
+        'Could not extract readable text from this page — it may be a ' +
+          'JavaScript-rendered app or a thin landing page. Try referencing a ' +
+          'specific article or page rather than a site homepage.',
       );
-      return;
     }
-  } catch (err) {
-    httpError = err instanceof Error ? err : new Error(String(err));
-  }
 
-  if (
-    shouldPreferBrowser ||
-    shouldAttemptBrowserFallback({
-      url,
-      httpError,
-    })
-  ) {
-    browserAttempted = true;
-    try {
-      const browserResult = await ingestUrlSourceWithBrowser(sourceId, url, {
-        browserFetcher,
-        updateExtraction: updateExtractionFn,
-        fetchedAt,
-      });
-
-      logger.info(
-        `[source-ingestion] URL source ${sourceId} ingested successfully ` +
-          `(${browserResult.extractedText.length} chars, type=${browserResult.contentType}, strategy=browser).`,
-      );
-      return;
-    } catch (err) {
-      browserError = err instanceof Error ? err : new Error(String(err));
-    }
-  }
-
-  if (managedFetcher) {
-    managedAttempted = true;
-    try {
-      const managedResult = await managedFetcher.fetch({
-        url,
-        timeoutMs: TALK_CONTEXT_MANAGED_FETCH_TIMEOUT_MS,
-      });
-      await updateExtractionFn({
-        sourceId,
-        extractedText: managedResult.extractedText,
-        extractionError: null,
-        mimeType: managedResult.contentType,
-        fetchStrategy: 'managed',
-        fetchedAt,
-      });
-
-      logger.info(
-        `[source-ingestion] URL source ${sourceId} ingested successfully ` +
-          `(${managedResult.extractedText.length} chars, type=${managedResult.contentType}, strategy=managed).`,
-      );
-      return;
-    } catch (err) {
-      managedError = err instanceof Error ? err : new Error(String(err));
-    }
-  }
-
-  if (
-    httpFallback &&
-    !httpFallback.isChallenge &&
-    httpFallback.extractedText.trim().length >= MIN_USEFUL_EXTRACTED_TEXT
-  ) {
     await updateExtractionFn({
       sourceId,
-      extractedText: httpFallback.extractedText,
+      extractedText: extracted,
       extractionError: null,
-      mimeType: httpFallback.contentType,
+      mimeType: result.contentType,
+      fetchStrategy: 'http',
+      fetchedAt,
+    });
+
+    logger.info(
+      `[source-ingestion] URL source ${sourceId} ingested successfully ` +
+        `(${extracted.length} chars, type=${result.contentType}, strategy=http).`,
+    );
+  } catch (err) {
+    const message = formatStageError(err);
+    await updateExtractionFn({
+      sourceId,
+      extractedText: null,
+      extractionError: message,
       fetchStrategy: 'http',
       fetchedAt,
     });
     logger.warn(
-      `[source-ingestion] URL source ${sourceId} fell back to HTTP extraction after browser/managed failure.`,
+      `[source-ingestion] URL source ${sourceId} ingestion failed: ${message}`,
     );
-    return;
   }
-
-  const messageParts = [
-    httpError ? `http: ${formatStageError(httpError)}` : null,
-    browserError ? `browser: ${formatStageError(browserError)}` : null,
-    managedError ? `managed: ${formatStageError(managedError)}` : null,
-  ].filter(Boolean);
-  const message = messageParts.join(' | ') || 'Unknown URL ingestion failure.';
-
-  await updateExtractionFn({
-    sourceId,
-    extractedText: null,
-    extractionError: message,
-    fetchStrategy: finalStrategyForFailure({
-      browserAttempted,
-      managedAttempted,
-    }),
-    fetchedAt,
-  });
-
-  logger.warn(
-    `[source-ingestion] URL source ${sourceId} ingestion failed: ${message}`,
-  );
 }
 
 /**
