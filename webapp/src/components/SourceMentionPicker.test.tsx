@@ -6,6 +6,7 @@ import {
   buildSourceMentionOptions,
   type SourceMentionOption,
 } from './SourceMentionPicker';
+import { getSourceDisplayRef } from './sourceDisplay';
 import type { ContextSource } from '../lib/api';
 
 afterEach(() => cleanup());
@@ -151,6 +152,55 @@ describe('buildSourceMentionOptions', () => {
     expect(byRef.find((o) => o.kind === 'source')?.source.id).toBe('s2');
   });
 
+  it('filters raw UUID-backed sources by their human-readable display label', () => {
+    const options = buildSourceMentionOptions({
+      sources: [
+        makeSource({
+          id: '0c111111-2222-4333-8444-555555555555',
+          sourceRef: '0c111111-2222-4333-8444-555555555555',
+          title: 'Investor memo',
+          sortOrder: 0,
+        }),
+      ],
+      filter: 'source',
+      contentTitle: null,
+    });
+
+    expect(options).toHaveLength(1);
+    expect(options[0]).toMatchObject({
+      kind: 'source',
+      source: { id: '0c111111-2222-4333-8444-555555555555' },
+    });
+  });
+
+  it('labels raw UUID-backed sources by full source-list order so panel and picker match', () => {
+    const options = buildSourceMentionOptions({
+      sources: [
+        makeSource({
+          id: 'pending',
+          sourceRef: '0c000000-2222-4333-8444-555555555555',
+          title: 'Pending source',
+          status: 'pending',
+          sortOrder: 0,
+        }),
+        makeSource({
+          id: '0c111111-2222-4333-8444-555555555555',
+          sourceRef: '0c111111-2222-4333-8444-555555555555',
+          title: 'Investor memo',
+          sortOrder: 5,
+        }),
+      ],
+      filter: '',
+      contentTitle: null,
+    });
+
+    expect(options).toHaveLength(1);
+    expect(options[0]).toMatchObject({
+      kind: 'source',
+      displayRef: 'Source 2',
+    });
+  });
+
   it('does not offer @doc when filter excludes it', () => {
     const options = buildSourceMentionOptions({
       sources: [],
@@ -178,14 +228,17 @@ describe('SourceMentionPicker', () => {
   function makeSourceOption(
     overrides?: Partial<ContextSource> & { id?: string },
   ): SourceMentionOption {
+    const source = makeSource({
+      id: overrides?.id ?? 's1',
+      title: overrides?.title ?? 'Design Notes',
+      sourceRef: overrides?.sourceRef ?? 'S1',
+      sortOrder: overrides?.sortOrder,
+    });
     return {
       kind: 'source',
       insertion: '@design-notes ',
-      source: makeSource({
-        id: overrides?.id ?? 's1',
-        title: overrides?.title ?? 'Design Notes',
-        sourceRef: overrides?.sourceRef ?? 'S1',
-      }),
+      source,
+      displayRef: getSourceDisplayRef(source, 0),
     };
   }
 
@@ -202,6 +255,73 @@ describe('SourceMentionPicker', () => {
     expect(screen.getByText('@doc')).toBeInTheDocument();
     expect(screen.getByText('Design Notes')).toBeInTheDocument();
     expect(screen.getByText('S1')).toBeInTheDocument();
+  });
+
+  it('renders raw UUID source refs as human-readable labels', () => {
+    render(
+      <SourceMentionPicker
+        options={[
+          makeSourceOption({
+            id: '0c111111-2222-4333-8444-555555555555',
+            sourceRef: '0c111111-2222-4333-8444-555555555555',
+            title: 'Investor memo',
+            sortOrder: 0,
+          }),
+        ]}
+        selectedIndex={0}
+        onSelect={() => undefined}
+        onDismiss={() => undefined}
+      />,
+    );
+
+    expect(screen.getByText('Source 1')).toBeInTheDocument();
+    expect(
+      screen.queryByText('0c111111-2222-4333-8444-555555555555'),
+    ).not.toBeInTheDocument();
+  });
+
+  it('keeps raw UUID insertion for ambiguous source slugs while displaying a readable label', () => {
+    const options = buildSourceMentionOptions({
+      sources: [
+        makeSource({
+          id: '0c111111-2222-4333-8444-555555555555',
+          sourceRef: '0c111111-2222-4333-8444-555555555555',
+          title: 'Notes',
+          sortOrder: 0,
+        }),
+        makeSource({
+          id: '0c222222-2222-4333-8444-555555555555',
+          sourceRef: '0c222222-2222-4333-8444-555555555555',
+          title: 'NOTES',
+          sortOrder: 1,
+        }),
+      ],
+      filter: '',
+      contentTitle: null,
+    });
+    const firstSource = options.find(
+      (option): option is SourceMentionOption & { kind: 'source' } =>
+        option.kind === 'source' &&
+        option.source.id === '0c111111-2222-4333-8444-555555555555',
+    );
+
+    expect(firstSource?.insertion).toBe(
+      '@0c111111-2222-4333-8444-555555555555 ',
+    );
+
+    render(
+      <SourceMentionPicker
+        options={options}
+        selectedIndex={0}
+        onSelect={() => undefined}
+        onDismiss={() => undefined}
+      />,
+    );
+    expect(screen.getByText('Source 1')).toBeInTheDocument();
+    expect(screen.getByText('Source 2')).toBeInTheDocument();
+    expect(
+      screen.queryByText('0c111111-2222-4333-8444-555555555555'),
+    ).not.toBeInTheDocument();
   });
 
   it('marks the selectedIndex option with aria-selected', () => {

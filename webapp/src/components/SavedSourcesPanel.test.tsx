@@ -83,6 +83,51 @@ describe('SavedSourcesPanel', () => {
     expect(screen.getByText(/120 chars extracted/)).toBeInTheDocument();
   });
 
+  it('shows a human-readable label instead of a raw UUID source ref', () => {
+    const source = makeSource({
+      id: '0c111111-2222-4333-8444-555555555555',
+      sourceRef: '0c111111-2222-4333-8444-555555555555',
+      title: 'Investor memo',
+      sortOrder: 0,
+    });
+    render(
+      <SavedSourcesPanel
+        talkId="t1"
+        sources={[source]}
+        setSources={() => undefined}
+        canEdit
+        hasVisionNonDocAgent={false}
+        onUnauthorized={() => undefined}
+      />,
+    );
+
+    expect(screen.getByText('Source 1')).toBeInTheDocument();
+    expect(
+      screen.queryByText('0c111111-2222-4333-8444-555555555555'),
+    ).not.toBeInTheDocument();
+  });
+
+  it('labels raw UUID source refs by rendered row order instead of stored sort order', () => {
+    const source = makeSource({
+      id: '0c111111-2222-4333-8444-555555555555',
+      sourceRef: '0c111111-2222-4333-8444-555555555555',
+      title: 'Investor memo',
+      sortOrder: 5,
+    });
+    render(
+      <SavedSourcesPanel
+        talkId="t1"
+        sources={[source]}
+        setSources={() => undefined}
+        canEdit
+        hasVisionNonDocAgent={false}
+        onUnauthorized={() => undefined}
+      />,
+    );
+
+    expect(screen.getByText('Source 1')).toBeInTheDocument();
+  });
+
   it('shows the routing-hint placeholder when note is empty', () => {
     const source = makeSource({ id: 's1', note: null });
     render(
@@ -210,7 +255,7 @@ describe('SavedSourcesPanel', () => {
     expect(patchMock).not.toHaveBeenCalled();
   });
 
-  it('renders the @-ref guidance in the panel header', () => {
+  it('renders the @ picker guidance in the panel header', () => {
     render(
       <SavedSourcesPanel
         talkId="t1"
@@ -221,8 +266,8 @@ describe('SavedSourcesPanel', () => {
         onUnauthorized={() => undefined}
       />,
     );
-    // The panel header explains @-ref usage to users.
-    expect(screen.getByText(/@S1/)).toBeInTheDocument();
+    // The panel header explains @ picker usage to users.
+    expect(screen.getByText(/@ picker/)).toBeInTheDocument();
     expect(screen.getByText(/@title-slug/)).toBeInTheDocument();
   });
 });

@@ -162,6 +162,59 @@ async function assignDisabledModelToAgent(input: {
   `;
 }
 
+async function assignDisabledProviderModelToAgent(input: {
+  workspaceId: string;
+  agentId: string;
+}): Promise<void> {
+  const db = getDbPg();
+  const suffix = input.agentId.slice(0, 8);
+  const providerId = `test.disabled-chat-provider-${suffix}`;
+  const modelId = `disabled-chat-provider-model-${suffix}`;
+  await db`
+    insert into public.llm_providers (
+      id, name, provider_kind, api_format, base_url, auth_scheme, enabled
+    )
+    values (
+      ${providerId},
+      'Disabled chat provider',
+      'custom',
+      'openai_chat_completions',
+      'mock://disabled-chat-provider',
+      'bearer',
+      false
+    )
+    on conflict (id) do update set
+      enabled = false,
+      name = excluded.name
+  `;
+  await db`
+    insert into public.llm_provider_models (
+      provider_id, model_id, display_name, context_window_tokens,
+      default_max_output_tokens, default_ttft_timeout_ms, enabled,
+      capabilities_json
+    )
+    values (
+      ${providerId},
+      ${modelId},
+      'Disabled-provider chat regression model',
+      128000,
+      4096,
+      30000,
+      true,
+      '{}'::jsonb
+    )
+    on conflict (provider_id, model_id) do update set
+      enabled = true,
+      display_name = excluded.display_name
+  `;
+  await db`
+    update public.agents
+    set model_id = ${modelId}
+    where workspace_id = ${input.workspaceId}::uuid
+      and id = ${input.agentId}::uuid
+  `;
+}
+
 describe('greenfield chat routes', () => {
   beforeAll(async () => {
     await initPgDatabase();
@@ -260,6 +313,47 @@ describe('greenfield chat routes', () => {
     });
 
     // Fails closed at enqueue: no message, run, or frozen snapshot is created.
+    const db = getDbPg();
+    const counts = await db<
+      Array<{
+        message_count: number;
+        run_count: number;
+        snapshot_count: number;
+      }>
+    >`
+      select
+        (select count(*)::int from public.messages where talk_id = ${talkId}::uuid) as message_count,
+        (select count(*)::int from public.runs where talk_id = ${talkId}::uuid) as run_count,
+        (select count(*)::int from public.talk_agent_snapshots where talk_id = ${talkId}::uuid) as snapshot_count
+    `;
+    expect(counts[0]).toMatchObject({
+      message_count: 0,
+      run_count: 0,
+      snapshot_count: 0,
+    });
+  });
+
+  it('rejects chat enqueue when a targeted agent provider is disabled', async () => {
+    const { workspaceId, talkId, agentIds } = await createTalkFixture();
+    await assignDisabledProviderModelToAgent({
+      workspaceId,
+      agentId: agentIds[0]!,
+    });
+
+    const result = await enqueueGreenfieldChatRoute({
+      auth: auth(),
+      workspaceId,
+      talkId,
+      content: 'Should not enqueue against a disabled provider.',
+      targetAgentIds: [agentIds[0]!],
+      threadId: talkId,
+    });
+
+    expect(result.statusCode).toBe(409);
+    expect(result.body.ok ? null : result.body.error).toMatchObject({
+      code: 'agent_model_not_found',
+    });
+
     const db = getDbPg();
     const counts = await db<
       Array<{

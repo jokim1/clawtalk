@@ -366,7 +366,7 @@ export async function enqueueGreenfieldChatRoute(input: {
           return error(
             409,
             'agent_model_not_found',
-            'A selected agent references a model that is not available.',
+            'A selected agent references a model or provider that is not available.',
           );
         }
         return error(

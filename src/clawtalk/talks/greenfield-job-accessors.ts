@@ -928,11 +928,14 @@ async function loadRoster(input: {
       on a.workspace_id = ta.workspace_id
      and a.id = ta.agent_id
     left join lateral (
-      select provider_id
-      from public.llm_provider_models
-      where model_id = a.model_id
-        and enabled = true
-      order by provider_id asc
+      select lpm.provider_id
+      from public.llm_provider_models lpm
+      join public.llm_providers lp
+        on lp.id = lpm.provider_id
+       and lp.enabled = true
+      where lpm.model_id = a.model_id
+        and lpm.enabled = true
+      order by lpm.provider_id asc
       limit 1
     ) lpm on true
     where ta.workspace_id = ${input.workspaceId}::uuid
@@ -996,7 +999,7 @@ async function getDependencyIssue(input: {
   if (!target.provider_id) {
     return {
       code: 'model_disabled',
-      message: 'The selected agent model is not available.',
+      message: 'The selected agent model or provider is not available.',
     };
   }
   const mutatingToolId = getMutatingJobToolId(input.sourceScope);
@@ -2084,7 +2087,7 @@ async function claimDueGreenfieldJobRun(input: {
       const targetIssue: GreenfieldJobDependencyIssue = {
         code: target ? 'model_disabled' : 'agent_missing',
         message: target
-          ? 'The selected agent model is not available.'
+          ? 'The selected agent model or provider is not available.'
           : 'The selected Talk agent is no longer available on this talk.',
       };
       await blockDueGreenfieldJobOnSql({
@@ -2490,7 +2493,7 @@ export async function createGreenfieldJobRunNow(input: {
         const targetIssue: GreenfieldJobDependencyIssue = {
           code: target ? 'model_disabled' : 'agent_missing',
           message: target
-            ? 'The selected agent model is not available.'
+            ? 'The selected agent model or provider is not available.'
             : 'The selected Talk agent is no longer available on this talk.',
         };
         await markGreenfieldJobBlockedOnSql({

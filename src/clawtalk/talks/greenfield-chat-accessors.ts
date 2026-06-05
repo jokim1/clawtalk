@@ -210,11 +210,14 @@ export async function enqueueGreenfieldChatTurn(input: {
         on a.workspace_id = ta.workspace_id
        and a.id = ta.agent_id
       left join lateral (
-        select provider_id
-        from public.llm_provider_models
-        where model_id = a.model_id
-          and enabled = true
-        order by provider_id asc
+        select lpm.provider_id
+        from public.llm_provider_models lpm
+        join public.llm_providers lp
+          on lp.id = lpm.provider_id
+         and lp.enabled = true
+        where lpm.model_id = a.model_id
+          and lpm.enabled = true
+        order by lpm.provider_id asc
         limit 1
       ) lpm on true
       where ta.workspace_id = ${input.workspaceId}::uuid
