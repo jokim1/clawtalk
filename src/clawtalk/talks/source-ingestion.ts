@@ -7,16 +7,11 @@
  *  - Status updates via an injected extraction updater
  */
 
-import { URL } from 'url';
-import net from 'net';
-import dns from 'dns/promises';
-import http from 'http';
-import https from 'https';
-
 import {
   TALK_CONTEXT_BROWSER_DISABLE_HOSTS,
   TALK_CONTEXT_BROWSER_PREFER_HOSTS,
   TALK_CONTEXT_BROWSER_TIMEOUT_MS,
+  TALK_CONTEXT_DOH_ENDPOINT,
   TALK_CONTEXT_MANAGED_FETCH_ENABLED,
   TALK_CONTEXT_MANAGED_FETCH_TIMEOUT_MS,
 } from '../config.js';
@@ -54,109 +49,191 @@ const CHALLENGE_MARKERS = [
 // SSRF protection
 // ---------------------------------------------------------------------------
 
+function isIpv4Literal(value: string): boolean {
+  const match = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(value);
+  if (!match) return false;
+  return match.slice(1, 5).every((part) => Number(part) <= 255);
+}
+
 /**
- * Returns true if an IP address is in a blocked range (loopback, private,
- * link-local, multicast, or unspecified).
+ * Normalizes an IPv6 string to its canonical compressed form via the WHATWG
+ * URL parser (available on Node and Workers). Returns null for non-IPv6 input.
+ * Collapsing expanded / non-canonical forms (`::01`, `0:0:0:0:0:ffff:7f00:1`)
+ * is what keeps the blocklist prefix checks below from being bypassed.
  */
-function isBlockedIp(ip: string): boolean {
-  // IPv4
-  if (net.isIPv4(ip)) {
-    const parts = ip.split('.').map(Number);
-    const [a, b] = parts;
+function canonicalizeIpv6(value: string): string | null {
+  try {
+    const host = new URL(`http://[${value}]/`).hostname;
+    const inner =
+      host.startsWith('[') && host.endsWith(']') ? host.slice(1, -1) : host;
+    return inner.includes(':') ? inner.toLowerCase() : null;
+  } catch {
+    return null;
+  }
+}
 
-    // 127.0.0.0/8
-    if (a === 127) return true;
-    // 10.0.0.0/8
-    if (a === 10) return true;
-    // 172.16.0.0/12
-    if (a === 172 && b >= 16 && b <= 31) return true;
-    // 192.168.0.0/16
-    if (a === 192 && b === 168) return true;
-    // 169.254.0.0/16 (link-local)
-    if (a === 169 && b === 254) return true;
-    // 224.0.0.0/4 (multicast)
-    if (a >= 224 && a <= 239) return true;
-    // 0.0.0.0
-    if (a === 0) return true;
+/**
+ * Returns true if an IP literal is in a blocked range (loopback, private,
+ * link-local, multicast, unspecified, or IPv6 ULA/link-local/multicast).
+ * Non-IP input (e.g. a CNAME target hostname) is treated as blocked
+ * (fail-closed). Pure string parsing — no `node:net` dependency — so it is
+ * identical on Node and the Cloudflare Workers runtime.
+ */
+export function isBlockedIp(ip: string): boolean {
+  const value = ip.trim();
 
+  // IPv4 (dotted quad)
+  if (isIpv4Literal(value)) {
+    const [a, b] = value.split('.').map(Number);
+    if (a === 127) return true; // 127.0.0.0/8 loopback
+    if (a === 10) return true; // 10.0.0.0/8 private
+    if (a === 172 && b >= 16 && b <= 31) return true; // 172.16.0.0/12 private
+    if (a === 192 && b === 168) return true; // 192.168.0.0/16 private
+    if (a === 169 && b === 254) return true; // 169.254.0.0/16 link-local
+    if (a >= 224 && a <= 239) return true; // 224.0.0.0/4 multicast
+    if (a === 0) return true; // 0.0.0.0 unspecified
     return false;
   }
 
-  // IPv6
-  if (net.isIPv6(ip)) {
-    const normalized = ip.toLowerCase();
-    // ::1 loopback
-    if (
-      normalized === '::1' ||
-      normalized === '0000:0000:0000:0000:0000:0000:0000:0001'
-    ) {
-      return true;
-    }
-    // :: unspecified
-    if (normalized === '::') return true;
-    // fe80::/10 link-local
-    if (normalized.startsWith('fe80:') || normalized.startsWith('fe80')) {
-      return true;
-    }
-    // fc00::/7 unique-local
+  // IPv6 (any colon-containing literal). Canonicalize first so expanded /
+  // non-canonical forms can't slip past the prefix checks below.
+  if (value.includes(':')) {
+    const normalized = canonicalizeIpv6(value);
+    if (!normalized) return true; // not a valid IPv6 literal → fail-closed
+    if (normalized === '::1') return true; // loopback
+    if (normalized === '::') return true; // unspecified
+    if (/^fe[89ab]/.test(normalized)) return true; // fe80::/10 link-local
     if (normalized.startsWith('fc') || normalized.startsWith('fd')) {
-      return true;
+      return true; // fc00::/7 unique-local
     }
-    // ff00::/8 multicast
-    if (normalized.startsWith('ff')) return true;
-    // IPv4-mapped ::ffff:x.x.x.x
-    const v4Match = normalized.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/);
-    if (v4Match) return isBlockedIp(v4Match[1]);
-
+    if (normalized.startsWith('ff')) return true; // ff00::/8 multicast
+    // IPv4-mapped (canonical serialization is the hex form `::ffff:7f00:1`;
+    // the dotted form is accepted defensively).
+    const mappedHex = normalized.match(
+      /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/,
+    );
+    if (mappedHex) {
+      const hi = parseInt(mappedHex[1], 16);
+      const lo = parseInt(mappedHex[2], 16);
+      return isBlockedIp(
+        `${(hi >> 8) & 255}.${hi & 255}.${(lo >> 8) & 255}.${lo & 255}`,
+      );
+    }
+    const mappedDotted = normalized.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/);
+    if (mappedDotted) return isBlockedIp(mappedDotted[1]);
     return false;
   }
 
-  // Unknown format → block
+  // Unknown format (e.g. a CNAME target hostname) → block (fail-closed).
   return true;
 }
 
 /**
- * Resolves a hostname and validates that no resolved address is in a blocked
- * IP range. Returns the first safe address.
+ * Resolves a hostname to its terminal A/AAAA addresses via DNS-over-HTTPS.
+ *
+ * Used instead of `node:dns.lookup` because the Cloudflare Workers runtime's
+ * `dns.lookup` mixes CNAME target strings into its results (which the SSRF
+ * check then fail-closes on) and its companion `node:http` socket pinning does
+ * not work on Workers. DoH is a plain `fetch()` — Workers-native — and follows
+ * CNAME chains itself, returning the final A/AAAA records in `Answer`.
  */
-async function resolveAndValidateHost(hostname: string): Promise<string> {
-  // If it's already an IP literal, validate directly
-  if (net.isIP(hostname)) {
-    if (isBlockedIp(hostname)) {
+async function resolveViaDoh(hostname: string): Promise<string[]> {
+  const addresses: string[] = [];
+  for (const recordType of ['A', 'AAAA'] as const) {
+    const query = `${TALK_CONTEXT_DOH_ENDPOINT}?name=${encodeURIComponent(
+      hostname,
+    )}&type=${recordType}`;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+    try {
+      const res = await fetch(query, {
+        headers: { accept: 'application/dns-json' },
+        signal: controller.signal,
+      });
+      if (!res.ok) {
+        throw new SourceIngestionError(
+          'dns_resolution_failed',
+          `DoH ${recordType} lookup for ${hostname} returned HTTP ${res.status}.`,
+        );
+      }
+      const data = (await res.json()) as {
+        Answer?: Array<{ type?: number; data?: string }>;
+      };
+      for (const answer of data.Answer ?? []) {
+        // type 1 = A, type 28 = AAAA. Ignore type 5 (CNAME) — resolving those
+        // as IPs is exactly the bug this replaces.
+        if ((answer.type === 1 || answer.type === 28) && answer.data) {
+          addresses.push(answer.data.trim());
+        }
+      }
+    } catch (err) {
+      // Any failure — network, timeout/abort, non-OK, or malformed JSON/shape
+      // — is a resolution failure. Fail closed so it is never treated as an
+      // ordinary HTTP error (which would route to the browser fallback).
+      if (err instanceof SourceIngestionError) throw err;
       throw new SourceIngestionError(
-        'ssrf_blocked',
-        `Address ${hostname} is in a blocked IP range.`,
+        'dns_resolution_failed',
+        `DoH ${recordType} lookup for ${hostname} failed: ${String(err)}`,
       );
+    } finally {
+      clearTimeout(timer);
     }
-    return hostname;
   }
+  return addresses;
+}
 
-  // Lowercase check for "localhost"
-  if (hostname.toLowerCase() === 'localhost') {
+/**
+ * SSRF gate for a single URL hop. Rejects `localhost` and any host — IP literal
+ * or DNS-resolved — that maps to a blocked IP range.
+ *
+ * Workers caveat: this validates the resolved IPs but cannot pin them to the
+ * subsequent `fetch()` connection (Workers `fetch()` re-resolves internally),
+ * so a validate-then-connect rebinding window exists. Accepted here because a
+ * Worker's public `fetch()` cannot reach an internal network or cloud-metadata
+ * endpoint (no adjacent private network), and the input is the operator's own
+ * pasted URL. Fails closed on DoH errors.
+ */
+async function validateHost(hostname: string): Promise<void> {
+  // Strip a trailing FQDN-root dot ("localhost." / "foo.localhost.") so the
+  // loopback-name check can't be sidestepped with a trailing dot.
+  const lower = hostname.toLowerCase().replace(/\.$/, '');
+  if (lower === 'localhost' || lower.endsWith('.localhost')) {
     throw new SourceIngestionError(
       'ssrf_blocked',
-      `Hostname "localhost" is blocked.`,
+      `Hostname "${hostname}" is blocked.`,
     );
   }
 
-  const result = await dns.lookup(hostname, { all: true });
-  if (result.length === 0) {
+  // IP-literal host (URL.hostname brackets IPv6) — validate directly, no DNS.
+  const literal =
+    hostname.startsWith('[') && hostname.endsWith(']')
+      ? hostname.slice(1, -1)
+      : hostname;
+  if (isIpv4Literal(literal) || literal.includes(':')) {
+    if (isBlockedIp(literal)) {
+      throw new SourceIngestionError(
+        'ssrf_blocked',
+        `Address ${literal} is in a blocked IP range.`,
+      );
+    }
+    return;
+  }
+
+  const addresses = await resolveViaDoh(hostname);
+  if (addresses.length === 0) {
     throw new SourceIngestionError(
       'dns_resolution_failed',
       `Could not resolve hostname: ${hostname}`,
     );
   }
-
-  for (const entry of result) {
-    if (isBlockedIp(entry.address)) {
+  for (const address of addresses) {
+    if (isBlockedIp(address)) {
       throw new SourceIngestionError(
         'ssrf_blocked',
-        `Resolved address ${entry.address} for ${hostname} is in a blocked IP range.`,
+        `Resolved address ${address} for ${hostname} is in a blocked IP range.`,
       );
     }
   }
-
-  return result[0].address;
 }
 
 // ---------------------------------------------------------------------------
@@ -255,118 +332,45 @@ export function createDefaultTalkContextSourceIngestionService(
 }
 
 /**
- * Makes a single HTTP/HTTPS request using Node's native modules with a
- * custom DNS `lookup` callback that returns only the pre-validated IP.
- *
- * This is the connect-time SSRF enforcement: the resolved IP is bound to
- * the actual socket, preventing DNS rebinding. For HTTPS, TLS SNI and
- * certificate validation use the original hostname automatically because
- * the hostname stays in the URL — only the DNS resolution is overridden.
+ * Reads a response body as UTF-8 text, aborting early if it exceeds `cap`
+ * bytes. Web-stream based (no `node:buffer`) so it runs on the Workers runtime.
  */
-function nodeRequest(
-  url: URL,
-  resolvedIp: string,
-): Promise<{
-  status: number;
-  headers: http.IncomingHttpHeaders;
-  body: Buffer;
-}> {
-  return new Promise((resolve, reject) => {
-    const isHttps = url.protocol === 'https:';
-    const mod = isHttps ? https : http;
-    if (!resolvedIp) {
-      reject(
-        new SourceIngestionError(
-          'dns_resolution_failed',
-          `Could not resolve hostname: ${url.hostname}`,
-        ),
+async function readBodyWithCap(res: Response, cap: number): Promise<string> {
+  const reader = res.body?.getReader();
+  if (!reader) return '';
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (!value) continue;
+    total += value.byteLength;
+    if (total > cap) {
+      await reader.cancel().catch(() => undefined);
+      throw new SourceIngestionError(
+        'response_too_large',
+        `Response exceeds ${cap} byte limit.`,
       );
-      return;
     }
-
-    const req = mod.request(
-      {
-        protocol: url.protocol,
-        hostname: resolvedIp,
-        port: url.port.length > 0 ? Number(url.port) : isHttps ? 443 : 80,
-        path: `${url.pathname}${url.search}`,
-        method: 'GET',
-        headers: {
-          Host: url.host,
-          'User-Agent': 'RocketClaw-SourceIngestion/1.0',
-          Accept: 'text/html, text/plain, application/pdf, */*',
-        },
-        timeout: FETCH_TIMEOUT_MS,
-        servername: isHttps ? url.hostname : undefined,
-        family: net.isIPv6(resolvedIp) ? 6 : 4,
-      },
-      (res) => {
-        const chunks: Buffer[] = [];
-        let totalBytes = 0;
-        let destroyed = false;
-
-        res.on('data', (chunk: Buffer) => {
-          totalBytes += chunk.length;
-          if (totalBytes > MAX_RESPONSE_BYTES) {
-            destroyed = true;
-            res.destroy();
-            reject(
-              new SourceIngestionError(
-                'response_too_large',
-                `Response exceeds ${MAX_RESPONSE_BYTES} byte limit.`,
-              ),
-            );
-            return;
-          }
-          chunks.push(chunk);
-        });
-
-        res.on('end', () => {
-          if (destroyed) return;
-          resolve({
-            status: res.statusCode ?? 0,
-            headers: res.headers,
-            body: Buffer.concat(chunks),
-          });
-        });
-
-        res.on('error', (err) => {
-          if (!destroyed) reject(err);
-        });
-      },
-    );
-
-    req.on('timeout', () => {
-      req.destroy();
-      reject(
-        new SourceIngestionError(
-          'fetch_timeout',
-          `Request to ${url.toString()} timed out after ${FETCH_TIMEOUT_MS}ms.`,
-        ),
-      );
-    });
-
-    req.on('error', (err) => {
-      reject(
-        new SourceIngestionError(
-          'fetch_error',
-          `Failed to fetch ${url.toString()}: ${String(err)}`,
-        ),
-      );
-    });
-
-    req.end();
-  });
+    chunks.push(value);
+  }
+  const merged = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    merged.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return new TextDecoder('utf-8').decode(merged);
 }
 
 /**
- * Fetches a URL with SSRF-safe connect-time enforcement.
+ * Fetches a URL with SSRF-safe validation, using the global `fetch()` so it
+ * runs on the Cloudflare Workers runtime.
  *
- * Each hop (initial + redirects) is validated:
- *  1. Scheme must be http or https
- *  2. All resolved IPs must not be in a blocked range
- *  3. The validated IP is bound to the socket via a custom DNS lookup,
- *     preventing DNS rebinding while preserving TLS SNI/certificate validation
+ * Each hop (initial + redirects) is validated by `validateHost` (scheme, then
+ * literal/DoH-resolved IP against `isBlockedIp`) before the request is made.
+ * Redirects are followed manually (`redirect: 'manual'`) so every hop is
+ * re-validated. See `validateHost` for the Workers TOCTOU caveat.
  *
  * Returns the raw text body and content type.
  */
@@ -383,50 +387,90 @@ export async function safeFetchUrl(inputUrl: string): Promise<FetchResult> {
       );
     }
 
-    // SSRF: resolve DNS and validate all IPs. The returned IP is then
-    // bound to the actual socket via nodeRequest's custom lookup callback,
-    // preventing DNS rebinding.
-    const resolvedIp = await resolveAndValidateHost(parsed.hostname);
+    await validateHost(parsed.hostname);
 
-    const result = await nodeRequest(parsed, resolvedIp);
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+    let res: Response;
+    try {
+      res = await fetch(parsed.toString(), {
+        method: 'GET',
+        redirect: 'manual',
+        signal: controller.signal,
+        headers: {
+          'user-agent': 'RocketClaw-SourceIngestion/1.0',
+          accept: 'text/html, text/plain, application/pdf, */*',
+        },
+      });
+    } catch (err) {
+      clearTimeout(timer);
+      if (err instanceof SourceIngestionError) throw err;
+      if (err instanceof Error && err.name === 'AbortError') {
+        throw new SourceIngestionError(
+          'fetch_timeout',
+          `Request to ${currentUrl} timed out after ${FETCH_TIMEOUT_MS}ms.`,
+        );
+      }
+      throw new SourceIngestionError(
+        'fetch_error',
+        `Failed to fetch ${currentUrl}: ${String(err)}`,
+      );
+    }
 
-    // Handle redirects manually so we validate each hop
-    if (result.status >= 300 && result.status < 400) {
-      const location = Array.isArray(result.headers['location'])
-        ? result.headers['location'][0]
-        : result.headers['location'];
+    // Handle redirects manually so we validate each hop.
+    if (res.status >= 300 && res.status < 400) {
+      clearTimeout(timer);
+      await res.body?.cancel().catch(() => undefined);
+      const location = res.headers.get('location');
       if (!location) {
         throw new SourceIngestionError(
           'redirect_error',
-          `Redirect response (${result.status}) missing Location header.`,
+          `Redirect response (${res.status}) missing Location header.`,
         );
       }
       currentUrl = new URL(location, currentUrl).toString();
       continue;
     }
 
-    if (result.status < 200 || result.status >= 300) {
+    if (res.status < 200 || res.status >= 300) {
+      clearTimeout(timer);
+      await res.body?.cancel().catch(() => undefined);
       throw new SourceIngestionError(
         'fetch_http_error',
-        `HTTP ${result.status} from ${currentUrl}`,
+        `HTTP ${res.status} from ${currentUrl}`,
       );
     }
 
-    // Validate content type
-    const rawContentType =
-      (Array.isArray(result.headers['content-type'])
-        ? result.headers['content-type'][0]
-        : result.headers['content-type']) ?? '';
+    // Validate content type.
+    const rawContentType = res.headers.get('content-type') ?? '';
     const mimeType = rawContentType.split(';')[0].trim().toLowerCase();
     if (!ALLOWED_CONTENT_TYPES.has(mimeType)) {
+      clearTimeout(timer);
+      await res.body?.cancel().catch(() => undefined);
       throw new SourceIngestionError(
         'unsupported_content_type',
         `Content type "${mimeType}" is not supported. Allowed: ${[...ALLOWED_CONTENT_TYPES].join(', ')}.`,
       );
     }
 
-    const body = result.body.toString('utf-8');
-    return { body, contentType: mimeType, finalUrl: currentUrl };
+    try {
+      const body = await readBodyWithCap(res, MAX_RESPONSE_BYTES);
+      return { body, contentType: mimeType, finalUrl: currentUrl };
+    } catch (err) {
+      if (err instanceof SourceIngestionError) throw err;
+      if (err instanceof Error && err.name === 'AbortError') {
+        throw new SourceIngestionError(
+          'fetch_timeout',
+          `Request to ${currentUrl} timed out after ${FETCH_TIMEOUT_MS}ms.`,
+        );
+      }
+      throw new SourceIngestionError(
+        'fetch_error',
+        `Failed to read body from ${currentUrl}: ${String(err)}`,
+      );
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   throw new SourceIngestionError(

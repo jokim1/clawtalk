@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('../config.js', () => ({
   TALK_CONTEXT_BROWSER_DISABLE_HOSTS: [],
@@ -6,6 +6,7 @@ vi.mock('../config.js', () => ({
   TALK_CONTEXT_BROWSER_TIMEOUT_MS: 30_000,
   TALK_CONTEXT_MANAGED_FETCH_ENABLED: false,
   TALK_CONTEXT_MANAGED_FETCH_TIMEOUT_MS: 30_000,
+  TALK_CONTEXT_DOH_ENDPOINT: 'https://doh.test/dns-query',
 }));
 
 vi.mock('../../logger.js', () => ({
@@ -19,6 +20,8 @@ vi.mock('../../logger.js', () => ({
 import {
   extractTextFromHtml,
   ingestUrlSource,
+  isBlockedIp,
+  safeFetchUrl,
   SourceIngestionError,
 } from './source-ingestion.js';
 
@@ -262,5 +265,304 @@ describe('extractTextFromHtml', () => {
     expect(text).toContain('Visible body.');
     expect(text).not.toContain('alert(2)');
     expect(text).not.toContain('a{}');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// SSRF gate + Workers-native fetch (safeFetchUrl / isBlockedIp). The global
+// `fetch` is stubbed to route DoH queries vs. page fetches; nothing hits the
+// network. NOTE: vitest runs on Node (pool: forks), not workerd, so these pin
+// the LOGIC — the real-runtime behavior was confirmed via a wrangler-dev probe.
+// ---------------------------------------------------------------------------
+
+const MB = 1024 * 1024;
+
+function dohResponse(answers: Array<{ type: number; data: string }>): unknown {
+  return { ok: true, status: 200, json: async () => ({ Answer: answers }) };
+}
+
+function pageResponse(input: {
+  status?: number;
+  contentType?: string;
+  location?: string;
+  body?: string;
+  bodyChunks?: Uint8Array[];
+}): unknown {
+  const headers: Record<string, string> = {};
+  if (input.contentType) headers['content-type'] = input.contentType;
+  if (input.location) headers['location'] = input.location;
+  const status = input.status ?? 200;
+  const chunks = input.bodyChunks ?? [
+    new TextEncoder().encode(input.body ?? ''),
+  ];
+  let index = 0;
+  return {
+    status,
+    ok: status >= 200 && status < 300,
+    headers: { get: (k: string) => headers[k.toLowerCase()] ?? null },
+    body: {
+      getReader: () => ({
+        read: async () =>
+          index < chunks.length
+            ? { done: false, value: chunks[index++] }
+            : { done: true, value: undefined },
+        cancel: async () => undefined,
+      }),
+      cancel: async () => undefined,
+    },
+  };
+}
+
+function installFetch(opts: {
+  doh?: (type: string, name: string) => unknown;
+  page?: (url: string) => unknown;
+}): ReturnType<typeof vi.fn> {
+  const fn = vi.fn(async (url: string | URL) => {
+    const u = String(url);
+    if (u.startsWith('https://doh.test/')) {
+      const parsed = new URL(u);
+      return (opts.doh?.(
+        parsed.searchParams.get('type') ?? 'A',
+        parsed.searchParams.get('name') ?? '',
+      ) ?? dohResponse([])) as Response;
+    }
+    return (opts.page?.(u) ?? pageResponse({ status: 200 })) as Response;
+  });
+  vi.stubGlobal('fetch', fn);
+  return fn;
+}
+
+const aRecords = (...ips: string[]) =>
+  dohResponse(ips.map((data) => ({ type: 1, data })));
+
+describe('source-ingestion SSRF gate', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  describe('isBlockedIp', () => {
+    it('blocks private / loopback / link-local / multicast IPv4', () => {
+      for (const ip of [
+        '127.0.0.1',
+        '10.1.2.3',
+        '172.16.0.1',
+        '172.31.255.255',
+        '192.168.1.1',
+        '169.254.169.254',
+        '224.0.0.1',
+        '0.0.0.0',
+      ]) {
+        expect(isBlockedIp(ip)).toBe(true);
+      }
+    });
+
+    it('allows public IPv4, including just outside 172.16/12', () => {
+      for (const ip of [
+        '8.8.8.8',
+        '1.1.1.1',
+        '93.184.216.34',
+        '104.18.36.24',
+        '172.64.151.232',
+        '172.15.0.1',
+        '172.32.0.1',
+      ]) {
+        expect(isBlockedIp(ip)).toBe(false);
+      }
+    });
+
+    it('blocks IPv6 loopback / ULA / link-local / multicast + mapped forms', () => {
+      for (const ip of [
+        '::1',
+        '::',
+        'fe80::1',
+        'fc00::1',
+        'fd12::1',
+        'ff02::1',
+        '::ffff:127.0.0.1',
+        '::ffff:169.254.169.254',
+        '::ffff:7f00:1', // hex-form mapped 127.0.0.1 must not bypass
+        '0:0:0:0:0:ffff:7f00:1', // expanded mapped 127.0.0.1 must not bypass
+        '::01', // non-canonical loopback
+        '0000:0000:0000:0000:0000:0000:0000:0001', // expanded loopback
+        'fe9a::1', // fe80::/10 link-local (not only the fe80 prefix)
+      ]) {
+        expect(isBlockedIp(ip)).toBe(true);
+      }
+    });
+
+    it('allows public IPv6 and blocks non-IP input (fail-closed)', () => {
+      expect(isBlockedIp('2001:4860:4860::8888')).toBe(false);
+      expect(isBlockedIp('target.substack-custom-domains.com.')).toBe(true);
+      expect(isBlockedIp('not-an-ip')).toBe(true);
+    });
+  });
+
+  describe('safeFetchUrl', () => {
+    it('fetches a host that resolves to a public IP', async () => {
+      const fetchMock = installFetch({
+        doh: (type) => (type === 'A' ? aRecords('93.184.216.34') : aRecords()),
+        page: () =>
+          pageResponse({ contentType: 'text/html', body: '<p>hi</p>' }),
+      });
+      const result = await safeFetchUrl('https://example.com/post');
+      expect(result).toEqual({
+        body: '<p>hi</p>',
+        contentType: 'text/html',
+        finalUrl: 'https://example.com/post',
+      });
+      expect(fetchMock).toHaveBeenCalled();
+    });
+
+    it('allows a CNAME-fronted host whose terminal A records are public', async () => {
+      installFetch({
+        doh: (type) =>
+          type === 'A'
+            ? dohResponse([
+                { type: 5, data: 'target.substack-custom-domains.com.' },
+                { type: 1, data: '104.18.36.24' },
+                { type: 1, data: '172.64.151.232' },
+              ])
+            : aRecords(),
+        page: () =>
+          pageResponse({ contentType: 'text/html', body: '<p>post</p>' }),
+      });
+      const result = await safeFetchUrl('https://www.gamemakers.com/');
+      expect(result.body).toBe('<p>post</p>');
+    });
+
+    it('blocks a host that resolves to a private IP', async () => {
+      installFetch({
+        doh: (type) =>
+          type === 'A' ? aRecords('169.254.169.254') : aRecords(),
+      });
+      await expect(safeFetchUrl('https://evil.test/')).rejects.toMatchObject({
+        code: 'ssrf_blocked',
+      });
+    });
+
+    it('blocks localhost without any fetch', async () => {
+      const fetchMock = installFetch({});
+      await expect(safeFetchUrl('http://localhost/')).rejects.toMatchObject({
+        code: 'ssrf_blocked',
+      });
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it('blocks a trailing-dot localhost without any fetch', async () => {
+      const fetchMock = installFetch({});
+      await expect(safeFetchUrl('http://localhost./')).rejects.toMatchObject({
+        code: 'ssrf_blocked',
+      });
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it('blocks an IP-literal host in a private range without a DNS lookup', async () => {
+      const fetchMock = installFetch({});
+      await expect(safeFetchUrl('http://10.0.0.1/')).rejects.toMatchObject({
+        code: 'ssrf_blocked',
+      });
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it('fails closed when DoH returns an error', async () => {
+      installFetch({
+        doh: () => ({ ok: false, status: 502, json: async () => ({}) }),
+      });
+      await expect(safeFetchUrl('https://example.com/')).rejects.toMatchObject({
+        code: 'dns_resolution_failed',
+      });
+    });
+
+    it('fails closed when DoH returns malformed JSON', async () => {
+      installFetch({
+        doh: () => ({
+          ok: true,
+          status: 200,
+          json: async () => {
+            throw new SyntaxError('Unexpected token < in JSON');
+          },
+        }),
+      });
+      await expect(safeFetchUrl('https://example.com/')).rejects.toMatchObject({
+        code: 'dns_resolution_failed',
+      });
+    });
+
+    it('re-validates each redirect hop and blocks a redirect to a private host', async () => {
+      installFetch({
+        doh: (type, name) =>
+          type !== 'A'
+            ? aRecords()
+            : name === 'first.test'
+              ? aRecords('93.184.216.34')
+              : aRecords('10.0.0.5'),
+        page: (url) =>
+          url.includes('first.test')
+            ? pageResponse({ status: 301, location: 'https://second.test/' })
+            : pageResponse({ contentType: 'text/html', body: 'x' }),
+      });
+      await expect(safeFetchUrl('https://first.test/')).rejects.toMatchObject({
+        code: 'ssrf_blocked',
+      });
+    });
+
+    it('throws too_many_redirects past the limit', async () => {
+      installFetch({
+        doh: (type) => (type === 'A' ? aRecords('93.184.216.34') : aRecords()),
+        page: () =>
+          pageResponse({ status: 301, location: 'https://loop.test/next' }),
+      });
+      await expect(safeFetchUrl('https://loop.test/')).rejects.toMatchObject({
+        code: 'too_many_redirects',
+      });
+    });
+
+    it('rejects an oversized body', async () => {
+      const oneMb = new Uint8Array(MB);
+      installFetch({
+        doh: (type) => (type === 'A' ? aRecords('93.184.216.34') : aRecords()),
+        page: () =>
+          pageResponse({
+            contentType: 'text/html',
+            bodyChunks: Array.from({ length: 11 }, () => oneMb),
+          }),
+      });
+      await expect(safeFetchUrl('https://big.test/')).rejects.toMatchObject({
+        code: 'response_too_large',
+      });
+    });
+
+    it('maps an aborted fetch to fetch_timeout', async () => {
+      installFetch({
+        doh: (type) => (type === 'A' ? aRecords('93.184.216.34') : aRecords()),
+        page: () => {
+          const err = new Error('aborted');
+          err.name = 'AbortError';
+          throw err;
+        },
+      });
+      await expect(safeFetchUrl('https://slow.test/')).rejects.toMatchObject({
+        code: 'fetch_timeout',
+      });
+    });
+
+    it('rejects a disallowed content type', async () => {
+      installFetch({
+        doh: (type) => (type === 'A' ? aRecords('93.184.216.34') : aRecords()),
+        page: () =>
+          pageResponse({ contentType: 'application/json', body: '{}' }),
+      });
+      await expect(safeFetchUrl('https://api.test/')).rejects.toMatchObject({
+        code: 'unsupported_content_type',
+      });
+    });
+
+    it('rejects a disallowed scheme without any fetch', async () => {
+      const fetchMock = installFetch({});
+      await expect(safeFetchUrl('ftp://example.com/')).rejects.toMatchObject({
+        code: 'invalid_scheme',
+      });
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
   });
 });

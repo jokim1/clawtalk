@@ -40,6 +40,7 @@ const envConfig = readEnvFile([
   'TALK_CONTEXT_MANAGED_FETCH_BASE_URL',
   'TALK_CONTEXT_MANAGED_FETCH_API_KEY',
   'TALK_CONTEXT_MANAGED_FETCH_TIMEOUT_MS',
+  'TALK_CONTEXT_DOH_ENDPOINT',
   'ANTHROPIC_API_KEY',
   'CLAUDE_CODE_OAUTH_TOKEN',
   'ANTHROPIC_AUTH_TOKEN',
@@ -339,6 +340,15 @@ export const TALK_CONTEXT_MANAGED_FETCH_TIMEOUT_MS = Number.isFinite(
 )
   ? Math.max(1_000, talkContextManagedTimeoutMs)
   : 30_000;
+
+// DNS-over-HTTPS resolver for the SSRF gate on URL source ingestion. DoH is a
+// plain fetch() (Workers-native); node:dns.lookup misbehaves on Workers.
+// Swappable so ops can point at an alternate resolver (e.g. 1.1.1.1) without a
+// redeploy if cloudflare-dns has issues.
+export const TALK_CONTEXT_DOH_ENDPOINT =
+  process.env.TALK_CONTEXT_DOH_ENDPOINT ||
+  envConfig.TALK_CONTEXT_DOH_ENDPOINT ||
+  'https://cloudflare-dns.com/dns-query';
 
 export const TALK_EXECUTOR_ANTHROPIC_API_KEY =
   process.env.ANTHROPIC_API_KEY || envConfig.ANTHROPIC_API_KEY || '';
