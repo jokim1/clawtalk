@@ -41,9 +41,10 @@ jobs:
       # Tests using `_initTestDatabase` (sqlite:memory) run in this
       # same job — they don't depend on the Supabase stack, just on
       # the runner having Node + the lockfile installed.
-      - uses: supabase/setup-cli@v1
+      - uses: supabase/setup-cli@v2.1.1
         with:
           version: latest
+          github-token: ${{ github.token }}
 
       - name: Start Supabase
         run: supabase start --workdir .
