@@ -8,7 +8,6 @@
  */
 
 import { TALK_CONTEXT_DOH_ENDPOINT } from '../config.js';
-import { updateSourceExtraction } from '../db/context-accessors.js';
 import { logger } from '../../logger.js';
 
 // ---------------------------------------------------------------------------
@@ -267,27 +266,23 @@ interface FetchResult {
   finalUrl: string;
 }
 
+/**
+ * Shape of the extraction-status updater the caller injects. The live caller
+ * (greenfield-api) wraps `updateGreenfieldContextSourceExtraction`; tests pass
+ * a mock. ingestUrlSource never persists directly.
+ */
+export type UpdateSourceExtractionFn = (input: {
+  sourceId: string;
+  extractedText: string | null;
+  extractionError: string | null;
+  mimeType?: string | null;
+  fetchStrategy?: 'http' | 'browser' | 'managed' | null;
+  fetchedAt?: string | null;
+}) => Promise<void>;
+
 export interface UrlSourceIngestionDependencies {
   httpFetcher?: typeof safeFetchUrl;
-  updateExtraction?: typeof updateSourceExtraction;
-}
-
-export interface TalkContextSourceIngestionService {
-  enqueueUrlSource(sourceId: string, url: string): void;
-}
-
-export function createDefaultTalkContextSourceIngestionService(
-  deps?: UrlSourceIngestionDependencies,
-): TalkContextSourceIngestionService {
-  return {
-    enqueueUrlSource(sourceId: string, url: string) {
-      void ingestUrlSource(sourceId, url, deps).catch((err) => {
-        logger.warn(
-          `[source-ingestion] Unexpected URL ingestion crash for ${sourceId}: ${formatStageError(err)}`,
-        );
-      });
-    },
-  };
+  updateExtraction: UpdateSourceExtractionFn;
 }
 
 /**
@@ -771,10 +766,10 @@ async function extractViaLinkedFeed(
 export async function ingestUrlSource(
   sourceId: string,
   url: string,
-  deps?: UrlSourceIngestionDependencies,
+  deps: UrlSourceIngestionDependencies,
 ): Promise<void> {
-  const httpFetcher = deps?.httpFetcher ?? safeFetchUrl;
-  const updateExtractionFn = deps?.updateExtraction ?? updateSourceExtraction;
+  const httpFetcher = deps.httpFetcher ?? safeFetchUrl;
+  const updateExtractionFn = deps.updateExtraction;
   const fetchedAt = new Date().toISOString();
 
   try {
@@ -846,68 +841,6 @@ export async function ingestUrlSource(
     });
     logger.warn(
       `[source-ingestion] URL source ${sourceId} ingestion failed: ${message}`,
-    );
-  }
-}
-
-/**
- * Processes an uploaded file's content and stores extracted text.
- * For v1, we handle text-based formats directly. PDF extraction is deferred.
- */
-export async function ingestFileSource(
-  sourceId: string,
-  fileContent: string | Buffer,
-  mimeType: string,
-  fileName: string,
-): Promise<void> {
-  try {
-    const textContent =
-      typeof fileContent === 'string'
-        ? fileContent
-        : fileContent.toString('utf-8');
-
-    let extracted: string;
-    switch (mimeType) {
-      case 'text/plain':
-      case 'text/markdown':
-        extracted = textContent.trim();
-        break;
-      case 'text/html':
-        extracted = extractTextFromHtml(textContent);
-        break;
-      case 'application/pdf':
-        extracted = '[PDF content — text extraction not yet supported in v1]';
-        break;
-      case 'application/vnd.openxmlformats-officedocument.wordprocessingml.document':
-        extracted = '[DOCX content — text extraction not yet supported in v1]';
-        break;
-      default:
-        extracted = textContent.trim();
-        break;
-    }
-
-    await updateSourceExtraction({
-      sourceId,
-      extractedText: extracted,
-      extractionError: null,
-      mimeType,
-    });
-
-    logger.info(
-      `[source-ingestion] File source ${sourceId} (${fileName}) ingested ` +
-        `(${extracted.length} chars, type=${mimeType}).`,
-    );
-  } catch (err) {
-    const message = String(err);
-
-    await updateSourceExtraction({
-      sourceId,
-      extractedText: null,
-      extractionError: message,
-    });
-
-    logger.warn(
-      `[source-ingestion] File source ${sourceId} (${fileName}) ingestion failed: ${message}`,
     );
   }
 }

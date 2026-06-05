@@ -1,11 +1,8 @@
 // clawtalk db barrel — pg-only after PR 2 cutover.
 
-export * from './accessors.js';
+export * from './core-accessors.js';
 export * from './agent-accessors.js';
 export * from './content-accessors.js';
-export * from './context-accessors.js';
-export * from './job-accessors.js';
-export * from './talk-agents.js';
 export * from './talk-tools-accessors.js';
 
 export {

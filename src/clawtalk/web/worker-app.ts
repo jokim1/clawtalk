@@ -30,7 +30,7 @@
 //                                     greenfield shell/detail/chat/policy/tools
 //                                     surface; legacy route modules only for
 //                                     not-yet-cut-over collisions
-//   /api/v1/talk-folders[/...]      — talks.ts (folder CRUD)
+//   /api/v1/talk-folders[/...]      — greenfield-api.ts (folder CRUD)
 //   /api/v1/user/tool-permissions   — user-settings.ts
 //   /api/v1/talks/:talkId/context[/...] — greenfield-api.ts compatibility
 //                                         routes over context_sources
@@ -38,7 +38,7 @@
 //                                         routes over jobs/runs
 //   /api/v1/talks/:talkId/attachments[/...] — unavailable until greenfield
 //                                         attachment storage lands
-//   /api/v1/talks/:talkId/threads[/...]     — talk-threads.ts (list +
+//   /api/v1/talks/:talkId/threads[/...]     — greenfield-api.ts (list +
 //                                         create + PATCH + DELETE)
 //   /api/v1/threads/:threadId/content
 //   /api/v1/contents/:contentId[/...]       — greenfield-api.ts document

@@ -12,7 +12,7 @@ import {
   withRequestScopedDb,
   withUserContext,
 } from '../../db.js';
-import { getOutboxEventsForTopics } from '../db/accessors.js';
+import { getOutboxEventsForTopics } from '../db/core-accessors.js';
 import {
   emitOutboxEvent,
   emitOutboxEventOnSql,

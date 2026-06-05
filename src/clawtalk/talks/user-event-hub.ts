@@ -42,7 +42,7 @@ import {
   getOutboxEventsForTopics,
   getOutboxMaxEventIdForTopics,
   getOutboxMinEventIdForTopics,
-} from '../db/accessors.js';
+} from '../db/core-accessors.js';
 import { withDurableObjectScopedDb } from '../../db.js';
 import {
   buildConversationRunEventFilter,
