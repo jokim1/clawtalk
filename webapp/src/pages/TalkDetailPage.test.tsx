@@ -3920,6 +3920,487 @@ describe('TalkDetailPage', () => {
     });
     expect(await screen.findByText('Job saved.')).toBeTruthy();
   });
+
+  // ── A1 characterization net: composer @-mention typeahead ──
+  // The composer's @-mention surface (trigger detection, filter, keyboard
+  // navigation, click + Enter insertion, dismissal) lives inline in
+  // TalkDetailPage and was previously untested. These pin its behavior
+  // ahead of the composer extraction (A3) so a regression there fails CI.
+
+  it('@-mention: opens the picker at a word boundary and lists ready sources', async () => {
+    const user = userEvent.setup();
+    installTalkDetailFetch({
+      context: buildTalkContext({
+        sources: [
+          buildReadySource({
+            id: 'source-1',
+            sourceRef: 'S1',
+            title: 'Quarterly Report',
+            sortOrder: 0,
+          }),
+          buildReadySource({
+            id: 'source-2',
+            sourceRef: 'S2',
+            title: 'Budget Sheet',
+            sortOrder: 1,
+          }),
+        ],
+      }),
+    });
+
+    renderDetailPage('/app/talks/talk-1');
+    const composer = await screen.findByPlaceholderText(/Type @ to reference/);
+
+    await user.click(composer);
+    await user.type(composer, '@');
+
+    const picker = await screen.findByRole('listbox', {
+      name: 'Mention picker',
+    });
+    expect(within(picker).getByText('Quarterly Report')).toBeTruthy();
+    expect(within(picker).getByText('Budget Sheet')).toBeTruthy();
+  });
+
+  it('@-mention: does not open the picker when nothing is mentionable', async () => {
+    const user = userEvent.setup();
+    installTalkDetailFetch();
+
+    renderDetailPage('/app/talks/talk-1');
+    const composer = await screen.findByPlaceholderText(
+      /^Send a message to this thread\.$/,
+    );
+
+    await user.click(composer);
+    await user.type(composer, '@');
+
+    expect(composer).toHaveValue('@');
+    expect(
+      screen.queryByRole('listbox', { name: 'Mention picker' }),
+    ).toBeNull();
+  });
+
+  it('@-mention: opens only at a word boundary, not mid-word', async () => {
+    const user = userEvent.setup();
+    installTalkDetailFetch({
+      context: buildTalkContext({
+        sources: [
+          buildReadySource({
+            id: 'source-1',
+            sourceRef: 'S1',
+            title: 'Quarterly Report',
+          }),
+        ],
+      }),
+    });
+
+    renderDetailPage('/app/talks/talk-1');
+    const composer = await screen.findByPlaceholderText(/Type @ to reference/);
+
+    await user.click(composer);
+    await user.type(composer, 'email@');
+    expect(
+      screen.queryByRole('listbox', { name: 'Mention picker' }),
+    ).toBeNull();
+
+    // A fresh `@` after whitespace is a boundary → the picker opens.
+    await user.type(composer, ' @');
+    expect(
+      await screen.findByRole('listbox', { name: 'Mention picker' }),
+    ).toBeTruthy();
+  });
+
+  it('@-mention: filters options by the text typed after @', async () => {
+    const user = userEvent.setup();
+    installTalkDetailFetch({
+      context: buildTalkContext({
+        sources: [
+          buildReadySource({
+            id: 'source-1',
+            sourceRef: 'S1',
+            title: 'Quarterly Report',
+            sortOrder: 0,
+          }),
+          buildReadySource({
+            id: 'source-2',
+            sourceRef: 'S2',
+            title: 'Budget Sheet',
+            sortOrder: 1,
+          }),
+        ],
+      }),
+    });
+
+    renderDetailPage('/app/talks/talk-1');
+    const composer = await screen.findByPlaceholderText(/Type @ to reference/);
+
+    await user.click(composer);
+    await user.type(composer, '@bud');
+
+    const picker = await screen.findByRole('listbox', {
+      name: 'Mention picker',
+    });
+    expect(within(picker).getByText('Budget Sheet')).toBeTruthy();
+    expect(within(picker).queryByText('Quarterly Report')).toBeNull();
+  });
+
+  it('@-mention: ArrowDown then Enter inserts the highlighted source without sending', async () => {
+    const user = userEvent.setup();
+    const sentBodies: Array<{ content: string }> = [];
+    installTalkDetailFetch({
+      onSendMessage: (body) => {
+        sentBodies.push(body);
+        return {
+          talkId: 'talk-1',
+          message: buildMessage({
+            id: 'm',
+            role: 'user',
+            content: body.content,
+            createdAt: '2026-03-06T00:00:05.000Z',
+          }),
+          runs: [],
+        };
+      },
+      context: buildTalkContext({
+        sources: [
+          buildReadySource({
+            id: 'source-1',
+            sourceRef: 'S1',
+            title: 'Quarterly Report',
+            sortOrder: 0,
+          }),
+          buildReadySource({
+            id: 'source-2',
+            sourceRef: 'S2',
+            title: 'Budget Sheet',
+            sortOrder: 1,
+          }),
+        ],
+      }),
+    });
+
+    renderDetailPage('/app/talks/talk-1');
+    const composer = await screen.findByPlaceholderText(/Type @ to reference/);
+
+    await user.click(composer);
+    await user.type(composer, '@');
+
+    const picker = await screen.findByRole('listbox', {
+      name: 'Mention picker',
+    });
+    const options = within(picker).getAllByRole('option');
+    expect(options[0]).toHaveAttribute('aria-selected', 'true');
+
+    await user.keyboard('{ArrowDown}');
+    expect(within(picker).getAllByRole('option')[1]).toHaveAttribute(
+      'aria-selected',
+      'true',
+    );
+
+    await user.keyboard('{Enter}');
+
+    await waitFor(() =>
+      expect(
+        screen.queryByRole('listbox', { name: 'Mention picker' }),
+      ).toBeNull(),
+    );
+    expect(composer).toHaveValue('@budget-sheet ');
+    expect(sentBodies).toHaveLength(0);
+  });
+
+  it('@-mention: clicking an option inserts THAT option, not the highlighted one', async () => {
+    // Two options so the click target differs from the default-selected
+    // (index 0) row — proving the click inserts the clicked source, not
+    // whatever happens to be highlighted.
+    const user = userEvent.setup();
+    installTalkDetailFetch({
+      context: buildTalkContext({
+        sources: [
+          buildReadySource({
+            id: 'source-1',
+            sourceRef: 'S1',
+            title: 'Quarterly Report',
+            sortOrder: 0,
+          }),
+          buildReadySource({
+            id: 'source-2',
+            sourceRef: 'S2',
+            title: 'Budget Sheet',
+            sortOrder: 1,
+          }),
+        ],
+      }),
+    });
+
+    renderDetailPage('/app/talks/talk-1');
+    const composer = await screen.findByPlaceholderText(/Type @ to reference/);
+
+    await user.click(composer);
+    await user.type(composer, '@');
+
+    const picker = await screen.findByRole('listbox', {
+      name: 'Mention picker',
+    });
+    // Index 0 ("Quarterly Report") is highlighted; click index 1.
+    expect(within(picker).getAllByRole('option')[0]).toHaveAttribute(
+      'aria-selected',
+      'true',
+    );
+    await user.click(within(picker).getByText('Budget Sheet'));
+
+    await waitFor(() =>
+      expect(
+        screen.queryByRole('listbox', { name: 'Mention picker' }),
+      ).toBeNull(),
+    );
+    expect(composer).toHaveValue('@budget-sheet ');
+  });
+
+  it('@-mention: offers @doc when the talk has an attached document', async () => {
+    const user = userEvent.setup();
+    installTalkDetailFetch({
+      contentByThreadId: {
+        [DEFAULT_THREAD_ID]: buildContent({
+          id: 'content-1',
+          title: 'Strategy Doc',
+        }),
+      },
+    });
+
+    renderDetailPage('/app/talks/talk-1');
+    const composer = await screen.findByPlaceholderText(/Type @ to reference/);
+
+    await user.click(composer);
+    await user.type(composer, '@');
+
+    const picker = await screen.findByRole('listbox', {
+      name: 'Mention picker',
+    });
+    expect(within(picker).getByText('@doc')).toBeTruthy();
+
+    await user.keyboard('{Enter}');
+    expect(composer).toHaveValue('@doc ');
+  });
+
+  it('@-mention: Escape dismisses the picker and leaves the literal @', async () => {
+    const user = userEvent.setup();
+    const sentBodies: Array<{ content: string }> = [];
+    installTalkDetailFetch({
+      onSendMessage: (body) => {
+        sentBodies.push(body);
+        return {
+          talkId: 'talk-1',
+          message: buildMessage({
+            id: 'm',
+            role: 'user',
+            content: body.content,
+            createdAt: '2026-03-06T00:00:05.000Z',
+          }),
+          runs: [],
+        };
+      },
+      context: buildTalkContext({
+        sources: [
+          buildReadySource({
+            id: 'source-1',
+            sourceRef: 'S1',
+            title: 'Quarterly Report',
+          }),
+        ],
+      }),
+    });
+
+    renderDetailPage('/app/talks/talk-1');
+    const composer = await screen.findByPlaceholderText(/Type @ to reference/);
+
+    await user.click(composer);
+    await user.type(composer, '@');
+    await screen.findByRole('listbox', { name: 'Mention picker' });
+
+    await user.keyboard('{Escape}');
+
+    expect(
+      screen.queryByRole('listbox', { name: 'Mention picker' }),
+    ).toBeNull();
+    expect(composer).toHaveValue('@');
+    expect(sentBodies).toHaveLength(0);
+  });
+
+  it('@-mention: Tab inserts the highlighted mention', async () => {
+    // handleComposerKeyDown treats Tab like Enter for committing the
+    // highlighted option — a behavior an extraction that rebinds Tab to
+    // focus traversal would silently drop.
+    const user = userEvent.setup();
+    installTalkDetailFetch({
+      context: buildTalkContext({
+        sources: [
+          buildReadySource({
+            id: 'source-1',
+            sourceRef: 'S1',
+            title: 'Quarterly Report',
+          }),
+        ],
+      }),
+    });
+
+    renderDetailPage('/app/talks/talk-1');
+    const composer = await screen.findByPlaceholderText(/Type @ to reference/);
+
+    await user.click(composer);
+    await user.type(composer, '@');
+    await screen.findByRole('listbox', { name: 'Mention picker' });
+
+    await user.keyboard('{Tab}');
+
+    await waitFor(() =>
+      expect(
+        screen.queryByRole('listbox', { name: 'Mention picker' }),
+      ).toBeNull(),
+    );
+    expect(composer).toHaveValue('@quarterly-report ');
+  });
+
+  it('@-mention: clicking outside dismisses the picker and inserts nothing', async () => {
+    const user = userEvent.setup();
+    installTalkDetailFetch({
+      context: buildTalkContext({
+        sources: [
+          buildReadySource({
+            id: 'source-1',
+            sourceRef: 'S1',
+            title: 'Quarterly Report',
+          }),
+        ],
+      }),
+    });
+
+    renderDetailPage('/app/talks/talk-1');
+    const composer = await screen.findByPlaceholderText(/Type @ to reference/);
+
+    await user.click(composer);
+    await user.type(composer, '@');
+    await screen.findByRole('listbox', { name: 'Mention picker' });
+
+    // SourceMentionPicker dismisses on a pointerdown outside its container.
+    fireEvent.pointerDown(document.body);
+
+    await waitFor(() =>
+      expect(
+        screen.queryByRole('listbox', { name: 'Mention picker' }),
+      ).toBeNull(),
+    );
+    expect(composer).toHaveValue('@');
+  });
+
+  it('@-mention: lists only ready sources and omits @doc in a source-only talk', async () => {
+    const user = userEvent.setup();
+    installTalkDetailFetch({
+      context: buildTalkContext({
+        sources: [
+          buildReadySource({
+            id: 'source-1',
+            sourceRef: 'S1',
+            title: 'Ready Doc',
+            sortOrder: 0,
+          }),
+          buildContextSource({
+            id: 'source-2',
+            sourceRef: 'S2',
+            title: 'Pending Doc',
+            status: 'pending',
+            extractionError: null,
+            sortOrder: 1,
+          }),
+          buildContextSource({
+            id: 'source-3',
+            sourceRef: 'S3',
+            title: 'Failed Doc',
+            status: 'failed',
+            sortOrder: 2,
+          }),
+        ],
+      }),
+    });
+
+    renderDetailPage('/app/talks/talk-1');
+    const composer = await screen.findByPlaceholderText(/Type @ to reference/);
+
+    await user.click(composer);
+    await user.type(composer, '@');
+
+    const picker = await screen.findByRole('listbox', {
+      name: 'Mention picker',
+    });
+    expect(within(picker).getByText('Ready Doc')).toBeTruthy();
+    expect(within(picker).queryByText('Pending Doc')).toBeNull();
+    expect(within(picker).queryByText('Failed Doc')).toBeNull();
+    // No attached document → no @doc option.
+    expect(within(picker).queryByText('@doc')).toBeNull();
+  });
+
+  it('@-mention: Backspace over the @ dismisses the picker', async () => {
+    const user = userEvent.setup();
+    installTalkDetailFetch({
+      context: buildTalkContext({
+        sources: [
+          buildReadySource({
+            id: 'source-1',
+            sourceRef: 'S1',
+            title: 'Quarterly Report',
+          }),
+        ],
+      }),
+    });
+
+    renderDetailPage('/app/talks/talk-1');
+    const composer = await screen.findByPlaceholderText(/Type @ to reference/);
+
+    await user.click(composer);
+    await user.type(composer, '@');
+    await screen.findByRole('listbox', { name: 'Mention picker' });
+
+    await user.keyboard('{Backspace}');
+
+    await waitFor(() =>
+      expect(
+        screen.queryByRole('listbox', { name: 'Mention picker' }),
+      ).toBeNull(),
+    );
+    expect(composer).toHaveValue('');
+  });
+
+  it('@-mention: inserting a mention mid-draft preserves the surrounding text', async () => {
+    // The @<filter> span is not at end-of-draft, so insertMentionOption's
+    // `after = draft.slice(cursor)` is non-empty — pin that the trailing
+    // text survives the splice.
+    const user = userEvent.setup();
+    installTalkDetailFetch({
+      context: buildTalkContext({
+        sources: [
+          buildReadySource({
+            id: 'source-1',
+            sourceRef: 'S1',
+            title: 'Quarterly Report',
+          }),
+        ],
+      }),
+    });
+
+    renderDetailPage('/app/talks/talk-1');
+    const composer = await screen.findByPlaceholderText(/Type @ to reference/);
+
+    await user.click(composer);
+    await user.type(composer, 'pre  post');
+    // Drop a fresh `@` between the two spaces (index 4), caret right after.
+    await user.type(composer, '@', {
+      initialSelectionStart: 4,
+      initialSelectionEnd: 4,
+    });
+    await screen.findByRole('listbox', { name: 'Mention picker' });
+
+    await user.keyboard('{Enter}');
+
+    expect(composer).toHaveValue('pre @quarterly-report  post');
+  });
 });
 
 function renderDetailPage(
@@ -4273,6 +4754,15 @@ function buildContextSource(input: Partial<ContextSource> = {}): ContextSource {
     pageImageCount: input.pageImageCount ?? 0,
     pageSetComplete: input.pageSetComplete ?? false,
   };
+}
+
+function buildReadySource(input: Partial<ContextSource>): ContextSource {
+  return buildContextSource({
+    status: 'ready',
+    extractedTextLength: 1200,
+    extractionError: null,
+    ...input,
+  });
 }
 
 function buildTalkContext(input?: Partial<TalkContext>): TalkContext {
