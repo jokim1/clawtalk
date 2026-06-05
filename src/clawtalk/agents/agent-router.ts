@@ -178,7 +178,7 @@ export interface AgentExecutionOptions {
 
 export const ALWAYS_ALLOWED_CONTEXT_TOOLS = new Set([
   'read_source',
-  // Content-feature edit tool — registered by context-loader only when
+  // Content-feature edit tool — registered only when
   // the Talk has an attached Content doc (`hasContent === true`). Never
   // appears in any tool family, so
   // without this allowlist it gets silently filtered out for every

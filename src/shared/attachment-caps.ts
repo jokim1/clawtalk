@@ -3,7 +3,7 @@
 // Created for the PDF page-rasterization feature (plan:
 // pdf-page-rasterization-plan.md, T3). Before this file the caps were
 // scattered — upload caps in `attachment-extraction.ts`, native-PDF
-// document caps in `context-loader.ts` — and the webapp kept its own
+// document caps in the talk context loader — and the webapp kept its own
 // (drifted) copies. Co-locating them here lets the Worker and the
 // webapp import one definition instead of re-deriving values that fall
 // out of sync (Codex #11).
@@ -25,7 +25,7 @@ export const MAX_IMAGE_ATTACHMENT_SIZE = 10 * 1024 * 1024; // 10 MB
 /** Max attachments per chat message. */
 export const MAX_ATTACHMENTS_PER_MESSAGE = 5;
 
-// ── Native-PDF document caps (re-exported from context-loader.ts) ────
+// ── Native-PDF document caps ────────────────────────────────────────
 // Govern the EXISTING native `document` block path (Claude / Codex),
 // which sends the PDF's bytes (text layer + page imagery) to the model.
 // Unchanged by the rasterization feature; co-located here so the new

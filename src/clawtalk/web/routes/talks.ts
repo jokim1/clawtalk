@@ -41,7 +41,7 @@ import {
   modelSupportsPdfDocuments,
   modelSupportsVision,
 } from '../../llm/capabilities.js';
-import type { TalkRunContextSnapshot } from '../../talks/context-loader.js';
+import type { TalkRunContextSnapshot } from '../../talks/talk-run-context-snapshot.js';
 type BrowserBlockMetadata = Record<string, unknown>;
 type BrowserResumeMetadata = Record<string, unknown>;
 type CarriedBrowserSessionMetadata = Record<string, unknown>;
