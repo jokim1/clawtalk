@@ -255,7 +255,7 @@ Current implementation state should live in only three places:
 
 - `REFACTOR-AUDIT.md` for audited state and gaps.
 - `roadmap.md` for the current execution sequence.
-- `PHASE5-AUTONOMOUS-PLAN.md` for the `/goal` protocol and lane split.
+- `PHASE5-AUTONOMOUS-PLAN.md` for the `/goal` protocol, lane split, and copy/paste Codex + Claude/Opus phase prompts.
 
 Archived handoffs and historical audits should stay archived.
 

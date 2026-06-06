@@ -13,7 +13,7 @@ You're reading this because you're an AI coding agent (or engineer) about to wor
 | **[REFACTOR-OVERVIEW.md](./REFACTOR-OVERVIEW.md)** | **The single-page narrative for the greenfield rebuild.** Stable orientation: why the model changed, what stays, what changes, runtime architecture, doc navigation. Not a live tracker. |
 | **[REFACTOR-AUDIT.md](./REFACTOR-AUDIT.md)** | **Current completion audit.** What is done, what remains, facade debt, Salon gap, missing surfaces, open decisions, and the recommended autonomous workstreams. Read this before starting new work. |
 | **[roadmap.md](./roadmap.md)** | Live shipped/in-flight tracker for the refactor. Short operational status. |
-| **[PHASE5-AUTONOMOUS-PLAN.md](./PHASE5-AUTONOMOUS-PLAN.md)** | Execution protocol for parallel Codex + Claude/Opus `/goal` runs with minimal human checkpoints. |
+| **[PHASE5-AUTONOMOUS-PLAN.md](./PHASE5-AUTONOMOUS-PLAN.md)** | Execution protocol and copy/paste phased prompts for parallel Codex + Claude/Opus `/goal` runs with minimal human checkpoints. |
 | **[DECISIONS.md](./DECISIONS.md)** | Resolved cross-cutting decisions (stack, naming, Forge agents). **When a spec doc conflicts with a decision here, this wins.** |
 | **[GLOSSARY.md](./GLOSSARY.md)** | Canonical terms + the shipped-DB-name ↔ spec-name mapping. Read it to avoid the vocabulary forks. |
 | **[engineering-notes.md](./engineering-notes.md)** | Durable engineering knowledge (architectural commitments, latency hotspots, eval gate). |
