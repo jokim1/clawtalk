@@ -31,6 +31,7 @@ const STRANDED_SIBLING_SWEEP_LIMIT = 100;
 
 export interface ScheduledTickEnv extends DbScopeEnvBindings {
   DB: { connectionString: string };
+  TEST_ONLY_OWNER_EMAIL_PATTERN?: string;
 }
 
 type StrandedGreenfieldRun = {
@@ -52,18 +53,22 @@ export async function runScheduledTick(
 ): Promise<void> {
   return withRequestScopedDb(env.DB.connectionString, ctx, env, async () =>
     withNotifyQueueScope(env, ctx, async () => {
-      await processClaimableJobs();
-      await sweepStuckRunningRuns();
-      await sweepStrandedOrderedSiblings();
-      await sweepStuckQueuedRuns();
+      const ownerEmailPattern = env.TEST_ONLY_OWNER_EMAIL_PATTERN;
+      await processClaimableJobs(ownerEmailPattern);
+      await sweepStuckRunningRuns(ownerEmailPattern);
+      await sweepStrandedOrderedSiblings(ownerEmailPattern);
+      await sweepStuckQueuedRuns(ownerEmailPattern);
     }),
   );
 }
 
-export async function processClaimableJobs(): Promise<void> {
+export async function processClaimableJobs(
+  ownerEmailPattern?: string,
+): Promise<void> {
   try {
     const result = await claimDueGreenfieldJobRuns({
       limit: JOB_CLAIM_BATCH_SIZE,
+      ownerEmailPattern,
       onEnqueuedRun: async (runId) => {
         try {
           await dispatchRun({ runId });
@@ -98,11 +103,25 @@ export async function processClaimableJobs(): Promise<void> {
   }
 }
 
-async function sweepStuckRunningRuns(): Promise<void> {
+async function sweepStuckRunningRuns(
+  ownerEmailPattern?: string,
+): Promise<void> {
   const threshold = new Date(Date.now() - STUCK_RUN_THRESHOLD_MS).toISOString();
   let stuck: StuckRunningGreenfieldRun[];
   try {
     const db = getDbPg();
+    const ownerFilter = ownerEmailPattern
+      ? db`
+        and exists (
+          select 1
+          from public.workspaces w
+          join auth.users u
+            on u.id = w.owner_id
+          where w.id = r.workspace_id
+            and u.email like ${ownerEmailPattern}
+        )
+      `
+      : db``;
     stuck = await db<StuckRunningGreenfieldRun[]>`
       select
         r.id,
@@ -117,6 +136,7 @@ async function sweepStuckRunningRuns(): Promise<void> {
       where r.status = 'running'
         and r.started_at is not null
         and r.started_at < ${threshold}::timestamptz
+        ${ownerFilter}
       order by r.started_at asc, r.id asc
       limit ${STUCK_RUN_SWEEP_LIMIT}
     `;
@@ -154,13 +174,27 @@ async function sweepStuckRunningRuns(): Promise<void> {
   }
 }
 
-async function sweepStrandedOrderedSiblings(): Promise<void> {
+async function sweepStrandedOrderedSiblings(
+  ownerEmailPattern?: string,
+): Promise<void> {
   const finishedBefore = new Date(
     Date.now() - STRANDED_SIBLING_GRACE_MS,
   ).toISOString();
   let stranded: StrandedGreenfieldRun[];
   try {
     const db = getDbPg();
+    const ownerFilter = ownerEmailPattern
+      ? db`
+        and exists (
+          select 1
+          from public.workspaces w
+          join auth.users u
+            on u.id = w.owner_id
+          where w.id = r.workspace_id
+            and u.email like ${ownerEmailPattern}
+        )
+      `
+      : db``;
     stranded = await db<StrandedGreenfieldRun[]>`
       select r.id, r.workspace_id, r.talk_id, r.response_group_id
       from public.runs r
@@ -170,6 +204,7 @@ async function sweepStrandedOrderedSiblings(): Promise<void> {
       where r.status = 'queued'
         and t.mode = 'ordered'
         and r.sequence_index > 0
+        ${ownerFilter}
         and not exists (
           select 1
           from public.runs prior
@@ -207,13 +242,25 @@ async function sweepStrandedOrderedSiblings(): Promise<void> {
   }
 }
 
-async function sweepStuckQueuedRuns(): Promise<void> {
+async function sweepStuckQueuedRuns(ownerEmailPattern?: string): Promise<void> {
   const threshold = new Date(
     Date.now() - STUCK_QUEUED_THRESHOLD_MS,
   ).toISOString();
   let stuck: StuckQueuedGreenfieldRun[];
   try {
     const db = getDbPg();
+    const ownerFilter = ownerEmailPattern
+      ? db`
+        and exists (
+          select 1
+          from public.workspaces w
+          join auth.users u
+            on u.id = w.owner_id
+          where w.id = r.workspace_id
+            and u.email like ${ownerEmailPattern}
+        )
+      `
+      : db``;
     stuck = await db<StuckQueuedGreenfieldRun[]>`
       select r.id
       from public.runs r
@@ -221,6 +268,7 @@ async function sweepStuckQueuedRuns(): Promise<void> {
         on t.workspace_id = r.workspace_id
        and t.id = r.talk_id
       where r.status = 'queued'
+        ${ownerFilter}
         and (
           t.mode = 'parallel'
           or not exists (

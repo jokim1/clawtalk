@@ -1142,6 +1142,44 @@ describe('GoogleAccountSection (flag-gated)', () => {
     expect(screen.getByLabelText('Configuration only')).toBeTruthy();
   });
 
+  it('Connectors tab: admin sees connected Slack workspaces with bound-channel counts', async () => {
+    installConnectorsFetchByWorkspace({
+      [TEST_WORKSPACE_ID]: {
+        channels: [],
+        dataConnectors: [],
+        slackInstalls: [
+          {
+            teamId: 'T123',
+            teamName: 'ClawTalk HQ',
+            installedAt: '2026-05-22T00:00:00Z',
+            boundChannelCount: 2,
+          },
+        ],
+      },
+    });
+
+    render(
+      <MemoryRouter initialEntries={['/app/settings?tab=connectors']}>
+        <SettingsPage
+          user={buildSessionUser()}
+          userRole="owner"
+          onUnauthorized={vi.fn()}
+          onUserUpdated={vi.fn()}
+        />
+      </MemoryRouter>,
+    );
+
+    await screen.findByRole('heading', { name: 'Slack workspaces' });
+    expect(screen.getByText('ClawTalk HQ')).toBeTruthy();
+    expect(screen.getByText('T123')).toBeTruthy();
+    expect(screen.getByText('2 channels')).toBeTruthy();
+    expect(
+      screen.getByRole('button', {
+        name: 'Disconnect Slack workspace ClawTalk HQ',
+      }),
+    ).toBeTruthy();
+  });
+
   it('Connectors tab: trusts API credential status for Slack channels', async () => {
     installConnectorsFetch({
       channels: [

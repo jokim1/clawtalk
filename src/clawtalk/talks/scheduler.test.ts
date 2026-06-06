@@ -35,6 +35,7 @@ import { runScheduledTick, type ScheduledTickEnv } from './scheduler.js';
 const TEST_DB_URL = 'postgresql://postgres:postgres@127.0.0.1:54432/postgres';
 const USER_ID = '0c898989-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
 const OTHER_USER_ID = '0c898989-bbbb-bbbb-bbbb-bbbbbbbbbbbb';
+const TEST_USER_EMAIL_PATTERN = 'scheduler-%@clawtalk.local';
 const GDRIVE_READ_SCOPE_ALIASES = [
   'drive.readonly',
   'documents',
@@ -50,9 +51,40 @@ interface FakeQueue {
   ): Promise<void>;
 }
 
+type QueueVisibleTestRun = {
+  run_id: string;
+  status: string;
+  snapshot_id: string | null;
+  is_test_run: boolean;
+};
+
 interface MockHub {
   env: Pick<DbScopeEnvBindings, 'USER_EVENT_HUB'>;
   fetchCalls: Array<{ ownerId: string; body: string }>;
+}
+
+async function loadQueueVisibleRun(
+  runId: string,
+): Promise<QueueVisibleTestRun | null> {
+  const db = getDbPg();
+  const rows = await db<QueueVisibleTestRun[]>`
+    select
+      r.id as run_id,
+      r.status,
+      rps.id as snapshot_id,
+      u.email like ${TEST_USER_EMAIL_PATTERN} as is_test_run
+    from public.runs r
+    join public.workspaces w
+      on w.id = r.workspace_id
+    join auth.users u
+      on u.id = w.owner_id
+    left join public.run_prompt_snapshots rps
+      on rps.workspace_id = r.workspace_id
+     and rps.run_id = r.id
+    where r.id = ${runId}::uuid
+    limit 1
+  `;
+  return rows[0] ?? null;
 }
 
 function makeQueue(options?: {
@@ -64,23 +96,24 @@ function makeQueue(options?: {
     attempts: 0,
     sends,
     async send(message) {
+      const payload = message as { runId: string };
+      const visibleRun = await loadQueueVisibleRun(payload.runId);
+      if (!visibleRun) {
+        if (options?.requireCommittedRun) {
+          throw new Error(
+            'Run and prompt snapshot must commit before dispatch',
+          );
+        }
+        return;
+      }
+      if (!visibleRun.is_test_run) return;
+
       this.attempts += 1;
       if (options?.failSend) {
         throw new Error('queue down');
       }
-      const payload = message as { runId: string };
       if (options?.requireCommittedRun) {
-        const db = getDbPg();
-        const rows = await db<Array<{ run_id: string; snapshot_id: string }>>`
-          select r.id as run_id, rps.id as snapshot_id
-          from public.runs r
-          join public.run_prompt_snapshots rps
-            on rps.workspace_id = r.workspace_id
-           and rps.run_id = r.id
-          where r.id = ${payload.runId}::uuid
-            and r.status = 'queued'
-        `;
-        if (rows.length !== 1) {
+        if (visibleRun.status !== 'queued' || !visibleRun.snapshot_id) {
           throw new Error(
             'Run and prompt snapshot must commit before dispatch',
           );
@@ -201,11 +234,13 @@ async function deleteUser(): Promise<void> {
   await db`delete from public.event_outbox where topic like 'talk:%'`;
   await db`
     delete from public.workspaces
-    where owner_id in (${USER_ID}::uuid, ${OTHER_USER_ID}::uuid)
+    where owner_id in (
+      select id from auth.users where email like ${TEST_USER_EMAIL_PATTERN}
+    )
   `;
   await db`
     delete from auth.users
-    where id in (${USER_ID}::uuid, ${OTHER_USER_ID}::uuid)
+    where email like ${TEST_USER_EMAIL_PATTERN}
   `;
 }
 
@@ -280,12 +315,22 @@ async function runTick(
   const env: ScheduledTickEnv = {
     DB: { connectionString: TEST_DB_URL },
     TALK_RUN_QUEUE: queue,
+    TEST_ONLY_OWNER_EMAIL_PATTERN: TEST_USER_EMAIL_PATTERN,
     ...envPatch,
   };
   const { ctx, drain } = makeMockCtx();
   await runScheduledTick(env, ctx);
   await drain();
   return queue;
+}
+
+function claimDueSchedulerTestJobRuns(
+  input?: Parameters<typeof claimDueGreenfieldJobRuns>[0],
+) {
+  return claimDueGreenfieldJobRuns({
+    ...input,
+    ownerEmailPattern: TEST_USER_EMAIL_PATTERN,
+  });
 }
 
 async function createQueuedJobRunFixture(): Promise<{
@@ -335,6 +380,15 @@ describe('greenfield scheduled tick safety sweeps', () => {
   afterAll(async () => {
     await deleteUser();
     await closePgDatabase();
+  });
+
+  it('keeps the committed-run queue assertion for invisible runs', async () => {
+    const queue = makeQueue({ requireCommittedRun: true });
+
+    await expect(queue.send({ runId: randomUUID() })).rejects.toThrow(
+      'Run and prompt snapshot must commit before dispatch',
+    );
+    expect(queue.sends).toHaveLength(0);
   });
 
   it('fires due jobs into scheduled runs and dispatches after commit', async () => {
@@ -489,7 +543,7 @@ describe('greenfield scheduled tick safety sweeps', () => {
       where id = ${job.id}::uuid
     `;
 
-    const claim = await claimDueGreenfieldJobRuns({ limit: 1 });
+    const claim = await claimDueSchedulerTestJobRuns({ limit: 1 });
 
     expect(claim.enqueuedRunIds).toHaveLength(1);
     const runId = claim.enqueuedRunIds[0]!;
@@ -590,7 +644,7 @@ describe('greenfield scheduled tick safety sweeps', () => {
         for update
       `;
 
-      const claim = await claimDueGreenfieldJobRuns({ limit: 1 });
+      const claim = await claimDueSchedulerTestJobRuns({ limit: 1 });
 
       expect(claim.enqueuedRunIds).toHaveLength(0);
       expect(claim.blockedJobIds).toHaveLength(0);
@@ -650,7 +704,7 @@ describe('greenfield scheduled tick safety sweeps', () => {
         for update
       `;
 
-      const claim = await claimDueGreenfieldJobRuns({ limit: 1 });
+      const claim = await claimDueSchedulerTestJobRuns({ limit: 1 });
 
       expect(claim.enqueuedRunIds).toHaveLength(0);
       expect(claim.blockedJobIds).toHaveLength(0);
@@ -796,7 +850,10 @@ describe('greenfield scheduled tick safety sweeps', () => {
     `;
 
     const firstNow = new Date().toISOString();
-    const claim = await claimDueGreenfieldJobRuns({ limit: 1, now: firstNow });
+    const claim = await claimDueSchedulerTestJobRuns({
+      limit: 1,
+      now: firstNow,
+    });
 
     expect(claim.enqueuedRunIds).toHaveLength(0);
     expect(claim.busyJobIds).toHaveLength(10);
@@ -830,7 +887,7 @@ describe('greenfield scheduled tick safety sweeps', () => {
     const secondNow = new Date(
       new Date(firstNow).getTime() + 60_000,
     ).toISOString();
-    const nextClaim = await claimDueGreenfieldJobRuns({
+    const nextClaim = await claimDueSchedulerTestJobRuns({
       limit: 1,
       now: secondNow,
     });
@@ -893,7 +950,7 @@ describe('greenfield scheduled tick safety sweeps', () => {
       where id = ${eligible.id}::uuid
     `;
 
-    const claim = await claimDueGreenfieldJobRuns({
+    const claim = await claimDueSchedulerTestJobRuns({
       limit: 1,
       now: new Date(firstNow.getTime() + 60 * 1000),
     });
@@ -960,7 +1017,7 @@ describe('greenfield scheduled tick safety sweeps', () => {
       where id = ${eligible.id}::uuid
     `;
 
-    const claim = await claimDueGreenfieldJobRuns({
+    const claim = await claimDueSchedulerTestJobRuns({
       limit: 1,
       now: firstNow,
     });
@@ -1027,7 +1084,7 @@ describe('greenfield scheduled tick safety sweeps', () => {
       where id in ${db(freshDueJobIds)}
     `;
 
-    const claim = await claimDueGreenfieldJobRuns({
+    const claim = await claimDueSchedulerTestJobRuns({
       limit: 4,
       now: firstNow,
     });
@@ -1784,7 +1841,7 @@ describe('greenfield scheduled tick safety sweeps', () => {
       where id = ${valid.id}::uuid
     `;
 
-    const claim = await claimDueGreenfieldJobRuns({
+    const claim = await claimDueSchedulerTestJobRuns({
       limit: 1,
       now: firstNow,
     });
@@ -1800,7 +1857,7 @@ describe('greenfield scheduled tick safety sweeps', () => {
     `;
     expect(poisonRows[0]?.deferred_count).toBe(10);
 
-    const nextClaim = await claimDueGreenfieldJobRuns({
+    const nextClaim = await claimDueSchedulerTestJobRuns({
       limit: 1,
       now: new Date(firstNow.getTime() + 60 * 1000),
     });
@@ -1997,7 +2054,7 @@ describe('greenfield scheduled tick safety sweeps', () => {
       where id = ${job.id}::uuid
     `;
 
-    const claim = await claimDueGreenfieldJobRuns({
+    const claim = await claimDueSchedulerTestJobRuns({
       limit: 1,
       now: '2026-11-01T08:31:00.000Z',
     });
@@ -2050,7 +2107,7 @@ describe('greenfield scheduled tick safety sweeps', () => {
       where id = ${job.id}::uuid
     `;
 
-    const claim = await claimDueGreenfieldJobRuns({
+    const claim = await claimDueSchedulerTestJobRuns({
       limit: 1,
       now: '2026-03-07T10:31:00.000Z',
     });
