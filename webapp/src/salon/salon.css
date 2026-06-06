@@ -1,0 +1,172 @@
+/* ClawTalk · Salon visual system — canonical design tokens + motion.
+ *
+ * Ported (not copied) from the reference prototype `ClawTalk Salon.html` and
+ * docs/02-visual-system.md. This is the foundation layer:
+ *   - `--salon-*` color tokens, type-family vars, radius scale
+ *   - run-status + agent-accent tokens
+ *   - the `.ct-*` motion / scroll utilities and density modes
+ *
+ * It is intentionally NON-DESTRUCTIVE: it defines tokens and opt-in utility
+ * classes but does not override the existing pre-Salon shell palette. Salon
+ * surfaces opt in through the `webapp/src/salon/*` primitives, which reference
+ * these tokens. A full shell re-skin is a later work package (REFACTOR-AUDIT §6 W2).
+ */
+
+:root {
+  /* §1 · Primary palette */
+  --salon-paper: #fbf7ef;
+  --salon-paper-2: #f4ecdb;
+  --salon-card: #ffffff;
+  --salon-ink: #1f1b16;
+  --salon-ink-2: #6b6660;
+  --salon-line: #e6e0d1;
+  --salon-accent: #c8643a;
+
+  /* §1 · Run-status tokens (bg / fg / dot / border), from CT_RUN_STATES */
+  --salon-status-queued-bg: #f5f4f0;
+  --salon-status-queued-fg: #6b6660;
+  --salon-status-queued-dot: #a8a29e;
+  --salon-status-queued-border: #e6e2da;
+  --salon-status-running-bg: #eaf3ee;
+  --salon-status-running-fg: #235041;
+  --salon-status-running-dot: #3f6b5c;
+  --salon-status-running-border: #c9dfd3;
+  --salon-status-awaiting-bg: #faf1de;
+  --salon-status-awaiting-fg: #7e5418;
+  --salon-status-awaiting-dot: #c8893a;
+  --salon-status-awaiting-border: #ead7a4;
+  --salon-status-completed-bg: #eaeff9;
+  --salon-status-completed-fg: #27407a;
+  --salon-status-completed-dot: #3d5688;
+  --salon-status-completed-border: #c9d5ee;
+  --salon-status-failed-bg: #fbecec;
+  --salon-status-failed-fg: #7b2a30;
+  --salon-status-failed-dot: #a8434a;
+  --salon-status-failed-border: #ecc4c7;
+  --salon-status-cancelled-bg: #f4efe6;
+  --salon-status-cancelled-fg: #5e5645;
+  --salon-status-cancelled-dot: #8b7e6a;
+  --salon-status-cancelled-border: #dcd2be;
+
+  /* §1 · Agent accent tokens */
+  --salon-agent-strategist: #c8643a;
+  --salon-agent-critic: #8e3b59;
+  --salon-agent-researcher: #3f6b5c;
+  --salon-agent-editor: #3d5688;
+  --salon-agent-quant: #2a6f7e;
+
+  /* §2 · Type families (loaded via <link> in index.html) */
+  --salon-font-serif: 'Newsreader', Georgia, serif;
+  --salon-font-display: 'Instrument Serif', Georgia, serif;
+  --salon-font-sans: 'Geist', 'IBM Plex Sans', system-ui, sans-serif;
+  --salon-font-mono: 'Geist Mono', 'JetBrains Mono', ui-monospace, monospace;
+
+  /* §3 · Radius scale */
+  --salon-radius-card: 16px;
+  --salon-radius-input: 10px;
+  --salon-radius-full: 9999px;
+}
+
+/* §5 · Motion — subtle screen-transition fade. */
+.ct-screen-enter {
+  animation: ctFadeIn 220ms ease-out both;
+}
+@keyframes ctFadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* §5 · Streaming caret. */
+.ct-caret {
+  display: inline-block;
+  width: 7px;
+  height: 18px;
+  background: currentColor;
+  margin-left: 2px;
+  vertical-align: text-bottom;
+  animation: ctBlink 800ms steps(1) infinite;
+}
+@keyframes ctBlink {
+  50% {
+    opacity: 0;
+  }
+}
+
+/* §5 · Live dot pulse. */
+.ct-pulse {
+  animation: ctPulse 1.6s ease-in-out infinite;
+}
+@keyframes ctPulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
+/* Thin scrollbars for Salon scroll regions. */
+.ct-thin-scroll::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+.ct-thin-scroll::-webkit-scrollbar-thumb {
+  background: rgba(31, 27, 22, 0.14);
+  border-radius: 8px;
+}
+.ct-thin-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* §8 · Density modes (opt-in via body class). */
+body.density-cozy {
+  font-size: 14px;
+}
+body.density-compact {
+  font-size: 13px;
+}
+
+/* Interactive primitive states (focus / hover) — opt-in via class. */
+.salon-btn {
+  transition:
+    filter 140ms ease,
+    transform 80ms ease,
+    box-shadow 140ms ease;
+}
+.salon-btn:hover:not(:disabled) {
+  filter: brightness(0.96);
+}
+.salon-btn:active:not(:disabled) {
+  transform: translateY(0.5px);
+}
+.salon-btn:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(200, 100, 58, 0.35);
+}
+
+.salon-field {
+  transition:
+    border-color 140ms ease,
+    box-shadow 140ms ease;
+}
+.salon-field:focus,
+.salon-field:focus-visible {
+  border-color: var(--salon-accent, #c8643a);
+  box-shadow: 0 0 0 3px rgba(200, 100, 58, 0.18);
+}
+
+/* Respect reduced-motion preference (a11y v1 bar). */
+@media (prefers-reduced-motion: reduce) {
+  .ct-screen-enter,
+  .ct-caret,
+  .ct-pulse {
+    animation: none;
+  }
+}

@@ -11,6 +11,7 @@ import { SlackChannelForm } from '../connectors/SlackChannelForm';
 import { SlackChannelPicker } from '../connectors/SlackChannelPicker';
 import { ConnectorStatusPill } from '../connectors/StatusPill';
 import { resolveConnectorSubtitle } from '../connectors/subtitle';
+import { Button, Kbd, Modal, Sheet } from '../../salon';
 
 const CHANNEL_KIND_LABELS: Record<ChannelKind, string> = {
   slack: 'Slack',
@@ -353,15 +354,12 @@ export function ConnectorsSettingsPanel({
       </section>
 
       {modal.kind !== 'closed' ? (
-        <div
-          className="connector-modal-backdrop"
-          role="dialog"
-          aria-modal="true"
-          onClick={(event) => {
-            if (event.target === event.currentTarget) onCloseModal();
-          }}
+        <Modal
+          onClose={onCloseModal}
+          width={560}
+          ariaLabel="Connector settings"
         >
-          <div className="connector-modal">
+          <div style={{ padding: '20px' }}>
             <ConnectorModalContent
               modal={modal}
               createKind={createKind}
@@ -378,57 +376,50 @@ export function ConnectorsSettingsPanel({
               onEditDataConnector={onEditDataConnector}
             />
           </div>
-        </div>
+        </Modal>
       ) : null}
 
       {deleteState.kind !== 'closed' ? (
-        <div
-          className="connector-modal-backdrop"
-          role="dialog"
-          aria-modal="true"
-          onClick={(event) => {
-            if (event.target === event.currentTarget && !deleteSubmitting) {
-              onCloseDelete();
-            }
+        <Sheet
+          width={460}
+          onClose={() => {
+            if (!deleteSubmitting) onCloseDelete();
           }}
-        >
-          <div className="connector-modal connector-delete-modal">
-            <h3>
-              Delete{' '}
-              {deleteState.kind === 'channel'
-                ? deleteState.channel.displayName
-                : deleteState.dataConnector.displayName}
-              ?
-            </h3>
-            <p>
-              Deleting removes this connector from{' '}
-              {deleteState.kind === 'channel'
-                ? deleteState.channel.boundTalkCount
-                : deleteState.dataConnector.boundTalkCount}{' '}
-              talks. Talk histories stay intact. This cannot be undone.
-            </p>
-            <div className="form-actions">
-              <button
-                type="button"
-                className="btn btn-secondary"
+          title={`Delete ${
+            deleteState.kind === 'channel'
+              ? deleteState.channel.displayName
+              : deleteState.dataConnector.displayName
+          }?`}
+          headerAccessory={<Kbd>Esc</Kbd>}
+          footer={
+            <>
+              <Button
+                variant="secondary"
                 onClick={onCloseDelete}
                 disabled={deleteSubmitting}
               >
                 Cancel
-              </button>
-              <button
-                type="button"
-                className="btn btn-danger"
+              </Button>
+              <Button
+                variant="danger"
                 onClick={() => {
                   void onConfirmDelete();
                 }}
                 disabled={deleteSubmitting}
               >
                 {deleteSubmitting ? 'Deleting…' : 'Delete connector'}
-              </button>
-            </div>
-          </div>
-        </div>
+              </Button>
+            </>
+          }
+        >
+          <p style={{ margin: 0, color: 'var(--salon-ink-2, #6b6660)' }}>
+            Deleting removes this connector from{' '}
+            {deleteState.kind === 'channel'
+              ? deleteState.channel.boundTalkCount
+              : deleteState.dataConnector.boundTalkCount}{' '}
+            talks. Talk histories stay intact. This cannot be undone.
+          </p>
+        </Sheet>
       ) : null}
     </>
   );

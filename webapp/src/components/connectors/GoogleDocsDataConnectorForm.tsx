@@ -1,6 +1,7 @@
 import { FormEvent, useState } from 'react';
 
 import type { WorkspaceDataConnector } from '../../lib/api';
+import { Button, Input } from '../../salon';
 
 type GoogleDocsDataConnectorFormProps = {
   mode: 'create' | 'edit';
@@ -46,7 +47,7 @@ export function GoogleDocsDataConnectorForm({
     <form className="connector-kind-form" onSubmit={handleSubmit}>
       <label className="form-field">
         <span className="form-field-label">Display name</span>
-        <input
+        <Input
           type="text"
           value={displayName}
           onChange={(event) => setDisplayName(event.target.value)}
@@ -57,7 +58,7 @@ export function GoogleDocsDataConnectorForm({
       </label>
       <label className="form-field">
         <span className="form-field-label">Folder ID (optional)</span>
-        <input
+        <Input
           type="text"
           value={folderId}
           onChange={(event) => setFolderId(event.target.value)}
@@ -74,21 +75,16 @@ export function GoogleDocsDataConnectorForm({
         </p>
       ) : null}
       <div className="form-actions">
-        <button
-          type="button"
-          className="btn btn-secondary"
-          onClick={onCancel}
-          disabled={submitting}
-        >
+        <Button variant="secondary" onClick={onCancel} disabled={submitting}>
           Cancel
-        </button>
-        <button type="submit" className="btn btn-primary" disabled={submitting}>
+        </Button>
+        <Button type="submit" variant="primary" disabled={submitting}>
           {submitting
             ? 'Saving…'
             : mode === 'create'
               ? 'Add data source'
               : 'Save'}
-        </button>
+        </Button>
       </div>
     </form>
   );
