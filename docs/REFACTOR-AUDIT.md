@@ -15,7 +15,7 @@ The backend/data cutover is real. The product refactor is not done.
 | Backend / data cutover | ~90% ✅ | Greenfield is the only live runtime. Legacy runtime/accessors were retired, and backend CI is a signal again. Remaining backend work is mainly facade deletion plus Home/Forge backends. |
 | Frontend structural decomposition | ~50% 🔄 | `TalkDetailPage.tsx` is 5,429 LOC and `SettingsPage.tsx` is 2,147 LOC. Talk panels, composer, thread view, reducer, and stream hook are extracted; the page-owned controller bulk remains. |
 | De-facade | ~0% ⛔ | Compat facades still serve the webapp: synthetic threads, runs-with-`threadId`, flat content markdown/html, snapshot compat, policy/tool/connectors facades, and run-context synthesis. |
-| Visual system (Salon) | 0% ⛔ | `webapp/src` has zero Salon tokens/fonts. `webapp/src/styles.css` is 7,284 LOC of pre-Salon hand CSS. |
+| Visual system (Salon) | Foundation in review 🔄 | Salon foundation shipped in PR #547: `webapp/src/salon/*` CSS-variable tokens (`--salon-*`), fonts (Newsreader/Geist/Geist Mono), brand mark, and the primitive library (CTMark/CTIcon/Avatar/AgentAvatar/RunPill/Chip/Kbd/Button/Input/Modal/Sheet/Popover) with behavior-preserving proof migrations + a smoke suite. Remaining: broad re-skin of the 7,284 LOC pre-Salon `webapp/src/styles.css`. |
 | Net-new product surfaces | ~5% ⛔ | Live app covers Talk list, Talk detail, and Settings. Home, native Documents, standalone Agents, Archive, command palette, New Talk sheet, and Forge are unbuilt or skeletal. |
 | Eval gate | ~5% ⛔ | `docs/eval-suite.md` exists, but there is no `eval/` directory and no `npm run eval`. |
 
@@ -120,15 +120,15 @@ The unused table set is mostly intentional schema waiting for surfaces: Home, Fo
 
 ## 5. Visual System (Salon)
 
-Salon is a product-defining gap, not polish.
+Salon was a product-defining gap. The **foundation landed in PR #547** (lane S): a CSS-variable system + primitive library under `webapp/src/salon/`, with behavior-preserving proof migrations and a `salon.test.tsx` smoke suite. The remaining Salon work is the broad re-skin of the 7,284 LOC pre-Salon `webapp/src/styles.css`, plus building the net-new surfaces Salon-native from the start.
 
-| Marker in `webapp/src` | Count |
-|---|---|
-| `--salon-*` tokens | 0 |
-| `#FBF7EF` / `#C8643A` / `#1F1B16` | 0 |
-| `Newsreader` / `Geist` / `Geist Mono` | 0 |
+| Marker in `webapp/src` | Before | After PR #547 |
+|---|---|---|
+| `--salon-*` tokens | 0 | defined in `salon/salon.css` + `salon/tokens.ts` |
+| `#FBF7EF` / `#C8643A` / `#1F1B16` | 0 | canonical palette tokens defined |
+| `Newsreader` / `Geist` / `Geist Mono` | 0 | wired via `<link>` in `index.html` |
 
-The webapp has no Tailwind/PostCSS pipeline and relies on 7,284 LOC of hand CSS. The reference prototype is Tailwind CDN + Babel-in-browser and must be ported, not copied.
+The webapp uses CSS variables + the existing Vite pipeline (no Tailwind, per §9). The reference prototype (Tailwind CDN + Babel-in-browser) was ported, not copied.
 
 Recommendation: default to CSS variables and the existing Vite CSS pipeline. Add Tailwind only if Joseph explicitly decides speed-to-port matters more than keeping the production stack small.
 
