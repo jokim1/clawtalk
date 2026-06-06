@@ -30,7 +30,11 @@ import {
   completeGreenfieldRun,
   failGreenfieldRun,
 } from './greenfield-run-accessors.js';
-import { runScheduledTick, type ScheduledTickEnv } from './scheduler.js';
+import {
+  resolveTestOnlyOwnerEmailPattern,
+  runScheduledTick,
+  type ScheduledTickEnv,
+} from './scheduler.js';
 
 const TEST_DB_URL = 'postgresql://postgres:postgres@127.0.0.1:54432/postgres';
 const USER_ID = '0c898989-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
@@ -398,15 +402,42 @@ describe('greenfield scheduled tick safety sweeps', () => {
     expect(queue.sends).toHaveLength(0);
   });
 
-  it('ignores the test-only owner filter outside the test runtime', async () => {
+  it('ignores the test-only owner filter outside the test runtime', () => {
+    const originalNodeEnv = process.env.NODE_ENV;
+    try {
+      process.env.NODE_ENV = 'production';
+      expect(
+        resolveTestOnlyOwnerEmailPattern({
+          TEST_ONLY_OWNER_EMAIL_PATTERN: 'nobody-%@clawtalk.local',
+        }),
+      ).toBeUndefined();
+
+      process.env.NODE_ENV = 'test';
+      expect(
+        resolveTestOnlyOwnerEmailPattern({
+          TEST_ONLY_OWNER_EMAIL_PATTERN: TEST_USER_EMAIL_PATTERN,
+        }),
+      ).toBe(TEST_USER_EMAIL_PATTERN);
+
+      expect(resolveTestOnlyOwnerEmailPattern({})).toBeUndefined();
+    } finally {
+      if (originalNodeEnv === undefined) {
+        delete process.env.NODE_ENV;
+      } else {
+        process.env.NODE_ENV = originalNodeEnv;
+      }
+    }
+  });
+
+  it('honors the test-only owner filter for scheduled ticks under test', async () => {
     const { workspaceId, talkId, agentIds } = await createIdleTalkFixture();
     const db = getDbPg();
     const job = await withUserContext(USER_ID, () =>
       createGreenfieldJob({
         workspaceId,
         talkId,
-        title: 'Production Guard Job',
-        prompt: 'Confirm the scheduler ignores test-only filters in prod.',
+        title: 'Test Filter Guard Job',
+        prompt: 'Confirm the scheduler honors test-only filters in tests.',
         agentId: agentIds[0]!,
         schedule: { kind: 'interval', everyHours: 1 },
         timezone: 'UTC',
@@ -420,34 +451,41 @@ describe('greenfield scheduled tick safety sweeps', () => {
       where id = ${job.id}::uuid
     `;
 
-    const originalNodeEnv = process.env.NODE_ENV;
-    process.env.NODE_ENV = 'production';
     const queue = makeQueue({ requireCommittedRun: true });
-    try {
-      const env: ScheduledTickEnv = {
-        DB: { connectionString: TEST_DB_URL },
-        TALK_RUN_QUEUE: queue,
-        TEST_ONLY_OWNER_EMAIL_PATTERN: 'nobody-%@clawtalk.local',
-      };
-      const { ctx, drain } = makeMockCtx();
-      await runScheduledTick(env, ctx);
-      await drain();
-    } finally {
-      if (originalNodeEnv === undefined) {
-        delete process.env.NODE_ENV;
-      } else {
-        process.env.NODE_ENV = originalNodeEnv;
-      }
-    }
+    const env: ScheduledTickEnv = {
+      DB: { connectionString: TEST_DB_URL },
+      TALK_RUN_QUEUE: queue,
+      TEST_ONLY_OWNER_EMAIL_PATTERN: 'nobody-%@clawtalk.local',
+    };
+    const { ctx, drain } = makeMockCtx();
+    await runScheduledTick(env, ctx);
+    await drain();
+
+    expect(queue.sends).toHaveLength(0);
+    const blockedRows = await db<Array<{ run_count: number }>>`
+      select count(*)::int as run_count
+      from public.runs
+      where job_id = ${job.id}::uuid
+    `;
+    expect(blockedRows[0]?.run_count).toBe(0);
+
+    const matchingEnv: ScheduledTickEnv = {
+      DB: { connectionString: TEST_DB_URL },
+      TALK_RUN_QUEUE: queue,
+      TEST_ONLY_OWNER_EMAIL_PATTERN: TEST_USER_EMAIL_PATTERN,
+    };
+    const { ctx: matchingCtx, drain: matchingDrain } = makeMockCtx();
+    await runScheduledTick(matchingEnv, matchingCtx);
+    await matchingDrain();
 
     expect(queue.sends).toHaveLength(1);
     expect(queue.sends[0]?.observedCommittedRun).toBe(true);
-    const rows = await db<Array<{ job_id: string | null }>>`
+    const runRows = await db<Array<{ job_id: string | null }>>`
       select job_id
       from public.runs
       where id = ${queue.sends[0]!.runId}::uuid
     `;
-    expect(rows[0]?.job_id).toBe(job.id);
+    expect(runRows[0]?.job_id).toBe(job.id);
   });
 
   it('fires due jobs into scheduled runs and dispatches after commit', async () => {

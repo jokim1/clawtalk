@@ -63,8 +63,8 @@ export async function runScheduledTick(
   );
 }
 
-function resolveTestOnlyOwnerEmailPattern(
-  env: ScheduledTickEnv,
+export function resolveTestOnlyOwnerEmailPattern(
+  env: Pick<ScheduledTickEnv, 'TEST_ONLY_OWNER_EMAIL_PATTERN'>,
 ): string | undefined {
   const pattern = env.TEST_ONLY_OWNER_EMAIL_PATTERN;
   if (!pattern) return undefined;
