@@ -17,6 +17,7 @@ import {
   failGreenfieldRun,
   findNextGreenfieldRunnableOrderedSibling,
 } from './greenfield-run-accessors.js';
+import { buildOwnerEmailWorkspaceFilter } from './scheduler-owner-filter.js';
 import { dispatchRun } from './queue-producer.js';
 
 // Number of due jobs to claim per tick. Keeps the scheduled hot path bounded.
@@ -138,18 +139,11 @@ async function sweepStuckRunningRuns(
   let stuck: StuckRunningGreenfieldRun[];
   try {
     const db = getDbPg();
-    const ownerFilter = ownerEmailPattern
-      ? db`
-        and exists (
-          select 1
-          from public.workspaces w
-          join auth.users u
-            on u.id = w.owner_id
-          where w.id = r.workspace_id
-            and u.email like ${ownerEmailPattern}
-        )
-      `
-      : db``;
+    const ownerFilter = buildOwnerEmailWorkspaceFilter(
+      db,
+      ownerEmailPattern,
+      'runs',
+    );
     stuck = await db<StuckRunningGreenfieldRun[]>`
       select
         r.id,
@@ -211,18 +205,11 @@ async function sweepStrandedOrderedSiblings(
   let stranded: StrandedGreenfieldRun[];
   try {
     const db = getDbPg();
-    const ownerFilter = ownerEmailPattern
-      ? db`
-        and exists (
-          select 1
-          from public.workspaces w
-          join auth.users u
-            on u.id = w.owner_id
-          where w.id = r.workspace_id
-            and u.email like ${ownerEmailPattern}
-        )
-      `
-      : db``;
+    const ownerFilter = buildOwnerEmailWorkspaceFilter(
+      db,
+      ownerEmailPattern,
+      'runs',
+    );
     stranded = await db<StrandedGreenfieldRun[]>`
       select r.id, r.workspace_id, r.talk_id, r.response_group_id
       from public.runs r
@@ -277,18 +264,11 @@ async function sweepStuckQueuedRuns(ownerEmailPattern?: string): Promise<void> {
   let stuck: StuckQueuedGreenfieldRun[];
   try {
     const db = getDbPg();
-    const ownerFilter = ownerEmailPattern
-      ? db`
-        and exists (
-          select 1
-          from public.workspaces w
-          join auth.users u
-            on u.id = w.owner_id
-          where w.id = r.workspace_id
-            and u.email like ${ownerEmailPattern}
-        )
-      `
-      : db``;
+    const ownerFilter = buildOwnerEmailWorkspaceFilter(
+      db,
+      ownerEmailPattern,
+      'runs',
+    );
     stuck = await db<StuckQueuedGreenfieldRun[]>`
       select r.id
       from public.runs r

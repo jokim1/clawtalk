@@ -17,6 +17,7 @@ import {
   normalizeGoogleScopeAliases,
 } from '../identity/google-scopes.js';
 import { emitOutboxEventOnSql, enqueueOutboxNotify } from './outbox-emit.js';
+import { buildOwnerEmailWorkspaceFilter } from './scheduler-owner-filter.js';
 
 export type GreenfieldJobStatus = 'active' | 'paused' | 'blocked';
 export type GreenfieldJobWeekday =
@@ -1833,19 +1834,11 @@ async function listDueGreenfieldJobCandidates(input: {
   const unclaimedPriority = retryFirst ? 1 : 0;
   const retryReadyPriority = retryFirst ? 0 : 1;
   const candidatePageLimit = unclaimedLimit + retryReadyLimit;
-  const buildOwnerEmailFilter = () =>
-    input.ownerEmailPattern
-      ? input.sql`
-        and exists (
-          select 1
-          from public.workspaces w
-          join auth.users u
-            on u.id = w.owner_id
-          where w.id = j.workspace_id
-            and u.email like ${input.ownerEmailPattern}
-        )
-      `
-      : input.sql``;
+  const ownerFilter = buildOwnerEmailWorkspaceFilter(
+    input.sql,
+    input.ownerEmailPattern,
+    'jobs',
+  );
   return input.sql<DueGreenfieldJobCandidate[]>`
     with unclaimed_due as (
       select
@@ -1863,7 +1856,7 @@ async function listDueGreenfieldJobCandidates(input: {
         and j.next_due_at <= ${input.now}::timestamptz
         and j.claimed_at is null
         and j.id <> all(${input.scannedJobIds}::uuid[])
-        ${buildOwnerEmailFilter()}
+        ${ownerFilter}
       order by j.next_due_at asc, j.created_at asc, j.id asc
       limit ${unclaimedLimit}
     ),
@@ -1883,7 +1876,7 @@ async function listDueGreenfieldJobCandidates(input: {
         and j.next_due_at <= ${input.now}::timestamptz
         and j.claimed_at < ${input.busyRetryBefore}::timestamptz
         and j.id <> all(${input.scannedJobIds}::uuid[])
-        ${buildOwnerEmailFilter()}
+        ${ownerFilter}
       order by j.claimed_at asc, j.next_due_at asc, j.created_at asc, j.id asc
       limit ${retryReadyLimit}
     ),
