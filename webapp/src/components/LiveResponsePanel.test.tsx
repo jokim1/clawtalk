@@ -12,7 +12,7 @@ import {
   type LiveResponsePanelProps,
   type PillState,
 } from './LiveResponsePanel';
-import type { LiveResponseView, RunView } from '../pages/TalkDetailPage';
+import type { LiveResponseView, RunView } from '../lib/talkRunReducer';
 
 afterEach(() => {
   cleanup();

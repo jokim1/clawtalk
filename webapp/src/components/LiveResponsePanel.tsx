@@ -1,6 +1,6 @@
 import { memo } from 'react';
 
-import type { LiveResponseView, RunView } from '../pages/TalkDetailPage';
+import type { LiveResponseView, RunView } from '../lib/talkRunReducer';
 import { ExecutionDecisionSummary } from './ExecutionDecisionSummary';
 
 const NICKNAME_MAX_CHARS = 18;

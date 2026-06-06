@@ -12,7 +12,7 @@ import type {
   OrderedRoundSummary,
   RunView,
   TalkTimelineEntry,
-} from '../pages/TalkDetailPage';
+} from '../lib/talkRunReducer';
 
 function isRenderableImageAttachment(mimeType: string): boolean {
   return (
