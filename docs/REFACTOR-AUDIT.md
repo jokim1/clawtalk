@@ -3,6 +3,8 @@
 > **Status:** audit snapshot at commit `96489dc` (merged PR #539), 2026-06-06. Read-only audit; no code changed.
 > **Purpose:** answer "how comprehensive is the refactor, what's done, what's left — including visuals?" against the full V2 product, not just the active decomposition plan.
 > **Method:** four parallel read-only auditors (V2 scope / backend+facades / frontend structure / visual system), each verifying claims against code in a clean `origin/main` worktree. Findings below are evidence-cited (file:line / LOC / grep counts).
+>
+> **Update 2026-06-06 (post `/plan-eng-review`):** This snapshot drove an eng-plan-review; 5 go-forward decisions are now locked (memory `project_refactor_audit_v2_decisions`): **D1** sequencing = *stabilize first* (finish decomposition + de-facade from a clean base, then build net-new surfaces Salon-native); **D2** Salon tooling = **Tailwind** (v4 `@theme` tokens + PostCSS; port the prototype ~1:1); **D3** the launch-blocking eval gate is built **now** as a frontend-independent parallel track; **D4** message attachments are **dropped for v1** (delete the gated-off dead branches + 501 routes); **D5** v1 keeps a minimal a11y bar and **defers** dark mode, full mobile/responsive, full WCAG, Archive, ⌘K (Forge stays post-MVP). **H1 shipped the read-only Home backend** (PR #542), so the "Home backend NOT built" findings below (§3b, §6, §9) are superseded for the backend; the Salon-native Home *UI* remains unbuilt.
 
 ---
 
@@ -76,7 +78,7 @@ The backend serves 9 legacy-shaped surfaces so the un-rewritten webapp keeps wor
 
 ### 3b. Net-new surface backends
 
-- **Home: NOT built.** No `home*.ts` route/accessor. The only production touch of the 13 `home_*` tables is a single **write** (`greenfield-job-accessors.ts:1132`, job-blocked inbox row) that **nothing reads**.
+- **Home: backend read-only API SHIPPED (PR #542, H1).** `web/routes/home.ts` (auth-gated, rate-limited GET `summary`/`inbox`/`recommendations`/`news`) + `home-accessors.ts` read the member-facing `home_*` tables — RLS-safe (defense-in-depth `workspace_id` predicates + composite-key joins; global `home_news_items` scoped via `home_news_matches`), deterministic ranking, strictly read-only. The job-blocked inbox **write** (`greenfield-job-accessors.ts:1132`) now has a reader (the inbox API), though no frontend consumes it yet. Curator-internal `home_*` tables (ranking/optimization/algorithm/activation/events) remain unread. Frontend `HomePage` still unbuilt (Salon-native, per D1/D2). *(Pre-H1 finding: "Home NOT built — no `home*.ts`".)*
 - **Documents: backend DONE** (full block-model accessors, `greenfield-detail-accessors.ts:428-1404`); only the frontend consumes the flat compat shape.
 
 ### 3c. Provisioned-but-dead schema
@@ -161,7 +163,7 @@ Organized as workstreams (W1–W6 are MVP; Forge is post-MVP).
 **W2 — De-facade (step 7, ~0% done).** Migrate frontend to native greenfield shapes, then delete each backend facade (§3a, 9 facades): synthetic threads, runs-with-threadId, content md/html, snapshot compat, channels/data-connectors, talk_tools families, policy, run-context, + the duplicate-route cleanup.
 
 **W3 — Net-new product surfaces.**
-- **Home (step 9):** backend routes/accessors over `home_*` (H1, in flight) + HomePage (inbox/recommendations/news/curator/stat-strip/FTUE). Largest single surface.
+- **Home (step 9):** backend routes/accessors over `home_*` (H1 ✅ **SHIPPED, PR #542**) + HomePage (inbox/recommendations/news/curator/stat-strip/FTUE) — **UI still unbuilt; build Salon-native per D1/D2**. Largest single surface.
 - **Documents (step 6):** DocumentsPage table + full-bleed editor (doc tabs, blocks, co-editor avatars, pending-edit Accept/Reject banner) on the native model.
 - **Agents page (step 7):** standalone roster + Agent profile + Team-compositions + Discover.
 - **Archive view**, **New-Talk sheet (⌘N)**, **⌘K palette**, **workspace-switcher UI** (verify built vs minimal), **Settings API-keys + Tools panels** (net-new).
@@ -218,7 +220,7 @@ There is no single honest percentage; by layer:
 - **Sidebar labels mislead:** "Home" → Talk list, "Content" → in-talk doc deep links (neither surface exists).
 - **`roadmap.md` self-reports `TalkDetailPage` at ~5719 LOC**; actual is **5347** (slightly further along).
 - **Duplicate route registrations:** `reorderGreenfieldTalkSidebarRoute` + `getGreenfieldRunContextRoute` are mounted in both `worker-app.ts` and `greenfield-api.ts` (first-match wins; the latter copies are dead).
-- **`home_inbox_items` is written but never read** (latent dead-write until Home ships).
+- **`home_inbox_items` is written and now read by the H1 inbox API** (PR #542) — no longer a dead-write, though no frontend consumes it yet.
 
 ---
 
