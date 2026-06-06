@@ -886,7 +886,7 @@ home_activation_state (
 Design notes:
 
 - **Naming.** `home_` prefix follows `07` §10. `activity_events` is bare because it's a generic event stream (Inbox + activity rails read it) rather than a Home-only surface.
-- **Forge on Home.** `home_inbox_items.type = 'forge_run_needs_review'` + `home_recommendations.kind = 'forge-suggestion'` (resolves DOC-AUDIT #4). `07` §6.6 must add a `forge_run_needs_review` subsection and `07` §7.6 must add the `forge-suggestion` generator (tracked as G-07.P0.3).
+- **Forge on Home.** `home_inbox_items.type = 'forge_run_needs_review'` + `home_recommendations.kind = 'forge-suggestion'`. `07` §6.6 must add a `forge_run_needs_review` subsection and `07` §7.6 must add the `forge-suggestion` generator (tracked as G-07.P0.3).
 - **Inbox idempotency for jobs (`12-jobs.md` §6 Inbox surfacing).** `home_inbox_items.ref_id` is the natural-dedup key for at-least-once emits. `job_output_ready` is emitted by the queue consumer on successful run completion and sets `ref_id = run.id` — `home_inbox_items_dedup` (unique partial index on `(workspace_id, type, ref_id)`) suppresses replays. `job_blocked` is emitted by the scheduler **synchronously** in the same transaction as the `jobs.status='blocked'` transition (no queue, no retry surface) and sets `ref_id = NULL` — each block episode produces a distinct row (a job that blocks, unblocks via user edit, then blocks again writes two rows; this is intentional). Other producers may set `ref_id` for their own dedup needs; the constraint is per-type.
 - **Type set (12 values).** The CHECK on `home_inbox_items.type` is the complete v1 set. `07` §6.5 `InboxItemType` ships only 10 (missing `forge_run_needs_review`, `job_output_ready`, `job_blocked` and still listing `job_needs_review`) — reconcile per G-07.P0.1.
 - **Recommendation kind set (15 values).** Includes both `forge-suggestion` (D6/§9) and `job`+`prompt-suggestion` (per `07` §7.6). Reconciliation: `07` §7.6 is currently missing `forge-suggestion` — fix per G-07.P0.2.
@@ -1340,7 +1340,7 @@ Remaining (taste calls + follow-ups, not blockers):
 - ~~**Score scale**~~ **RESOLVED 2026-05-30.** Composite 0–10 for UI surfaces (gallery/leaderboard sort key) + 1–5 per-persona Likert in the trust panel. `per_persona_json` stores the raw 1–5 values; `composite_score numeric` is the canonical 0–10 sort number (already projected on the SSR side). Matches §9 design notes at L1021.
 - ~~**Per-tab vs per-document co-editors**~~ **RESOLVED 2026-05-30: per-tab.** `doc_tab_coeditors` is canonical (§5). Matches the prototype's Draft-vs-Comp distinct-editors UX. `§01.1.5 DocTab.coEditorIds` already aligned (G-01.P1.7).
 - ~~**SSR asset freshness**~~ **RESOLVED 2026-05-30: cache + manual sync.** `forge_personas`/`forge_reference_sets`/`forge_questions` stay as the read-through cache. Admin clicks "Refresh" on the Audiences page to re-sync via SSR MCP (§09 §9.1). `synced_at` exposes last-refresh time in the UI. Fast page loads, no MCP latency on every browse.
-- **API + 03 follow-ons** — add Forge endpoints + move-block endpoint to `04`, drop SSE; point `04` §14 at `llm_models`; seed role templates from `03` with the "Samira"/handle fixes.
+- **API + 03 follow-ons** — add Forge endpoints + move-block endpoint to `04`; point `04` §14 at `llm_models`; seed role templates from `03` with the user-name placeholder and canonical `@strat` handle fixes.
 
 Remaining (deferred to dedicated reviews — these block parts of the schema):
 

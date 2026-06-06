@@ -1,4 +1,4 @@
-> **Status:** canonical (design tokens). TODO: add the doc-tab strip + Forge surface components (DOC-AUDIT #15).
+> **Status:** canonical (design tokens). Production implementation is still pending; see [REFACTOR-AUDIT.md](./REFACTOR-AUDIT.md) for the Salon gap and current tooling recommendation.
 > Precedence + orientation: [README.md](./README.md) · decisions: [DECISIONS.md](./DECISIONS.md) · terms: [GLOSSARY.md](./GLOSSARY.md).
 
 # ClawTalk · Visual System

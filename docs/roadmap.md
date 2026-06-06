@@ -1,58 +1,58 @@
-> **Status:** live implementation tracker · **Last updated:** 2026-06-05
-> Orientation: [REFACTOR-OVERVIEW.md](./REFACTOR-OVERVIEW.md) · readiness: [IMPLEMENTATION-READINESS.md](./IMPLEMENTATION-READINESS.md)
+> **Status:** live implementation tracker · **Last updated:** 2026-06-06
+> Orientation: [REFACTOR-OVERVIEW.md](./REFACTOR-OVERVIEW.md) · current audit: [REFACTOR-AUDIT.md](./REFACTOR-AUDIT.md) · execution protocol: [PHASE5-AUTONOMOUS-PLAN.md](./PHASE5-AUTONOMOUS-PLAN.md)
 
 # ClawTalk Roadmap
 
-This file tracks shipped state vs. the greenfield refactor. It is not the product spec; use it to orient what exists today and what to implement next.
+This file is the short operational tracker for the greenfield refactor. It is not the product spec. Use `01` through `12` for target behavior, `REFACTOR-AUDIT.md` for the completion audit, and this file for what to run next.
 
-## Shipped / Current
+## Current State
 
-| Area              | State                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
-| ----------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Runtime           | Cloudflare Workers + Hono + Durable Objects + Hyperdrive + Queues + R2 + Supabase Postgres. Keep.                                                                                                                                                                                                                                                                                                                                                                     |
-| Auth              | Google OAuth/device-code/cookie + CSRF stack exists. Rework for workspace bootstrap, keep the security shape.                                                                                                                                                                                                                                                                                                                                                         |
-| LLM providers     | Provider/model discovery, provider secrets, runtime model guard, and model lifecycle logic exist. Keep and adapt to `llm_models` view over `llm_provider_models`.                                                                                                                                                                                                                                                                                                     |
-| Event streaming   | `event_outbox` + `UserEventHub` DO exists. Keep and adapt event payloads to the greenfield API.                                                                                                                                                                                                                                                                                                                                                                       |
-| Schema baseline   | Active cutover branch has replaced the legacy migration stream with `supabase/migrations/0001_clawtalk_greenfield.sql`; legacy migrations are archived under `docs/archive/legacy-supabase-migrations/`.                                                                                                                                                                                                                                                              |
-| Talk execution    | Greenfield core/detail/chat routes, roster read/write, their Hono mount layer, chat enqueue, queue consumer, executor, scheduler sweeps, and run-state hardening run against `messages`, `runs`, `agents`, and `talk_agent_snapshots`. The legacy context/executor path is **retired** (`CleanTalkExecutor` fails closed with `LEGACY_EXECUTOR_RETIRED`); disabled/retired models now fail closed at chat enqueue, matching the job path.                             |
-| Content/Documents | Legacy `contents` + `content_edits` flow exists, plus recent PDF page rasterization work. Rewrite as `documents` + `doc_tabs` + `doc_blocks` + `document_edits`; preserve rasterization capability in `context_source_pages`.                                                                                                                                                                                                                                         |
-| Jobs              | Greenfield job CRUD, manual run-now, scheduler Path A, prompt snapshots, source-scoped tool manifests, blocked-dependency handling, and queue execution are in place. Job snapshot creation skips disabled non-target roster agents so they do not abort otherwise valid scheduled/run-now jobs. Jobs UI and document-append output remain.                                                                                                                           |
-| Frontend          | **Phase 5 underway.** Workspace switcher + per-request `x-workspace-id` scoping landed; the fresh-project cutover runbook is written (`docs/CUTOVER-RUNBOOK.md`). `TalkDetailPage.tsx` decomposition has shipped through A4b-1 (State card, Context, Jobs, Agents, Runs, Composer, Thread view, and reducer extraction; page now ~5719 LOC). Track B Settings cleanup has extracted Provider config, AI agents, and Connectors panels with page-owned mutation state. |
+| Area | State | Notes |
+|---|---|---|
+| Backend / data cutover | ✅ Done | Greenfield runtime is live. Legacy runtime/accessors were retired, backend CI is a real signal again, and the fresh baseline is `supabase/migrations/0001_clawtalk_greenfield.sql`. |
+| Frontend structure | 🔄 Mid-flight | `TalkDetailPage.tsx` is 5,429 LOC, target roughly 2,500. `SettingsPage.tsx` is 2,147 LOC. Talk panels, composer, thread view, reducer, and stream hook are extracted; the Talk tab shell and page-owned controller state remain. |
+| De-facade | ⛔ Not started | Synthetic threads, runs-with-`threadId`, flat content markdown/html, snapshot compat, policy/tool/connectors facades, and duplicate route mounts still need native consumers and deletion. |
+| Salon visual system | ⛔ Not started | `webapp/src` has zero Salon tokens/fonts. Current app is hand CSS, 7,284 LOC in `webapp/src/styles.css`. |
+| Jobs | 🔄 Mostly functional, not complete | Jobs backend and Talk Jobs panel cover CRUD, pause/resume, run-now, and archive/delete. Remaining gaps: `emit_document_append`, `job_output_ready`, and a Home read surface for `job_blocked`/`job_output_ready`. |
+| Net-new surfaces | ⛔ Mostly unbuilt | Home, native Documents page/editor, standalone Agents page, Archive, command palette, New Talk sheet, and Forge are not production surfaces yet. |
+| Eval gate | ⛔ Contract only | `docs/eval-suite.md` specifies the shape, but there is no `eval/` implementation and no `npm run eval`. |
 
-## Recent Mainline State
+## Active Sequence
 
-- PR #506 has landed: PDF rasterization Lane C T10 render-pages affordance + capability surfacing.
-- PR #507 landed the greenfield schema SQL as a docs-side draft. That file is now a guarded historical pointer; the active executable baseline lives at `supabase/migrations/0001_clawtalk_greenfield.sql`. PR #502 was closed because landing the executable schema alone breaks the legacy source/tests.
-- Cutover branch `codex/clawtalk-greenfield-cutover` now has the active fresh baseline at `supabase/migrations/0001_clawtalk_greenfield.sql`, role-template seeds, first-signin workspace bootstrap, and focused §11 invariant tests. We are not layering a `0040+` migration over disposable data.
-- Commits `9f72e76`, `ff9b6d8`, and `cac02ff` added greenfield workspace/talk route modules for core APIs, detail/snapshot APIs, and chat enqueue.
-- Commits `55c3d7e`, `3863628`, and `c53df5a` ported the queue consumer, executor, and scheduler sweeps to greenfield `runs` / `messages` / `talk_agent_snapshots`.
-- Commit `2363ee1` hardened greenfield run-state behavior across queue consumer, scheduler, in-process dispatch, outbox notify timing, DLQ retry behavior, executor ordered/parallel prompt semantics, and bootstrap idempotency tests.
-- The API shell extraction slice moves greenfield `/me`, workspace/folder/talk CRUD, snapshot/detail/content/thread compatibility, and chat mounts into `src/clawtalk/web/routes/greenfield-api.ts`.
-- The roster mutation cleanup slice moves `PUT /api/v1/talks/:talkId/agents` to greenfield `talk_agents` / workspace `agents` and removes that legacy route collision.
-- The talk policy cleanup slice moves `GET/PUT /api/v1/talks/:talkId/policy` to a greenfield compatibility facade derived from `talk_agents`, keeps the old no-op `PUT` name-normalization leniency, reports the greenfield 5-agent roster cap, and does not reintroduce a policy mirror.
-- The tools cleanup slice moves `GET/PATCH /api/v1/talks/:talkId/tools` to greenfield `talk_tools`, materializes the existing light-family frontend contract into canonical per-tool rows, freezes active families plus resolved effective tool permissions into greenfield run prompt snapshots for execution, emits `talk_tools_changed`, and removes the legacy `active_tool_families_json` route collision.
-- Commit `951ab34` retired the legacy context/runtime execution surface (provider-replay privacy via private `message_provider_replay`, immutable snapshot `provider_id`/`model_id` identity, raw `context_sources.id::text` source refs, fail-closed `CleanTalkExecutor`, greenfield history replay scoping, and the disabled non-target roster-agent job-snapshot fix).
-- Commit `6c40fb7` gates disabled/retired models at chat enqueue so they fail closed like the job path (`llm_provider_models.enabled` filter → null provider → `agent_model_not_found`).
-- Commit `5bb6712` landed the webapp workspace switcher on the greenfield per-request model (no persisted active workspace; `x-workspace-id` header from a localStorage marker; clean-reload switch that discards in-flight old-workspace requests; stale-marker self-heal; sign-out clear).
-- Per-slice review gate is now three named passes: gstack `/review` (including the Codex CLI pass where available), `/karpathy-audit diff`, and standalone Claude adversarial review. Honor blocking findings before landing. See [IMPLEMENTATION-HANDOFF.md](./IMPLEMENTATION-HANDOFF.md).
-- Backend `vitest` is green again: the dead pre-greenfield legacy talk data/route layer was fully retired (net ~−15k LOC). Deleted whole files (`routes/talks.ts`, `routes/talk-snapshot.ts`, `middleware/acl.ts`, `routes/talk-threads.ts`, `routes/talk-attachments.ts`, `db/job-accessors.ts`, `db/talk-snapshot-accessor.ts`, `db/accessors.ts`, `db/context-accessors.ts`, `db/talk-agents.ts`) plus their tests — they queried greenfield-dropped tables/columns (`talks.owner_id`, `registered_agents`, `talk_context_*`, `talk_state_entries`). The live survivors of `accessors.ts` (settings_kv + event_outbox helpers + `updateUserDisplayName`) moved to new `db/core-accessors.ts`; `agent-registry.ts` was trimmed to its 5 live main/default-agent pointer functions; `source-ingestion.ts` was decoupled from the dead legacy extraction updater (the live caller injects the greenfield one). CI red-by-design (every PR admin-merging past the failing legacy suite) is resolved — backend CI is a real signal again.
-- Track B Settings cleanup extracted the remaining sizeable inline Connectors tab into a presentational `ConnectorsSettingsPanel` with page-owned connector/modal/Slack mutation state. The slice also hardened scheduler tests with a test-only owner-email filter for due-job selection and stuck-run sweeps, plus fake-queue ignores for non-scheduler-owned dispatches, instead of depending on an empty developer database.
+These are the current work packages after PR #541. Run each as a scoped `/goal` in Codex and Claude/Opus, with separate worktrees when two agents can run in parallel.
 
-## Refactor Roadmap
+| Order | Work package | Primary gate |
+|---|---|---|
+| 0 | Docs drift cleanup | Live docs point to current audit/roadmap; archived docs are clearly marked historical. |
+| 1 | Salon foundation decision + primitives | Default to CSS variables unless Joseph explicitly chooses Tailwind. Ship tokens, fonts, brand mark, RunPill/Chip/Kbd/Modal/Sheet/Popover/AgentAvatar primitives. |
+| 2 | Structural cleanup | `TalkDetailPage.tsx` and `SettingsPage.tsx` shrink through behavior-preserving hooks/components; delete `TalkLlmSettingsCard.tsx` if still orphaned. |
+| 3 | Native Documents | Documents page/editor and in-Talk doc pane consume `documents`/`doc_tabs`/`doc_blocks`/`document_edits`; content markdown/html facade can be deleted. |
+| 4 | Home | Backend routes/accessors over `home_*`; Home page renders inbox, recommendations, news, and action lifecycle. |
+| 5 | Remaining de-facade | Migrate frontend off synthetic threads/run-context/snapshot/tool/policy/connectors facades; delete each backend facade with tests. |
+| 6 | Product surface completion | Standalone Agents page/profile, Archive, New Talk sheet, command palette, settings gaps, workspace-member management. |
+| 7 | Eval gate | Implement `eval/`, scenarios, graders, `npm run eval`, and launch thresholds. |
+| 8 | Forge | Post-MVP flag: SSR connection, audiences, improvement runs, gallery, winner to `document_edits`. |
 
-| Step | Work                                                                                                                       | Gate                                                                                                                                                                                                                                              |
-| ---- | -------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 1    | Cutover foundation: fresh Supabase baseline, role-template seed, first-signin workspace bootstrap, §11 verification tests. | ✅ Applies on empty/reset DB; workspace + default agents seed; first invariant tests pass.                                                                                                                                                        |
-| 2    | Greenfield route/accessor spine: workspace/talk core APIs, detail/snapshot APIs, chat enqueue.                             | ✅ Focused greenfield core/detail/chat route tests pass.                                                                                                                                                                                          |
-| 3    | Greenfield execution backend: queue consumer, executor, scheduler sweeps, run-state hardening.                             | ✅ Atomic outbox/state transitions, notify timing, ordered/parallel behavior, scheduler sweeps, and DLQ retry tests pass.                                                                                                                         |
-| 4    | API shell/resource decomposition cleanup.                                                                                  | ✅ Backend compatibility/runtime cleanup committed through context, connectors, jobs, and legacy executor retirement.                                                                                                                             |
-| 5    | Frontend shell + Talk rewrite.                                                                                             | 🔄 Workspace switcher + cutover runbook landed. `TalkDetailPage.tsx` decomposition has shipped through A4b-1; Settings panels are being decomposed with page-owned mutation state. Continue one isolated extraction/verification slice at a time. |
-| 6    | Documents.                                                                                                                 | Primary document, tabs/blocks, pending edit accept/reject, PDF/page context path work against new schema.                                                                                                                                         |
-| 7    | Agents, tools, connectors, context.                                                                                        | Agent editing, prompt snapshots, tool gating, connector binding, and context sources are greenfield.                                                                                                                                              |
-| 8    | Jobs.                                                                                                                      | Scheduler/run-now/queue/output/inbox behavior passes `12-jobs.md` verification.                                                                                                                                                                   |
-| 9    | Home, Settings, polish, eval gate.                                                                                         | Home inbox/recommendations/news are deterministic first; agent eval gate passes before broader launch.                                                                                                                                            |
-| 10   | Forge.                                                                                                                     | Post-MVP feature flag: SSR connection, audiences, improvement runs, gallery, promote to `document_edits`.                                                                                                                                         |
+## Autonomy Gate
 
-## Active Decision
+Each autonomous run must start with a goal packet in that tool:
 
-The **big-bang cutover branch** (from [IMPLEMENTATION-READINESS.md](./IMPLEMENTATION-READINESS.md)) is the chosen path; a dual-path feature flag was not adopted. The backend/runtime cutover is committed. Current action is the **frontend rewrite (Phase 5)**: with the workspace switcher landed, the next step is human visual verification of the shell, then decomposing `TalkDetailPage.tsx` one isolated extraction at a time. Backend compatibility facades (synthetic threads, content markdown/html, runs-with-threadId) keep the legacy webapp working until each surface is rewritten to native greenfield shapes. There is intentionally no create-workspace flow.
+```text
+/goal
+Objective: ...
+Scope: files/modules allowed
+Non-goals: ...
+Acceptance: user-visible behavior + deletion criteria
+Verify: exact commands and browser checks
+Human gate: none, or the specific decision that cannot be inferred
+Handoff: docs/tests/status to update before marking complete
+```
+
+Completion requires implementation, tests, doc update if behavior/status changed, and the full review gate: gstack PR review, Karpathy audit diff, and adversarial cross-model review. If Codex implemented the slice, run `/claude review`; if Claude/Opus implemented it, run `/codex review`. Claude/Opus should use dynamic workflows inside the goal when useful, while staying inside the parent goal. Default decisions and copy/paste phase prompts are recorded in [PHASE5-AUTONOMOUS-PLAN.md](./PHASE5-AUTONOMOUS-PLAN.md).
+
+## Drift Controls
+
+- Keep the live docs set small: `REFACTOR-AUDIT.md`, `roadmap.md`, `PHASE5-AUTONOMOUS-PLAN.md`, `REFACTOR-OVERVIEW.md`, and the canonical spec docs.
+- Archive worktree-specific handoffs and old audits instead of updating them.
+- After each work package, update this roadmap and the relevant audit section.
+- Before landing docs, run a stale-reference grep for old LOC counts, archived docs, obsolete CI-bypass language, and cutover-era notes.

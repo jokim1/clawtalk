@@ -1,4 +1,4 @@
-> **Status:** canonical (product behavior). Uses greenfield `documents`/`agents` names — read via [GLOSSARY](./GLOSSARY.md) (DECISIONS D2). Connectors are workspace-global per [roadmap](./roadmap.md) #5; scheduled-jobs scope per DECISIONS D2 — both override this doc.
+> **Status:** canonical (product behavior). Uses greenfield `documents`/`agents` names — read via [GLOSSARY](./GLOSSARY.md) (DECISIONS D2). Implementation status lives in [REFACTOR-AUDIT.md](./REFACTOR-AUDIT.md); this doc describes target behavior.
 > Precedence + orientation: [README.md](./README.md) · decisions: [DECISIONS.md](./DECISIONS.md) · terms: [GLOSSARY.md](./GLOSSARY.md).
 
 # ClawTalk · Product Spec
@@ -23,7 +23,7 @@
 | **Team composition** | A saved roster of agents reusable across Talks. |
 | **Document** | A markdown or HTML artifact with one or more tabs. It may be the primary editable document for one Talk, and may also be supporting read-only context for many Talks. |
 | **Tools** | Per-Talk capabilities the agents can invoke (web search, Drive read, Gmail send, news monitor, etc.). |
-| **Connectors** | Per-Talk external service bindings (Slack #channel, Drive folder, Linear project). |
+| **Connectors** | Workspace-level external service authorizations; Talk-specific targets are connector bindings (Slack #channel, Drive folder, Linear project). |
 | **Context** | The set of sources the room currently knows from (primary document, supporting documents, attached URLs, uploaded files, past Talks, house rules). |
 | **Unfiled** | Virtual Talk list for Talks that have no folder. Not Inbox. |
 | **Inbox** | Home queue of arrivals, blockers, and waiting items generated from Talk/doc/run/connector state. A Talk can be the target of an Inbox item, but is not itself an Inbox item. |

@@ -1,36 +1,38 @@
 # ClawTalk — Glossary & Canonical Terms
 
-> **Status:** canonical · **Last updated:** 2026-05-28
-> One place to resolve the vocabulary forks across docs and code. If two docs use different words for the same thing, this file says which is canonical. Naming direction is set in [DECISIONS.md](./DECISIONS.md) D2 (provisional: orient to shipped DB names).
+> **Status:** canonical · **Last updated:** 2026-06-06
+> One place to resolve vocabulary forks across docs and code. Naming direction is set by [DECISIONS.md](./DECISIONS.md) D2: canonical product terms are Workspace, Folder, Talk, Document, Agent, Job, Home, and Forge.
 
-## Core concepts
+## Core Concepts
 
-| Term | Means | Notes |
+| Term | Means | Current implementation note |
 |---|---|---|
-| **Workspace** | Top-level tenant; permissions/billing/data root. | |
-| **Folder** | Optional flat grouping of Talks. | Live: `talk_folders` (pre-migration) → `folders` (post-§11). |
-| **Talk** | A context-bound multi-agent conversation. | |
-| **Round** | One turn of debate; Editor closes with synthesis. | |
-| **Agent** | A fixed-role LLM reasoning role. | Live: `registered_agents` (pre-migration) → `agents` + `talk_agent_snapshots` (post-§11). |
-| **Content / Document** | The editable long-form artifact attached to a Talk. | Pre-migration: `contents` (PR #423 hybrid MD+HTML). Post-§11: `documents` + `doc_tabs` + `doc_blocks` + `document_edits`. Canonical name (post-migration): **Document**. |
-| **Document tab** | A Google-Docs-style section inside one Content/Document. | Live table: `doc_tabs` (§11 §5). |
-| **Pending edit** | An agent-proposed change awaiting accept/reject. | Pre-migration: `content_edits` (PR #423). Post-§11: `document_edits` (with `source ∈ ('agent','forge','job')`). |
-| **Tools** | What agents can *do* (web search, Drive read, …). Per-Talk + workspace catalog. | |
-| **Connectors** | External service bindings (Slack, Drive, Linear, …). Workspace-global. | |
-| **Context** | What the room *knows from* (primary doc, supporting docs, URLs, files, past Talks, rules, news). | |
-| **Unfiled** | Virtual view: Talks with `folder_id is null`. **Not** Inbox. | |
-| **Inbox** | Home queue of arrivals/blockers/waits. A Talk can be an Inbox item's *target*, never an item itself. | |
-| **Curator** | Home copy/summary layer over deterministic state. Not the ranking source of truth. | |
-| **Forge** | Autonomous content-improvement loop (generate→score→improve) over Content, using SSR as the scoring oracle. | PRD `09`, design `10`. |
+| Workspace | Top-level tenant; permissions, billing, provider keys, members, and private data root. | Live greenfield table: `workspaces`; request scoping uses `x-workspace-id`. |
+| Folder | Optional flat grouping of Talks. | Live greenfield table: `folders`. Archived docs may say `talk_folders`. |
+| Talk | A context-bound multi-agent conversation. | Live table: `talks`. A Talk has no Threads in the target model. |
+| Round | One turn of the multi-agent loop. | `messages.round` and `runs.round`. |
+| Run | One agent response in a round, or a scheduled/manual Job firing. | Live table: `runs`; freezes `talk_agent_snapshots` and `run_prompt_snapshots`. |
+| Agent | A workspace-scoped LLM role/persona. | Live table: `agents`; snapshots live in `talk_agent_snapshots`. Archived docs may say `registered_agents`. |
+| Document | Editable long-form artifact attached to a Talk or browsed independently. | Canonical tables: `documents`, `doc_tabs`, `doc_blocks`, `document_edits`. Frontend still has a flat content compatibility facade in places. |
+| Document tab | Ordered section inside a Document. | `doc_tabs`; one or more per document. |
+| Pending edit | Proposed document mutation awaiting accept/reject. | `document_edits`, with `source` of `agent`, `job`, or `forge`. |
+| Tool | What agents can do, such as web search or Drive read. | Per-Talk toggles in `talk_tools`; runtime also applies user/tool permission and connector authorization. |
+| Connector | Workspace-level external-service authorization. | `connectors` plus `connector_secrets`; Talk-specific targets use `connector_bindings`. |
+| Context | Sources a Talk can read from: primary document projection, supporting docs, files, URLs, rules, past Talks, news. | `context_sources` and `context_source_pages`; primary Document is projected, not stored as a context row. |
+| Unfiled | Virtual view of Talks with `folder_id is null`. | Not Home Inbox. |
+| Inbox | Home queue of arrivals, blockers, and waiting items. | `home_inbox_items`; writes exist for `job_blocked`, but Home read surface is not built yet. |
+| Home | Curator/dashboard surface for Inbox, recommendations, news, and next actions. | Schema exists; production surface is pending. |
+| Forge | Autonomous document improvement loop using SSR/Synthetical scoring. | Schema/docs exist; post-MVP runtime/UI. |
 
-## Easy-to-confuse pairs
+## Easy-to-confuse Pairs
 
-- **Parallel mode ≠ "Panel" mode.** Canonical modes are **Ordered / Parallel** (`01`). "Panel" appears only in the archived ClawRocket review — ignore it.
-- **Forge content-improvement ≠ agent prompt-improvement.** `06` §14's "Prompt Improvement Loop" improves *agent system prompts*; **Forge** (`09`/`10`) improves *document content*. Both share an "audit → propose → admin-accept → versioned rollout" shape but are different systems.
-- **Primary document ≠ supporting document.** A Talk has 0–1 *primary* (editable) Content; many *supporting* documents are read-only via Context.
-- **Unfiled ≠ Inbox.** Unfiled = no folder. Inbox = Home arrivals/blockers/waits.
-- **Threads = removed.** `01` §1.4 removes Threads (Rounds replace them). The live `talk_threads`/`main_threads` tables are legacy drift — see D2.
+- **Thread vs Talk.** Threads are removed. Any `threadId` in current code is a compatibility projection.
+- **Connector vs binding.** Connector is the workspace authorization; binding attaches an authorized service target to a Talk.
+- **Primary Document vs supporting document.** The primary Document is the editable artifact for a Talk. Supporting documents are read-only context.
+- **Document vs old content.** Canonical term is Document. `contents`/`content_edits` are archived-era names or compatibility shapes.
+- **Forge content improvement vs prompt improvement.** Forge improves document content. The agent prompt-improvement loop improves role prompts.
+- **Unfiled vs Inbox.** Unfiled is organization. Inbox is action queue.
 
-## Retired terms (archived docs only)
+## Retired Terms
 
-**ClawRocket**, **Nanoclaw / Main (Nanoclaw)**, **registered route / `talk_routes`**, **container core executor**, **direct-HTTP vs containerized execution domains**, **SQLite**, **SSE event delivery**, **systemd / Ubuntu deployment**. All belong to the retired architecture in [`archive/`](./archive/). The product is **ClawTalk** on **Cloudflare Workers + Supabase Postgres**.
+The following belong to archived docs or compatibility bridges: ClawRocket, NanoClaw, registered agents, talk threads, contents, content proposals, talk routes, container executor, SQLite, SSE, systemd/Ubuntu deployment.
