@@ -17,6 +17,7 @@ import {
   normalizeGoogleScopeAliases,
 } from '../identity/google-scopes.js';
 import { emitOutboxEventOnSql, enqueueOutboxNotify } from './outbox-emit.js';
+import { buildOwnerEmailWorkspaceFilter } from './scheduler-owner-filter.js';
 
 export type GreenfieldJobStatus = 'active' | 'paused' | 'blocked';
 export type GreenfieldJobWeekday =
@@ -1716,6 +1717,7 @@ type DueGreenfieldJobCandidate = {
 export async function claimDueGreenfieldJobRuns(input?: {
   limit?: number;
   now?: string | Date;
+  ownerEmailPattern?: string;
   onEnqueuedRun?: (runId: string) => Promise<void> | void;
 }): Promise<ClaimDueGreenfieldJobRunsResult> {
   const limit = Math.max(1, Math.min(100, Math.floor(input?.limit ?? 10)));
@@ -1747,6 +1749,7 @@ export async function claimDueGreenfieldJobRuns(input?: {
       busyRetryBefore,
       limit: Math.min(limit, remainingScanBudget),
       scannedJobIds: Array.from(scannedJobIds),
+      ownerEmailPattern: input?.ownerEmailPattern ?? null,
     });
     if (dueJobs.length === 0) break;
 
@@ -1823,6 +1826,7 @@ async function listDueGreenfieldJobCandidates(input: {
   busyRetryBefore: string;
   limit: number;
   scannedJobIds: string[];
+  ownerEmailPattern: string | null;
 }): Promise<DueGreenfieldJobCandidate[]> {
   const retryReadyLimit = Math.max(1, Math.floor(input.limit / 3));
   const unclaimedLimit = Math.max(1, input.limit - retryReadyLimit);
@@ -1830,6 +1834,11 @@ async function listDueGreenfieldJobCandidates(input: {
   const unclaimedPriority = retryFirst ? 1 : 0;
   const retryReadyPriority = retryFirst ? 0 : 1;
   const candidatePageLimit = unclaimedLimit + retryReadyLimit;
+  const ownerFilter = buildOwnerEmailWorkspaceFilter(
+    input.sql,
+    input.ownerEmailPattern,
+    'jobs',
+  );
   return input.sql<DueGreenfieldJobCandidate[]>`
     with unclaimed_due as (
       select
@@ -1847,6 +1856,7 @@ async function listDueGreenfieldJobCandidates(input: {
         and j.next_due_at <= ${input.now}::timestamptz
         and j.claimed_at is null
         and j.id <> all(${input.scannedJobIds}::uuid[])
+        ${ownerFilter}
       order by j.next_due_at asc, j.created_at asc, j.id asc
       limit ${unclaimedLimit}
     ),
@@ -1866,6 +1876,7 @@ async function listDueGreenfieldJobCandidates(input: {
         and j.next_due_at <= ${input.now}::timestamptz
         and j.claimed_at < ${input.busyRetryBefore}::timestamptz
         and j.id <> all(${input.scannedJobIds}::uuid[])
+        ${ownerFilter}
       order by j.claimed_at asc, j.next_due_at asc, j.created_at asc, j.id asc
       limit ${retryReadyLimit}
     ),
