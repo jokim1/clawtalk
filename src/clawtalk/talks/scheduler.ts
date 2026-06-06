@@ -28,6 +28,7 @@ const STUCK_RUN_SWEEP_LIMIT = 100;
 
 const STRANDED_SIBLING_GRACE_MS = 2 * 60 * 1000;
 const STRANDED_SIBLING_SWEEP_LIMIT = 100;
+let warnedAboutAppliedTestOnlyOwnerFilter = false;
 let warnedAboutIgnoredTestOnlyOwnerFilter = false;
 
 export interface ScheduledTickEnv extends DbScopeEnvBindings {
@@ -68,7 +69,16 @@ export function resolveTestOnlyOwnerEmailPattern(
 ): string | undefined {
   const pattern = env.TEST_ONLY_OWNER_EMAIL_PATTERN;
   if (!pattern) return undefined;
-  if (process.env.NODE_ENV === 'test') return pattern;
+  if (process.env.NODE_ENV === 'test') {
+    if (!warnedAboutAppliedTestOnlyOwnerFilter) {
+      warnedAboutAppliedTestOnlyOwnerFilter = true;
+      logger.warn(
+        { nodeEnv: process.env.NODE_ENV, ownerEmailPattern: pattern },
+        'scheduler: applying TEST_ONLY_OWNER_EMAIL_PATTERN under test runtime',
+      );
+    }
+    return pattern;
+  }
 
   if (!warnedAboutIgnoredTestOnlyOwnerFilter) {
     warnedAboutIgnoredTestOnlyOwnerFilter = true;
