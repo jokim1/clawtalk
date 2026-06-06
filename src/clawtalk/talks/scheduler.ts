@@ -28,6 +28,7 @@ const STUCK_RUN_SWEEP_LIMIT = 100;
 
 const STRANDED_SIBLING_GRACE_MS = 2 * 60 * 1000;
 const STRANDED_SIBLING_SWEEP_LIMIT = 100;
+let warnedAboutIgnoredTestOnlyOwnerFilter = false;
 
 export interface ScheduledTickEnv extends DbScopeEnvBindings {
   DB: { connectionString: string };
@@ -53,13 +54,30 @@ export async function runScheduledTick(
 ): Promise<void> {
   return withRequestScopedDb(env.DB.connectionString, ctx, env, async () =>
     withNotifyQueueScope(env, ctx, async () => {
-      const ownerEmailPattern = env.TEST_ONLY_OWNER_EMAIL_PATTERN;
+      const ownerEmailPattern = resolveTestOnlyOwnerEmailPattern(env);
       await processClaimableJobs(ownerEmailPattern);
       await sweepStuckRunningRuns(ownerEmailPattern);
       await sweepStrandedOrderedSiblings(ownerEmailPattern);
       await sweepStuckQueuedRuns(ownerEmailPattern);
     }),
   );
+}
+
+function resolveTestOnlyOwnerEmailPattern(
+  env: ScheduledTickEnv,
+): string | undefined {
+  const pattern = env.TEST_ONLY_OWNER_EMAIL_PATTERN;
+  if (!pattern) return undefined;
+  if (process.env.NODE_ENV === 'test') return pattern;
+
+  if (!warnedAboutIgnoredTestOnlyOwnerFilter) {
+    warnedAboutIgnoredTestOnlyOwnerFilter = true;
+    logger.warn(
+      { nodeEnv: process.env.NODE_ENV ?? null },
+      'scheduler: ignored TEST_ONLY_OWNER_EMAIL_PATTERN outside test runtime',
+    );
+  }
+  return undefined;
 }
 
 export async function processClaimableJobs(

@@ -231,7 +231,14 @@ async function seedAuthUser(): Promise<void> {
 
 async function deleteUser(): Promise<void> {
   const db = getDbPg();
-  await db`delete from public.event_outbox where topic like 'talk:%'`;
+  await db`
+    delete from public.event_outbox eo
+    using public.talks t, public.workspaces w, auth.users u
+    where eo.topic = 'talk:' || t.id::text
+      and t.workspace_id = w.id
+      and w.owner_id = u.id
+      and u.email like ${TEST_USER_EMAIL_PATTERN}
+  `;
   await db`
     delete from public.workspaces
     where owner_id in (
@@ -389,6 +396,58 @@ describe('greenfield scheduled tick safety sweeps', () => {
       'Run and prompt snapshot must commit before dispatch',
     );
     expect(queue.sends).toHaveLength(0);
+  });
+
+  it('ignores the test-only owner filter outside the test runtime', async () => {
+    const { workspaceId, talkId, agentIds } = await createIdleTalkFixture();
+    const db = getDbPg();
+    const job = await withUserContext(USER_ID, () =>
+      createGreenfieldJob({
+        workspaceId,
+        talkId,
+        title: 'Production Guard Job',
+        prompt: 'Confirm the scheduler ignores test-only filters in prod.',
+        agentId: agentIds[0]!,
+        schedule: { kind: 'interval', everyHours: 1 },
+        timezone: 'UTC',
+        sourceScope: { allowWeb: false, toolIds: [] },
+        createdBy: USER_ID,
+      }),
+    );
+    await db`
+      update public.jobs
+      set next_due_at = now() - interval '30 seconds'
+      where id = ${job.id}::uuid
+    `;
+
+    const originalNodeEnv = process.env.NODE_ENV;
+    process.env.NODE_ENV = 'production';
+    const queue = makeQueue({ requireCommittedRun: true });
+    try {
+      const env: ScheduledTickEnv = {
+        DB: { connectionString: TEST_DB_URL },
+        TALK_RUN_QUEUE: queue,
+        TEST_ONLY_OWNER_EMAIL_PATTERN: 'nobody-%@clawtalk.local',
+      };
+      const { ctx, drain } = makeMockCtx();
+      await runScheduledTick(env, ctx);
+      await drain();
+    } finally {
+      if (originalNodeEnv === undefined) {
+        delete process.env.NODE_ENV;
+      } else {
+        process.env.NODE_ENV = originalNodeEnv;
+      }
+    }
+
+    expect(queue.sends).toHaveLength(1);
+    expect(queue.sends[0]?.observedCommittedRun).toBe(true);
+    const rows = await db<Array<{ job_id: string | null }>>`
+      select job_id
+      from public.runs
+      where id = ${queue.sends[0]!.runId}::uuid
+    `;
+    expect(rows[0]?.job_id).toBe(job.id);
   });
 
   it('fires due jobs into scheduled runs and dispatches after commit', async () => {
