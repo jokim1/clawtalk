@@ -55,7 +55,7 @@ Framework-agnostic backend contracts derived from the prototype's behavior. Tran
 | `GET /workspaces/:id`                     | Full workspace info                                                                                                               |
 | `PATCH /workspaces/:id`                   | Update name/settings                                                                                                              |
 | `DELETE /workspaces/:id`                  | Hard-delete workspace (owner-only; rejects with 409 `WORKSPACE_HAS_JOBS_WITH_HISTORY` if any job has `run_count > 0` per §11 §8). |
-| `POST /workspaces/switch`                 | `{ workspaceId }` → set the calling session's active workspace. Rejects with 403 if the user is not a member.                     |
+| `POST /workspaces/switch`                 | `{ workspaceId }` → validate membership and return `{ currentWorkspaceId }`. The client stores that marker locally and sends `X-Workspace-Id` on workspace-scoped requests; the session token itself is not re-minted for the workspace. |
 | `POST /workspaces/:id/invite`             | Invite member by email                                                                                                            |
 | `GET /workspaces/:id/members`             | List members                                                                                                                      |
 | `PATCH /workspaces/:id/members/:userId`   | `{ role: 'owner' \| 'admin' \| 'member' }` — role update (admin-only; cannot demote the last owner).                              |
@@ -156,7 +156,7 @@ User sends a message. Triggers a run for each agent in the team (Ordered → seq
 
 ```ts
 // Request
-{ content: string, targetAgentIds?: string[], threadId?: string | null }
+{ content: string, targetAgentIds?: string[] }
 
 // Response (202)
 {
@@ -167,10 +167,11 @@ User sends a message. Triggers a run for each agent in the team (Ordered → seq
 
 Subscribe to the WebSocket stream (§9) to receive `run.update` events.
 
-Message attachments are not part of the active greenfield cutover contract.
-The legacy `/talks/:id/attachments` compatibility routes return
-`attachments_not_available` until a future R2-backed attachment slice lands;
-use context file uploads for source material.
+Message attachments are not part of the active greenfield contract. The legacy
+`/talks/:id/attachments` compatibility routes return `attachments_not_available`
+until a future R2-backed attachment slice lands; use context file uploads for
+source material. Current compatibility code may still accept or emit synthetic
+`threadId`; native API consumers should not depend on it.
 
 ### `POST /talks/:id/cancel-runs`
 

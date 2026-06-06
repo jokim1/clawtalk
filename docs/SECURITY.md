@@ -1,6 +1,6 @@
 # ClawTalk Security
 
-Security model for the current Workers + Postgres stack. Supersedes [archive/SECURITY.md](./archive/SECURITY.md) (retired SQLite/containers model). Closes DOC-AUDIT #22.
+Security model for the current Workers + Postgres stack. Supersedes [archive/SECURITY.md](./archive/SECURITY.md) (retired SQLite/containers model).
 
 Cross-refs: [§11 §12](./11-data-model.md) (RLS), [engineering-notes.md](./engineering-notes.md), `src/clawtalk/identity/`, `src/clawtalk/llm/`.
 
@@ -13,7 +13,7 @@ Cross-refs: [§11 §12](./11-data-model.md) (RLS), [engineering-notes.md](./engi
   - `eb_at` — access token. `HttpOnly`, `Secure`, `SameSite=Lax`, `Path=/`.
   - `eb_rt` — refresh token. `HttpOnly`, `Secure`, `SameSite=Strict`, `Path=/api/v1/auth/refresh` (scoped to the refresh endpoint so it never leaks to other requests).
   - `eb_csrf` — CSRF token, non-`HttpOnly` so the SPA can echo it. `Secure`, `SameSite=Lax`, `Path=/`.
-- **Workspace-scoped sessions.** Access token carries the active `workspace_id`; switching workspaces issues a new access token.
+- **Workspace selection.** Access/refresh cookies authenticate the user, not one active workspace. Workspace-scoped requests carry `x-workspace-id`; the backend validates membership on each request. The frontend may remember a local active workspace marker, but switching workspaces does not mint a new access token.
 - **Rotation.** Refresh on every access-token expiry; refresh token rotates on use.
 
 ## 2. Authorization model

@@ -10,27 +10,27 @@ You're reading this because you're an AI coding agent (or engineer) about to wor
 
 | Doc | Why |
 |---|---|
-| **[REFACTOR-OVERVIEW.md](./REFACTOR-OVERVIEW.md)** | **The single-page narrative for the greenfield rebuild.** If you've never seen this work, read this first. What it is, why now, what changes, the model in a diagram, the runtime architecture, the phasing, what's locked / open, doc navigation. |
+| **[REFACTOR-OVERVIEW.md](./REFACTOR-OVERVIEW.md)** | **The single-page narrative for the greenfield rebuild.** Stable orientation: why the model changed, what stays, what changes, runtime architecture, doc navigation. Not a live tracker. |
+| **[REFACTOR-AUDIT.md](./REFACTOR-AUDIT.md)** | **Current completion audit.** What is done, what remains, facade debt, Salon gap, missing surfaces, open decisions, and the recommended autonomous workstreams. Read this before starting new work. |
+| **[roadmap.md](./roadmap.md)** | Live shipped/in-flight tracker for the refactor. Short operational status. |
+| **[PHASE5-AUTONOMOUS-PLAN.md](./PHASE5-AUTONOMOUS-PLAN.md)** | Execution protocol for parallel Codex + Claude/Opus `/goal` runs with minimal human checkpoints. |
 | **[DECISIONS.md](./DECISIONS.md)** | Resolved cross-cutting decisions (stack, naming, Forge agents). **When a spec doc conflicts with a decision here, this wins.** |
 | **[GLOSSARY.md](./GLOSSARY.md)** | Canonical terms + the shipped-DB-name ↔ spec-name mapping. Read it to avoid the vocabulary forks. |
-| **[SPEC-READINESS.md](./SPEC-READINESS.md)** | Gap-closure punch list with stable IDs (G-XX.PY.Z). Verdict + history. |
-| **[IMPLEMENTATION-READINESS.md](./IMPLEMENTATION-READINESS.md)** | Current audit of docs vs. source, verification results, and the cutover recommendation. Read this before starting code. |
-| **[IMPLEMENTATION-HANDOFF.md](./IMPLEMENTATION-HANDOFF.md)** | Current pause point, staged-slice verification, remaining review gate, and resume prompt. Read this before resuming implementation. |
-| **[DOC-AUDIT.md](./DOC-AUDIT.md)** | Historical 2026-05-28 audit behind the cleanup. Superseded for live readiness by IMPLEMENTATION-READINESS. |
-| **[roadmap.md](./roadmap.md)** | Live shipped/in-flight tracker for the refactor. |
 | **[engineering-notes.md](./engineering-notes.md)** | Durable engineering knowledge (architectural commitments, latency hotspots, eval gate). |
 | **[archive/](./archive/)** | Retired "ClawRocket"-era docs. **Not current** — do not implement from them. |
+
+Historical audits, handoffs, runbooks, and tactical plans live under [archive/audits/](./archive/audits/), [archive/runbooks/](./archive/runbooks/), and [archive/plans/](./archive/plans/). Old top-level filenames are kept as pointer stubs only so older links resolve.
 
 ## Precedence — who wins on conflict
 
 1. **Cross-cutting decisions** → [DECISIONS.md](./DECISIONS.md).
 2. **Hierarchy / data model** → [08-information-architecture.md](./08-information-architecture.md).
 3. **UI / interaction** → the prototype (`ClawTalk Salon.html` + `prototype/*.jsx`).
-4. **Stack / runtime** → `CLAUDE.md` + repo reality (Cloudflare Workers) — **not** the historical "Tech stack" note below.
-5. **What currently exists** → [IMPLEMENTATION-READINESS.md](./IMPLEMENTATION-READINESS.md) + [roadmap.md](./roadmap.md) describe the current/shipped code, which is **disposable** in the greenfield build (DECISIONS D0) — use it for context, not as a constraint on the target design.
+4. **Stack / runtime** → repo reality (Cloudflare Workers + Hono + Durable Objects + Hyperdrive + Queues) and [DECISIONS.md](./DECISIONS.md) D1.
+5. **What currently exists** → [REFACTOR-AUDIT.md](./REFACTOR-AUDIT.md) + [roadmap.md](./roadmap.md). Use old archived implementation notes only as provenance.
 6. **Product behavior** → `01-product-spec.md`. **Anything in [archive/](./archive/) is superseded.**
 
-> ⚠️ **Greenfield build (DECISIONS D0).** The `01`/`08` model — **Workspace → Folder → Talk + Document**, multi-workspace, no Threads — is the design we're building, on a clean new schema with clean names (`workspaces`, `folders`, `talks`, `documents`, `agents`). The Supabase implementation starts from a fresh baseline (`supabase/migrations/0001_clawtalk_greenfield.sql`) after old data/migration history are reset or archived; we are not layering compatibility migrations over disposable data. The current code uses different names/shapes (`contents`, `talk_threads`, user-owned, `registered_agents`); it's **disposable** and referenced only to extract requirements. The [GLOSSARY](./GLOSSARY.md) maps the old terms purely as a reading aid for the code being replaced.
+> ⚠️ **Greenfield build (DECISIONS D0).** The `01`/`08` model — **Workspace → Folder → Talk + Document**, multi-workspace, no Threads — is the design we're building, on the fresh baseline at `supabase/migrations/0001_clawtalk_greenfield.sql`. Backend/runtime cutover has landed; compatibility facades remain only to keep the current webapp alive while each frontend surface moves to native greenfield shapes.
 
 ---
 
@@ -73,7 +73,7 @@ You're reading this because you're an AI coding agent (or engineer) about to wor
 6. **Read `07-homepage-system-design.md`** before implementing Home, Inbox, recommendations, or News.
 7. **Read `08-information-architecture.md`** before implementing folders, Talks, Documents, Context, or archive behavior.
 8. **Read `04-api-contracts.md`** when you start the backend.
-9. **Use `05-build-plan.md`** to sequence the work.
+9. **Use `REFACTOR-AUDIT.md` + `PHASE5-AUTONOMOUS-PLAN.md`** to sequence current implementation work. `05-build-plan.md` remains the canonical product build order, not the live status tracker.
 
 When ambiguity arises, the **prototype** is the canonical reference for UI, the **docs** for behavior, and the **user** for product questions you can't answer from either.
 
@@ -95,9 +95,9 @@ The prototype is React + Tailwind + Babel-in-the-browser. Production runs on the
 
 - **Runtime:** Cloudflare Workers + Hono + Durable Objects + Hyperdrive. Run queues are **Cloudflare Queues**; websocket pub/sub is the `UserEventHub` Durable Object. **No Redis, no BullMQ/Sidekiq.**
 - **Database:** Supabase Postgres (postgres.js + RLS via `withUserContext`).
-- **Frontend:** Vite + React + Tailwind under `webapp/`. Stick with the tokens in `02-visual-system.md`.
+- **Frontend:** Vite + React under `webapp/`. The production app currently uses hand-written CSS; Salon adoption should happen through the current visual-system decision in [REFACTOR-AUDIT.md](./REFACTOR-AUDIT.md) and [PHASE5-AUTONOMOUS-PLAN.md](./PHASE5-AUTONOMOUS-PLAN.md).
 - **LLM providers:** Anthropic Claude, OpenAI GPT, Google Gemini — via the provider abstraction in `04` §14. Model catalog single source of truth: `§11` `llm_models` is a view over `llm_provider_models` (cross-ref `§11` §4).
 - **Real-time:** WebSocket only.
-- **Auth:** OAuth (Google, GitHub) + magic-link email; HttpOnly cookies + double-submit CSRF. Workspace-scoped sessions.
+- **Auth:** Google OAuth + device-code auth; email magic-link is planned. HttpOnly cookies + double-submit CSRF. Workspace selection is carried per request by `x-workspace-id`, not by minting a new access token on every workspace switch.
 
 > Earlier drafts (and the archived rebuild plan) recommended Next.js + Node + Redis. That was **rejected** — see DECISIONS D1.

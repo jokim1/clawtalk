@@ -1,6 +1,6 @@
 # ClawTalk — Engineering Notes
 
-> **Status:** canonical (engineering reference) · **Last updated:** 2026-06-02
+> **Status:** canonical (engineering reference) · **Last updated:** 2026-06-06
 > Durable, hard-won engineering knowledge distilled from docs that were archived in the 2026-05-28 restructure. The originals live in [`archive/`](./archive/); line numbers there may be stale, so treat the code as truth and these as orientation. Stack decision is [DECISIONS.md](./DECISIONS.md) D1.
 
 ---
@@ -33,7 +33,7 @@ The review's broader conclusions, now canonical: **keep Cloudflare Workers** (D1
 
 ## 3. Offline agent eval gate (from the same review) — launch-blocking
 
-The five system prompts in `03-agents.md` have **never been tested against each other** in a multi-agent run. Before launch, build an offline eval that runs the default team on representative prompts and checks role adherence, non-duplication, evidence discipline, and concision (the rubric in `06` §14.6 `AgentAuditResult`). Track this as a build-plan item (DOC-AUDIT #24).
+The five system prompts in `03-agents.md` have **never been tested against each other** in a multi-agent run. Before launch, build an offline eval that runs the default team on representative prompts and checks role adherence, non-duplication, evidence discipline, and concision (the rubric in `06` §14.6 `AgentAuditResult`). Track this through [eval-suite.md](./eval-suite.md) and the active roadmap.
 
 ---
 
@@ -61,7 +61,7 @@ The archived doc has the full `query()` options table and message-type reference
 
 ## 6. Cutover invariants — committed backend/runtime slice
 
-As of 2026-06-02, the greenfield cutover branch has **committed** the backend/runtime cutover (legacy context runtime retired in `951ab34`, disabled-model fail-closed enqueue in `6c40fb7`). Keep these invariants in mind while building on it:
+As of 2026-06-06, the greenfield backend/runtime cutover is merged to main. Keep these invariants in mind while building on it:
 
 - Fresh Supabase baseline only. Keep editing `supabase/migrations/0001_clawtalk_greenfield.sql` for final-state schema while the DB is disposable; do not introduce compatibility/backfill migrations for old data.
 - `message_provider_replay` is the only storage surface for Codex encrypted provider replay blobs. `messages.metadata_json` is member-readable and must stay client-safe.
@@ -70,4 +70,4 @@ As of 2026-06-02, the greenfield cutover branch has **committed** the backend/ru
 - Active source references are `context_sources.id::text`; legacy `meta_json.sourceRef` is only a compatibility alias.
 - The retired `CleanTalkExecutor` must fail closed. Do not restore the old legacy executor as a fallback.
 - Scheduled/run-now job snapshots should skip non-target roster agents whose provider/model is disabled, while still blocking if the target agent/provider is unavailable.
-- Per-slice review gate is mandatory before commit: focused tests, typecheck/build, then exactly two passes — gstack `/review` (bundles a Codex cross-model adversarial pass; honor its `block` verdicts) and `/karpathy-audit diff`. No third standalone Claude review.
+- Current autonomous work should follow `/goal` packets in [PHASE5-AUTONOMOUS-PLAN.md](./PHASE5-AUTONOMOUS-PLAN.md), with focused tests, typecheck/build, and cross-model review before landing.

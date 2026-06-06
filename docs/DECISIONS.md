@@ -1,11 +1,11 @@
 # ClawTalk — Decision Log
 
-> **Status:** canonical · **Last updated:** 2026-05-28
-> Records resolved cross-cutting decisions so docs and agents don't relitigate them. When a doc conflicts with a decision here, this log wins. See [DOC-AUDIT.md](./DOC-AUDIT.md) for the issues that prompted them.
+> **Status:** canonical · **Last updated:** 2026-06-06
+> Records resolved cross-cutting decisions so docs and agents don't relitigate them. When a doc conflicts with a decision here, this log wins. Historical audit context is archived under [archive/audits/](./archive/audits/).
 
 ## D0 — Build posture: greenfield, not migration — ✅ Decided
 
-**Decision.** ClawTalk is being **rebuilt greenfield**: new UI, new features, new architecture, **new schema**. We design the cleanest, most elegant model and build it directly. Existing tables, data, and code are **disposable** — there are no external users beyond Joseph, and this matches `CLAUDE.md`'s engineering defaults (no backward-compat scaffolding, no old+new code paths, treat stored data as disposable).
+**Decision.** ClawTalk is being **rebuilt greenfield**: new UI, new features, new architecture, **new schema**. We design the cleanest, most elegant model and build it directly. Existing tables, data, and code are **disposable** — there are no external users beyond Joseph, so old+new compatibility paths are temporary bridges only while a surface is being rewritten.
 
 **This means:** no migration plans, no backfill/rescope steps, no preserving `contents`/`talk_threads`/`registered_agents`/`talk_folders` names or shapes. Supabase starts from a fresh active baseline (`supabase/migrations/0001_clawtalk_greenfield.sql`) after the old data and active migration stream are reset/removed or archived. The current code is referenced only to understand requirements, then replaced. Every decision below is a clean-slate design choice, not a delta from today.
 
@@ -17,7 +17,7 @@
 
 **Rejected.** Next.js + Node + Redis + BullMQ/Sidekiq (from `README.md`, `05-build-plan.md`, archived rebuild plan). Run queues = CF Queues; websocket pub/sub = `UserEventHub` Durable Object; streaming transport = **WebSocket** (no SSE).
 
-**Follow-ups.** Fix `README.md` §tech-stack and `05-build-plan.md` Phase 0 + Risk register (drop Redis/BullMQ); drop the SSE hedge in `04` §0.
+**Follow-ups.** Resolved in the live docs: Cloudflare Workers + WebSocket is the stack, and Redis/BullMQ/SSE are not part of the target design.
 
 ---
 
@@ -85,6 +85,18 @@ From the Codex review + prototype pressure-test of [11-data-model.md](./11-data-
 - **False-reuse corrections.** `idempotency_cache` (HTTP-response cache, keyed `idempotency_key,user_id,method,path`) and `workspace_provider_secrets` (shared LLM keys, keyed by `workspace_id,provider_id,credential_kind`) are **not** reused for Forge batch retries / connector OAuth — each gets its own store.
 
 **Mechanical follow-ons** (fall out of the above; apply during the schema patch): composite FKs + `workspace_id` on all join tables; restore run sequencing columns; add a `talk_agents` current-roster table distinct from `talk_agent_snapshots`; read-state table for unread; folder/Unfiled talk ordering; `forge_audiences` + synced-SSR-asset tables; persist Forge search config + held-out set on runs; document-invariant enforcement (≥1 tab, last-tab guard, `after_block_id` FK, edit CAS/version).
+
+---
+
+## D8 — Autonomous implementation protocol — ✅ Decided
+
+**Decision.** Current refactor implementation runs are scoped with `/goal` packets in Codex and Claude/Opus. A goal names objective, scope, non-goals, acceptance, verification, human gate, and handoff. One workstream equals one goal; scope expansion starts a new goal. Claude/Opus should use dynamic workflows inside the goal when branching or adaptive sequencing helps, but the workflow must stay inside the parent goal and record sub-slices in the handoff.
+
+**Why.** The remaining work is broad enough that informal "continue" prompts create drift. Goal packets let agents work autonomously while keeping deletion criteria, verification, and doc updates explicit.
+
+**Execution.** Use [PHASE5-AUTONOMOUS-PLAN.md](./PHASE5-AUTONOMOUS-PLAN.md). Default product calls to reduce Joseph interrupts: CSS-variable Salon, attachments deferred unless launch-critical, Forge post-MVP, dark mode after light Salon, and milestone-level visual review only.
+
+**Review gate.** After every autonomous development slice, run three reviews before landing or marking complete: gstack PR review, Karpathy audit diff, and an adversarial cross-model review. If Codex implemented the slice, run `/claude review`; if Claude/Opus implemented it, run `/codex review`. Blocking findings must be fixed or documented as false positives/out of scope in the handoff.
 
 ## How to use this log
 
