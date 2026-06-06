@@ -55,6 +55,8 @@
 //                                         cooperative cancel via DB
 //                                         status flip — U3 consumer
 //                                         polls and bails.
+//   /api/v1/home[/...]             — home.ts (read-only Home summary,
+//                                     Inbox, recommendations, News)
 //
 // NOT mounted (chassis-removed; will not return):
 //   legacy main/browser route families and legacy connector route families.
@@ -131,6 +133,7 @@ import {
   pollOpenAiCodexOauthRoute,
 } from './routes/agent-oauth.js';
 import { mountGreenfieldApiRoutes } from './routes/greenfield-api.js';
+import { mountHomeRoutes } from './routes/home.js';
 import { reorderGreenfieldTalkSidebarRoute } from './routes/greenfield-core.js';
 import { getGreenfieldRunContextRoute } from './routes/greenfield-detail.js';
 import {
@@ -308,6 +311,7 @@ function buildApp(): Hono<{ Variables: Variables }> {
   });
 
   mountGreenfieldApiRoutes(app);
+  mountHomeRoutes(app, requireAuthMiddleware);
 
   // ── ai-agents.ts: page composite + provider credentials ──────
   app.get('/api/v1/agents', async (c) => {
