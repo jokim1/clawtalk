@@ -56,10 +56,15 @@ export function Modal({
         style={{
           width,
           maxWidth: 'calc(100vw - 32px)',
+          // Cap height and scroll tall content so actions never clip on short
+          // viewports / zoom (matches the .connector-modal max-height:90vh it
+          // replaces). Top offset is 10vh, so 85vh leaves a small bottom margin.
+          maxHeight: '85vh',
           background: salon.card,
           border: `1px solid ${salon.line}`,
           borderRadius: 16,
           overflow: 'hidden',
+          overflowY: 'auto',
           boxShadow: '0 40px 80px rgba(31, 27, 22, 0.25)',
         }}
         onMouseDown={(event) => event.stopPropagation()}

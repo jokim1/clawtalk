@@ -2,6 +2,7 @@
  * Sheet. Larger form-modal with sectioned header/body/footer layout, ported
  * from `NewTalkSheet` in prototype/talk-dialogs.jsx (docs §4). Built on Modal.
  */
+import { useId } from 'react';
 import { salon, salonFont } from './tokens';
 import { Modal } from './Modal';
 import { CTIcon } from './CTIcon';
@@ -26,8 +27,10 @@ export function Sheet({
   children,
   footer,
   headerAccessory,
-  titleId = 'salon-sheet-title',
+  titleId: providedTitleId,
 }: SheetProps) {
+  const generatedId = useId();
+  const titleId = providedTitleId ?? generatedId;
   return (
     <Modal onClose={onClose} width={width} ariaLabelledby={titleId}>
       <header
