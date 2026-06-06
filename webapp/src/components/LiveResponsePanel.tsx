@@ -3,8 +3,6 @@ import { memo } from 'react';
 import type { LiveResponseView, RunView } from '../lib/talkRunReducer';
 import { ExecutionDecisionSummary } from './ExecutionDecisionSummary';
 
-const NICKNAME_MAX_CHARS = 18;
-
 export type PillState =
   | 'queued'
   | 'running'
@@ -95,16 +93,6 @@ export function bodyFallback(
   }
 }
 
-export function truncateNickname(label: string): {
-  display: string;
-  full: string;
-} {
-  if (label.length <= NICKNAME_MAX_CHARS) {
-    return { display: label, full: label };
-  }
-  return { display: `${label.slice(0, NICKNAME_MAX_CHARS - 1)}…`, full: label };
-}
-
 export interface LiveResponsePanelProps {
   response: LiveResponseView;
   run: RunView | undefined;
@@ -153,10 +141,6 @@ function LiveResponsePanelImpl(props: LiveResponsePanelProps): JSX.Element {
   const body = isRetrying
     ? `Waiting on retry ${response.retryAttempt}/${response.retryMaxRetries ?? 3}…`
     : bodyFallback(state, response);
-  const { display: displayLabel, full: fullLabel } = truncateNickname(
-    agentLabel,
-  );
-
   const articleClass = [
     'message message-assistant message-live',
     state === 'failed' ? 'message-error' : '',
@@ -165,17 +149,13 @@ function LiveResponsePanelImpl(props: LiveResponsePanelProps): JSX.Element {
     .filter(Boolean)
     .join(' ');
 
-  const ariaLabel = `${fullLabel}, ${pillLabel.toLowerCase()}`;
+  const ariaLabel = `${agentLabel}, ${pillLabel.toLowerCase()}`;
 
   return (
-    <article
-      className={articleClass}
-      aria-label={ariaLabel}
-      aria-live="polite"
-    >
+    <article className={articleClass} aria-label={ariaLabel} aria-live="polite">
       <header>
-        <strong title={fullLabel} className="message-live-label">
-          {displayLabel}
+        <strong title={agentLabel} className="message-live-label">
+          {agentLabel}
         </strong>
         <span className={pillClass}>
           {pillLabel}

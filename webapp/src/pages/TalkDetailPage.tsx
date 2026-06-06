@@ -1039,6 +1039,10 @@ export function TalkDetailPage({
   const titleInputRef = useRef<HTMLInputElement | null>(null);
   const messageElementRefs = useRef<Map<string, HTMLElement>>(new Map());
   const autoStickToBottomRef = useRef<ScrollBehavior | null>(null);
+  // Whether the user is currently following the bottom of the timeline.
+  // Driven by the scroll-restore decision + every user scroll; consulted by
+  // the bottom-stick ResizeObserver so growth only re-pins when at the bottom.
+  const followBottomRef = useRef(true);
   const onUnauthorizedRef = useRef(onUnauthorized);
 
   useEffect(() => {
@@ -1592,39 +1596,48 @@ export function TalkDetailPage({
     return distanceToBottom <= SCROLL_STICK_THRESHOLD_PX;
   }, []);
 
-  const scrollToBottom = useCallback((behavior: ScrollBehavior = 'auto') => {
-    // Drive timelineRef.scrollTop directly instead of
-    // endRef.scrollIntoView. The latter walks every overflow-scrollable
-    // ancestor and the talk shell has two of them (.talk-workspace-scroll
-    // wraps .talk-thread-scroll). In nested scroll containers,
-    // scrollIntoView can end up scrolling the outer wrapper to put endRef
-    // at the bottom of the viewport — which visually leaves the inner
-    // scroll at the top showing the oldest messages. Targeting the inner
-    // container alone is unambiguous. requestAnimationFrame defers the
-    // write to the next frame so scrollHeight reflects the newly
-    // committed message.
-    if (import.meta.env.DEV && typeof window !== 'undefined') {
-      const w = window as unknown as { __clawtalkScrollToBottomCount?: number };
-      w.__clawtalkScrollToBottomCount =
-        (w.__clawtalkScrollToBottomCount ?? 0) + 1;
-    }
-    const apply = () => {
-      const container = timelineRef.current;
-      if (!container) return;
-      const target = container.scrollHeight - container.clientHeight;
-      if (target <= 0) return;
-      if (behavior === 'smooth' && typeof container.scrollTo === 'function') {
-        container.scrollTo({ top: target, behavior: 'smooth' });
-      } else {
-        container.scrollTop = target;
+  const scrollToBottom = useCallback(
+    (behavior: ScrollBehavior = 'auto', shouldStillScroll?: () => boolean) => {
+      // Drive timelineRef.scrollTop directly instead of
+      // endRef.scrollIntoView. The latter walks every overflow-scrollable
+      // ancestor and the talk shell has two of them (.talk-workspace-scroll
+      // wraps .talk-thread-scroll). In nested scroll containers,
+      // scrollIntoView can end up scrolling the outer wrapper to put endRef
+      // at the bottom of the viewport — which visually leaves the inner
+      // scroll at the top showing the oldest messages. Targeting the inner
+      // container alone is unambiguous. requestAnimationFrame defers the
+      // write to the next frame so scrollHeight reflects the newly
+      // committed message.
+      if (import.meta.env.DEV && typeof window !== 'undefined') {
+        const w = window as unknown as {
+          __clawtalkScrollToBottomCount?: number;
+        };
+        w.__clawtalkScrollToBottomCount =
+          (w.__clawtalkScrollToBottomCount ?? 0) + 1;
       }
-    };
-    if (typeof requestAnimationFrame === 'function') {
-      requestAnimationFrame(apply);
-    } else {
-      apply();
-    }
-  }, []);
+      const apply = () => {
+        // Deferred to the next frame, so re-check at write time: a caller (the
+        // streaming auto-stick) may pass a guard that turns false if the user
+        // scrolled away before this ran, and we must not yank them back.
+        if (shouldStillScroll && !shouldStillScroll()) return;
+        const container = timelineRef.current;
+        if (!container) return;
+        const target = container.scrollHeight - container.clientHeight;
+        if (target <= 0) return;
+        if (behavior === 'smooth' && typeof container.scrollTo === 'function') {
+          container.scrollTo({ top: target, behavior: 'smooth' });
+        } else {
+          container.scrollTop = target;
+        }
+      };
+      if (typeof requestAnimationFrame === 'function') {
+        requestAnimationFrame(apply);
+      } else {
+        apply();
+      }
+    },
+    [],
+  );
 
   const setMessageElementRef = useCallback(
     (messageId: string, element: HTMLElement | null) => {
@@ -2075,8 +2088,10 @@ export function TalkDetailPage({
           );
           container.scrollTop = Math.min(saved.offset, maxOffset);
         }
+        followBottomRef.current = false;
       } else {
         scrollToBottom('auto');
+        followBottomRef.current = true;
       }
       dispatch({ type: 'CLEAR_UNREAD' });
     });
@@ -2121,6 +2136,63 @@ export function TalkDetailPage({
       if (timer) clearTimeout(timer);
     };
   }, [activeThreadId, isNearBottom, pageKind, talkId]);
+
+  // Reset the follow flag whenever the thread changes: default to "not
+  // following" until the per-thread scroll-restore effect above decides. This
+  // keeps the reflow stick inert during a cold thread-switch fetch (when the
+  // restore effect is gated out waiting on the snapshot), so it can never pin
+  // to the bottom over a restored mid-scroll position.
+  useEffect(() => {
+    followBottomRef.current = false;
+  }, [activeThreadId]);
+
+  // Robust bottom-stick through reflow. The per-event stick + scrollToBottom
+  // compute their scroll target in a single rAF, so when the timeline grows a
+  // frame later — a streamed token, the live→settled markdown swap, a just-
+  // sent message — the view lands short of the true bottom. Track whether the
+  // user is following the bottom (followBottomRef: set by the restore decision,
+  // updated on every user scroll) and, on each content resize, re-pin to the
+  // true bottom. The ResizeObserver fires after layout, so scrollHeight is
+  // already current and we write scrollTop directly — no deferred rAF that
+  // could yank a user who scrolled away in the meantime. We pin only while
+  // following (never yanks a reader), skip the first/initial-size callback (so
+  // a remount or thread switch can't auto-scroll), and bind to the Talk tab
+  // only — the timeline unmounts on other tabs, so the effect must re-bind on
+  // tab re-entry (and per thread).
+  useEffect(() => {
+    if (pageKind !== 'ready' || !activeThreadId || currentTab !== 'talk') {
+      return;
+    }
+    const container = timelineRef.current;
+    if (!container) return;
+    const onScroll = () => {
+      followBottomRef.current = isNearBottom();
+    };
+    container.addEventListener('scroll', onScroll, { passive: true });
+    if (typeof ResizeObserver === 'undefined') {
+      return () => container.removeEventListener('scroll', onScroll);
+    }
+    const content = container.querySelector<HTMLElement>(
+      '.talk-thread-timeline',
+    );
+    let initialized = false;
+    const observer = new ResizeObserver(() => {
+      if (!initialized) {
+        initialized = true;
+        return;
+      }
+      if (!followBottomRef.current) return;
+      const el = timelineRef.current;
+      if (!el) return;
+      const target = el.scrollHeight - el.clientHeight;
+      if (target > 0) el.scrollTop = target;
+    });
+    if (content) observer.observe(content);
+    return () => {
+      container.removeEventListener('scroll', onScroll);
+      observer.disconnect();
+    };
+  }, [activeThreadId, currentTab, isNearBottom, pageKind]);
 
   useEffect(() => {
     if (pageKind !== 'ready' || !activeTalkWorkspaceId) {
@@ -2245,7 +2317,13 @@ export function TalkDetailPage({
     const stickBehavior = autoStickToBottomRef.current;
     if (!stickBehavior) return;
     autoStickToBottomRef.current = null;
-    scrollToBottom(stickBehavior);
+    // The scroll is deferred a frame, so guard it on the live follow state —
+    // the user may scroll up before it runs and must not be yanked back. This
+    // applies to BOTH 'auto' (streaming) and 'smooth' (e.g. a non-user
+    // resyncTalkState stream-recovery scroll). Genuine user jumps (send,
+    // clear-unread) set followBottomRef = true first, so their scroll still
+    // goes through.
+    scrollToBottom(stickBehavior, () => followBottomRef.current);
     dispatch({ type: 'CLEAR_UNREAD' });
     // Also depends on liveResponsesByRunId so the effect re-runs on
     // RESPONSE_STARTED (placeholder appears) and on each RESPONSE_DELTA
@@ -3554,10 +3632,12 @@ export function TalkDetailPage({
         attachmentIds: input.attachmentIds,
         threadId: activeThreadId,
       });
-      // The user just submitted — show them where their message landed,
-      // even if they were scrolled up reading earlier history. Subsequent
-      // agent responses go through the usual nearBottom gate so a user
-      // who scrolls away mid-stream won't get yanked back.
+      // The user just submitted — show them where their message landed, even
+      // if they were scrolled up reading earlier history. Mark them following
+      // so the guarded auto-stick scroll goes through; subsequent agent
+      // responses still go through the usual nearBottom gate, so a user who
+      // scrolls away mid-stream won't get yanked back.
+      followBottomRef.current = true;
       autoStickToBottomRef.current = 'smooth';
       appendTalkMessageToSnapshot({
         queryClient,
@@ -3966,6 +4046,8 @@ export function TalkDetailPage({
   );
 
   const handleClearUnread = () => {
+    // User chose to jump to the newest — resume following.
+    followBottomRef.current = true;
     scrollToBottom('smooth');
     dispatch({ type: 'CLEAR_UNREAD' });
   };
