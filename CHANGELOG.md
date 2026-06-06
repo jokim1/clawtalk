@@ -1,6 +1,8 @@
 # Changelog
 
-All notable changes to NanoClaw will be documented in this file.
+> Historical NanoClaw/ClawRocket-era changelog. Current ClawTalk greenfield refactor status lives in [docs/roadmap.md](docs/roadmap.md) and [docs/REFACTOR-AUDIT.md](docs/REFACTOR-AUDIT.md).
+
+All historical notable changes to NanoClaw/ClawRocket are documented in this file.
 
 ## [1.2.7](https://github.com/jokim1/clawrocket/compare/v1.2.6...v1.2.7)
 

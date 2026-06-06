@@ -1,107 +1,146 @@
-# Phase 5 Autonomous Completion Plan — Opus 4.8 × Codex 5.5
+# Phase 5 Autonomous Completion Plan
 
-> Goal-oriented plan to finish the greenfield frontend rewrite (roadmap steps 5–9) with
-> two models running as autonomously as possible. Backend cutover (steps 1–4) is done + live.
-> Forge (step 10) is out of scope. Orientation: [roadmap.md](./roadmap.md) ·
-> [IMPLEMENTATION-HANDOFF.md](./IMPLEMENTATION-HANDOFF.md).
+> **Status:** current execution protocol · **Last updated:** 2026-06-06
+> Scope: finish roadmap steps 5-9 with parallel Codex + Claude/Opus runs. Forge remains post-MVP unless Joseph explicitly pulls it forward. Orientation: [roadmap.md](./roadmap.md) · audit: [REFACTOR-AUDIT.md](./REFACTOR-AUDIT.md).
 
-## 1. Goal & Definition of Done
+## 1. Purpose
 
-The refactor is **done** when:
+The refactor is now less about backend cutover and more about finishing the product surface: Salon, Documents, Home, de-facade, structural cleanup, and the eval gate.
 
-- `TalkDetailPage.tsx` (now 7830 LOC) is decomposed to **≤ ~2.5k LOC**, with every major surface
-  (composer, thread+streaming, agents/connectors/runs/jobs/context tabs, documents) in a
-  **presentational component or hook** — page-owned state, props in (the proven Slice 2/4 shape).
-- `SettingsPage.tsx` (3243 LOC) is decomposed the same way (provider config, AiAgents, registered agents).
-- The frontend reads **native greenfield shapes**, not the backend compat facades
-  (synthetic threads, runs-with-threadId, content-md/html), wherever a surface has been rewritten.
-- **Documents UI** (step 6) runs on `documents`/`doc_tabs`/`doc_blocks`/`document_edits`.
-- Every slice: characterization tests green + full webapp suite green + **codex-clean** + Karpathy pass.
-- `docs/roadmap.md` step 5–9 gates flip to ✅.
+The operating goal is to minimize human-in-the-loop work without letting agents wander. The unit of work is a scoped `/goal` in each tool, not an informal "continue the refactor" prompt.
 
-Measurable burn-down: **LOC of the two god-files** + **count of compat-facade reads remaining** + **roadmap step gates**.
+For Claude/Opus runs, prefer dynamic workflows when the work naturally branches. The workflow can discover sub-slices, reorder low-risk tasks, and adapt implementation details, but it must still stay inside the parent goal's scope, preserve the human gate rules, and finish with the review gate below.
 
-## 2. The split (conflict-free, both models always busy)
+## 2. Goal Protocol
 
-Two big files that share no code → two parallel worktrees, no edit collisions.
+Every Codex and Claude/Opus workstream starts with a goal packet:
 
-| Track | Owner | Surface | Reviewer |
-| --- | --- | --- | --- |
-| **A — critical path** | **Opus 4.8** (Claude Code) | `TalkDetailPage.tsx` + its panels | Codex (`codex exec review`) |
-| **B — parallel** | **Codex 5.5** (`codex exec`) | `SettingsPage.tsx` + small follow-ups | Opus (review pass) |
+```text
+/goal
+Objective: one concrete outcome
+Scope: files/modules the agent may edit
+Non-goals: nearby work explicitly out of scope
+Acceptance: behavior, deletion criteria, and docs status
+Verify: exact commands, tests, and browser checks
+Human gate: none, or one named decision needed from Joseph
+Handoff: what to update before marking complete
+```
 
-Rule: **Track A never touches `SettingsPage.tsx`; Track B never touches `TalkDetailPage.tsx`.** Each is a
-separate worktree off `codex/clawtalk-greenfield-cutover`. Land Track A first when a slice touches shared
-components (rare) — otherwise they merge independently.
+Rules:
 
-## 3. The autonomous per-slice loop (the engine — both tracks)
+- One goal equals one workstream. If scope expands, close the current goal with a handoff and start a new one.
+- Claude/Opus may use a dynamic workflow inside the goal to create sub-goals or revise sequencing as it learns more. The dynamic workflow must record the chosen sub-slices in the handoff and cannot silently expand the parent goal.
+- The goal is not complete until implementation, verification, and doc/status updates are done.
+- A code goal that touches UI needs a browser or screenshot check when the surface can be run locally.
+- A deletion goal needs both a consumer grep and a test/build gate.
+- No admin merge past known-red CI. Backend CI is green again after the legacy cleanup, so red checks are blockers unless the failing job is unrelated and explicitly justified.
 
-0. **Orient** (once per session): read this file + [IMPLEMENTATION-HANDOFF.md](./IMPLEMENTATION-HANDOFF.md)
-   §"Review Gate" + the Slice 2/4 lessons + memory `[[greenfield-cutover-active]]`,
-   `[[two-gate-review-process]]`. **Verify every claim against code before trusting it** (the handoff/memory
-   have been wrong — e.g. "context-loader = 3 dead fns" was actually a whole dead file).
-1. **Characterize** — before a risky extraction, *add* webapp tests that pin the behaviors the slice could
-   break (send flow, streaming reducer transitions, @-mention, guardrail block, tab-switch persistence).
-   These tests are the autonomy lever — they replace the per-slice human eyeball.
-2. **Extract** — presentational component/hook. **All state an async mutation writes stays page-owned and
-   is threaded in as props** (the panel unmounts on tab switch; panel-local mutation state orphans on a
-   late-resolving save/run — codex caught this 3× already). Self-fetch only pure read-only data nothing mutates.
-3. **Gate**: `npm run typecheck` + `npm --prefix webapp run typecheck` + targeted/full webapp tests +
-   `npm --prefix webapp run build`, all green.
-4. **Cross-model review**: Track A → `~/.bun/bin/codex exec review --uncommitted` from the worktree.
-   Track B → an Opus review pass on the PR. Honor blocks: adjudicate (real? in-scope? introduced here?), fix or justify.
-5. **Karpathy** four principles by inspection.
-6. **Ship**: `npm run format:fix` → `git add -u` → commit → push → `gh pr create --base main` →
-   `gh pr merge <#> --admin --merge` → watch `deploy.yml`.
-7. **Record**: update IMPLEMENTATION-HANDOFF.md slice table + roadmap gate + memory.
-8. **Loop** to the next slice. Only stop for §6 milestone checks or a genuine *novel* design fork.
+## 3. Required Review Gate
 
-## 4. Track A queue (Opus — ordered)
+After every autonomous development slice, run three reviews before landing or marking the goal complete:
 
-1. **A1 · Characterization net** for the talk tab: thread timeline render, send→queue→stream→settle, @-mention
-   typeahead, guardrail block, tab-switch state persistence. (Foundation for A3/A4.)
-2. **A2 · Easy tab panels**: extract `agents` (~6166–6480), `connectors` (~6480), `runs` (~6514) inline tabs →
-   presentational panels (proven pattern; quick LOC + risk reduction).
-3. **A3 · Composer** → `TalkComposer` (presentational; page owns draft, attachments, @-mention index, send +
-   guardrail state). Untangles `SavedSourcesPanel` ↔ `contextSources`.
-4. **A4 · Thread + streaming** → `TalkThread` + `useTalkRunStream` hook (extract the message-list render + the
-   ~500-line `talkReducer` at L819). Biggest chunk; A1 tests de-risk it.
-5. **A5 · Documents UI** (step 6) → rewrite the content/editor surface onto `documents`/`doc_tabs`/`doc_blocks`;
-   drop the content-md/html facade. (Design pass first — this changes a data contract, not just structure.)
-6. **A6 · De-facade** → replace synthetic-thread / runs-with-threadId reads with native greenfield shapes,
-   surface by surface, deleting each backend facade as its last consumer goes native.
+1. **gstack PR review** — use the gstack PR review feature for a structural PR-style review.
+2. **Karpathy audit diff** — run the Karpathy audit diff skill/workflow and address blocking findings.
+3. **Adversarial cross-model review** — if Codex implemented the slice, run `/claude review`; if Claude/Opus implemented the slice, run `/codex review`.
 
-## 5. Track B queue (Codex — ordered, independent)
+The slice is not done until blocking findings are fixed or explicitly documented as false positives/out of scope. Include the three review outcomes in the goal handoff.
 
-1. **B1 · Settings decomposition**: extract provider-config, AiAgents, and registered-agents sections of
-   `SettingsPage.tsx` (3243 LOC) into presentational panels (same rule as Track A).
-2. **B2 · Small follow-ups** (from IMPLEMENTATION-HANDOFF §Open follow-ups): human-readable display for raw-UUID
-   source refs (`SavedSourcesPanel`, `SourceMentionPicker`); a `selectProviderReplayMessageIds` budget/break unit
-   test; provider-level disablement audit (gate at both roster joins **only if** it's a real gap).
-3. **B3 · Test backfill**: characterization tests for any surface Track A hasn't reached yet.
+## 4. Parallel Lanes
 
-## 6. Autonomy levers & where the human stays in the loop
+Use separate worktrees for simultaneous runs. Keep ownership boundaries sharp.
 
-**Levers (these remove Joseph from the loop):** pre-baked design rules (§3 step 2) → no design questions;
-characterization tests → behavior verified by CI, not eyes; `codex exec review` → automated adversarial gate;
-admin-merge-past-red-CI → no green-CI wait; behavior-preserving slices → tiny decision surface.
+| Lane | Primary owner | Work | Reviewer |
+|---|---|---|---|
+| S | Claude/Opus | Salon tokens, primitive library, visual implementation of new surfaces | Codex review |
+| C | Codex | Structural cleanup, orphan deletion, route/facade cleanup, backend/API work | Claude/Opus review |
+| D | Claude/Opus | Native Documents UI and editor interactions | Codex review |
+| H | Split | Home backend in Codex, Home UI in Claude/Opus after Salon foundation | Cross-review both ways |
+| E | Codex | Eval harness, scenarios, graders, `npm run eval` | Claude/Opus review |
 
-**Human stays in the loop only for:** (a) **milestone visual spot-checks** on clawtalk.app — after A3 (composer),
-after A4 (thread), after A5 (documents), and after each Track-B Settings batch — because jsdom can't see CSS /
-focus / scroll / real streaming, and a browser smoke needs Google OAuth (Joseph's hands); (b) a **genuine novel
-design fork** not covered by the playbook. Everything else loops autonomously. Target: **milestone-touch, not per-slice.**
+Avoid editing the same files across lanes. If two lanes need the same primitive or API type, land the shared foundation first.
 
-## 7. Hard rules (proven gotchas — do not relearn)
+## 5. Default Decisions
 
-- **Worktrees**: Track A and Track B each in their own `.claude/worktrees/<name>` (or `.codex/...`) off
-  `codex/clawtalk-greenfield-cutover`; absolute worktree paths on every tool call. Never edit the main checkout.
-- **Review gate is `codex exec review --uncommitted` from inside the worktree** — gstack `/review` diffs the main
-  checkout and can't see the worktree.
-- **Shell**: one line per command, never backslash line-continuations.
-- **Commit**: pre-commit `format:fix` doesn't re-stage → `npm run format:fix` then `git add -u` before commit;
-  `npx prettier --write` any edited webapp file (webapp isn't in the root pre-commit).
-- **Tests need Node 24**; if only Node 22 is present, prefix with `CLAWTALK_ALLOW_UNSUPPORTED_NODE=1`. This
-  worktree's `node_modules` are real dirs (not symlinks), so `npm install` is safe here.
-- **Deploy**: merge to main → `deploy.yml` (~1 min). Backend full suite is **red by design** (legacy tests hit
-  dropped tables) → admin-merge; gate on typecheck + targeted greenfield/webapp tests, not full CI.
-- **Presentational + page-owned state** is non-negotiable for tab-mounted panels (§3 step 2).
+These defaults are chosen to reduce Joseph interrupts. Override only when code reality disproves them or Joseph gives a different call.
+
+| Decision | Default |
+|---|---|
+| Salon tooling | Use CSS variables + existing Vite/React CSS pipeline. Do not add Tailwind unless Joseph explicitly chooses speed-to-port over stack simplicity. |
+| Salon sequencing | Build the foundation before Home/Documents/Agents so net-new surfaces are Salon-native. |
+| Message attachments | Defer chat attachments from v1 unless multimodal chat upload becomes a launch requirement. Keep context file/PDF ingestion as the supported source-material path. |
+| Forge | Post-MVP. Keep schema and docs, do not block v1 surface completion on Forge. |
+| Dark mode | Post-light-Salon. Do not invent a dark palette while the light system is unimplemented. |
+| Mobile/accessibility | v1 bar: no overlapping text, responsive layout for phone/tablet widths, keyboard operability for command surfaces, semantic buttons/labels. Full WCAG pass is a separate goal. |
+| Human visual gates | Milestone-level only: after Salon foundation, after native Documents, after Home, before launch. |
+
+## 6. Work Packages
+
+### G0. Docs Drift
+
+- Archive stale audits/runbooks/plans.
+- Update root docs and live docs to point at `REFACTOR-AUDIT.md`, `roadmap.md`, and this file.
+- Run stale-reference grep before finishing.
+
+### G1. Salon Foundation
+
+- Add tokens, font loading, brand mark, primitives, and migration notes.
+- Verify no one-off palette dominates the app and no text overlaps at desktop/mobile widths.
+- Gate: webapp typecheck, tests/build, browser screenshot checks.
+
+### G2. Structural Cleanup
+
+- `TalkDetailPage.tsx`: extract the Talk tab shell and page-owned controller hooks until the file is near the 2.5k LOC target.
+- `SettingsPage.tsx`: extract Profile, Tools/Google/WebSearch, and OAuth state.
+- Delete orphaned `TalkLlmSettingsCard.tsx` after a repo-wide importer grep.
+- Gate: targeted component tests, webapp typecheck/test/build.
+
+### G3. Native Documents
+
+- Add native Documents page/editor and in-Talk doc pane over `documents`/`doc_tabs`/`doc_blocks`/`document_edits`.
+- Delete the content markdown/html compatibility facade only after the final consumer moves.
+- Gate: document edit accept/reject tests, API tests, webapp tests/build, browser check.
+
+### G4. Home
+
+- Implement read/write accessors and routes for deterministic Inbox, recommendations, news, and lifecycle actions.
+- Build Home in Salon from the start.
+- Gate: backend tests for item lifecycle/idempotency, webapp tests/build, browser check.
+
+### G5. De-facade
+
+- Maintain a deletion ledger: facade, current consumers, native replacement, deletion test.
+- Remove synthetic `threadId`, native run context fabrication, policy/tool/connectors facades, duplicate Hono mounts, and flat content projections as consumers leave.
+- Gate: grep proves no consumers, route tests removed or rewritten, full relevant test suites green.
+
+### G6. Product Surface Completion
+
+- Standalone Agents page/profile, Archive, New Talk sheet, command palette, Settings API key/workspace-member gaps.
+- Gate: interaction tests and browser smoke for each user-facing flow.
+
+### G7. Eval Gate
+
+- Create `eval/` with scenario JSON, grader prompts, harness CLI, report output, and thresholds.
+- Add `npm run eval`.
+- Gate: eval dry run on a local seeded workspace and documented pass/fail semantics.
+
+## 7. Verification Matrix
+
+| Change type | Required verification |
+|---|---|
+| Backend/API | `npm run typecheck`, targeted backend tests, broader `npm run test` when shared runtime changes. |
+| Webapp structure | `npm --prefix webapp run typecheck`, targeted tests, `npm --prefix webapp run test`, `npm --prefix webapp run build`. |
+| Visual/UI | Webapp gates plus browser screenshots at desktop and mobile widths. |
+| Facade deletion | Consumer grep, route/accessor tests updated, backend + webapp gates if API shapes changed. |
+| Any autonomous development slice | Relevant tests plus the required review gate: gstack PR review, Karpathy audit diff, and adversarial cross-model review. |
+| Docs only | `git diff --check` plus stale-reference grep. |
+
+## 8. Handoff Standard
+
+Every goal finishes by updating:
+
+- `docs/roadmap.md` if a state or gate changed.
+- `docs/REFACTOR-AUDIT.md` if an audited gap closed or a new gap appeared.
+- The relevant canonical spec doc only when target behavior changed.
+- Goal handoff notes with: tests run, gstack PR review result, Karpathy audit diff result, adversarial cross-model review result, and any deferred non-blockers.
+
+Do not create new worktree-specific handoff docs. Use the active goal summary and the live roadmap instead.

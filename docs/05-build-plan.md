@@ -5,11 +5,11 @@
 
 Recommended sequence for building ClawTalk greenfield. Infrastructure → data → core flows → polish → Forge.
 
-The numbering is _suggested_. You can parallelize where capacity allows — front-end work on Talk thread UX doesn't block back-end work on streaming, for example.
+The numbering is _suggested_. This is a product build sequence, not the live completion tracker. For current state, use [REFACTOR-AUDIT.md](./REFACTOR-AUDIT.md) and [roadmap.md](./roadmap.md).
 
 Each phase carries a one-line **Done when:** acceptance criterion to gate progress.
 
-Current codebase audit: [IMPLEMENTATION-READINESS.md](./IMPLEMENTATION-READINESS.md) recommends a big-bang cutover branch. The current runtime passes typecheck and the webapp test suite, but backend tests intentionally fail against the greenfield shape because legacy tests still expect `talks.owner_id`, `users.role`, `registered_agents`, `talk_threads`, `contents`, and `talk_runs`.
+Current codebase audit: [REFACTOR-AUDIT.md](./REFACTOR-AUDIT.md). Backend/runtime cutover has landed and backend CI is expected to be a real signal. Remaining work is frontend/product completion, Salon, de-facade, Home, Documents, and evals.
 
 ---
 
@@ -23,7 +23,7 @@ The stack is locked by [DECISIONS](./DECISIONS.md) D1 — no "pick stack" step.
 - [ ] **Provisioning:** Supabase project (local stack via `npm run db:start`) + Cloudflare account + Wrangler local dev (`npm run dev:worker`) + Hyperdrive binding to Supabase + R2 bucket binding + KV / Queue / DO bindings declared in `wrangler.toml`.
 - [ ] Set up dev / staging / production environments.
 - [ ] Set up LLM provider accounts: Anthropic, OpenAI, Google. Keys are stored encrypted at rest in the kept `workspace_provider_secrets` table (§11 §11), decrypted just-in-time server-side; never shipped to the client.
-- [ ] Pull tokens from `02-visual-system.md` into the webapp design system (CSS variables + Tailwind config).
+- [ ] Pull tokens from `02-visual-system.md` into the webapp design system. Current autonomous-plan default is CSS variables on the existing Vite CSS pipeline unless Joseph explicitly chooses Tailwind.
 
 **Done when:** `npm run dev:worker` boots, `npm run dev:web` proxies to it, a Worker-served `/api/health` returns 200 against a local Supabase DB through Hyperdrive.
 
@@ -52,8 +52,8 @@ One baseline migration file, executed top-to-bottom in a transaction. Steps insi
 ### Step 2 · Seed `agent_role_templates`
 
 - [ ] Seed the five canonical roles from `03-agents.md`: `strategist`, `critic`, `researcher`, `editor`, `quant`. Use the §11 §4 schema (`default_name`, `default_handle`, `default_initials`, `default_accent` + `default_accent_dark`, `default_model_id`, `default_temperature`, `job`, `system_prompt`, `method_default text[]`, `version`).
-- [ ] **Strategist seed fix:** replace the hardcoded `Samira` reference in the Strategist `system_prompt` with a user-name placeholder (e.g. `{user_display_name}`) resolved at prompt assembly time. The seed text otherwise reads `Samira` literally for every workspace (DOC-AUDIT #7).
-- [ ] **`@strat` handle:** seed `default_handle = '@strat'` (canonical; `03-agents.md:32`) — not `@strategy` (DOC-AUDIT #8).
+- [ ] **Strategist seed fix:** replace the hardcoded `Samira` reference in the Strategist `system_prompt` with a user-name placeholder (e.g. `{user_display_name}`) resolved at prompt assembly time. The seed text otherwise reads `Samira` literally for every workspace.
+- [ ] **`@strat` handle:** seed `default_handle = '@strat'` (canonical; `03-agents.md:32`) — not `@strategy`.
 - [ ] Add two new system roles per [DECISIONS](./DECISIONS.md) D3 / Forge (§11 §4 `agents.is_system`): `forge_rewriter` and `forge_critic`. Prompts live alongside the user-facing roles in seed; Forge invokes them internally and the agent registry filters them from `GET /agents`.
 
 ### Step 3 · First-signin workspace bootstrap
@@ -136,7 +136,7 @@ This phase is the largest. Allocate accordingly.
 - [ ] Full-bleed doc editor: 720px column, serif typography, co-editor avatars (per-tab via `doc_tab_coeditors`) in meta strip, pending-edits banner. Reference: `DocEditorScreen`.
 - [ ] In-Talk doc pane (side-by-side with thread). Reference: `DocPane`.
 - [ ] "New document" creation flow (linked or unlinked). Linking sets `documents.primary_talk_id`; the partial unique index rejects a second primary doc for the same Talk.
-- [ ] Move-block-between-tabs endpoint (DOC-AUDIT #14) — composite FKs in §11 §5 allow this but the API contract needs to specify the payload.
+- [ ] Move-block-between-tabs endpoint — composite FKs in §11 §5 allow this but the API contract needs to specify the payload.
 
 **Done when:** the user can create a doc, link it as primary to a Talk, agents propose pending edits (`document_edits.source='agent'`), the user accepts them, the block versions advance, and a concurrent edit at the same anchor lands `superseded`.
 
@@ -232,7 +232,7 @@ Highest design risk. Ship behind a feature flag.
 
 ## Phase 13 · Offline agent eval gate — launch-blocking
 
-Per `engineering-notes.md` §3 + DOC-AUDIT #24, the five system prompts in `03-agents.md` have never been tested against each other in a multi-agent run. This phase builds the eval and runs it as a launch gate.
+Per `engineering-notes.md` §3, the five system prompts in `03-agents.md` have never been tested against each other in a multi-agent run. This phase builds the eval and runs it as a launch gate.
 
 - [ ] Build an offline eval harness that runs the default 5-agent team on a representative prompt set (decision-quality questions covering the v1 talk shapes).
 - [ ] Evaluator-model checks per `06-agent-system-design.md` §14.6 produce an `AgentAuditResult` JSON per agent per run, scoring (1–5 each): `roleAdherence`, `nonDuplication`, `evidenceDiscipline`, `methodAdherence`, `usefulness`, `concision`.
@@ -266,7 +266,7 @@ Schema is already in §11 §9 (`ssr_connections`, `forge_personas`/`reference_se
 | **Run orchestrator.**                             | Cloudflare Queues + the `scheduler.ts` cron tick + queue-consumer atomic claim (`update runs set status='running' where id=$1 and status='queued' returning *`) handle dispatch; the §12 stuck-`queued` re-dispatch (5min) + stuck-`running` fail sweep (1h) is the safety net. State machine lives in code, not in DB triggers.                      |
 | **Cutover scope creep.**                          | Keep the first implementation PR to fresh baseline + seed + workspace bootstrap + §11 verification tests. The second PR starts accessors/API. Do not begin Home/Forge while Talk execution and Documents still target legacy tables.                                                                                                                  |
 | **Schema baseline size.**                         | The fresh baseline is large, but it applies to an empty/reset Supabase database per D0. Keep `11-data-model.md` as the design source and `supabase/migrations/0001_clawtalk_greenfield.sql` as the single executable DDL source, then verify with the §11 §14 invariant suite before deploying to staging; a green suite is the gate, not "looks OK." |
-| **Cutover gap.**                                  | The baseline removes the legacy schema that current `src/` and tests target. Landing it without the matching src/ rewrite breaks main. The cutover branch now keeps the active baseline in `supabase/migrations/0001_clawtalk_greenfield.sql` and proceeds as one coordinated src/webapp rewrite before merging. See REFACTOR-OVERVIEW §14.           |
+| **Compatibility facade drag.**                    | The greenfield backend is live, but synthetic threads, flat content, and other old-shaped DTOs remain so the current webapp works. Track each facade with consumers, native replacement, and deletion test; delete them one at a time.                                                                                         |
 | **Curator quality.**                              | Phase 11 is behind a flag for model polish only. Deterministic recommendations must work without Curator output.                                                                                                                                                                                                                                      |
 | **News feed privacy.**                            | Bake the topic-summary-only contract into the matcher service. `home_news_items` is a shared global pool with no `workspace_id` per §07 §8.4 — never log message bodies in that pipeline. Document for security review.                                                                                                                               |
 | **Home auto-optimization.**                       | Tune only bounded `home_ranking_profiles` weights automatically. Structural algorithm changes require `home_optimization_proposals` → admin review → new `home_algorithm_versions` row → `home_algorithm_assignments` flip.                                                                                                                           |
