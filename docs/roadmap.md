@@ -48,7 +48,7 @@ Human gate: none, or the specific decision that cannot be inferred
 Handoff: docs/tests/status to update before marking complete
 ```
 
-Completion requires implementation, tests, doc update if behavior/status changed, and the full review gate: gstack PR review, Karpathy audit diff, and adversarial cross-model review. If Codex implemented the slice, run `/claude review`; if Claude/Opus implemented it, run `/codex review`. Claude/Opus should use dynamic workflows inside the goal when useful, while staying inside the parent goal. Human involvement should be milestone-level, not per slice. Default decisions are recorded in [PHASE5-AUTONOMOUS-PLAN.md](./PHASE5-AUTONOMOUS-PLAN.md).
+Completion requires implementation, tests, doc update if behavior/status changed, and the full review gate: gstack PR review, Karpathy audit diff, and adversarial cross-model review. If Codex implemented the slice, run `/claude review`; if Claude/Opus implemented it, run `/codex review`. Claude/Opus should use dynamic workflows inside the goal when useful, while staying inside the parent goal. Default decisions and copy/paste phase prompts are recorded in [PHASE5-AUTONOMOUS-PLAN.md](./PHASE5-AUTONOMOUS-PLAN.md).
 
 ## Drift Controls
 
