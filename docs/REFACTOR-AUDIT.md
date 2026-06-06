@@ -216,20 +216,20 @@ Why: Home/Documents/Agents should not be built pre-Salon and then re-skinned. Bu
 
 ### 8a. Use `/goal` as the Unit of Work
 
-Every Codex and Claude/Opus run should begin with:
+Every Codex and Claude/Opus run begins with one scoped `/goal`. `/goal` is a real Claude Code command: after every turn a fast model checks a completion condition by reading **only the conversation** (it runs no commands and cannot see inside subagents), so the condition must be something the agent **proves in the transcript**. The full protocol — the `/effort ultracode` + auto-mode + `/goal` trifecta, the transcript-checkable Done-when rule, the turn bound, and orchestration — lives in [PHASE5-AUTONOMOUS-PLAN.md §2](PHASE5-AUTONOMOUS-PLAN.md). The packet shape:
 
 ```text
 /goal
-Objective: ...
-Scope: ...
-Non-goals: ...
-Acceptance: ...
-Verify: ...
-Human gate: ...
-Handoff: ...
+Objective: one concrete outcome.
+Scope: the exact files/modules the agent may edit.
+Non-goals: nearby work explicitly out of scope.
+Done-when (transcript-checkable): ONE end state the after-every-turn evaluator can confirm from the conversation — commands the agent RUNS and whose output it PASTES (typecheck/test/build exit 0, file paths, passing test names, rg counts, `gh run` conclusion). End with "or stop after N turns and hand off." Subjective/visual sign-off is NOT here — it belongs to the milestone human gate.
+Orchestration: how to fan out, if at all; single-agent if linear.
+Human gate: none, or one named decision needed from Joseph.
+Handoff: what to update before marking complete.
 ```
 
-This prevents drift, makes "done" auditable, and gives each agent permission to finish without asking for per-slice approvals.
+This prevents drift, makes "done" machine-auditable by the `/goal` evaluator, and lets each agent finish without per-slice approvals.
 
 ### 8b. Default Product Calls to Avoid Interrupts
 
