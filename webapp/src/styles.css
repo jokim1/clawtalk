@@ -2994,14 +2994,18 @@ a {
   padding: 0.4rem 0.65rem;
 }
 
-/* Long-nickname truncation on the panel header. */
+/* Show the full agent nickname; ellipsize only when the row is genuinely
+   too narrow (the settled message shows the full name, so this matches it). */
 .message-live-label {
-  display: inline-block;
-  max-width: 18ch;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  vertical-align: bottom;
+}
+
+/* Keep the status pill intact so the label ellipsizes first. */
+.message-live header .run-history-status {
+  flex-shrink: 0;
 }
 
 @media (max-width: 480px) {
@@ -3010,6 +3014,8 @@ a {
     align-items: flex-start;
     gap: 0.25rem;
   }
+  /* Column layout: flex-start sizes the label to its content, so cap it at
+     the card width — long names ellipsize instead of spilling horizontally. */
   .message-live-label {
     max-width: 100%;
   }

@@ -8,7 +8,6 @@ import {
   pillClassForState,
   pillLabelForState,
   resolvePillState,
-  truncateNickname,
   type LiveResponsePanelProps,
   type PillState,
 } from './LiveResponsePanel';
@@ -97,7 +96,9 @@ describe('LiveResponsePanel helpers', () => {
     expect(pillClassForState('reconnecting')).toContain(
       'run-history-status-queued',
     );
-    expect(pillClassForState('running')).toContain('run-history-status-running');
+    expect(pillClassForState('running')).toContain(
+      'run-history-status-running',
+    );
     expect(pillClassForState('completed')).toContain(
       'run-history-status-completed',
     );
@@ -130,18 +131,6 @@ describe('LiveResponsePanel helpers', () => {
     );
     expect(bodyFallback('failed', makeResponse())).toBeNull();
     expect(bodyFallback('cancelled', makeResponse())).toBeNull();
-  });
-
-  it('truncateNickname keeps short labels and truncates long ones with ellipsis', () => {
-    expect(truncateNickname('Sonnet')).toEqual({
-      display: 'Sonnet',
-      full: 'Sonnet',
-    });
-    const longName = 'Claude Sonnet 4.6 (extended thinking, 1M context)';
-    const result = truncateNickname(longName);
-    expect(result.full).toBe(longName);
-    expect(result.display.length).toBeLessThanOrEqual(18);
-    expect(result.display.endsWith('…')).toBe(true);
   });
 
   it('resolvePillState gives terminal precedence over pendingStatus', () => {
@@ -265,12 +254,12 @@ describe('LiveResponsePanel render', () => {
     expect(container.querySelector('article.is-dense')).toBeNull();
   });
 
-  it('truncates long agent label and keeps full name in title attribute', () => {
+  it('renders the full agent label and keeps it in the title attribute', () => {
     const longName = 'Claude Sonnet 4.6 (extended thinking, 1M context)';
     render(<LiveResponsePanel {...makeProps({ agentLabel: longName })} />);
-    const labelEl = screen.getByText(/Claude Sonnet/);
+    const labelEl = screen.getByText(longName);
     expect(labelEl.getAttribute('title')).toBe(longName);
-    expect(labelEl.textContent?.endsWith('…')).toBe(true);
+    expect(labelEl.textContent).toBe(longName);
   });
 
   it('shows Failed pill with retained elapsed and surfaces Retry + Open Run History when retry-eligible', () => {
