@@ -16,7 +16,7 @@ The backend/data cutover is real. The product refactor is not done.
 | Frontend structural decomposition | ~50% 🔄 | `TalkDetailPage.tsx` is 5,429 LOC and `SettingsPage.tsx` is 2,147 LOC. Talk panels, composer, thread view, reducer, and stream hook are extracted; the page-owned controller bulk remains. |
 | De-facade | ~0% ⛔ | Compat facades still serve the webapp: synthetic threads, runs-with-`threadId`, flat content markdown/html, snapshot compat, policy/tool/connectors facades, and run-context synthesis. |
 | Visual system (Salon) | Foundation in review 🔄 | Salon foundation shipped in PR #547: `webapp/src/salon/*` CSS-variable tokens (`--salon-*`), fonts (Newsreader/Geist/Geist Mono), brand mark, and the primitive library (CTMark/CTIcon/Avatar/AgentAvatar/RunPill/Chip/Kbd/Button/Input/Modal/Sheet/Popover) with behavior-preserving proof migrations + a smoke suite. Remaining: broad re-skin of the 7,284 LOC pre-Salon `webapp/src/styles.css`. |
-| Net-new product surfaces | ~5% ⛔ | Live app covers Talk list, Talk detail, and Settings. Home, native Documents, standalone Agents, Archive, command palette, New Talk sheet, and Forge are unbuilt or skeletal. |
+| Net-new product surfaces | ~15% 🔄 | Live app covers Talk list, Talk detail, Settings, and now a read-first Salon **Home** page on the read-only Home API (PR #550). Native Documents, standalone Agents, Archive, command palette, New Talk sheet, and Forge are still unbuilt or skeletal. |
 | Eval gate | ~5% ⛔ | `docs/eval-suite.md` exists, but there is no `eval/` directory and no `npm run eval`. |
 
 The biggest missing work is Salon, native Documents, Home, de-facade, eval gate, and final surface completion. Forge remains post-MVP.
@@ -111,7 +111,7 @@ The unused table set is mostly intentional schema waiting for surfaces: Home, Fo
 
 ### 4c. Missing Surfaces
 
-- Home currently routes to Talk list, not a Home page.
+- Home is built Salon-native on the read-only Home API (PR #550), read-first and now the `/` landing surface; the remaining gap is the Home **write/lifecycle** API (mark-read/resolve/dismiss/snooze, recommendation + news status) to activate the disabled inbox/recommendation/news actions.
 - Documents sidebar entry links into the in-Talk doc pane, not a standalone Documents surface.
 - Agents are folded into Settings; standalone Agents and Agent profile are unbuilt.
 - Archive, New Talk sheet, and command palette are not production-complete.
