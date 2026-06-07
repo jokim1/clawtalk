@@ -10,14 +10,14 @@
 
 The backend/data cutover is real. The product refactor is not done.
 
-| Layer | Done | Evidence |
-|---|---|---|
-| Backend / data cutover | ~90% ✅ | Greenfield is the only live runtime. Legacy runtime/accessors were retired, and backend CI is a signal again. Remaining backend work is mainly facade deletion plus Home/Forge backends. |
-| Frontend structural decomposition | ~50% 🔄 | `TalkDetailPage.tsx` is 5,429 LOC and `SettingsPage.tsx` is 2,147 LOC. Talk panels, composer, thread view, reducer, and stream hook are extracted; the page-owned controller bulk remains. |
-| De-facade | ~0% ⛔ | Compat facades still serve the webapp: synthetic threads, runs-with-`threadId`, flat content markdown/html, snapshot compat, policy/tool/connectors facades, and run-context synthesis. |
-| Visual system (Salon) | Foundation in review 🔄 | Salon foundation shipped in PR #547: `webapp/src/salon/*` CSS-variable tokens (`--salon-*`), fonts (Newsreader/Geist/Geist Mono), brand mark, and the primitive library (CTMark/CTIcon/Avatar/AgentAvatar/RunPill/Chip/Kbd/Button/Input/Modal/Sheet/Popover) with behavior-preserving proof migrations + a smoke suite. Remaining: broad re-skin of the 7,284 LOC pre-Salon `webapp/src/styles.css`. |
-| Net-new product surfaces | ~15% 🔄 | Live app covers Talk list, Talk detail, Settings, and now a read-first Salon **Home** page on the read-only Home API (PR #550). Native Documents, standalone Agents, Archive, command palette, New Talk sheet, and Forge are still unbuilt or skeletal. |
-| Eval gate | ~5% ⛔ | `docs/eval-suite.md` exists, but there is no `eval/` directory and no `npm run eval`. |
+| Layer                             | Done                    | Evidence                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| --------------------------------- | ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Backend / data cutover            | ~90% ✅                 | Greenfield is the only live runtime. Legacy runtime/accessors were retired, and backend CI is a signal again. Remaining backend work is mainly facade deletion plus Home/Forge backends.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| Frontend structural decomposition | ~50% 🔄                 | `TalkDetailPage.tsx` is 5,429 LOC and `SettingsPage.tsx` is 2,147 LOC. Talk panels, composer, thread view, reducer, and stream hook are extracted; the page-owned controller bulk remains.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| De-facade                         | ~0% ⛔                  | Compat facades still serve the webapp: synthetic threads, runs-with-`threadId`, flat content markdown/html, snapshot compat, policy/tool/connectors facades, and run-context synthesis.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| Visual system (Salon)             | Foundation in review 🔄 | Salon foundation shipped in PR #547: `webapp/src/salon/*` CSS-variable tokens (`--salon-*`), fonts (Newsreader/Geist/Geist Mono), brand mark, and the primitive library (CTMark/CTIcon/Avatar/AgentAvatar/RunPill/Chip/Kbd/Button/Input/Modal/Sheet/Popover) with behavior-preserving proof migrations + a smoke suite. Surfaces re-skinned to Salon (PR #550): Home, Archive, Registered Agents + agent profile, the **Talks list page**, and the **sign-in surface** — each off its legacy classes with dead `styles.css` rules trimmed + a responsive Playwright spec. Remaining (milestone-gated): the app **shell + sidebar** (2-col token reskin vs. prototype 3-col icon-rail = a Joseph visual-direction call) plus `TalkDetailPage`/`SettingsPage`-owned CSS (Codex lanes). Known system-wide a11y item: the Salon primary `Button` (`#c8643a` + white ≈ 3.93:1) is below WCAG AA for normal text — a brand-accent decision. |
+| Net-new product surfaces          | ~15% 🔄                 | Live app covers Talk list, Talk detail, Settings, and now a read-first Salon **Home** page on the read-only Home API (PR #550). Native Documents, standalone Agents, Archive, command palette, New Talk sheet, and Forge are still unbuilt or skeletal.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| Eval gate                         | ~5% ⛔                  | `docs/eval-suite.md` exists, but there is no `eval/` directory and no `npm run eval`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
 
 The biggest missing work is Salon, native Documents, Home, de-facade, eval gate, and final surface completion. Forge remains post-MVP.
 
@@ -44,18 +44,18 @@ The current refactor plan is a subset of that denominator. It must be explicit a
 
 ## 2. Status by Roadmap Step
 
-| Step | Title | Status |
-|---|---|---|
-| 1 | Cutover foundation | ✅ Done |
-| 2 | Greenfield route/accessor spine | ✅ Done |
-| 3 | Execution backend | ✅ Done |
-| 4 | API shell cleanup / legacy retirement | ✅ Done |
-| 5 | Frontend shell + Talk rewrite | 🔄 Mid-flight. Structure improved, but Talk controller bulk and Salon remain. |
-| 6 | Documents | 🔄 Backend compatibility path exists; native Documents UI/editor not built. |
-| 7 | Agents/tools/connectors/context | 🔄 Backend mostly greenfield behind facades; frontend still consumes compat shapes; standalone Agents page not built. |
-| 8 | Jobs | 🔄 Backend and Talk Jobs panel mostly usable. Missing `emit_document_append`, `job_output_ready`, and Home read surface. |
-| 9 | Home, Settings, polish, eval gate | ⛔ Home/eval/Salon not built; Settings still has inline Profile/Tools/OAuth state. |
-| 10 | Forge | ⛔ Schema/docs only, intentionally post-MVP. |
+| Step | Title                                 | Status                                                                                                                   |
+| ---- | ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| 1    | Cutover foundation                    | ✅ Done                                                                                                                  |
+| 2    | Greenfield route/accessor spine       | ✅ Done                                                                                                                  |
+| 3    | Execution backend                     | ✅ Done                                                                                                                  |
+| 4    | API shell cleanup / legacy retirement | ✅ Done                                                                                                                  |
+| 5    | Frontend shell + Talk rewrite         | 🔄 Mid-flight. Structure improved, but Talk controller bulk and Salon remain.                                            |
+| 6    | Documents                             | 🔄 Backend compatibility path exists; native Documents UI/editor not built.                                              |
+| 7    | Agents/tools/connectors/context       | 🔄 Backend mostly greenfield behind facades; frontend still consumes compat shapes; standalone Agents page not built.    |
+| 8    | Jobs                                  | 🔄 Backend and Talk Jobs panel mostly usable. Missing `emit_document_append`, `job_output_ready`, and Home read surface. |
+| 9    | Home, Settings, polish, eval gate     | ⛔ Home/eval/Salon not built; Settings still has inline Profile/Tools/OAuth state.                                       |
+| 10   | Forge                                 | ⛔ Schema/docs only, intentionally post-MVP.                                                                             |
 
 ---
 
@@ -71,17 +71,17 @@ The cutover is comprehensive enough to build on:
 
 Each facade should get a deletion ticket with owner, consumers, native replacement, and deletion test.
 
-| # | Facade | Current role | Native replacement |
-|---|---|---|---|
-| 1 | Synthetic threads | `threadId` is fabricated even though the schema has no threads. | Frontend treats Talk as the conversation and drops `threadId`. |
-| 2 | Runs/messages with `threadId` | DTO compatibility for old reducers/hooks. | Native run/message DTOs using `responseGroupId`, `round`, and run ids. |
-| 3 | Content markdown/html | Native document blocks are flattened to `{ bodyMarkdown, bodyHtml }`. | Block editor on `documents`/`doc_tabs`/`doc_blocks`. |
-| 4 | Snapshot compat | `snapshotVersion` is an outbox high-water, not a native version. | Native per-talk hydration contract. |
-| 5 | Channels/data-connectors split | Old surfaces map onto final `connectors` tables. | Single connectors/bindings surface. |
-| 6 | Talk tools light-family API | Light families map onto canonical `talk_tools.tool_id`. | Per-tool toggles. |
-| 7 | Policy facade | Derived from `talk_agents`; no policy table exists. | Native roster and run settings. |
-| 8 | Run-context synthesis | Fabricates legacy manifest with `threadId`. | Native run context without thread fields. |
-| 9 | Attachments guard | Routes return `attachments_not_available`. | Future R2-backed chat attachments, if v1 needs them. |
+| #   | Facade                         | Current role                                                          | Native replacement                                                     |
+| --- | ------------------------------ | --------------------------------------------------------------------- | ---------------------------------------------------------------------- |
+| 1   | Synthetic threads              | `threadId` is fabricated even though the schema has no threads.       | Frontend treats Talk as the conversation and drops `threadId`.         |
+| 2   | Runs/messages with `threadId`  | DTO compatibility for old reducers/hooks.                             | Native run/message DTOs using `responseGroupId`, `round`, and run ids. |
+| 3   | Content markdown/html          | Native document blocks are flattened to `{ bodyMarkdown, bodyHtml }`. | Block editor on `documents`/`doc_tabs`/`doc_blocks`.                   |
+| 4   | Snapshot compat                | `snapshotVersion` is an outbox high-water, not a native version.      | Native per-talk hydration contract.                                    |
+| 5   | Channels/data-connectors split | Old surfaces map onto final `connectors` tables.                      | Single connectors/bindings surface.                                    |
+| 6   | Talk tools light-family API    | Light families map onto canonical `talk_tools.tool_id`.               | Per-tool toggles.                                                      |
+| 7   | Policy facade                  | Derived from `talk_agents`; no policy table exists.                   | Native roster and run settings.                                        |
+| 8   | Run-context synthesis          | Fabricates legacy manifest with `threadId`.                           | Native run context without thread fields.                              |
+| 9   | Attachments guard              | Routes return `attachments_not_available`.                            | Future R2-backed chat attachments, if v1 needs them.                   |
 
 Duplicate route registrations also need cleanup: `reorderGreenfieldTalkSidebarRoute` and `getGreenfieldRunContextRoute` are mounted in both `worker-app.ts` and `greenfield-api.ts`; first match wins, leaving dead duplicate mounts.
 
@@ -122,11 +122,11 @@ The unused table set is mostly intentional schema waiting for surfaces: Home, Fo
 
 Salon was a product-defining gap. The **foundation landed in PR #547** (lane S): a CSS-variable system + primitive library under `webapp/src/salon/`, with behavior-preserving proof migrations and a `salon.test.tsx` smoke suite. The remaining Salon work is the broad re-skin of the 7,284 LOC pre-Salon `webapp/src/styles.css`, plus building the net-new surfaces Salon-native from the start.
 
-| Marker in `webapp/src` | Before | After PR #547 |
-|---|---|---|
-| `--salon-*` tokens | 0 | defined in `salon/salon.css` + `salon/tokens.ts` |
-| `#FBF7EF` / `#C8643A` / `#1F1B16` | 0 | canonical palette tokens defined |
-| `Newsreader` / `Geist` / `Geist Mono` | 0 | wired via `<link>` in `index.html` |
+| Marker in `webapp/src`                | Before | After PR #547                                    |
+| ------------------------------------- | ------ | ------------------------------------------------ |
+| `--salon-*` tokens                    | 0      | defined in `salon/salon.css` + `salon/tokens.ts` |
+| `#FBF7EF` / `#C8643A` / `#1F1B16`     | 0      | canonical palette tokens defined                 |
+| `Newsreader` / `Geist` / `Geist Mono` | 0      | wired via `<link>` in `index.html`               |
 
 The webapp uses CSS variables + the existing Vite pipeline (no Tailwind, per §9). The reference prototype (Tailwind CDN + Babel-in-browser) was ported, not copied.
 
@@ -263,14 +263,14 @@ Archived handoffs and historical audits should stay archived.
 
 ## 9. Outstanding Decisions
 
-| Decision | Recommendation |
-|---|---|
-| Salon tooling | CSS variables unless Joseph overrides. |
-| Message attachments | Defer from v1 unless chat uploads are launch-critical. |
-| Dark mode | Defer until light Salon exists. |
-| Accessibility/mobile | Set a v1 bar now, full WCAG later. |
-| Eval ownership | Codex primary, Claude/Opus review. Start before final surface polish. |
-| Forge timing | Keep post-MVP. |
+| Decision             | Recommendation                                                        |
+| -------------------- | --------------------------------------------------------------------- |
+| Salon tooling        | CSS variables unless Joseph overrides.                                |
+| Message attachments  | Defer from v1 unless chat uploads are launch-critical.                |
+| Dark mode            | Defer until light Salon exists.                                       |
+| Accessibility/mobile | Set a v1 bar now, full WCAG later.                                    |
+| Eval ownership       | Codex primary, Claude/Opus review. Start before final surface polish. |
+| Forge timing         | Keep post-MVP.                                                        |
 
 ---
 
