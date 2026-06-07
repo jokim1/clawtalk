@@ -31,6 +31,7 @@ import { TalkAgentsPanel } from '../components/TalkAgentsPanel';
 import { TalkRunsPanel } from '../components/TalkRunsPanel';
 import { TalkHistoryEditor } from '../components/TalkHistoryEditor';
 import { TalkDetailShell } from '../components/Talk/TalkDetailShell';
+import { TalkDocumentCreateModal } from '../components/Talk/TalkDocumentCreateModal';
 import { TalkTabContent } from '../components/Talk/TalkTabContent';
 import { getLastThreadForTalk } from '../lib/lastThreadForTalk';
 import {
@@ -1468,91 +1469,17 @@ export function TalkDetailPage({
         resolveActorLabel={resolveMessageActorLabel}
       />
       {docModalOpen ? (
-        <div
-          className="doc-promote-modal-backdrop"
-          role="dialog"
-          aria-modal="true"
-          aria-labelledby="doc-promote-modal-title"
-          onMouseDown={(event) => {
-            if (event.target === event.currentTarget) closeDocModal();
-          }}
-        >
-          <form className="doc-promote-modal" onSubmit={handleCreateDoc}>
-            <h3 id="doc-promote-modal-title">Add a document</h3>
-            <label
-              className="doc-promote-modal-label"
-              htmlFor="doc-promote-modal-input"
-            >
-              Title
-            </label>
-            <input
-              id="doc-promote-modal-input"
-              ref={docModalInputRef}
-              type="text"
-              className="doc-promote-modal-input"
-              value={docModalTitle}
-              onChange={(event) => setDocModalTitle(event.target.value)}
-              placeholder="Untitled document"
-              maxLength={160}
-              disabled={docModalSubmitting}
-              autoComplete="off"
-              onKeyDown={(event) => {
-                if (event.key === 'Escape') {
-                  event.preventDefault();
-                  closeDocModal();
-                }
-              }}
-            />
-            <fieldset
-              className="doc-promote-modal-format"
-              disabled={docModalSubmitting}
-            >
-              <legend className="doc-promote-modal-label">Format</legend>
-              <label className="doc-promote-modal-format-option">
-                <input
-                  type="radio"
-                  name="doc-promote-modal-format"
-                  value="markdown"
-                  checked={docModalFormat === 'markdown'}
-                  onChange={() => setDocModalFormat('markdown')}
-                />
-                Markdown
-              </label>
-              <label className="doc-promote-modal-format-option">
-                <input
-                  type="radio"
-                  name="doc-promote-modal-format"
-                  value="html"
-                  checked={docModalFormat === 'html'}
-                  onChange={() => setDocModalFormat('html')}
-                />
-                HTML
-              </label>
-            </fieldset>
-            {docModalError ? (
-              <p className="doc-promote-modal-error" role="alert">
-                {docModalError}
-              </p>
-            ) : null}
-            <div className="doc-promote-modal-actions">
-              <button
-                type="button"
-                className="doc-promote-modal-cancel"
-                onClick={closeDocModal}
-                disabled={docModalSubmitting}
-              >
-                Cancel
-              </button>
-              <button
-                type="submit"
-                className="doc-promote-modal-submit"
-                disabled={docModalSubmitting || !docModalTitle.trim()}
-              >
-                {docModalSubmitting ? 'Creating…' : 'Create document'}
-              </button>
-            </div>
-          </form>
-        </div>
+        <TalkDocumentCreateModal
+          title={docModalTitle}
+          format={docModalFormat}
+          submitting={docModalSubmitting}
+          error={docModalError}
+          inputRef={docModalInputRef}
+          onTitleChange={setDocModalTitle}
+          onFormatChange={setDocModalFormat}
+          onClose={closeDocModal}
+          onSubmit={handleCreateDoc}
+        />
       ) : null}
     </section>
   );
