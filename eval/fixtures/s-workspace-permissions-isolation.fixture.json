@@ -1,0 +1,59 @@
+{
+  "scenarioId": "s-workspace-permissions-isolation",
+  "observedAt": "2026-06-07T00:06:00.000Z",
+  "source": "fixture",
+  "events": [
+    {
+      "kind": "permission.check",
+      "actor": "member",
+      "result": "allowed",
+      "signals": [
+        "permissions.member.talk_read.ok",
+        "permissions.member.document_read.ok",
+        "permissions.member.job_read.ok",
+        "permissions.member.home_read.ok"
+      ]
+    },
+    {
+      "kind": "permission.check",
+      "actor": "nonmember",
+      "result": "denied",
+      "signals": [
+        "permissions.nonmember.talk_read.denied",
+        "permissions.nonmember.document_read.denied",
+        "permissions.nonmember.job_read.denied",
+        "permissions.nonmember.home_read.denied"
+      ]
+    },
+    {
+      "kind": "permission.check",
+      "actor": "cross-workspace",
+      "result": "denied",
+      "signals": [
+        "permissions.cross_workspace.document_rejected",
+        "permissions.cross_workspace.talk_rejected",
+        "permissions.cross_workspace.job_rejected",
+        "permissions.cross_workspace.home_rejected"
+      ]
+    },
+    {
+      "kind": "permission.check",
+      "actor": "admin",
+      "result": "credential-denied",
+      "signals": ["permissions.admin.cannot_steal_user_credential"]
+    }
+  ],
+  "records": [
+    { "table": "workspace_members", "roles": ["owner", "member"] },
+    {
+      "table": "connectors",
+      "scope": "workspace",
+      "signals": ["permissions.connector.workspace_scoped"]
+    },
+    {
+      "table": "user_google_credentials",
+      "scope": "creator",
+      "signals": ["permissions.oauth.private_to_creator"]
+    }
+  ]
+}

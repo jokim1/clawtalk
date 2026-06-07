@@ -1,0 +1,89 @@
+{
+  "scenarioId": "s-jobs-document-output-home-inbox",
+  "observedAt": "2026-06-07T00:03:00.000Z",
+  "source": "fixture",
+  "events": [
+    {
+      "kind": "job.run.completed",
+      "jobId": "job-eval-1",
+      "runId": "run-eval-job-1",
+      "signals": ["job.run.completed"]
+    },
+    {
+      "kind": "document_edit.created",
+      "editId": "edit-job-1",
+      "runId": "run-eval-job-1",
+      "signals": [
+        "job.document_edit.created",
+        "job.document_edit.source_run_id"
+      ]
+    },
+    {
+      "kind": "home_inbox.created",
+      "type": "job_output_ready",
+      "runId": "run-eval-job-1",
+      "documentEditId": "edit-job-1",
+      "deepLink": "/documents/doc-eval-1?edit=edit-job-1",
+      "dedupeKey": "job-eval-1:run-eval-job-1:edit-job-1",
+      "deliveryAttempt": 1,
+      "signals": [
+        "home_inbox.job_output_ready.created",
+        "home_inbox.item.ref_run_id",
+        "home_inbox.item.ref_document_edit_id",
+        "home_inbox.item.deep_link.present"
+      ]
+    },
+    {
+      "kind": "home_inbox.created",
+      "type": "job_output_ready",
+      "runId": "run-eval-job-1",
+      "documentEditId": "edit-job-1",
+      "deepLink": "/documents/doc-eval-1?edit=edit-job-1",
+      "dedupeKey": "job-eval-1:run-eval-job-1:edit-job-1",
+      "deliveryAttempt": 2,
+      "result": "deduped_to_existing_item",
+      "signals": [
+        "job.delivery.idempotent",
+        "home_inbox.job_output_ready.deduped"
+      ]
+    },
+    {
+      "kind": "home_inbox.created",
+      "type": "job_blocked",
+      "reason": "no_primary_document",
+      "signals": [
+        "job.no_primary_document.blocked",
+        "home_inbox.job_blocked.created"
+      ]
+    }
+  ],
+  "records": [
+    {
+      "table": "jobs",
+      "id": "job-eval-1",
+      "emit_document_append": true,
+      "signals": ["job.emit_document_append.enabled"]
+    },
+    {
+      "table": "document_edits",
+      "id": "edit-job-1",
+      "source": "job",
+      "sourceRunId": "run-eval-job-1",
+      "signals": [
+        "job.document_edit.created",
+        "job.document_edit.source_run_id"
+      ]
+    },
+    {
+      "table": "home_inbox_items",
+      "id": "inbox-job-output-1",
+      "type": "job_output_ready",
+      "dedupeKey": "job-eval-1:run-eval-job-1:edit-job-1",
+      "signals": [
+        "home_inbox.job_output_ready.created",
+        "job.delivery.idempotent",
+        "home_inbox.job_output_ready.deduped"
+      ]
+    }
+  ]
+}

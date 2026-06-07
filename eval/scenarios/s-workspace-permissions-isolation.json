@@ -1,0 +1,66 @@
+{
+  "id": "s-workspace-permissions-isolation",
+  "title": "Workspace permissions isolation",
+  "description": "Talk, document, job, Home, and connector records stay scoped to the active workspace and actor permissions.",
+  "category": "permissions",
+  "team": "default",
+  "mode": "ordered",
+  "roundsLimit": 1,
+  "userPrompt": "Exercise owner, member, non-member, and cross-workspace access for Talk, Documents, Jobs, Home, and connector credentials.",
+  "expectedDynamics": "Workspace members can read their workspace, non-members are denied, cross-workspace IDs are rejected, and private credentials stay creator-scoped.",
+  "threshold": 4,
+  "fixture": "s-workspace-permissions-isolation.fixture.json",
+  "checks": [
+    {
+      "id": "permissions-member-read-own-workspace",
+      "area": "permissions",
+      "description": "Workspace members can read their own Talk, document, job, and Home records.",
+      "requiredSignals": [
+        "permissions.member.talk_read.ok",
+        "permissions.member.document_read.ok",
+        "permissions.member.job_read.ok",
+        "permissions.member.home_read.ok"
+      ],
+      "threshold": 4,
+      "launchCritical": true
+    },
+    {
+      "id": "permissions-nonmember-denied",
+      "area": "permissions",
+      "description": "Non-members are denied across launch-critical resources.",
+      "requiredSignals": [
+        "permissions.nonmember.talk_read.denied",
+        "permissions.nonmember.document_read.denied",
+        "permissions.nonmember.job_read.denied",
+        "permissions.nonmember.home_read.denied"
+      ],
+      "threshold": 4,
+      "launchCritical": true
+    },
+    {
+      "id": "permissions-cross-workspace-rejected",
+      "area": "permissions",
+      "description": "Cross-workspace IDs cannot be mixed into routes or mutations.",
+      "requiredSignals": [
+        "permissions.cross_workspace.document_rejected",
+        "permissions.cross_workspace.talk_rejected",
+        "permissions.cross_workspace.job_rejected",
+        "permissions.cross_workspace.home_rejected"
+      ],
+      "threshold": 4,
+      "launchCritical": true
+    },
+    {
+      "id": "permissions-credential-privacy",
+      "area": "permissions",
+      "description": "OAuth/tool credentials remain scoped to the creator and workspace policy.",
+      "requiredSignals": [
+        "permissions.connector.workspace_scoped",
+        "permissions.oauth.private_to_creator",
+        "permissions.admin.cannot_steal_user_credential"
+      ],
+      "threshold": 4,
+      "launchCritical": true
+    }
+  ]
+}

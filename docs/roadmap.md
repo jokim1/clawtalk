@@ -1,4 +1,4 @@
-> **Status:** live implementation tracker · **Last updated:** 2026-06-07
+> **Status:** live implementation tracker · **Last updated:** 2026-06-08
 > Orientation: [REFACTOR-OVERVIEW.md](./REFACTOR-OVERVIEW.md) · current audit: [REFACTOR-AUDIT.md](./REFACTOR-AUDIT.md) · execution protocol: [PHASE5-AUTONOMOUS-PLAN.md](./PHASE5-AUTONOMOUS-PLAN.md)
 
 # ClawTalk Roadmap
@@ -15,7 +15,7 @@ This file is the short operational tracker for the greenfield refactor. It is no
 | Salon visual system | 🔄 Foundation in review (PR #547) | `webapp/src/salon/*` ships CSS-variable tokens (`--salon-*`), fonts (Newsreader/Geist/Geist Mono), brand mark, and primitives (CTMark, CTIcon, Avatar/AgentAvatar, RunPill, Chip, Kbd, Button, Input/Textarea, Modal, Sheet, Popover) with proof migrations + a `salon.test.tsx` smoke suite. Remaining: broad re-skin of the 7,284 LOC pre-Salon `webapp/src/styles.css`. |
 | Jobs | 🔄 Mostly functional, not complete | Jobs backend and Talk Jobs panel cover CRUD, pause/resume, run-now, archive/delete, and this branch adds `emit_document_append` + `job_output_ready` inbox/outbox production. Remaining gap: Home UI surfacing and DB-backed verification once the local/CI database is available. |
 | Net-new surfaces | ⛔ Mostly unbuilt | Home, native Documents page/editor, standalone Agents page, Archive, command palette, New Talk sheet, and Forge are not production surfaces yet. Native Documents backend routes/client methods now exist for Opus UI consumption. |
-| Eval gate | ⛔ Contract only | `docs/eval-suite.md` specifies the shape, but there is no `eval/` implementation and no `npm run eval`. |
+| Eval gate | 🔄 MVP dry-run harness | `eval/` now contains launch-critical scenario contracts, deterministic fixtures, grader prompt contracts, tests, and `npm run eval`; live provider/backend grading remains unwired. |
 
 ## Active Sequence
 
@@ -30,7 +30,7 @@ These are the current work packages after PR #541. Run each as a scoped `/goal` 
 | 4 | Home | Backend routes/accessors over `home_*`; Home page renders inbox, recommendations, news, and action lifecycle. |
 | 5 | Remaining de-facade | Migrate frontend off synthetic threads/run-context/snapshot/tool/policy/connectors facades; delete each backend facade with tests. |
 | 6 | Product surface completion | Standalone Agents page/profile, Archive, New Talk sheet, command palette, settings gaps, workspace-member management. |
-| 7 | Eval gate | Implement `eval/`, scenarios, graders, `npm run eval`, and launch thresholds. |
+| 7 | Eval gate | Harden the MVP dry-run gate into live backend/provider grading once native consumers and test fixtures are ready. |
 | 8 | Forge | Post-MVP flag: SSR connection, audiences, improvement runs, gallery, winner to `document_edits`. |
 
 ## Autonomy Gate

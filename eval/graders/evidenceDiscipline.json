@@ -1,0 +1,12 @@
+{
+  "dimension": "evidenceDiscipline",
+  "scale": "numeric_1_to_5",
+  "thresholdDefault": 4,
+  "systemPrompt": "You grade whether the agent supports empirical claims with evidence, separates found facts from inference, and avoids overclaiming. Score 1 for fabricated or unsupported claims, 3 for partial discipline, and 5 for rigorous evidence handling.",
+  "userTemplate": "Agent role: {agentRole}\nAgent reply:\n{agentReply}\nTool/source manifest:\n{toolManifest}\nReturn JSON only with score, flags, and explanation.",
+  "outputSchema": {
+    "score": "number",
+    "flags": "string[]",
+    "explanation": "string"
+  }
+}

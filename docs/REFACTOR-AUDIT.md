@@ -1,8 +1,8 @@
 # ClawTalk Refactor — Full Completion Audit
 
-> **Status:** live audit snapshot at commit `16f6d89` (merged PR #541), updated 2026-06-07 for the Phase 5 native Documents API unblocker.
+> **Status:** live audit snapshot updated 2026-06-08 for the Phase 5 native Documents API unblocker and MVP dry-run eval gate.
 > **Purpose:** answer how much of the greenfield refactor is actually complete, what remains, and how to improve the plan so Codex + Claude/Opus can execute with minimal human interruption.
-> **Method:** second-pass audit against current main after PR #541, including docs, code LOC, facade consumers, runtime routes, visual-system markers, Jobs status, and eval presence.
+> **Method:** second-pass audit against current main after PR #541, with later Phase 5 backend/eval evidence folded into the live status rows.
 
 ---
 
@@ -17,9 +17,9 @@ The backend/data cutover is real. The product refactor is not done.
 | De-facade | ~0% ⛔ | Compat facades still serve the webapp: synthetic threads, runs-with-`threadId`, flat content markdown/html, snapshot compat, policy/tool/connectors facades, and run-context synthesis. |
 | Visual system (Salon) | Foundation in review 🔄 | Salon foundation shipped in PR #547: `webapp/src/salon/*` CSS-variable tokens (`--salon-*`), fonts (Newsreader/Geist/Geist Mono), brand mark, and the primitive library (CTMark/CTIcon/Avatar/AgentAvatar/RunPill/Chip/Kbd/Button/Input/Modal/Sheet/Popover) with behavior-preserving proof migrations + a smoke suite. Remaining: broad re-skin of the 7,284 LOC pre-Salon `webapp/src/styles.css`. |
 | Net-new product surfaces | ~5% ⛔ | Live app covers Talk list, Talk detail, and Settings. Home, native Documents UI/editor, standalone Agents, Archive, command palette, New Talk sheet, and Forge are unbuilt or skeletal. Native Documents backend routes/client methods now exist for the UI lane. |
-| Eval gate | ~5% ⛔ | `docs/eval-suite.md` exists, but there is no `eval/` directory and no `npm run eval`. |
+| Eval gate | ~35% 🔄 | `eval/` exists with six launch-critical dry-run scenarios, deterministic fixtures, grader prompt contracts, harness tests, and `npm run eval`; live backend/provider grading is still unwired. |
 
-The biggest missing work is Salon, native Documents, Home, de-facade, eval gate, and final surface completion. Forge remains post-MVP.
+The biggest missing work is Salon, native Documents, Home, de-facade, live eval hardening, and final surface completion. Forge remains post-MVP.
 
 ---
 
@@ -54,7 +54,7 @@ The current refactor plan is a subset of that denominator. It must be explicit a
 | 6 | Documents | 🔄 Native backend API/client path exists for list/detail tabs+blocks+pending edits and edit accept/reject; native Documents UI/editor not built. |
 | 7 | Agents/tools/connectors/context | 🔄 Backend mostly greenfield behind facades; frontend still consumes compat shapes; standalone Agents page not built. |
 | 8 | Jobs | 🔄 Backend and Talk Jobs panel mostly usable. This branch adds `emit_document_append` and `job_output_ready` inbox/outbox production; Home UI surfacing and DB-backed verification remain. |
-| 9 | Home, Settings, polish, eval gate | ⛔ Home/eval/Salon not built; Settings still has inline Profile/Tools/OAuth state. |
+| 9 | Home, Settings, polish, eval gate | 🔄 Eval dry-run harness exists; Home/Salon are still not built, and Settings still has inline Profile/Tools/OAuth state. |
 | 10 | Forge | ⛔ Schema/docs only, intentionally post-MVP. |
 
 ---
@@ -172,9 +172,9 @@ Salon should be first-class before Home/Documents/Agents, otherwise those surfac
 
 ### W6. Eval Gate
 
-- Implement `eval/`, scenario files, grader prompts, harness CLI, and thresholds.
-- Add `npm run eval`.
-- Treat as launch-blocking before anyone beyond Joseph uses the app.
+- Implemented MVP dry-run: `eval/`, scenario files, deterministic fixtures, grader prompt contracts, harness CLI, thresholds, and `npm run eval`.
+- Remaining: live Worker/workspace fixture execution, evaluator-model adapter, persisted real-run JSON, and CI policy for when the gate becomes mandatory.
+- Treat the live gate as launch-blocking before anyone beyond Joseph uses the app.
 
 ### W7. Capability Gaps
 
@@ -247,7 +247,7 @@ Before finishing any docs/planning PR, run greps for:
 - old Talk/Settings LOC counts from pre-PR #541 planning docs.
 - stale cutover-era CI-bypass language and old cutover-runbook references.
 - archived readiness, handoff, and audit filenames in live orientation docs.
-- unimplemented eval signals: no `eval/`, no `npm run eval`.
+- eval hardening signals: dry-run-only `eval/`, missing live provider/backend adapter, and no CI policy for `npm run eval`.
 - facade consumers: `threadId`, flat content fields, duplicate route mounts.
 
 ### 8d. Keep Live Docs Small
