@@ -18,7 +18,6 @@ import {
   cancelTalkRuns,
   ContentSidebarItem,
   createTalkThread,
-  deleteTalkMessages,
   deleteTalkThread,
   getAiAgents,
   getTalk,
@@ -92,6 +91,7 @@ import { useTalkRunViewModel } from '../hooks/useTalkRunViewModel';
 import { useTalkContextController } from '../hooks/useTalkContextController';
 import { useTalkJobsController } from '../hooks/useTalkJobsController';
 import { useTalkOrchestrationController } from '../hooks/useTalkOrchestrationController';
+import { useTalkHistoryController } from '../hooks/useTalkHistoryController';
 import { createInitialDetailState, detailReducer } from '../lib/talkRunReducer';
 import { useQueryClient } from '@tanstack/react-query';
 import {
@@ -680,11 +680,6 @@ export function TalkDetailPage({
     status: 'idle' | 'saving' | 'error' | 'success';
     message?: string;
   }>({ status: 'idle' });
-  const [historyEditorOpen, setHistoryEditorOpen] = useState(false);
-  const [historyEditState, setHistoryEditState] = useState<{
-    status: 'idle' | 'saving' | 'error' | 'success';
-    message?: string;
-  }>({ status: 'idle' });
   const titleInputRef = useRef<HTMLInputElement | null>(null);
   const messageElementRefs = useRef<Map<string, HTMLElement>>(new Map());
   const autoStickToBottomRef = useRef<ScrollBehavior | null>(null);
@@ -1101,8 +1096,6 @@ export function TalkDetailPage({
     setTargetAgentIds([]);
     setAgentsCatalogError(null);
     setAgentState({ status: 'idle' });
-    setHistoryEditorOpen(false);
-    setHistoryEditState({ status: 'idle' });
     setRunContextPanels({});
     return () => {
       if (threadRefreshTimerRef.current) {
@@ -1885,99 +1878,26 @@ export function TalkDetailPage({
     },
     [navigate, runsTabHref],
   );
+  const {
+    historyEditorOpen,
+    historyEditState,
+    openHistoryEditor,
+    handleCloseHistoryEditor,
+    handleDeleteHistoryMessages,
+  } = useTalkHistoryController({
+    talkId,
+    pageKind,
+    pageTalk,
+    activeThreadId,
+    hasActiveRound: Boolean(activeRound),
+    pageMessages,
+    threadSnapshotVersionRef,
+    rememberDeletedMessageIds,
+    resyncTalkState,
+    onUnauthorized: handleUnauthorized,
+  });
   const manageConnectorsHref = '/app/connectors';
   const isRenaming = renameDraft?.talkId === talkId;
-
-  const openHistoryEditor = useCallback(() => {
-    if (pageKind !== 'ready') return;
-    if (activeRound) {
-      setHistoryEditState({
-        status: 'error',
-        message:
-          'Wait for the current round to finish or cancel it before editing history.',
-      });
-      return;
-    }
-    if (!pageMessages.some((message) => message.role !== 'system')) {
-      setHistoryEditState({
-        status: 'error',
-        message: 'There are no editable messages in this Talk yet.',
-      });
-      return;
-    }
-    setHistoryEditState({ status: 'idle' });
-    setHistoryEditorOpen(true);
-  }, [activeRound, state]);
-
-  const handleCloseHistoryEditor = useCallback(() => {
-    if (historyEditState.status === 'saving') return;
-    setHistoryEditorOpen(false);
-    setHistoryEditState((current) =>
-      current.status === 'success' ? current : { status: 'idle' },
-    );
-  }, [historyEditState.status]);
-
-  const handleDeleteHistoryMessages = useCallback(
-    async (messageIds: string[]) => {
-      if (pageKind !== 'ready' || !pageTalk) return;
-      const threadId = activeThreadId;
-      if (!threadId) return;
-      if (messageIds.length === 0) {
-        setHistoryEditState({
-          status: 'error',
-          message: 'Select at least one message to delete.',
-        });
-        return;
-      }
-      const confirmed = window.confirm(
-        `Delete ${messageIds.length} selected message${
-          messageIds.length === 1 ? '' : 's'
-        } from this Talk history?`,
-      );
-      if (!confirmed) return;
-
-      setHistoryEditState({ status: 'saving' });
-      try {
-        const result = await deleteTalkMessages({
-          talkId: pageTalk.id,
-          messageIds,
-          threadId,
-        });
-        threadSnapshotVersionRef.current += 1;
-        rememberDeletedMessageIds(result.deletedMessageIds);
-        await resyncTalkState({ refreshThreads: true });
-        setHistoryEditorOpen(false);
-        setHistoryEditState({
-          status: 'success',
-          message: `Deleted ${result.deletedCount} message${
-            result.deletedCount === 1 ? '' : 's'
-          } from this Talk history.`,
-        });
-      } catch (err) {
-        if (err instanceof UnauthorizedError) {
-          handleUnauthorized();
-          return;
-        }
-        if (err instanceof ApiError && err.code === 'message_not_found') {
-          threadSnapshotVersionRef.current += 1;
-          rememberDeletedMessageIds(messageIds);
-          void resyncTalkState({ refreshThreads: true });
-        }
-        setHistoryEditState({
-          status: 'error',
-          message:
-            err instanceof Error ? err.message : 'Unable to edit Talk history.',
-        });
-      }
-    },
-    [
-      activeThreadId,
-      handleUnauthorized,
-      rememberDeletedMessageIds,
-      resyncTalkState,
-      state,
-    ],
-  );
 
   const mentionFilter = useMemo(() => {
     if (!mentionState) return '';
