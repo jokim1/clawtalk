@@ -1698,32 +1698,6 @@ a {
   font-size: 0.95rem;
 }
 
-.talk-list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: grid;
-  gap: 0.75rem;
-}
-
-.talk-list li a {
-  display: flex;
-  justify-content: space-between;
-  gap: 0.75rem;
-  align-items: center;
-  text-decoration: none;
-  color: inherit;
-  border: 1px solid #dde4f2;
-  border-radius: 10px;
-  padding: 0.8rem;
-  background: #fdfefe;
-}
-
-.talk-list-main {
-  display: grid;
-  gap: 0.35rem;
-}
-
 .talk-agent-row {
   display: flex;
   flex-wrap: wrap;
@@ -1791,12 +1765,6 @@ a {
 .channel-diagnosis-headline {
   display: flex;
   align-items: center;
-}
-
-.talk-list li a span {
-  color: #66728d;
-  font-size: 0.85rem;
-  white-space: nowrap;
 }
 
 .policy-panel {

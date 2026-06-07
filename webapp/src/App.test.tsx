@@ -122,9 +122,14 @@ describe('App', () => {
       screen.getByRole('button', { name: 'Collapse sidebar' }),
     ).toBeTruthy();
     expect(screen.getByRole('link', { name: 'Home' })).toBeTruthy();
-    expect(
-      screen.getAllByRole('link', { name: /Family Planning/i }),
-    ).toHaveLength(2);
+    // The Salon Talks page renders its header eagerly (across loading/empty/list
+    // states), so wait for the async sidebar fetch to resolve before asserting
+    // the talk appears in both the sidebar tree and the main list.
+    await waitFor(() =>
+      expect(
+        screen.getAllByRole('link', { name: /Family Planning/i }),
+      ).toHaveLength(2),
+    );
   });
 
   it('collapses and re-expands the sidebar from the top header', async () => {
