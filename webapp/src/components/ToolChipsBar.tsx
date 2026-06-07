@@ -19,7 +19,12 @@ import {
   updateTalkTool,
   type TalkToolsState,
 } from '../lib/api';
-import { TOOL_FAMILY_ORDER, TOOL_HINTS, TOOL_NAMES } from '../lib/tool-families';
+import {
+  TOOL_FAMILY_ORDER,
+  TOOL_HINTS,
+  TOOL_NAMES,
+} from '../lib/tool-families';
+import { Chip } from '../salon';
 
 export interface ToolChipsBarProps {
   talkId: string;
@@ -49,9 +54,7 @@ export function ToolChipsBar({
       .catch((err) => {
         if (!cancelled) {
           onError?.(
-            err instanceof Error
-              ? err.message
-              : 'Failed to load tool toggles',
+            err instanceof Error ? err.message : 'Failed to load tool toggles',
           );
         }
       });
@@ -134,19 +137,18 @@ export function ToolChipsBar({
           const enabled = state.active[family] === true;
           const pending = pendingFamilies.has(family);
           return (
-            <button
+            <Chip
               key={family}
-              type="button"
-              className={`tool-chip${enabled ? ' tool-chip-on' : ''}${pending ? ' tool-chip-pending' : ''}`}
-              aria-pressed={enabled}
+              active={enabled}
               disabled={pending}
+              ariaPressed={enabled}
               title={TOOL_HINTS[family]}
               onClick={() => {
                 void onToggle(family);
               }}
             >
               {TOOL_NAMES[family] ?? family}
-            </button>
+            </Chip>
           );
         })}
       </div>

@@ -242,14 +242,13 @@ a {
   align-items: center;
   justify-content: center;
   border-radius: 14px;
-  background: linear-gradient(135deg, #2759d6 0%, #5d8bff 100%);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.24);
+  background: var(--salon-paper-2, #f4ecdb);
+  box-shadow: inset 0 0 0 1px var(--salon-line, #e6e0d1);
 }
 
 .clawtalk-sidebar-brand-mark svg {
-  width: 1.35rem;
-  height: 1.35rem;
-  fill: #fefeff;
+  width: 1.6rem;
+  height: 1.6rem;
 }
 
 .clawtalk-sidebar-workspace {
@@ -2477,40 +2476,6 @@ a {
   padding: 0.4rem 0;
 }
 
-.tool-chip {
-  display: inline-flex;
-  align-items: center;
-  border: 1px solid #d2dced;
-  border-radius: 999px;
-  padding: 0.25rem 0.6rem;
-  font-size: 0.78rem;
-  line-height: 1.15;
-  background: #fff;
-  color: #6b7591;
-  cursor: pointer;
-  transition:
-    background 0.12s ease,
-    border-color 0.12s ease,
-    color 0.12s ease;
-}
-
-.tool-chip:hover:not(:disabled) {
-  border-color: #aec4f0;
-  color: #2d3954;
-}
-
-.tool-chip-on {
-  border-color: #aec4f0;
-  background: #eef5ff;
-  color: #1d4ca1;
-}
-
-.tool-chip-pending,
-.tool-chip:disabled {
-  opacity: 0.55;
-  cursor: default;
-}
-
 .tool-chips-bar-wrap {
   display: flex;
   flex-direction: column;
@@ -2758,28 +2723,6 @@ a {
   border: 1px solid #ef4444;
 }
 
-.connector-modal-backdrop {
-  position: fixed;
-  inset: 0;
-  background: rgba(15, 23, 42, 0.45);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 1rem;
-  z-index: 50;
-}
-
-.connector-modal {
-  background: var(--color-bg, #fff);
-  border-radius: 0.5rem;
-  padding: 1.5rem;
-  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.2);
-  width: 100%;
-  max-width: 520px;
-  max-height: 90vh;
-  overflow-y: auto;
-}
-
 .slack-channel-picker-list {
   margin-top: 0.5rem;
   max-height: 320px;
@@ -2823,16 +2766,6 @@ a {
 .slack-channel-picker-meta {
   font-size: 0.78rem;
   color: var(--color-text-muted, rgba(0, 0, 0, 0.55));
-}
-
-.connector-modal h3 {
-  margin: 0 0 1rem;
-  font-size: 1.1rem;
-}
-
-.connector-delete-modal p {
-  margin: 0 0 1.25rem;
-  color: var(--color-text-muted, #6b7280);
 }
 
 .connector-kind-form {

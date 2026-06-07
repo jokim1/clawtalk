@@ -10,6 +10,7 @@ import {
   queryClient,
 } from './lib/queryClient';
 import './styles.css';
+import './salon/salon.css';
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>

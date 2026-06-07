@@ -1,0 +1,141 @@
+/* ClawTalk · Salon visual system — canonical design tokens + motion.
+ *
+ * Ported (not copied) from the reference prototype `ClawTalk Salon.html` and
+ * docs/02-visual-system.md. This is the foundation layer:
+ *   - `--salon-*` palette + type-family CSS vars (docs/02 §1/§2)
+ *   - the `.ct-*` motion / scroll utilities and density modes
+ *
+ * The run-status + agent-accent palettes (docs/02 §1) are value tables, not CSS
+ * vars — they live in `tokens.ts` (RUN_STATES / AGENT_ACCENTS) where they are
+ * typed and consumed, so each palette has a single source of truth instead of a
+ * CSS/TS split. The radius scale (docs/02 §3) is likewise not a CSS var; it is
+ * applied inline in the primitives.
+ *
+ * It is intentionally NON-DESTRUCTIVE: it defines tokens and opt-in utility
+ * classes but does not override the existing pre-Salon shell palette. Salon
+ * surfaces opt in through the `webapp/src/salon/*` primitives, which reference
+ * these tokens. A full shell re-skin is a later work package (REFACTOR-AUDIT §6 W2).
+ */
+
+:root {
+  /* §1 · Primary palette */
+  --salon-paper: #fbf7ef;
+  --salon-paper-2: #f4ecdb;
+  --salon-card: #ffffff;
+  --salon-ink: #1f1b16;
+  --salon-ink-2: #6b6660;
+  --salon-line: #e6e0d1;
+  --salon-accent: #c8643a;
+
+  /* §2 · Type families (loaded via <link> in index.html) */
+  --salon-font-serif: 'Newsreader', Georgia, serif;
+  --salon-font-display: 'Instrument Serif', Georgia, serif;
+  --salon-font-sans: 'Geist', 'IBM Plex Sans', system-ui, sans-serif;
+  --salon-font-mono: 'Geist Mono', 'JetBrains Mono', ui-monospace, monospace;
+}
+
+/* §5 · Motion — subtle screen-transition fade. */
+.ct-screen-enter {
+  animation: ctFadeIn 220ms ease-out both;
+}
+@keyframes ctFadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* §5 · Streaming caret. */
+.ct-caret {
+  display: inline-block;
+  width: 7px;
+  height: 18px;
+  background: currentColor;
+  margin-left: 2px;
+  vertical-align: text-bottom;
+  animation: ctBlink 800ms steps(1) infinite;
+}
+@keyframes ctBlink {
+  50% {
+    opacity: 0;
+  }
+}
+
+/* §5 · Live dot pulse. */
+.ct-pulse {
+  animation: ctPulse 1.6s ease-in-out infinite;
+}
+@keyframes ctPulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
+/* Thin scrollbars for Salon scroll regions. */
+.ct-thin-scroll::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+.ct-thin-scroll::-webkit-scrollbar-thumb {
+  background: rgba(31, 27, 22, 0.14);
+  border-radius: 8px;
+}
+.ct-thin-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* §8 · Density modes (opt-in via body class). */
+body.density-cozy {
+  font-size: 14px;
+}
+body.density-compact {
+  font-size: 13px;
+}
+
+/* Interactive primitive states (focus / hover) — opt-in via class. */
+.salon-btn {
+  transition:
+    filter 140ms ease,
+    transform 80ms ease,
+    box-shadow 140ms ease;
+}
+.salon-btn:hover:not(:disabled) {
+  filter: brightness(0.96);
+}
+.salon-btn:active:not(:disabled) {
+  transform: translateY(0.5px);
+}
+.salon-btn:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(200, 100, 58, 0.35);
+}
+
+.salon-field {
+  background: var(--salon-paper, #fbf7ef);
+  border: 1px solid var(--salon-line, #e6e0d1);
+  transition:
+    border-color 140ms ease,
+    box-shadow 140ms ease;
+}
+.salon-field:focus,
+.salon-field:focus-visible {
+  border-color: var(--salon-accent, #c8643a);
+  box-shadow: 0 0 0 3px rgba(200, 100, 58, 0.18);
+}
+
+/* Respect reduced-motion preference (a11y v1 bar). */
+@media (prefers-reduced-motion: reduce) {
+  .ct-screen-enter,
+  .ct-caret,
+  .ct-pulse {
+    animation: none;
+  }
+}

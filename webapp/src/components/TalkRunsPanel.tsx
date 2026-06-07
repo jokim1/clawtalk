@@ -1,6 +1,17 @@
 import type { TalkMessage, TalkRun, TalkRunContextSnapshot } from '../lib/api';
+import { RunPill, type RunStatus } from '../salon';
 import { BrowserBlockedRunCard } from './BrowserBlockedRunCard';
 import { ExecutionDecisionSummary } from './ExecutionDecisionSummary';
+
+/** Map the app's run-status union onto the Salon RunPill vocabulary. */
+const SALON_RUN_STATUS: Record<TalkRun['status'], RunStatus> = {
+  queued: 'queued',
+  running: 'running',
+  awaiting_confirmation: 'awaiting',
+  cancelled: 'cancelled',
+  completed: 'completed',
+  failed: 'failed',
+};
 
 /** Per-run "View context" disclosure state, page-owned and threaded in. */
 export type RunContextPanelState = {
@@ -168,11 +179,12 @@ export function TalkRunsPanel({
                 className="run-history-item"
               >
                 <div className="run-history-main">
-                  <span
-                    className={`run-history-status run-history-status-${run.status}`}
-                  >
-                    {run.status}
-                  </span>
+                  {/* label={run.status} preserves the exact prior raw-status
+                      text (e.g. awaiting_confirmation) this pill replaced. */}
+                  <RunPill
+                    status={SALON_RUN_STATUS[run.status]}
+                    label={run.status}
+                  />
                   <code>{run.id}</code>
                 </div>
                 {run.targetAgentNickname ? (

@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 
 import type { SessionUser } from '../lib/api';
+import { Avatar } from '../salon';
 
 type Props = {
   user: SessionUser;
@@ -78,13 +79,12 @@ export function SidebarProfileMenu({
   return (
     <div className="clawtalk-sidebar-profile" ref={containerRef}>
       <div className="clawtalk-sidebar-profile-row">
-        <span
+        <Avatar
           className="clawtalk-sidebar-profile-avatar"
-          style={{ background: gradient }}
-          aria-hidden="true"
-        >
-          {initials}
-        </span>
+          initials={initials}
+          color={gradient}
+          size={36}
+        />
         <div className="clawtalk-sidebar-profile-meta">
           <strong className="clawtalk-sidebar-profile-name">
             {user.displayName}
@@ -106,13 +106,12 @@ export function SidebarProfileMenu({
       {open ? (
         <div className="clawtalk-sidebar-profile-menu" role="menu">
           <div className="clawtalk-sidebar-profile-menu-header">
-            <span
+            <Avatar
               className="clawtalk-sidebar-profile-avatar clawtalk-sidebar-profile-avatar-md"
-              style={{ background: gradient }}
-              aria-hidden="true"
-            >
-              {initials}
-            </span>
+              initials={initials}
+              color={gradient}
+              size={44}
+            />
             <div className="clawtalk-sidebar-profile-meta">
               <strong className="clawtalk-sidebar-profile-name">
                 {user.displayName}
