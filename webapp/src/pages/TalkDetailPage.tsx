@@ -16,24 +16,16 @@ import {
   AiAgentsPageData,
   ApiError,
   cancelTalkRuns,
-  Content,
-  ContentEditSummary,
-  ContentFormat,
   ContentSidebarItem,
   ContextGoal,
   ContextRule,
   ContextSource,
-  createTalkContent,
-  createThreadContent,
-  getThreadContent,
-  patchContent,
   createTalkThread,
   deleteTalkMessages,
   deleteTalkThread,
   getAiAgents,
   getTalk,
   getTalkAgents,
-  getTalkContent,
   getTalkContext,
   getTalkRunContext,
   getTalkRuns,
@@ -60,7 +52,6 @@ import {
   type RegisteredAgent,
   UnauthorizedError,
 } from '../lib/api';
-import { type DocPaneMode } from '../components/DocPaneHeader';
 import { TalkToolsPanel } from '../components/TalkToolsPanel';
 import { SavedSourcesPanel } from '../components/SavedSourcesPanel';
 import {
@@ -95,10 +86,6 @@ import {
   type TalkAgentExecutionGuardrail,
 } from '../lib/talkAgents';
 import {
-  getContentSplitRatio,
-  setContentSplitRatio,
-} from '../lib/contentSplitRatio';
-import {
   getLastThreadForTalk,
   setLastThreadForTalk,
 } from '../lib/lastThreadForTalk';
@@ -114,6 +101,7 @@ import {
   useTalkDetailRouteState,
   useTalkDetailTabLinks,
 } from '../hooks/useTalkDetailTabs';
+import { useTalkDocumentController } from '../hooks/useTalkDocumentController';
 import {
   createInitialDetailState,
   detailReducer,
@@ -134,7 +122,6 @@ import {
   patchTalkInSnapshot,
   prependOlderTalkMessagesToSnapshot,
 } from '../lib/wsCacheRouter';
-import { type RichTextEditorSaveStatus } from '../components/rich-text/RichTextEditor';
 
 type TalkOrchestrationMode = Talk['orchestrationMode'];
 
@@ -696,39 +683,12 @@ export function TalkDetailPage({
   const threadStateRef = useRef<ThreadListState>(threadState);
   const searchQueryRef = useRef(searchQuery);
   const orchestrationMenuRef = useRef<HTMLDivElement | null>(null);
-  const [docModalOpen, setDocModalOpen] = useState(false);
-  const [docModalTitle, setDocModalTitle] = useState('');
-  const [docModalFormat, setDocModalFormat] =
-    useState<ContentFormat>('markdown');
-  const [docModalSubmitting, setDocModalSubmitting] = useState(false);
-  const [docModalError, setDocModalError] = useState<string | null>(null);
-  const docModalInputRef = useRef<HTMLInputElement | null>(null);
-  const [talkContent, setTalkContent] = useState<Content | null>(null);
-  const [talkContentLoading, setTalkContentLoading] = useState(false);
   const [loadingOlderMessages, setLoadingOlderMessages] = useState(false);
   // Tracks whether the server has more history past the current view.
   // Initial value follows snapshot.hasOlderMessages; flips to false the
   // moment a `?before=<oldest>` page comes back short, so the
   // Load-earlier button hides once history is exhausted.
   const [olderMessagesAvailable, setOlderMessagesAvailable] = useState(false);
-  const [talkContentError, setTalkContentError] = useState<string | null>(null);
-  const [talkContentPendingEdits, setTalkContentPendingEdits] = useState<
-    ContentEditSummary[]
-  >([]);
-  const [pendingEditStreamingByRunId, setPendingEditStreamingByRunId] =
-    useState<Map<string, string | null>>(() => new Map());
-  // Sidecar timestamps so the streaming-banner TTL sweep can age out
-  // stuck entries when the server never emits a terminal event (e.g.,
-  // an executor crash that bypasses the `content_edit_run_aborted`
-  // emit). Kept as a ref — the periodic sweep uses it but no UI reads
-  // it directly. Always kept in sync with `pendingEditStreamingByRunId`
-  // — every add to the map writes here, every remove deletes here.
-  const pendingEditStreamingStartedAtRef = useRef<Map<string, number>>(
-    new Map(),
-  );
-  const [pendingEditInFlight, setPendingEditInFlight] = useState<Set<string>>(
-    () => new Set(),
-  );
   // Bumped each time a `talk_tools_changed` event arrives. Triggers
   // ToolChipsBar to refetch its active set so chip state syncs across
   // tabs without us threading the payload through.
@@ -742,49 +702,6 @@ export function TalkDetailPage({
     atIndex: number;
     selectedIndex: number;
   } | null>(null);
-  const [talkContentSaveStatus, setTalkContentSaveStatus] =
-    useState<RichTextEditorSaveStatus>('idle');
-  const [talkContentConflict, setTalkContentConflict] = useState(false);
-  const talkContentRef = useRef<Content | null>(null);
-  const talkContentSaveStatusRef = useRef<RichTextEditorSaveStatus>('idle');
-  useEffect(() => {
-    talkContentRef.current = talkContent;
-  }, [talkContent]);
-  useEffect(() => {
-    talkContentSaveStatusRef.current = talkContentSaveStatus;
-  }, [talkContentSaveStatus]);
-  // Doc-pane visibility + HTML Preview/Source mode. Persisted per
-  // thread via localStorage key `clawtalk_doc_state:{threadId}` so the
-  // user's last layout choice survives reload + thread switch.
-  const [docPaneHidden, setDocPaneHidden] = useState<boolean>(false);
-  const [htmlMode, setHtmlMode] = useState<DocPaneMode>('preview');
-  // Tracks whether we've already auto-flipped this doc from Source ➜
-  // Preview after the first AI generation. Sticky for the lifetime of
-  // the page mount — flips only once per doc.
-  const htmlAutoFlippedRef = useRef<Set<string>>(new Set());
-  // Local draft for the HTML source editor. The optimistic state
-  // sidesteps the lag between keystrokes and the debounced PATCH
-  // round-trip, so the editor always shows the latest characters.
-  const [htmlSourceDraft, setHtmlSourceDraft] = useState<string>('');
-  const htmlSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const htmlSavingRef = useRef<boolean>(false);
-  const htmlLastSavedRef = useRef<string>('');
-  const docBodyRef = useRef<HTMLDivElement | null>(null);
-  const docEdgeTabRef = useRef<HTMLButtonElement | null>(null);
-  const docNarrowShowBtnRef = useRef<HTMLButtonElement | null>(null);
-  const [chatRatio, setChatRatio] = useState(0.5);
-  const [isNarrowViewport, setIsNarrowViewport] = useState(() => {
-    if (typeof window === 'undefined') return false;
-    if (typeof window.matchMedia !== 'function') return false;
-    return window.matchMedia('(max-width: 767px)').matches;
-  });
-  const initialDocParam = locationParams.get('doc') === '1';
-  const [mobilePane, setMobilePane] = useState<'chat' | 'doc'>(
-    initialDocParam ? 'doc' : 'chat',
-  );
-  const splitContainerRef = useRef<HTMLDivElement | null>(null);
-  const splitHandleRef = useRef<HTMLDivElement | null>(null);
-  const splitDraggingRef = useRef(false);
   const [agents, setAgents] = useState<TalkAgent[]>([]);
   const [agentDrafts, setAgentDrafts] = useState<TalkAgent[]>([]);
   const [aiAgentsData, setAiAgentsData] = useState<AiAgentsPageData | null>(
@@ -904,515 +821,71 @@ export function TalkDetailPage({
     [activeThreadId, sidebarContents],
   );
 
-  const openDocModal = useCallback(() => {
-    setDocModalTitle('');
-    setDocModalFormat('markdown');
-    setDocModalError(null);
-    setDocModalOpen(true);
-  }, []);
-
-  const closeDocModal = useCallback(() => {
-    if (docModalSubmitting) return;
-    setDocModalOpen(false);
-    setDocModalError(null);
-  }, [docModalSubmitting]);
-
-  const handleCreateDoc = useCallback(
-    async (event: FormEvent) => {
-      event.preventDefault();
-      if (docModalSubmitting) return;
-      const trimmed = docModalTitle.trim();
-      if (!trimmed) {
-        setDocModalError('Please enter a title.');
-        return;
-      }
-      setDocModalSubmitting(true);
-      setDocModalError(null);
-      try {
-        // Prefer the thread-scoped endpoint when the active thread is
-        // known — the backend keys content rows on threadId and the
-        // /threads route works equally well for default threads. Fall
-        // back to talk-scoped if the thread list hasn't hydrated yet.
-        const created = activeThreadId
-          ? await createThreadContent({
-              threadId: activeThreadId,
-              title: trimmed,
-              format: docModalFormat,
-            })
-          : await createTalkContent({
-              talkId,
-              title: trimmed,
-              format: docModalFormat,
-            });
-
-        // Render the new doc immediately. The create API returns the row,
-        // so we don't wait on a background snapshot/WS refetch — for a
-        // brand-new doc the WS content handler bails while talkContent is
-        // still null (see onContentUpdated ~4747), so otherwise the doc
-        // only lands on a much later refetch (that "took a long time" feel).
-        //
-        // Clobber-safety: the snapshot hydration effect does an
-        // unconditional setTalkContent(snapshot.content). A same-thread
-        // snapshot fetch already in flight (it read the server before this
-        // doc existed) would resolve content:null and wipe the optimistic
-        // doc back out. Cancel those in-flight fetches and seed the cache so
-        // hydration reads content:created. Key on created.threadId so the
-        // talk-scoped fallback (default thread) is covered too.
-        const threadKey = snapshotQueryKey(userId, talkId, created.threadId);
-        await queryClient.cancelQueries({ queryKey: threadKey });
-        queryClient.setQueryData<TalkSnapshot>(threadKey, (old) =>
-          old ? { ...old, content: created, pendingEdits: [] } : old,
-        );
-
-        setTalkContent(created);
-        setTalkContentPendingEdits([]);
-        setTalkContentError(null);
-        setTalkContentConflict(false);
-        setTalkContentSaveStatus('idle');
-        setTalkContentLoading(false);
-        setDocPaneHidden(false);
-        setDocModalOpen(false);
-        setDocModalTitle('');
-        // Reconcile the sidebar (hides "+ Doc") in the background — don't
-        // block the modal close on it.
-        void onSidebarChanged();
-        // Preserve ?thread= so we stay on the canonical thread-keyed
-        // snapshot entry (no bootstrap refetch that could reintroduce the
-        // clobber).
-        navigate(
-          `${buildThreadHref(talkId, created.threadId, currentTab)}&doc=1`,
-        );
-      } catch (err) {
-        if (err instanceof UnauthorizedError) {
-          onUnauthorized();
-          return;
-        }
-        const message =
-          err instanceof Error ? err.message : 'Failed to create document.';
-        setDocModalError(message);
-        if (err instanceof ApiError && err.code === 'content_already_exists') {
-          await onSidebarChanged();
-        }
-      } finally {
-        setDocModalSubmitting(false);
-      }
-    },
-    [
-      activeThreadId,
-      currentTab,
-      docModalFormat,
-      docModalSubmitting,
-      docModalTitle,
-      navigate,
-      onSidebarChanged,
-      onUnauthorized,
-      queryClient,
-      talkId,
-      userId,
-    ],
-  );
-
-  useEffect(() => {
-    if (!docModalOpen) return;
-    docModalInputRef.current?.focus();
-  }, [docModalOpen]);
-
-  useEffect(() => {
-    setTalkContent(null);
-    setTalkContentError(null);
-    setTalkContentConflict(false);
-    setTalkContentSaveStatus('idle');
-    setTalkContentPendingEdits([]);
-    setPendingEditStreamingByRunId(new Map());
-    pendingEditStreamingStartedAtRef.current.clear();
-    setPendingEditInFlight(new Set());
-  }, [talkId]);
-
-  // TTL sweep for the streaming-banner map. The server normally emits
-  // `content_edit_run_aborted` when the agent finishes a turn without
-  // calling apply_content_edit, but an executor crash mid-turn can
-  // bypass that emit and leave the banner stuck on "X is editing…"
-  // forever. Sweep every 15s and drop entries older than the TTL.
-  useEffect(() => {
-    const STREAMING_TTL_MS = 90_000;
-    const interval = setInterval(() => {
-      const now = Date.now();
-      const stale: string[] = [];
-      for (const [
-        runId,
-        startedAt,
-      ] of pendingEditStreamingStartedAtRef.current) {
-        if (now - startedAt > STREAMING_TTL_MS) stale.push(runId);
-      }
-      if (stale.length === 0) return;
-      setPendingEditStreamingByRunId((prev) => {
-        let next: Map<string, string | null> | null = null;
-        for (const runId of stale) {
-          if (prev.has(runId)) {
-            if (next === null) next = new Map(prev);
-            next.delete(runId);
-          }
-        }
-        return next ?? prev;
-      });
-      for (const runId of stale) {
-        pendingEditStreamingStartedAtRef.current.delete(runId);
-      }
-    }, 15_000);
-    return () => clearInterval(interval);
-  }, []);
-
-  // Combined doc-pane state lifecycle: hydrate once per thread, decide
-  // the initial HTML mode (Preview unless empty-HTML doc with no
-  // persisted preference → Source), then persist on every change. We
-  // do this in one effect chain (gated by per-thread refs) so the
-  // first persist doesn't race the auto-source decision.
-  const docStateHydratedForRef = useRef<string | null>(null);
-  useEffect(() => {
-    if (!activeThreadId) return;
-    if (typeof window === 'undefined') return;
-    if (docStateHydratedForRef.current === activeThreadId) return;
-    docStateHydratedForRef.current = activeThreadId;
-    try {
-      const raw = window.localStorage.getItem(
-        `clawtalk_doc_state:${activeThreadId}`,
-      );
-      if (raw) {
-        const parsed = JSON.parse(raw) as {
-          hidden?: boolean;
-          mode?: DocPaneMode;
-        };
-        setDocPaneHidden(parsed.hidden === true);
-        setHtmlMode(parsed.mode === 'source' ? 'source' : 'preview');
-        return;
-      }
-    } catch {
-      // Malformed entry — fall through to defaults.
-    }
-    setDocPaneHidden(false);
-    setHtmlMode('preview');
-  }, [activeThreadId]);
-
-  // Auto-flip an empty HTML doc into Source mode, BUT only when there
-  // is no persisted preference for this thread. The ref guard ensures
-  // we only attempt this once per content id so the user can later
-  // manually toggle to Preview while the body is still empty.
-  // ALWAYS sets the ref (even for markdown / non-empty HTML / persisted
-  // preference cases) so the persist effect's gate opens after the
-  // initial decision is made.
-  const docFirstLoadModeAppliedRef = useRef<string | null>(null);
-  useEffect(() => {
-    if (!talkContent) return;
-    if (docFirstLoadModeAppliedRef.current === talkContent.id) return;
-    docFirstLoadModeAppliedRef.current = talkContent.id;
-    if (talkContent.contentFormat !== 'html') return;
-    const body = talkContent.bodyHtml ?? '';
-    if (body.length > 0) return;
-    if (typeof window === 'undefined') return;
-    try {
-      const raw = window.localStorage.getItem(
-        `clawtalk_doc_state:${talkContent.threadId}`,
-      );
-      if (raw) return;
-    } catch {
-      // Ignore localStorage read failures.
-    }
-    setHtmlMode('source');
-    // Write the same value to localStorage immediately so the hydrate
-    // effect (which may fire later when activeThreadId arrives in a
-    // separate commit) sees the auto-source preference and doesn't
-    // overwrite it back to Preview.
-    try {
-      window.localStorage.setItem(
-        `clawtalk_doc_state:${talkContent.threadId}`,
-        JSON.stringify({ hidden: false, mode: 'source' }),
-      );
-    } catch {
-      // Quota / private mode — silently ignore.
-    }
-  }, [talkContent]);
-
-  // Persist doc-pane state to localStorage on user-initiated changes.
-  // Gated on "we've already done initial hydration AND first-load
-  // auto-source for this content" so the very first commit doesn't
-  // overwrite the auto-source choice with the default `preview`.
-  useEffect(() => {
-    if (!talkContent) return;
-    if (typeof window === 'undefined') return;
-    // Only persist after both hydration and first-load auto-source
-    // have settled for the active thread/content. Otherwise the first
-    // commit (where htmlMode is still the stale `'preview'` closure
-    // captured before either of those effects fired) clobbers the
-    // newly-computed mode.
-    if (!activeThreadId) return;
-    if (docStateHydratedForRef.current !== activeThreadId) return;
-    if (docFirstLoadModeAppliedRef.current !== talkContent.id) return;
-    try {
-      window.localStorage.setItem(
-        `clawtalk_doc_state:${talkContent.threadId}`,
-        JSON.stringify({ hidden: docPaneHidden, mode: htmlMode }),
-      );
-    } catch {
-      // Quota / private mode — silently ignore.
-    }
-  }, [activeThreadId, docPaneHidden, htmlMode, talkContent]);
-
-  // Keep the local HTML draft in sync with the server-side content body
-  // so server-driven changes (initial fetch, AI edits, conflict reloads)
-  // land in the editor.
-  useEffect(() => {
-    if (!talkContent) {
-      setHtmlSourceDraft('');
-      htmlLastSavedRef.current = '';
-      return;
-    }
-    if (talkContent.contentFormat !== 'html') return;
-    const body = talkContent.bodyHtml ?? '';
-    setHtmlSourceDraft(body);
-    htmlLastSavedRef.current = body;
-  }, [talkContent]);
-
-  // Cancel any in-flight HTML autosave debounce on unmount.
-  useEffect(() => {
-    return () => {
-      if (htmlSaveTimerRef.current !== null) {
-        clearTimeout(htmlSaveTimerRef.current);
-        htmlSaveTimerRef.current = null;
-      }
-    };
-  }, []);
-
-  // Persist an HTML source edit. Mirrors the markdown autosave shape:
-  // PATCH with bodyHtml, swap to 'saving', then 'saved' / 'error'. On
-  // version_conflict we surface the same reload banner the markdown
-  // path uses.
-  const performHtmlSave = useCallback(
-    async (next: string): Promise<void> => {
-      const cur = talkContentRef.current;
-      if (!cur) return;
-      if (cur.contentFormat !== 'html') return;
-      if (next === htmlLastSavedRef.current) return;
-      if (htmlSavingRef.current) return;
-      htmlSavingRef.current = true;
-      setTalkContentSaveStatus('saving');
-      try {
-        const result = await patchContent({
-          contentId: cur.id,
-          expectedVersion: cur.bodyVersion,
-          bodyHtml: next,
-        });
-        htmlLastSavedRef.current = result.content.bodyHtml ?? '';
-        setTalkContent(result.content);
-        setTalkContentSaveStatus('saved');
-      } catch (err) {
-        if (err instanceof ApiError && err.code === 'version_conflict') {
-          setTalkContentConflict(true);
-          setTalkContentSaveStatus('error');
-          return;
-        }
-        if (err instanceof UnauthorizedError) {
-          onUnauthorized();
-          return;
-        }
-        setTalkContentSaveStatus('error');
-        setTalkContentError(
-          err instanceof Error ? err.message : 'Failed to save document.',
-        );
-      } finally {
-        htmlSavingRef.current = false;
-      }
-    },
-    [onUnauthorized],
-  );
-
-  const handleHtmlSourceChange = useCallback((next: string) => {
-    setHtmlSourceDraft(next);
-    setTalkContentSaveStatus('pending');
-  }, []);
-
-  const handleHtmlSourceSave = useCallback(
-    (next: string) => {
-      // HtmlSourceEditor already debounces; this just fires the PATCH.
-      void performHtmlSave(next);
-    },
-    [performHtmlSave],
-  );
-
-  // PATCH the doc title from the header's InlineEditableTitle. Throws
-  // on error so InlineEditableTitle can surface the message inline.
-  const handleDocTitleSave = useCallback(
-    async (nextTitle: string): Promise<void> => {
-      const cur = talkContentRef.current;
-      if (!cur) return;
-      const trimmed = nextTitle.trim();
-      if (!trimmed) throw new Error('Title cannot be empty.');
-      if (trimmed === cur.title) return;
-      try {
-        const result = await patchContent({
-          contentId: cur.id,
-          expectedVersion: cur.bodyVersion,
-          title: trimmed,
-        });
-        setTalkContent(result.content);
-        // Sidebar shows the title — refresh so the rename propagates.
-        void onSidebarChanged();
-      } catch (err) {
-        if (err instanceof UnauthorizedError) {
-          onUnauthorized();
-          return;
-        }
-        if (err instanceof ApiError && err.code === 'version_conflict') {
-          setTalkContentConflict(true);
-          throw new Error('Document changed elsewhere. Reload to retry.');
-        }
-        throw err instanceof Error ? err : new Error('Failed to update title.');
-      }
-    },
-    [onSidebarChanged, onUnauthorized],
-  );
-
-  // Hide / show the doc pane. The button is rendered both in the
-  // header (hide) and as an edge-tab (show) — both share this setter
-  // so the localStorage write effect fires either way.
-  const handleHideDocPane = useCallback(() => {
-    setDocPaneHidden(true);
-    // Move focus to the edge tab (or narrow-viewport "Show doc" btn)
-    // so keyboard users don't lose their place.
-    requestAnimationFrame(() => {
-      docEdgeTabRef.current?.focus();
-      docNarrowShowBtnRef.current?.focus();
-    });
-  }, []);
-
-  const handleShowDocPane = useCallback(() => {
-    setDocPaneHidden(false);
-    requestAnimationFrame(() => {
-      docBodyRef.current?.focus();
-    });
-  }, []);
-
-  const refetchTalkContent = useCallback(async (): Promise<Content | null> => {
-    if (!talkId) return null;
-    try {
-      // Prefer thread-scoped fetch when we know the active thread.
-      // /threads/:threadId/content works for the default thread too,
-      // so we can keep a single code path once threads have hydrated.
-      // Read the activeThreadId via ref so this callback stays stable
-      // — the openTalkStream effect depends on it and we don't want
-      // to tear the WebSocket down every time the thread changes.
-      const threadId = activeThreadIdRef.current;
-      const payload = threadId
-        ? await getThreadContent(threadId)
-        : await getTalkContent(talkId);
-      setTalkContent(payload.content);
-      setTalkContentPendingEdits(payload.pendingEdits ?? []);
-      setTalkContentError(null);
-      return payload.content;
-    } catch (err) {
-      if (err instanceof UnauthorizedError) {
-        onUnauthorized();
-        return null;
-      }
-      setTalkContentError(
-        err instanceof Error ? err.message : 'Failed to load document.',
-      );
-      return null;
-    }
-  }, [onUnauthorized, talkId]);
-
-  // Doc state is hydrated entirely by the snapshot. The defensive clear
-  // that used to live here raced sidebarContents on initial load —
-  // App.tsx fetches the sidebar tree separately, so `currentThreadHasContent`
-  // could land `false` for a thread that genuinely has a doc, clearing
-  // `snapshot.content` before the sidebar caught up. Codex #462 P1.
-
-  useEffect(() => {
-    if (!talkId) return;
-    setChatRatio(getContentSplitRatio(talkId));
-  }, [talkId]);
-
-  useEffect(() => {
-    if (typeof window === 'undefined') return;
-    if (typeof window.matchMedia !== 'function') return;
-    const mq = window.matchMedia('(max-width: 767px)');
-    const onChange = (event: MediaQueryListEvent) =>
-      setIsNarrowViewport(event.matches);
-    mq.addEventListener('change', onChange);
-    return () => mq.removeEventListener('change', onChange);
-  }, []);
-
-  // When the user navigates to ?doc=1 (e.g., from the sidebar CONTENT
-  // row or the +Doc promotion modal), default the narrow-screen toggle
-  // to the doc pane. Re-evaluates whenever the query string changes.
-  useEffect(() => {
-    if (initialDocParam) setMobilePane('doc');
-  }, [initialDocParam]);
-
-  const clampRatio = useCallback((value: number) => {
-    if (!Number.isFinite(value)) return 0.5;
-    return Math.max(0.2, Math.min(0.8, value));
-  }, []);
-
-  const applyChatRatio = useCallback(
-    (nextRaw: number) => {
-      const next = clampRatio(nextRaw);
-      setChatRatio(next);
-      if (talkId) setContentSplitRatio(talkId, next);
-    },
-    [clampRatio, talkId],
-  );
-
-  const handleResizeHandleKeyDown = useCallback(
-    (event: React.KeyboardEvent<HTMLDivElement>) => {
-      if (event.key === 'ArrowLeft') {
-        event.preventDefault();
-        applyChatRatio(chatRatio - 0.05);
-      } else if (event.key === 'ArrowRight') {
-        event.preventDefault();
-        applyChatRatio(chatRatio + 0.05);
-      } else if (event.key === 'Home') {
-        event.preventDefault();
-        applyChatRatio(0.2);
-      } else if (event.key === 'End') {
-        event.preventDefault();
-        applyChatRatio(0.8);
-      }
-    },
-    [applyChatRatio, chatRatio],
-  );
-
-  useEffect(() => {
-    const handle = splitHandleRef.current;
-    if (!handle) return;
-    const onPointerDown = (event: PointerEvent) => {
-      splitDraggingRef.current = true;
-      handle.setPointerCapture(event.pointerId);
-    };
-    const onPointerMove = (event: PointerEvent) => {
-      if (!splitDraggingRef.current) return;
-      const container = splitContainerRef.current;
-      if (!container) return;
-      const rect = container.getBoundingClientRect();
-      if (rect.width <= 0) return;
-      applyChatRatio((event.clientX - rect.left) / rect.width);
-    };
-    const onPointerUp = (event: PointerEvent) => {
-      splitDraggingRef.current = false;
-      if (handle.hasPointerCapture(event.pointerId)) {
-        handle.releasePointerCapture(event.pointerId);
-      }
-    };
-    handle.addEventListener('pointerdown', onPointerDown);
-    handle.addEventListener('pointermove', onPointerMove);
-    handle.addEventListener('pointerup', onPointerUp);
-    handle.addEventListener('pointercancel', onPointerUp);
-    return () => {
-      handle.removeEventListener('pointerdown', onPointerDown);
-      handle.removeEventListener('pointermove', onPointerMove);
-      handle.removeEventListener('pointerup', onPointerUp);
-      handle.removeEventListener('pointercancel', onPointerUp);
-    };
-  }, [applyChatRatio, currentThreadHasContent, talkContent]);
+  const {
+    docModalOpen,
+    docModalTitle,
+    setDocModalTitle,
+    docModalFormat,
+    setDocModalFormat,
+    docModalSubmitting,
+    docModalError,
+    docModalInputRef,
+    openDocModal,
+    closeDocModal,
+    handleCreateDoc,
+    talkContent,
+    setTalkContent,
+    talkContentLoading,
+    talkContentError,
+    setTalkContentError,
+    talkContentPendingEdits,
+    setTalkContentPendingEdits,
+    pendingEditStreamingByRunId,
+    setPendingEditStreamingByRunId,
+    pendingEditStreamingStartedAtRef,
+    pendingEditInFlight,
+    setPendingEditInFlight,
+    talkContentSaveStatus,
+    setTalkContentSaveStatus,
+    talkContentConflict,
+    setTalkContentConflict,
+    talkContentRef,
+    talkContentSaveStatusRef,
+    docPaneHidden,
+    setDocPaneHidden,
+    htmlMode,
+    setHtmlMode,
+    htmlAutoFlippedRef,
+    htmlSourceDraft,
+    docBodyRef,
+    docNarrowShowBtnRef,
+    chatRatio,
+    isNarrowViewport,
+    mobilePane,
+    setMobilePane,
+    splitContainerRef,
+    splitHandleRef,
+    handleResizeHandleKeyDown,
+    handleHtmlSourceChange,
+    handleHtmlSourceSave,
+    handleDocTitleSave,
+    handleHideDocPane,
+    handleShowDocPane,
+    refetchTalkContent,
+    hydrateDocumentFromSnapshot,
+  } = useTalkDocumentController({
+    talkId,
+    userId,
+    activeThreadId,
+    activeThreadIdRef,
+    currentTab,
+    locationParams,
+    currentThreadHasContent,
+    queryClient,
+    navigate,
+    onUnauthorized,
+    onSidebarChanged,
+  });
 
   const isNearBottom = useCallback((): boolean => {
     const container = timelineRef.current;
@@ -1728,10 +1201,6 @@ export function TalkDetailPage({
     setJobDraft(buildDefaultJobDraft());
     setSelectedJobRuns([]);
     setSelectedJobRunsStatus({ status: 'idle' });
-    setTalkContent(null);
-    setTalkContentPendingEdits([]);
-    setTalkContentError(null);
-    setTalkContentLoading(false);
     return () => {
       if (threadRefreshTimerRef.current) {
         clearTimeout(threadRefreshTimerRef.current);
@@ -1761,25 +1230,7 @@ export function TalkDetailPage({
     threadStateTalkIdRef.current = talkId;
     // Always reconcile doc state — it advances independently of the
     // message timeline (content_updated/applied/resolved invalidates).
-    setTalkContent(snapshot.content);
-    setTalkContentPendingEdits(
-      snapshot.pendingEdits.map((edit) => ({
-        id: edit.id,
-        contentId: edit.contentId,
-        runId: edit.runId,
-        agentId: edit.agentId,
-        agentNickname: edit.agentNickname,
-        messageId: edit.messageId,
-        kind: edit.kind,
-        baseContentVersion: edit.baseContentVersion,
-        targetAnchorId: edit.targetAnchorId,
-        newMarkdown: edit.newMarkdown,
-        rationale: edit.rationale,
-        createdAt: edit.createdAt,
-      })),
-    );
-    setTalkContentError(null);
-    setTalkContentLoading(false);
+    hydrateDocumentFromSnapshot(snapshot);
     rememberActiveThreadForTalk(talkId, snapshot.activeThreadId);
     setOlderMessagesAvailable(snapshot.hasOlderMessages);
     if (!isFirstHydration) return;
@@ -1789,7 +1240,12 @@ export function TalkDetailPage({
       threadId: snapshot.activeThreadId,
       runs: snapshotRunsToTalkRuns(snapshot.runs),
     });
-  }, [snapshotQuery.data, snapshotQuery.error, talkId]);
+  }, [
+    hydrateDocumentFromSnapshot,
+    snapshotQuery.data,
+    snapshotQuery.error,
+    talkId,
+  ]);
 
   // Rich runs (historical) + rich agents (provider/model/health) come
   // from these two existing endpoints — kept out of the snapshot wire
