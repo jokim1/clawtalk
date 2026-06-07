@@ -61,14 +61,17 @@ export function AgentProfilePage({
     }
 
     setState({ status: 'loading' });
-    const [agentRes, aiRes] = await Promise.allSettled([
-      getRegisteredAgent(agentId, { workspaceId }),
-      getAiAgents({ workspaceId }),
-    ]);
-    if (signal.cancelled) return;
 
-    if (agentRes.status === 'rejected') {
-      const reason = agentRes.reason;
+    // The agent fetch is the only gating request. The AiAgents catalog is
+    // optional label enrichment that can be slow (a cache miss triggers live
+    // model discovery, up to ~5s), so it must never block the profile — or its
+    // 404/error handling — from rendering. Render on the agent, then upgrade
+    // the labels if/when the catalog arrives.
+    let agent: RegisteredAgent;
+    try {
+      agent = await getRegisteredAgent(agentId, { workspaceId });
+    } catch (reason) {
+      if (signal.cancelled) return;
       if (reason instanceof UnauthorizedError) {
         onUnauthorized();
         return;
@@ -86,12 +89,22 @@ export function AgentProfilePage({
       });
       return;
     }
+    if (signal.cancelled) return;
+    setState({ status: 'ready', agent, ai: null });
 
-    setState({
-      status: 'ready',
-      agent: agentRes.value,
-      ai: aiRes.status === 'fulfilled' ? aiRes.value : null,
-    });
+    // Non-blocking enrichment: friendly provider/model labels. Failures are
+    // swallowed (humanized ids remain); a stale/cancelled load never applies.
+    try {
+      const ai = await getAiAgents({ workspaceId });
+      if (signal.cancelled) return;
+      setState((prev) =>
+        prev.status === 'ready' && prev.agent.id === agent.id
+          ? { ...prev, ai }
+          : prev,
+      );
+    } catch {
+      // optional — keep the humanized id labels already shown
+    }
   }, [agentId, workspaceId, onUnauthorized]);
 
   useEffect(() => {

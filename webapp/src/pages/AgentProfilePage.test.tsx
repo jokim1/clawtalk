@@ -109,11 +109,25 @@ describe('AgentProfilePage', () => {
     renderPage();
 
     expect(await screen.findByText('Strategist')).toBeTruthy();
-    // Model display name resolved from the catalog (unique to the Model field).
-    expect(screen.getByText('GPT-5')).toBeTruthy();
+    // Model display name resolved from the catalog. The catalog is enriched in
+    // a second tick (non-blocking), so the friendly label appears after the
+    // agent renders.
+    expect(await screen.findByText('GPT-5')).toBeTruthy();
     // System prompt surfaced.
     expect(screen.getByText('You are the strategist.')).toBeTruthy();
     // Keyboard-accessible primary action is a real link.
+    expect(screen.getByRole('link', { name: 'Edit in Settings' })).toBeTruthy();
+  });
+
+  it('renders without waiting on the optional catalog (Codex P2)', async () => {
+    agentMock.mockResolvedValue(AGENT);
+    aiMock.mockReturnValue(new Promise(() => {})); // catalog never settles
+
+    renderPage();
+
+    // The profile renders on the agent fetch alone; humanized id labels stand
+    // in until (if ever) the catalog arrives — it never gates the page.
+    expect(await screen.findByText('Strategist')).toBeTruthy();
     expect(screen.getByRole('link', { name: 'Edit in Settings' })).toBeTruthy();
   });
 
