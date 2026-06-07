@@ -1,11 +1,7 @@
 import {
-  Component,
   FormEvent,
   KeyboardEvent as ReactKeyboardEvent,
   type MouseEvent as ReactMouseEvent,
-  type ReactNode,
-  Suspense,
-  lazy,
   useCallback,
   useEffect,
   useMemo,
@@ -13,7 +9,7 @@ import {
   useRef,
   useState,
 } from 'react';
-import { Link, useLocation, useNavigate, useParams } from 'react-router-dom';
+import { Link, useNavigate, useParams } from 'react-router-dom';
 
 import {
   AgentProviderCard,
@@ -64,11 +60,7 @@ import {
   type RegisteredAgent,
   UnauthorizedError,
 } from '../lib/api';
-import { CopyExportMenu } from '../components/CopyExportMenu';
-import { DocPaneHeader, type DocPaneMode } from '../components/DocPaneHeader';
-import { DocPaneEdgeTab } from '../components/DocPaneEdgeTab';
-import { PendingEditDocSurface } from '../components/PendingEditDocSurface';
-import { SafeHtml } from '../components/SafeHtml';
+import { type DocPaneMode } from '../components/DocPaneHeader';
 import { TalkToolsPanel } from '../components/TalkToolsPanel';
 import { SavedSourcesPanel } from '../components/SavedSourcesPanel';
 import {
@@ -84,23 +76,18 @@ import {
   type TalkJobsStatusState,
 } from '../components/TalkJobsPanel';
 import {
-  SourceMentionPicker,
   buildSourceMentionOptions,
   type SourceMentionOption,
 } from '../components/SourceMentionPicker';
-import { ToolChipsBar } from '../components/ToolChipsBar';
 import { TalkConnectorsPanel } from '../components/connectors/TalkConnectorsPanel';
 import { TalkAgentsPanel } from '../components/TalkAgentsPanel';
 import {
   TalkRunsPanel,
   type RunContextPanelState,
 } from '../components/TalkRunsPanel';
-import { TalkComposer } from '../components/TalkComposer';
-import { TalkThreadView } from '../components/TalkThreadView';
-import { ThreadContextMenu } from '../components/ThreadContextMenu';
-import { ThreadRowTitleEditor } from '../components/ThreadRowTitleEditor';
-import { ThreadStartButton } from '../components/ThreadStartButton';
 import { TalkHistoryEditor } from '../components/TalkHistoryEditor';
+import { TalkDetailShell } from '../components/Talk/TalkDetailShell';
+import { TalkTabContent } from '../components/Talk/TalkTabContent';
 import {
   formatTalkRole,
   buildAgentLabel,
@@ -120,8 +107,13 @@ import {
   loadThreadScroll,
   saveThreadScroll,
 } from '../lib/threadScroll';
-import { displayThreadTitle, formatThreadLabel } from '../lib/threadTitles';
+import { formatThreadLabel } from '../lib/threadTitles';
 import { useTalkRunStream } from '../hooks/useTalkRunStream';
+import {
+  buildThreadHref,
+  useTalkDetailRouteState,
+  useTalkDetailTabLinks,
+} from '../hooks/useTalkDetailTabs';
 import {
   createInitialDetailState,
   detailReducer,
@@ -144,24 +136,7 @@ import {
 } from '../lib/wsCacheRouter';
 import { type RichTextEditorSaveStatus } from '../components/rich-text/RichTextEditor';
 
-type TabKey = 'talk' | 'agents' | 'context' | 'connectors' | 'jobs' | 'runs';
-
 type TalkOrchestrationMode = Talk['orchestrationMode'];
-
-const ORCHESTRATION_MODE_OPTIONS: ReadonlyArray<{
-  value: TalkOrchestrationMode;
-  label: string;
-}> = [
-  { value: 'ordered', label: 'Ordered' },
-  { value: 'panel', label: 'Parallel' },
-];
-
-const ORCHESTRATION_MODE_TOOLTIP =
-  'Ordered is turn based synthesis focused multi-agent response. Parallel is fast independent response.';
-
-function getOrchestrationModeLabel(mode: TalkOrchestrationMode): string {
-  return mode === 'ordered' ? 'Ordered' : 'Parallel';
-}
 
 function getOrderedStepStatusLabel(run: RunView, totalSteps: number): string {
   switch (run.status) {
@@ -265,32 +240,6 @@ function hasFileTransfer(
   return Array.from(types as ArrayLike<string>).includes('Files');
 }
 
-function getTabFromPath(pathname: string, talkId: string): TabKey {
-  const base = `/app/talks/${talkId}`;
-  if (pathname === `${base}/agents`) return 'agents';
-  if (pathname === `${base}/context`) return 'context';
-  if (pathname === `${base}/connectors`) return 'connectors';
-  if (pathname === `${base}/jobs`) return 'jobs';
-  if (pathname === `${base}/runs`) return 'runs';
-  if (
-    pathname === `${base}/channels` ||
-    pathname === `${base}/data-connectors`
-  ) {
-    return 'connectors';
-  }
-  if (pathname === `${base}/tools`) {
-    return 'context';
-  }
-  return 'talk';
-}
-
-function formatDateTime(value: string | null): string {
-  if (!value) return 'Never';
-  const parsed = new Date(value);
-  if (Number.isNaN(parsed.valueOf())) return value;
-  return parsed.toLocaleString();
-}
-
 function sortThreads(threads: TalkThread[]): TalkThread[] {
   return [...threads].sort((left, right) => {
     if (left.isPinned !== right.isPinned) {
@@ -302,84 +251,6 @@ function sortThreads(threads: TalkThread[]): TalkThread[] {
     if (Number.isFinite(delta) && delta !== 0) return delta;
     return rightAt.localeCompare(leftAt);
   });
-}
-
-function ThreadPinIcon(): JSX.Element {
-  return (
-    <span className="thread-pin-icon" aria-hidden="true">
-      <svg viewBox="0 0 16 16" focusable="false">
-        <path
-          d="M10.9 1.8a.75.75 0 0 1 1.06 0l2.24 2.24a.75.75 0 0 1 0 1.06L12.7 6.6v2.02a.75.75 0 0 1-.22.53L9.9 11.73v2.77a.75.75 0 0 1-1.28.53l-1.8-1.8a.75.75 0 0 1-.22-.53v-.97H5.6a.75.75 0 0 1-.53-.22l-1.8-1.8a.75.75 0 0 1 .53-1.28h2.77l2.58-2.58a.75.75 0 0 1 .53-.22h2.02l1.2-1.2-1.18-1.18-1.2 1.2H8.5a.75.75 0 0 1-.53-.22L6.3 2.56a.75.75 0 0 1 0-1.06l1.8-1.8a.75.75 0 0 1 1.06 0l1.74 1.74h.02Z"
-          fill="currentColor"
-        />
-      </svg>
-    </span>
-  );
-}
-
-function OrchestrationModeIcon(): JSX.Element {
-  return (
-    <svg viewBox="0 0 16 16" focusable="false" aria-hidden="true">
-      <path
-        d="M2.25 4.5A1.75 1.75 0 0 1 4 2.75h5.25A1.75 1.75 0 0 1 11 4.5v1.75A1.75 1.75 0 0 1 9.25 8H6.64L3.8 10.12a.5.5 0 0 1-.8-.4V8.97A1.75 1.75 0 0 1 2.25 7.3V4.5Z"
-        fill="none"
-        stroke="currentColor"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        strokeWidth="1.25"
-      />
-      <path
-        d="M6.25 6.75h5.25A1.25 1.25 0 0 1 12.75 8v1.1A1.25 1.25 0 0 1 11.5 10.35H9.52l-1.97 1.47a.5.5 0 0 1-.8-.4v-1.1"
-        fill="none"
-        stroke="currentColor"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        strokeWidth="1.25"
-      />
-    </svg>
-  );
-}
-
-function OrchestrationChevronIcon(): JSX.Element {
-  return (
-    <svg viewBox="0 0 16 16" focusable="false" aria-hidden="true">
-      <path
-        d="m4.25 6.5 3.75 3.5 3.75-3.5"
-        fill="none"
-        stroke="currentColor"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        strokeWidth="1.4"
-      />
-    </svg>
-  );
-}
-
-function OrchestrationCheckIcon(): JSX.Element {
-  return (
-    <svg viewBox="0 0 16 16" focusable="false" aria-hidden="true">
-      <path
-        d="M3.5 8.25 6.4 11.1 12.5 5"
-        fill="none"
-        stroke="currentColor"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        strokeWidth="1.5"
-      />
-    </svg>
-  );
-}
-
-function buildThreadHref(
-  talkId: string,
-  threadId: string,
-  tab?: TabKey,
-): string {
-  const base =
-    tab && tab !== 'talk'
-      ? `/app/talks/${talkId}/${tab}`
-      : `/app/talks/${talkId}`;
-  return `${base}?thread=${encodeURIComponent(threadId)}`;
 }
 
 function getConfiguredProviders(
@@ -658,49 +529,6 @@ function haveSameTalkAgentDraftState(
   return true;
 }
 
-// Lazy-loaded raw-HTML editor for the Source-mode pane. CodeMirror is
-// heavyweight enough that we don't want to bundle it on the main route.
-// The HtmlSourceEditor module exports both a named export and a default;
-// React.lazy needs the default.
-const LazyHtmlSourceEditor = lazy(() =>
-  import('../components/HtmlSourceEditor').then((mod) => ({
-    default: mod.HtmlSourceEditor,
-  })),
-);
-
-// Error boundary specifically for the lazy CodeMirror import. If the
-// dynamic import fails (network blip, code-split chunk missing), show
-// a graceful inline message with a reload escape hatch instead of
-// crashing the whole TalkDetailPage tree.
-class HtmlEditorErrorBoundary extends Component<
-  { children: ReactNode },
-  { hasError: boolean }
-> {
-  state = { hasError: false };
-  static getDerivedStateFromError(): { hasError: boolean } {
-    return { hasError: true };
-  }
-  render(): ReactNode {
-    if (this.state.hasError) {
-      return (
-        <div className="talk-tab-doc-body" role="alert">
-          Editor failed to load.{' '}
-          <button
-            type="button"
-            className="talk-tab-doc-conflict-button"
-            onClick={() => {
-              if (typeof window !== 'undefined') window.location.reload();
-            }}
-          >
-            Reload
-          </button>
-        </div>
-      );
-    }
-    return this.props.children;
-  }
-}
-
 export function TalkDetailPage({
   userId,
   onUnauthorized,
@@ -724,9 +552,7 @@ export function TalkDetailPage({
 }): JSX.Element {
   const { talkId = '' } = useParams<{ talkId: string }>();
   const navigate = useNavigate();
-  const location = useLocation();
-  const currentTab = getTabFromPath(location.pathname, talkId);
-  const locationParams = new URLSearchParams(location.search);
+  const { currentTab, locationParams } = useTalkDetailRouteState(talkId);
   const requestedThreadId = locationParams.get('thread')?.trim() || null;
   // If the URL hasn't pinned a thread yet, ride the saved last-viewed
   // thread for this Talk so the snapshot warms straight to the UX the
@@ -2420,7 +2246,6 @@ export function TalkDetailPage({
 
   const orchestrationMode: TalkOrchestrationMode =
     pageKind === 'ready' && pageTalk ? pageTalk.orchestrationMode : 'ordered';
-  const orchestrationModeLabel = getOrchestrationModeLabel(orchestrationMode);
   const showOrchestrationSelector = agents.length >= 2;
   useEffect(() => {
     if (showOrchestrationSelector && orchestrationState.status !== 'saving') {
@@ -2991,28 +2816,15 @@ export function TalkDetailPage({
     },
     [agentLabelById],
   );
-  const talkTabHref = `/app/talks/${talkId}`;
-  const threadAwareTalkTabHref = activeThreadId
-    ? buildThreadHref(talkId, activeThreadId)
-    : talkTabHref;
-  const agentsTabHref = activeThreadId
-    ? buildThreadHref(talkId, activeThreadId, 'agents')
-    : `/app/talks/${talkId}/agents`;
-  const contextTabHref = activeThreadId
-    ? buildThreadHref(talkId, activeThreadId, 'context')
-    : `/app/talks/${talkId}/context`;
-  const workspaceConnectorsTabHref = activeThreadId
-    ? buildThreadHref(talkId, activeThreadId, 'connectors')
-    : `/app/talks/${talkId}/connectors`;
-  const jobsTabHref = activeThreadId
-    ? buildThreadHref(talkId, activeThreadId, 'jobs')
-    : `/app/talks/${talkId}/jobs`;
-  const runsTabHref = activeThreadId
-    ? buildThreadHref(talkId, activeThreadId, 'runs')
-    : `/app/talks/${talkId}/runs`;
-  const manageAgentsHref = `/app/settings?tab=agents&returnTo=${encodeURIComponent(
+  const {
     threadAwareTalkTabHref,
-  )}`;
+    agentsTabHref,
+    contextTabHref,
+    workspaceConnectorsTabHref,
+    jobsTabHref,
+    runsTabHref,
+    manageAgentsHref,
+  } = useTalkDetailTabLinks({ talkId, activeThreadId });
   const handleOpenRunHistory = useCallback(
     (runId: string) => {
       pendingRunHistoryScrollRef.current = runId;
@@ -4458,239 +4270,40 @@ export function TalkDetailPage({
             Drop files to attach
           </div>
         ) : null}
-        <div className="talk-workspace-header">
-          <header className="page-header talk-page-header">
-            <div className="talk-page-heading">
-              <div className="talk-page-topbar">
-                {isRenaming ? (
-                  <input
-                    ref={titleInputRef}
-                    className="talk-title-input"
-                    type="text"
-                    value={renameDraft?.draft ?? ''}
-                    onChange={(event) =>
-                      onRenameDraftChange(talkId, event.target.value)
-                    }
-                    onKeyDown={async (event) => {
-                      if (event.key === 'Enter') {
-                        event.preventDefault();
-                        await onRenameDraftCommit(
-                          talkId,
-                          renameDraft?.draft ?? '',
-                        );
-                      }
-                      if (event.key === 'Escape') {
-                        event.preventDefault();
-                        onRenameDraftCancel(talkId);
-                      }
-                    }}
-                    onBlur={() => {
-                      void onRenameDraftCommit(
-                        talkId,
-                        renameDraft?.draft ?? '',
-                      );
-                    }}
-                    aria-label="Talk title"
-                  />
-                ) : (
-                  <h1 className="talk-title">
-                    <button
-                      type="button"
-                      className="talk-title-button"
-                      onClick={() =>
-                        onRenameDraftChange(talkId, displayedTitle)
-                      }
-                      aria-label="Rename talk title"
-                      title="Rename talk title"
-                    >
-                      {displayedTitle}
-                    </button>
-                  </h1>
-                )}
-                <div className="talk-tabs-stack">
-                  <div className="talk-tabs-row">
-                    <nav className="talk-tabs" aria-label="Talk sections">
-                      <Link
-                        to={threadAwareTalkTabHref}
-                        className={`talk-tab ${currentTab === 'talk' ? 'talk-tab-active' : ''}`}
-                      >
-                        Talk
-                      </Link>
-                      <Link
-                        to={agentsTabHref}
-                        className={`talk-tab ${currentTab === 'agents' ? 'talk-tab-active' : ''}`}
-                      >
-                        Agents
-                      </Link>
-                      <Link
-                        to={contextTabHref}
-                        className={`talk-tab ${currentTab === 'context' ? 'talk-tab-active' : ''}`}
-                      >
-                        Context
-                        <span
-                          className="talk-tab-badge"
-                          aria-label={`${activeRuleCount} active rules`}
-                        >
-                          {activeRuleCount}
-                        </span>
-                      </Link>
-                      <Link
-                        to={workspaceConnectorsTabHref}
-                        className={`talk-tab ${currentTab === 'connectors' ? 'talk-tab-active' : ''}`}
-                      >
-                        Connectors
-                      </Link>
-                      <Link
-                        to={jobsTabHref}
-                        className={`talk-tab ${currentTab === 'jobs' ? 'talk-tab-active' : ''}`}
-                      >
-                        Jobs
-                      </Link>
-                      <Link
-                        to={runsTabHref}
-                        className={`talk-tab ${currentTab === 'runs' ? 'talk-tab-active' : ''}`}
-                      >
-                        Run History
-                      </Link>
-                    </nav>
-                    {showOrchestrationSelector ? (
-                      <div
-                        className="talk-orchestration-menu"
-                        ref={orchestrationMenuRef}
-                      >
-                        <button
-                          type="button"
-                          className={`talk-orchestration-trigger${
-                            orchestrationMenuOpen
-                              ? ' talk-orchestration-trigger-open'
-                              : ''
-                          }`}
-                          onClick={() =>
-                            setOrchestrationMenuOpen((current) => !current)
-                          }
-                          aria-expanded={orchestrationMenuOpen}
-                          aria-haspopup="menu"
-                          aria-label={`Response mode, ${orchestrationModeLabel}`}
-                          title={ORCHESTRATION_MODE_TOOLTIP}
-                          disabled={orchestrationState.status === 'saving'}
-                        >
-                          <span
-                            className="talk-orchestration-trigger-icon"
-                            aria-hidden="true"
-                          >
-                            <OrchestrationModeIcon />
-                          </span>
-                          <span className="talk-orchestration-trigger-text">
-                            {orchestrationModeLabel}
-                          </span>
-                          <span
-                            className="talk-orchestration-trigger-chevron"
-                            aria-hidden="true"
-                          >
-                            <OrchestrationChevronIcon />
-                          </span>
-                        </button>
-                        {orchestrationMenuOpen ? (
-                          <div
-                            className="talk-orchestration-dropdown"
-                            role="menu"
-                            aria-label="Response mode options"
-                          >
-                            {ORCHESTRATION_MODE_OPTIONS.map((option) => {
-                              const selected =
-                                orchestrationMode === option.value;
-                              return (
-                                <button
-                                  type="button"
-                                  key={option.value}
-                                  className={`talk-orchestration-option${
-                                    selected
-                                      ? ' talk-orchestration-option-selected'
-                                      : ''
-                                  }`}
-                                  role="menuitemradio"
-                                  aria-checked={selected}
-                                  onClick={() => {
-                                    setOrchestrationMenuOpen(false);
-                                    void handleOrchestrationModeChange(
-                                      option.value,
-                                    );
-                                  }}
-                                >
-                                  <span>{option.label}</span>
-                                  {selected ? (
-                                    <span
-                                      className="talk-orchestration-option-check"
-                                      aria-hidden="true"
-                                    >
-                                      <OrchestrationCheckIcon />
-                                    </span>
-                                  ) : null}
-                                </button>
-                              );
-                            })}
-                          </div>
-                        ) : null}
-                      </div>
-                    ) : null}
-                    {!currentThreadHasContent ? (
-                      <button
-                        type="button"
-                        className="talk-tabs-add-doc"
-                        onClick={openDocModal}
-                        aria-label="Add a document to this thread"
-                        title="Add a document to this thread"
-                      >
-                        + Doc
-                      </button>
-                    ) : null}
-                  </div>
-                </div>
-              </div>
-              {effectiveAgents.length > 0 ? (
-                <div
-                  className="talk-status-strip"
-                  role="list"
-                  aria-label="Talk agent status"
-                >
-                  {effectiveAgents.map((agent) => {
-                    const guardrail =
-                      talkAgentExecutionGuardrailsById[agent.id];
-                    return (
-                      <span
-                        key={agent.id}
-                        className={`talk-status-pill talk-status-pill-${agent.health}`}
-                        role="listitem"
-                        title={guardrail?.message || undefined}
-                      >
-                        <span
-                          className={`talk-status-dot talk-status-dot-${agent.health}`}
-                          aria-hidden="true"
-                        />
-                        <span>{buildAgentLabel(agent)}</span>
-                        {guardrail?.badgeLabel ? (
-                          <span
-                            className={`talk-status-constraint talk-status-constraint-${guardrail.kind}`}
-                          >
-                            {guardrail.badgeLabel}
-                          </span>
-                        ) : null}
-                        {agent.isPrimary ? (
-                          <span className="talk-status-primary">Primary</span>
-                        ) : null}
-                      </span>
-                    );
-                  })}
-                </div>
-              ) : null}
-              {orchestrationState.status === 'error' ? (
-                <p className="talk-thread-search-error" role="alert">
-                  {orchestrationState.message}
-                </p>
-              ) : null}
-            </div>
-          </header>
-        </div>
+        <TalkDetailShell
+          talkId={talkId}
+          displayedTitle={displayedTitle}
+          isRenaming={isRenaming}
+          renameDraft={renameDraft}
+          titleInputRef={titleInputRef}
+          onRenameDraftChange={onRenameDraftChange}
+          onRenameDraftCancel={onRenameDraftCancel}
+          onRenameDraftCommit={onRenameDraftCommit}
+          currentTab={currentTab}
+          tabLinks={{
+            threadAwareTalkTabHref,
+            agentsTabHref,
+            contextTabHref,
+            workspaceConnectorsTabHref,
+            jobsTabHref,
+            runsTabHref,
+            manageAgentsHref,
+          }}
+          activeRuleCount={activeRuleCount}
+          showOrchestrationSelector={showOrchestrationSelector}
+          orchestrationMenuRef={orchestrationMenuRef}
+          orchestrationMenuOpen={orchestrationMenuOpen}
+          setOrchestrationMenuOpen={setOrchestrationMenuOpen}
+          orchestrationMode={orchestrationMode}
+          orchestrationState={orchestrationState}
+          onOrchestrationModeChange={(mode) => {
+            void handleOrchestrationModeChange(mode);
+          }}
+          currentThreadHasContent={currentThreadHasContent}
+          openDocModal={openDocModal}
+          effectiveAgents={effectiveAgents}
+          talkAgentExecutionGuardrailsById={talkAgentExecutionGuardrailsById}
+        />
 
         <div
           className={`talk-workspace-scroll${
@@ -4818,509 +4431,147 @@ export function TalkDetailPage({
           ) : null}
 
           {currentTab === 'talk' ? (
-            <div
-              ref={splitContainerRef}
-              className={[
-                'talk-tab-content',
-                talkContent ? 'talk-tab-content-split' : '',
-                talkContent && isNarrowViewport
-                  ? 'talk-tab-content-split-narrow'
-                  : '',
-              ]
-                .filter(Boolean)
-                .join(' ')}
-            >
-              {talkContent && isNarrowViewport ? (
-                <div
-                  className="talk-tab-mobile-toggle"
-                  role="tablist"
-                  aria-label="Talk or document"
-                >
-                  <button
-                    type="button"
-                    role="tab"
-                    aria-selected={mobilePane === 'chat'}
-                    className={`talk-tab-mobile-toggle-btn${
-                      mobilePane === 'chat'
-                        ? ' talk-tab-mobile-toggle-btn-active'
-                        : ''
-                    }`}
-                    onClick={() => setMobilePane('chat')}
-                  >
-                    Chat
-                  </button>
-                  <button
-                    type="button"
-                    role="tab"
-                    aria-selected={mobilePane === 'doc'}
-                    className={`talk-tab-mobile-toggle-btn${
-                      mobilePane === 'doc'
-                        ? ' talk-tab-mobile-toggle-btn-active'
-                        : ''
-                    }`}
-                    onClick={() => {
-                      // Switching to the doc tab also un-hides the
-                      // doc pane — the narrow-viewport "Show doc"
-                      // button does the same thing more explicitly.
-                      if (docPaneHidden) setDocPaneHidden(false);
-                      setMobilePane('doc');
-                    }}
-                  >
-                    Doc
-                  </button>
-                  {docPaneHidden && mobilePane === 'chat' ? (
-                    <button
-                      ref={docNarrowShowBtnRef}
-                      type="button"
-                      className="talk-tab-mobile-show-doc"
-                      onClick={() => {
-                        setDocPaneHidden(false);
-                        setMobilePane('doc');
-                      }}
-                    >
-                      Show doc
-                    </button>
-                  ) : null}
-                </div>
-              ) : null}
-              <div
-                className={[
-                  'talk-tab-chat-pane',
-                  talkContent && isNarrowViewport && mobilePane !== 'chat'
-                    ? 'talk-tab-pane-hidden'
-                    : '',
-                ]
-                  .filter(Boolean)
-                  .join(' ')}
-                style={
-                  talkContent && !isNarrowViewport
-                    ? { flex: `${chatRatio} 1 0` }
-                    : undefined
-                }
-              >
-                <div className="talk-thread-shell">
-                  <aside className="talk-thread-rail" aria-label="Talk threads">
-                    <div className="talk-thread-rail-header">
-                      <h2>Threads</h2>
-                      <ThreadStartButton
-                        onClick={() => void handleCreateThread()}
-                      />
-                    </div>
-                    <form
-                      className="talk-thread-search"
-                      onSubmit={(event) => {
-                        event.preventDefault();
-                        void handleSearch();
-                      }}
-                    >
-                      <input
-                        type="search"
-                        value={searchQuery}
-                        onChange={(event) => setSearchQuery(event.target.value)}
-                        placeholder="Search threads"
-                        aria-label="Search Talk messages"
-                      />
-                      <button
-                        type="submit"
-                        className="secondary-btn"
-                        disabled={searchLoading}
-                      >
-                        {searchLoading ? 'Searching…' : 'Search'}
-                      </button>
-                    </form>
-                    {searchError ? (
-                      <p className="talk-thread-search-error" role="alert">
-                        {searchError}
-                      </p>
-                    ) : null}
-                    {searchResults.length > 0 ? (
-                      <ul className="talk-thread-search-results">
-                        {searchResults.map((result) => (
-                          <li key={result.messageId}>
-                            <button
-                              type="button"
-                              className="talk-thread-search-result"
-                              onClick={() => handleSearchResultSelect(result)}
-                            >
-                              <strong>
-                                {displayThreadTitle(result.threadTitle)}
-                              </strong>
-                              <span>{result.preview}</span>
-                            </button>
-                          </li>
-                        ))}
-                      </ul>
-                    ) : null}
-                    {threadState.error ? (
-                      <p className="page-state" role="alert">
-                        {threadState.error}
-                      </p>
-                    ) : null}
-                    {threadState.loading ? (
-                      <p className="page-state">Loading threads…</p>
-                    ) : sortedThreads.length === 0 ? (
-                      <p className="page-state">No threads yet.</p>
-                    ) : (
-                      <ul className="talk-thread-items">
-                        {sortedThreads.map((thread) => (
-                          <li key={thread.id}>
-                            {editingThreadId === thread.id ? (
-                              <div
-                                className={`talk-thread-item${
-                                  thread.id === activeThreadId
-                                    ? ' talk-thread-item-active'
-                                    : ''
-                                } talk-thread-item-editing`}
-                                onMouseDown={handleThreadSecondaryClick(
-                                  thread.id,
-                                )}
-                                onContextMenu={handleThreadContextMenu(
-                                  thread.id,
-                                )}
-                              >
-                                <ThreadRowTitleEditor
-                                  title={formatThreadLabel(thread)}
-                                  isEditing={true}
-                                  onSave={(title) =>
-                                    handleRenameThread(thread.id, title)
-                                  }
-                                  onCancel={() => setEditingThreadId(null)}
-                                  staticClassName="talk-thread-item-title"
-                                  inputClassName="thread-row-title-input"
-                                  errorClassName="thread-row-title-error"
-                                  leadingVisual={
-                                    thread.isPinned ? (
-                                      <ThreadPinIcon />
-                                    ) : undefined
-                                  }
-                                />
-                                <span className="talk-thread-item-meta">
-                                  {thread.messageCount} message
-                                  {thread.messageCount === 1 ? '' : 's'} ·{' '}
-                                  {formatDateTime(
-                                    thread.lastMessageAt || thread.createdAt,
-                                  )}
-                                </span>
-                              </div>
-                            ) : (
-                              <button
-                                type="button"
-                                className={`talk-thread-item${
-                                  thread.id === activeThreadId
-                                    ? ' talk-thread-item-active'
-                                    : ''
-                                }`}
-                                onClick={() => handleSelectThread(thread.id)}
-                                onMouseDown={handleThreadSecondaryClick(
-                                  thread.id,
-                                )}
-                                onContextMenu={handleThreadContextMenu(
-                                  thread.id,
-                                )}
-                              >
-                                <ThreadRowTitleEditor
-                                  title={formatThreadLabel(thread)}
-                                  isEditing={false}
-                                  onSave={() => undefined}
-                                  onCancel={() => undefined}
-                                  staticClassName="talk-thread-item-title"
-                                  inputClassName="thread-row-title-input"
-                                  errorClassName="thread-row-title-error"
-                                  leadingVisual={
-                                    thread.isPinned ? (
-                                      <ThreadPinIcon />
-                                    ) : undefined
-                                  }
-                                />
-                                <span className="talk-thread-item-meta">
-                                  {thread.messageCount} message
-                                  {thread.messageCount === 1 ? '' : 's'} ·{' '}
-                                  {formatDateTime(
-                                    thread.lastMessageAt || thread.createdAt,
-                                  )}
-                                </span>
-                              </button>
-                            )}
-                          </li>
-                        ))}
-                      </ul>
-                    )}
-                  </aside>
-
-                  <div className="talk-thread-detail">
-                    <TalkThreadView
-                      timelineRef={timelineRef}
-                      endRef={endRef}
-                      setMessageElementRef={setMessageElementRef}
-                      activeThread={activeThread}
-                      handleRenameActiveThread={handleRenameActiveThread}
-                      openHistoryEditor={openHistoryEditor}
-                      canEditHistory={canEditHistory}
-                      activeOrderedProgress={activeOrderedProgress}
-                      latestOrderedRound={latestOrderedRound}
-                      handleRetryAgentRun={handleRetryAgentRun}
-                      retryRunState={retryRunState}
-                      isSnapshotPending={snapshotQuery.isPending}
-                      olderMessagesAvailable={olderMessagesAvailable}
-                      loadingOlderMessages={loadingOlderMessages}
-                      pageMessages={pageMessages}
-                      handleLoadOlderMessages={handleLoadOlderMessages}
-                      talkTimeline={talkTimeline}
-                      agentsTabHref={agentsTabHref}
-                      runsById={state.runsById}
-                      orderedGroupSizesById={orderedGroupSizesById}
-                      agentLabelById={agentLabelById}
-                      talkId={talkId}
-                      handleUnauthorized={handleUnauthorized}
-                      refreshBrowserRuns={refreshBrowserRuns}
-                      isDenseRound={isDenseRound}
-                      nowTick={nowTick}
-                      handleOpenRunHistory={handleOpenRunHistory}
-                      hasUnreadBelow={state.hasUnreadBelow}
-                      handleClearUnread={handleClearUnread}
-                    />
-
-                    <ToolChipsBar
-                      talkId={talkId}
-                      refreshKey={toolsRefreshKey}
-                    />
-
-                    <TalkComposer
-                      handleSend={handleSend}
-                      fileInputRef={fileInputRef}
-                      ALLOWED_ATTACHMENT_EXTENSIONS={
-                        ALLOWED_ATTACHMENT_EXTENSIONS
-                      }
-                      handleFileInputChange={handleFileInputChange}
-                      GREENFIELD_MESSAGE_ATTACHMENTS_ENABLED={
-                        GREENFIELD_MESSAGE_ATTACHMENTS_ENABLED
-                      }
-                      effectiveAgents={effectiveAgents}
-                      targetAgentIds={targetAgentIds}
-                      talkAgentExecutionGuardrailsById={
-                        talkAgentExecutionGuardrailsById
-                      }
-                      selectedGuardrailAgentIds={selectedGuardrailAgentIds}
-                      handleToggleTarget={handleToggleTarget}
-                      sendState={state.sendState}
-                      composerTargetHelp={composerTargetHelp}
-                      draft={draft}
-                      TALK_MESSAGE_MAX_CHARS={TALK_MESSAGE_MAX_CHARS}
-                      composerGuardrailMessage={composerGuardrailMessage}
-                      mentionState={mentionState}
-                      mentionOptions={mentionOptions}
-                      insertMentionOption={insertMentionOption}
-                      setMentionState={setMentionState}
-                      textareaRef={textareaRef}
-                      handleDraftChange={handleDraftChange}
-                      handleComposerKeyDown={handleComposerKeyDown}
-                      talkContent={talkContent}
-                      contextSources={contextSources}
-                      activeRound={activeRound}
-                      hasUnsavedAgentChanges={hasUnsavedAgentChanges}
-                      activeThreadId={activeThreadId}
-                      pendingAttachments={pendingAttachments}
-                      handleRemoveAttachment={handleRemoveAttachment}
-                      handleAttachButtonClick={handleAttachButtonClick}
-                      canEditAgents={canEditAgents}
-                      handleCancelRuns={handleCancelRuns}
-                      cancelState={state.cancelState}
-                      sendBlockedByGuardrail={sendBlockedByGuardrail}
-                      historyEditState={historyEditState}
-                    />
-                  </div>
-                  {threadMenu && menuThread ? (
-                    <ThreadContextMenu
-                      x={threadMenu.x}
-                      y={threadMenu.y}
-                      isPinned={menuThread.isPinned}
-                      canDelete={!menuThread.isDefault}
-                      onClose={() => setThreadMenu(null)}
-                      onRename={() => setEditingThreadId(menuThread.id)}
-                      onTogglePin={() => {
-                        void updateThreadMetadata(menuThread.id, {
-                          pinned: !menuThread.isPinned,
-                        }).catch((err) => {
-                          setThreadState((current) => ({
-                            ...current,
-                            error:
-                              err instanceof Error
-                                ? err.message
-                                : 'Failed to update thread.',
-                          }));
-                        });
-                      }}
-                      onDelete={() => void handleDeleteThread(menuThread)}
-                    />
-                  ) : null}
-                </div>
-              </div>
-              {talkContent && !isNarrowViewport && !docPaneHidden ? (
-                <div
-                  ref={splitHandleRef}
-                  className="talk-tab-split-handle"
-                  role="separator"
-                  aria-orientation="vertical"
-                  aria-valuemin={20}
-                  aria-valuemax={80}
-                  aria-valuenow={Math.round(chatRatio * 100)}
-                  aria-label="Resize chat and document panes"
-                  tabIndex={0}
-                  onKeyDown={handleResizeHandleKeyDown}
-                />
-              ) : null}
-              {talkContent && docPaneHidden && !isNarrowViewport ? (
-                <DocPaneEdgeTab
-                  docTitle={talkContent.title}
-                  format={talkContent.contentFormat}
-                  onClick={handleShowDocPane}
-                />
-              ) : null}
-              {talkContent ? (
-                <section
-                  className={[
-                    'talk-tab-doc-pane',
-                    (isNarrowViewport && mobilePane !== 'doc') ||
-                    (!isNarrowViewport && docPaneHidden)
-                      ? 'talk-tab-pane-hidden'
-                      : '',
-                  ]
-                    .filter(Boolean)
-                    .join(' ')}
-                  style={
-                    !isNarrowViewport && !docPaneHidden
-                      ? { flex: `${1 - chatRatio} 1 0` }
-                      : undefined
-                  }
-                  aria-label="Talk document"
-                >
-                  <DocPaneHeader
-                    title={talkContent.title}
-                    onTitleSave={handleDocTitleSave}
-                    format={talkContent.contentFormat}
-                    saveStatus={talkContentSaveStatus}
-                    loading={talkContentLoading}
-                    mode={
-                      talkContent.contentFormat === 'html'
-                        ? htmlMode
-                        : undefined
-                    }
-                    onModeChange={
-                      talkContent.contentFormat === 'html'
-                        ? setHtmlMode
-                        : undefined
-                    }
-                    copyExportSlot={
-                      <CopyExportMenu
-                        format={talkContent.contentFormat}
-                        bodyMarkdown={talkContent.bodyMarkdown}
-                        bodyHtml={talkContent.bodyHtml}
-                        documentTitle={talkContent.title}
-                      />
-                    }
-                    onHidePane={handleHideDocPane}
-                    sanitizeWarning={null}
-                  />
-                  {talkContentConflict ? (
-                    <div
-                      className="talk-tab-doc-conflict"
-                      role="alert"
-                      aria-live="assertive"
-                    >
-                      <span>
-                        This document changed elsewhere. Reload to see the
-                        latest version — your unsaved edits will be lost.
-                      </span>
-                      <button
-                        type="button"
-                        className="talk-tab-doc-conflict-button"
-                        onClick={() => {
-                          setTalkContentConflict(false);
-                          setTalkContentSaveStatus('idle');
-                          void refetchTalkContent();
-                        }}
-                      >
-                        Reload
-                      </button>
-                    </div>
-                  ) : null}
-                  {talkContentError ? (
-                    <p className="page-state" role="alert">
-                      {talkContentError}
-                    </p>
-                  ) : talkContent.contentFormat === 'html' ? (
-                    htmlMode === 'source' ? (
-                      <HtmlEditorErrorBoundary>
-                        <Suspense
-                          fallback={
-                            <div className="talk-tab-doc-body" aria-busy="true">
-                              Loading editor…
-                            </div>
-                          }
-                        >
-                          <div
-                            className="talk-tab-doc-body"
-                            ref={docBodyRef}
-                            tabIndex={-1}
-                          >
-                            <LazyHtmlSourceEditor
-                              value={htmlSourceDraft}
-                              onChange={handleHtmlSourceChange}
-                              onSave={
-                                canEditDoc && !talkContentConflict
-                                  ? handleHtmlSourceSave
-                                  : undefined
-                              }
-                              readOnly={!canEditDoc || talkContentConflict}
-                              placeholder="Ask an agent to generate, or type HTML"
-                            />
-                          </div>
-                        </Suspense>
-                      </HtmlEditorErrorBoundary>
-                    ) : (
-                      <div
-                        ref={docBodyRef}
-                        tabIndex={-1}
-                        className="talk-tab-doc-body-wrap"
-                      >
-                        <SafeHtml
-                          html={talkContent.bodyHtml ?? ''}
-                          className="talk-tab-doc-body"
-                        />
-                      </div>
-                    )
-                  ) : (
-                    <div
-                      className="talk-tab-doc-body"
-                      ref={docBodyRef}
-                      tabIndex={-1}
-                    >
-                      <PendingEditDocSurface
-                        content={talkContent}
-                        pendingEdits={talkContentPendingEdits}
-                        streamingByRunId={pendingEditStreamingByRunId}
-                        inFlightEditIds={pendingEditInFlight}
-                        canEditDoc={canEditDoc}
-                        conflict={talkContentConflict}
-                        onSaved={(content) =>
-                          setTalkContent((current) =>
-                            current && current.id === content.id
-                              ? content
-                              : current,
-                          )
-                        }
-                        onConflict={() => setTalkContentConflict(true)}
-                        onError={(err) => setTalkContentError(err.message)}
-                        onStatusChange={setTalkContentSaveStatus}
-                        setPendingEdits={setTalkContentPendingEdits}
-                        setInFlightEditIds={setPendingEditInFlight}
-                        refetchTalkContent={refetchTalkContent}
-                      />
-                    </div>
-                  )}
-                </section>
-              ) : null}
-            </div>
+            <TalkTabContent
+              talkId={talkId}
+              splitContainerRef={splitContainerRef}
+              splitHandleRef={splitHandleRef}
+              docBodyRef={docBodyRef}
+              docNarrowShowBtnRef={docNarrowShowBtnRef}
+              timelineRef={timelineRef}
+              endRef={endRef}
+              setMessageElementRef={setMessageElementRef}
+              fileInputRef={fileInputRef}
+              textareaRef={textareaRef}
+              talkContent={talkContent}
+              setTalkContent={setTalkContent}
+              isNarrowViewport={isNarrowViewport}
+              mobilePane={mobilePane}
+              setMobilePane={setMobilePane}
+              docPaneHidden={docPaneHidden}
+              setDocPaneHidden={setDocPaneHidden}
+              chatRatio={chatRatio}
+              handleResizeHandleKeyDown={handleResizeHandleKeyDown}
+              threadState={threadState}
+              sortedThreads={sortedThreads}
+              editingThreadId={editingThreadId}
+              setEditingThreadId={setEditingThreadId}
+              activeThreadId={activeThreadId}
+              activeThread={activeThread}
+              threadMenu={threadMenu}
+              menuThread={menuThread}
+              handleCreateThread={handleCreateThread}
+              handleSearch={handleSearch}
+              searchQuery={searchQuery}
+              setSearchQuery={setSearchQuery}
+              searchLoading={searchLoading}
+              searchError={searchError}
+              searchResults={searchResults}
+              handleSearchResultSelect={handleSearchResultSelect}
+              handleThreadSecondaryClick={handleThreadSecondaryClick}
+              handleThreadContextMenu={handleThreadContextMenu}
+              handleRenameThread={handleRenameThread}
+              handleSelectThread={handleSelectThread}
+              closeThreadMenu={() => setThreadMenu(null)}
+              onRenameMenuThread={(thread) => setEditingThreadId(thread.id)}
+              onToggleMenuThreadPin={(thread) => {
+                void updateThreadMetadata(thread.id, {
+                  pinned: !thread.isPinned,
+                }).catch((err) => {
+                  setThreadState((current) => ({
+                    ...current,
+                    error:
+                      err instanceof Error
+                        ? err.message
+                        : 'Failed to update thread.',
+                  }));
+                });
+              }}
+              onDeleteMenuThread={(thread) => {
+                void handleDeleteThread(thread);
+              }}
+              handleRenameActiveThread={handleRenameActiveThread}
+              openHistoryEditor={openHistoryEditor}
+              canEditHistory={canEditHistory}
+              activeOrderedProgress={activeOrderedProgress}
+              latestOrderedRound={latestOrderedRound}
+              handleRetryAgentRun={handleRetryAgentRun}
+              retryRunState={retryRunState}
+              isSnapshotPending={snapshotQuery.isPending}
+              olderMessagesAvailable={olderMessagesAvailable}
+              loadingOlderMessages={loadingOlderMessages}
+              pageMessages={pageMessages}
+              handleLoadOlderMessages={handleLoadOlderMessages}
+              talkTimeline={talkTimeline}
+              agentsTabHref={agentsTabHref}
+              runsById={state.runsById}
+              orderedGroupSizesById={orderedGroupSizesById}
+              agentLabelById={agentLabelById}
+              handleUnauthorized={handleUnauthorized}
+              refreshBrowserRuns={refreshBrowserRuns}
+              isDenseRound={isDenseRound}
+              nowTick={nowTick}
+              handleOpenRunHistory={handleOpenRunHistory}
+              hasUnreadBelow={state.hasUnreadBelow}
+              handleClearUnread={handleClearUnread}
+              toolsRefreshKey={toolsRefreshKey}
+              handleSend={handleSend}
+              ALLOWED_ATTACHMENT_EXTENSIONS={ALLOWED_ATTACHMENT_EXTENSIONS}
+              handleFileInputChange={handleFileInputChange}
+              GREENFIELD_MESSAGE_ATTACHMENTS_ENABLED={
+                GREENFIELD_MESSAGE_ATTACHMENTS_ENABLED
+              }
+              effectiveAgents={effectiveAgents}
+              targetAgentIds={targetAgentIds}
+              talkAgentExecutionGuardrailsById={
+                talkAgentExecutionGuardrailsById
+              }
+              selectedGuardrailAgentIds={selectedGuardrailAgentIds}
+              handleToggleTarget={handleToggleTarget}
+              sendState={state.sendState}
+              composerTargetHelp={composerTargetHelp}
+              draft={draft}
+              TALK_MESSAGE_MAX_CHARS={TALK_MESSAGE_MAX_CHARS}
+              composerGuardrailMessage={composerGuardrailMessage}
+              mentionState={mentionState}
+              mentionOptions={mentionOptions}
+              insertMentionOption={insertMentionOption}
+              setMentionState={setMentionState}
+              handleDraftChange={handleDraftChange}
+              handleComposerKeyDown={handleComposerKeyDown}
+              contextSources={contextSources}
+              activeRound={activeRound}
+              hasUnsavedAgentChanges={hasUnsavedAgentChanges}
+              pendingAttachments={pendingAttachments}
+              handleRemoveAttachment={handleRemoveAttachment}
+              handleAttachButtonClick={handleAttachButtonClick}
+              canEditAgents={canEditAgents}
+              handleCancelRuns={handleCancelRuns}
+              cancelState={state.cancelState}
+              sendBlockedByGuardrail={sendBlockedByGuardrail}
+              historyEditState={historyEditState}
+              handleShowDocPane={handleShowDocPane}
+              handleHideDocPane={handleHideDocPane}
+              handleDocTitleSave={handleDocTitleSave}
+              talkContentSaveStatus={talkContentSaveStatus}
+              talkContentLoading={talkContentLoading}
+              htmlMode={htmlMode}
+              setHtmlMode={setHtmlMode}
+              talkContentConflict={talkContentConflict}
+              setTalkContentConflict={setTalkContentConflict}
+              setTalkContentSaveStatus={setTalkContentSaveStatus}
+              refetchTalkContent={refetchTalkContent}
+              talkContentError={talkContentError}
+              htmlSourceDraft={htmlSourceDraft}
+              handleHtmlSourceChange={handleHtmlSourceChange}
+              handleHtmlSourceSave={handleHtmlSourceSave}
+              canEditDoc={canEditDoc}
+              talkContentPendingEdits={talkContentPendingEdits}
+              setTalkContentPendingEdits={setTalkContentPendingEdits}
+              pendingEditStreamingByRunId={pendingEditStreamingByRunId}
+              pendingEditInFlight={pendingEditInFlight}
+              setPendingEditInFlight={setPendingEditInFlight}
+              setTalkContentError={setTalkContentError}
+            />
           ) : null}
         </div>
       </div>
