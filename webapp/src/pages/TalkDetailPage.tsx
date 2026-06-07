@@ -1,7 +1,6 @@
 import {
   FormEvent,
   KeyboardEvent as ReactKeyboardEvent,
-  type MouseEvent as ReactMouseEvent,
   useCallback,
   useEffect,
   useMemo,
@@ -15,26 +14,20 @@ import {
   ApiError,
   cancelTalkRuns,
   ContentSidebarItem,
-  createTalkThread,
-  deleteTalkThread,
   getTalk,
   getTalkAgents,
   getTalkRunContext,
   getTalkRuns,
   listTalkThreads,
   listTalkMessages,
-  searchTalkMessages,
   sendTalkMessage,
   Talk,
   TalkMessage,
-  TalkMessageSearchResult,
   TalkMessageAttachment,
   TalkRun,
   TalkSnapshot,
   TalkRunContextSnapshot,
-  TalkThread,
   uploadTalkAttachment,
-  updateTalkThread,
   UnauthorizedError,
 } from '../lib/api';
 import { TalkToolsPanel } from '../components/TalkToolsPanel';
@@ -54,16 +47,11 @@ import {
 import { TalkHistoryEditor } from '../components/TalkHistoryEditor';
 import { TalkDetailShell } from '../components/Talk/TalkDetailShell';
 import { TalkTabContent } from '../components/Talk/TalkTabContent';
+import { getLastThreadForTalk } from '../lib/lastThreadForTalk';
 import {
-  getLastThreadForTalk,
-  setLastThreadForTalk,
-} from '../lib/lastThreadForTalk';
-import {
-  clearThreadScroll,
   loadThreadScroll,
   saveThreadScroll,
 } from '../lib/threadScroll';
-import { formatThreadLabel } from '../lib/threadTitles';
 import { useTalkRunStream } from '../hooks/useTalkRunStream';
 import {
   buildThreadHref,
@@ -77,6 +65,7 @@ import { useTalkJobsController } from '../hooks/useTalkJobsController';
 import { useTalkOrchestrationController } from '../hooks/useTalkOrchestrationController';
 import { useTalkHistoryController } from '../hooks/useTalkHistoryController';
 import { useTalkAgentsController } from '../hooks/useTalkAgentsController';
+import { useTalkThreadController } from '../hooks/useTalkThreadController';
 import { createInitialDetailState, detailReducer } from '../lib/talkRunReducer';
 import { useQueryClient } from '@tanstack/react-query';
 import {
@@ -89,12 +78,6 @@ import {
   createWsCacheRouter,
   prependOlderTalkMessagesToSnapshot,
 } from '../lib/wsCacheRouter';
-
-type ThreadListState = {
-  threads: TalkThread[];
-  loading: boolean;
-  error: string | null;
-};
 
 const SCROLL_STICK_THRESHOLD_PX = 120;
 const TALK_MESSAGE_MAX_CHARS = 20_000;
@@ -160,19 +143,6 @@ function hasFileTransfer(
   }
 
   return Array.from(types as ArrayLike<string>).includes('Files');
-}
-
-function sortThreads(threads: TalkThread[]): TalkThread[] {
-  return [...threads].sort((left, right) => {
-    if (left.isPinned !== right.isPinned) {
-      return Number(right.isPinned) - Number(left.isPinned);
-    }
-    const leftAt = left.lastMessageAt || left.createdAt;
-    const rightAt = right.lastMessageAt || right.createdAt;
-    const delta = Date.parse(rightAt) - Date.parse(leftAt);
-    if (Number.isFinite(delta) && delta !== 0) return delta;
-    return rightAt.localeCompare(leftAt);
-  });
 }
 
 export function TalkDetailPage({
@@ -272,27 +242,9 @@ export function TalkDetailPage({
   const canManageTalkConnectors =
     accessRole === 'owner' || accessRole === 'admin';
 
-  const [threadState, setThreadState] = useState<ThreadListState>({
-    threads: [],
-    loading: true,
-    error: null,
-  });
-  const [editingThreadId, setEditingThreadId] = useState<string | null>(null);
-  const [threadMenu, setThreadMenu] = useState<{
-    threadId: string;
-    x: number;
-    y: number;
-  } | null>(null);
   const [runContextPanels, setRunContextPanels] = useState<
     Record<string, RunContextPanelState>
   >({});
-  const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
-  const [searchQuery, setSearchQuery] = useState('');
-  const [searchResults, setSearchResults] = useState<TalkMessageSearchResult[]>(
-    [],
-  );
-  const [searchLoading, setSearchLoading] = useState(false);
-  const [searchError, setSearchError] = useState<string | null>(null);
   const [draft, setDraft] = useState('');
   const [retryRunState, setRetryRunState] = useState<{
     runId: string;
@@ -319,18 +271,8 @@ export function TalkDetailPage({
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const pendingAttachmentsRef = useRef(pendingAttachments);
   const runContextPanelsRef = useRef<Record<string, RunContextPanelState>>({});
-  const threadRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
-    null,
-  );
-  const threadRefreshInFlightRef = useRef(false);
-  const threadRefreshDirtyRef = useRef(false);
   const pendingComposerFocusRef = useRef(false);
   const pendingRunHistoryScrollRef = useRef<string | null>(null);
-  const activeThreadIdRef = useRef<string | null>(null);
-  // Talk id for which `threadState.threads` was last loaded. Gates the
-  // routing-resolution effect so it can't run with a freshly-changed
-  // talkId but stale threadState (same-commit cross-talk navigation).
-  const threadStateTalkIdRef = useRef<string | null>(null);
   const threadSnapshotVersionRef = useRef(0);
   const deletedMessageIdsRef = useRef<Set<string>>(new Set());
   // Bumped whenever deleted ids are recorded so memoized message lists
@@ -346,8 +288,6 @@ export function TalkDetailPage({
   const pendingMessageRefetchTimersRef = useRef<
     Map<string, ReturnType<typeof setTimeout>>
   >(new Map());
-  const threadStateRef = useRef<ThreadListState>(threadState);
-  const searchQueryRef = useRef(searchQuery);
   const [loadingOlderMessages, setLoadingOlderMessages] = useState(false);
   // Tracks whether the server has more history past the current view.
   // Initial value follows snapshot.hasOlderMessages; flips to false the
@@ -380,9 +320,55 @@ export function TalkDetailPage({
     onUnauthorizedRef.current = onUnauthorized;
   }, [onUnauthorized]);
 
-  activeThreadIdRef.current = activeThreadId;
-  threadStateRef.current = threadState;
-  searchQueryRef.current = searchQuery;
+  const handleUnauthorized = useCallback(() => {
+    onUnauthorizedRef.current();
+  }, []);
+
+  const {
+    threadState,
+    editingThreadId,
+    setEditingThreadId,
+    threadMenu,
+    activeThreadId,
+    activeThreadIdRef,
+    searchQuery,
+    setSearchQuery,
+    searchResults,
+    searchLoading,
+    searchError,
+    sortedThreads,
+    activeThread,
+    menuThread,
+    resetTalkThreads,
+    hydrateTalkThreads,
+    replaceThreadList,
+    scheduleThreadListRefresh,
+    ensureKnownThread,
+    bumpThreadSummaryFromMessage,
+    handleRenameThread,
+    handleRenameActiveThread,
+    handleSelectThread,
+    handleThreadSecondaryClick,
+    handleThreadContextMenu,
+    handleCreateThread,
+    handleSearch,
+    handleSearchResultSelect,
+    closeThreadMenu,
+    handleRenameMenuThread,
+    handleToggleMenuThreadPin,
+    handleDeleteMenuThread,
+  } = useTalkThreadController({
+    talkId,
+    requestedThreadId,
+    currentTab,
+    pageKind,
+    pageTalkId: pageTalk?.id ?? null,
+    canEditThreads: canEditAgents,
+    navigate,
+    pendingComposerFocusRef,
+    onUnauthorized: handleUnauthorized,
+  });
+
   runContextPanelsRef.current = runContextPanels;
 
   useEffect(() => {
@@ -532,10 +518,6 @@ export function TalkDetailPage({
     [],
   );
 
-  const handleUnauthorized = useCallback(() => {
-    onUnauthorizedRef.current();
-  }, []);
-
   const {
     agents,
     agentDrafts,
@@ -601,34 +583,6 @@ export function TalkDetailPage({
     pageKind,
     onUnauthorized: handleUnauthorized,
   });
-
-  const refreshThreadListNow = useCallback(async () => {
-    if (threadRefreshInFlightRef.current) {
-      threadRefreshDirtyRef.current = true;
-      return;
-    }
-    threadRefreshInFlightRef.current = true;
-    try {
-      const next = sortThreads(await listTalkThreads(talkId));
-      setThreadState({ threads: next, loading: false, error: null });
-    } catch (err) {
-      if (err instanceof UnauthorizedError) {
-        handleUnauthorized();
-        return;
-      }
-      setThreadState((current) => ({
-        ...current,
-        loading: false,
-        error: err instanceof Error ? err.message : 'Failed to load threads.',
-      }));
-    } finally {
-      threadRefreshInFlightRef.current = false;
-      if (threadRefreshDirtyRef.current) {
-        threadRefreshDirtyRef.current = false;
-        void refreshThreadListNow();
-      }
-    }
-  }, [handleUnauthorized, talkId]);
 
   const rememberDeletedMessageIds = useCallback((messageIds: string[]) => {
     if (messageIds.length === 0) return;
@@ -715,17 +669,6 @@ export function TalkDetailPage({
     userId,
   ]);
 
-  const scheduleThreadListRefresh = useCallback(() => {
-    threadRefreshDirtyRef.current = true;
-    if (threadRefreshTimerRef.current) return;
-    threadRefreshTimerRef.current = setTimeout(() => {
-      threadRefreshTimerRef.current = null;
-      if (!threadRefreshDirtyRef.current) return;
-      threadRefreshDirtyRef.current = false;
-      void refreshThreadListNow();
-    }, 500);
-  }, [refreshThreadListNow]);
-
   const resyncTalkState = useCallback(
     async (options?: { refreshThreads?: boolean }) => {
       const threadId = activeThreadIdRef.current;
@@ -752,11 +695,7 @@ export function TalkDetailPage({
           return;
         }
         if (threads) {
-          setThreadState({
-            threads: sortThreads(threads),
-            loading: false,
-            error: null,
-          });
+          replaceThreadList(threads);
         }
         dispatch({ type: 'MERGE_HISTORICAL_RUNS', runs });
         autoStickToBottomRef.current = 'smooth';
@@ -766,7 +705,7 @@ export function TalkDetailPage({
         }
       }
     },
-    [handleUnauthorized, queryClient, talkId, userId],
+    [handleUnauthorized, queryClient, replaceThreadList, talkId, userId],
   );
 
   const refreshBrowserRuns = useCallback(
@@ -810,26 +749,14 @@ export function TalkDetailPage({
   // their defaults until the user opens the corresponding tab.
   useEffect(() => {
     dispatch({ type: 'TALK_RESET' });
-    threadStateTalkIdRef.current = null;
     hydratedKeyRef.current = null;
     lastSnapshotRef.current = null;
     messageElementRefs.current.clear();
-    setThreadState({ threads: [], loading: true, error: null });
     deletedMessageIdsRef.current = new Set();
-    setActiveThreadId(null);
-    setSearchQuery('');
-    setSearchResults([]);
-    setSearchLoading(false);
-    setSearchError(null);
+    resetTalkThreads();
     resetTalkAgents();
     setRunContextPanels({});
-    return () => {
-      if (threadRefreshTimerRef.current) {
-        clearTimeout(threadRefreshTimerRef.current);
-        threadRefreshTimerRef.current = null;
-      }
-    };
-  }, [resetTalkAgents, talkId]);
+  }, [resetTalkAgents, resetTalkThreads, talkId]);
 
   // Hydrate non-RQ side-effects the moment the snapshot resolves: the
   // thread list (kept in component state because the threads tab edits
@@ -845,11 +772,7 @@ export function TalkDetailPage({
     if (snapshot.talk.id !== talkId) return;
     const hydrationKey = `${talkId}::${snapshot.activeThreadId}`;
     const isFirstHydration = hydratedKeyRef.current !== hydrationKey;
-    const sortedThreads = sortThreads(
-      snapshot.threads.filter((thread) => !thread.isInternal),
-    );
-    setThreadState({ threads: sortedThreads, loading: false, error: null });
-    threadStateTalkIdRef.current = talkId;
+    hydrateTalkThreads(snapshot.threads);
     // Always reconcile doc state — it advances independently of the
     // message timeline (content_updated/applied/resolved invalidates).
     hydrateDocumentFromSnapshot(snapshot);
@@ -864,6 +787,7 @@ export function TalkDetailPage({
     });
   }, [
     hydrateDocumentFromSnapshot,
+    hydrateTalkThreads,
     snapshotQuery.data,
     snapshotQuery.error,
     talkId,
@@ -903,60 +827,6 @@ export function TalkDetailPage({
   }, [handleUnauthorized, hydrateTalkAgents, talkId]);
 
   useEffect(() => {
-    if (threadState.loading) return;
-    // Bail when threadState was loaded for a different talkId — happens
-    // mid-commit during cross-talk sidebar navigation, where this effect
-    // fires before the bootstrap effect's state resets propagate.
-    // Without this gate we'd save Talk A's threads[0] under Talk B's key.
-    if (threadStateTalkIdRef.current !== talkId) return;
-    if (threadState.threads.length === 0) {
-      setActiveThreadId(null);
-      return;
-    }
-    // Resolution order: URL ?thread= → saved-last-thread for this Talk
-    // (localStorage) → most-recent-by-activity (threads[0]). Saved id is
-    // dropped if the thread no longer exists.
-    let validThreadId: string | null = null;
-    if (
-      requestedThreadId &&
-      threadState.threads.some((thread) => thread.id === requestedThreadId)
-    ) {
-      validThreadId = requestedThreadId;
-    } else {
-      const saved = getLastThreadForTalk(talkId);
-      if (saved && threadState.threads.some((thread) => thread.id === saved)) {
-        validThreadId = saved;
-      } else {
-        validThreadId = threadState.threads[0]?.id || null;
-      }
-    }
-    if (!validThreadId) return;
-    if (requestedThreadId !== validThreadId) {
-      navigate(buildThreadHref(talkId, validThreadId, currentTab), {
-        replace: true,
-      });
-    }
-    if (activeThreadId !== validThreadId) {
-      setActiveThreadId(validThreadId);
-    }
-    // Persist the (talkId, threadId) pairing here — this is the only
-    // place we know threadState has been loaded for the CURRENT talkId,
-    // so a sidebar click to another Talk can't race a stale activeThreadId
-    // into the wrong key.
-    setLastThreadForTalk(talkId, validThreadId);
-  }, [
-    activeThreadId,
-    currentTab,
-    navigate,
-    requestedThreadId,
-    talkId,
-    threadState.loading,
-    threadState.threads,
-  ]);
-
-  useEffect(() => {
-    setSearchResults([]);
-    setSearchError(null);
     setRetryRunState(null);
   }, [activeThreadId]);
 
@@ -1096,44 +966,6 @@ export function TalkDetailPage({
     };
   }, [activeThreadId, currentTab, isNearBottom, pageKind]);
 
-  const ensureKnownThread = useCallback(
-    (threadId?: string | null): boolean => {
-      if (!threadId) return false;
-      const known = threadStateRef.current.threads.some(
-        (thread) => thread.id === threadId,
-      );
-      if (!known) {
-        scheduleThreadListRefresh();
-      }
-      return known;
-    },
-    [scheduleThreadListRefresh],
-  );
-
-  const bumpThreadSummaryFromMessage = useCallback(
-    (threadId: string, createdAt: string) => {
-      const known = threadStateRef.current.threads.some(
-        (thread) => thread.id === threadId,
-      );
-      if (!known) {
-        scheduleThreadListRefresh();
-        return;
-      }
-      setThreadState((current) => {
-        const threads = current.threads.map((thread) => {
-          if (thread.id !== threadId) return thread;
-          return {
-            ...thread,
-            messageCount: thread.messageCount + 1,
-            lastMessageAt: createdAt,
-          };
-        });
-        return { ...current, threads: sortThreads(threads) };
-      });
-    },
-    [scheduleThreadListRefresh],
-  );
-
   useTalkRunStream({
     dispatch,
     talkId,
@@ -1229,141 +1061,6 @@ export function TalkDetailPage({
     () =>
       new Map(pageMessages.map((message) => [message.id, message] as const)),
     [pageMessages],
-  );
-  const sortedThreads = useMemo(
-    () => sortThreads(threadState.threads),
-    [threadState.threads],
-  );
-  const activeThread = useMemo(
-    () => sortedThreads.find((thread) => thread.id === activeThreadId) || null,
-    [activeThreadId, sortedThreads],
-  );
-  const menuThread = useMemo(
-    () =>
-      threadMenu
-        ? threadState.threads.find(
-            (thread) => thread.id === threadMenu.threadId,
-          ) || null
-        : null,
-    [threadMenu, threadState.threads],
-  );
-  const updateThreadMetadata = useCallback(
-    async (
-      threadId: string,
-      patch: {
-        title?: string;
-        pinned?: boolean;
-      },
-    ) => {
-      if (pageKind !== 'ready' || !pageTalk) {
-        throw new Error('Talk not ready.');
-      }
-      try {
-        const updated = await updateTalkThread({
-          talkId: pageTalk.id,
-          threadId,
-          ...patch,
-        });
-        setThreadState((current) => ({
-          ...current,
-          error: null,
-          threads: current.threads.map((thread) =>
-            thread.id === updated.id
-              ? {
-                  ...thread,
-                  title: updated.title,
-                  isPinned: updated.isPinned,
-                  updatedAt: updated.updatedAt,
-                }
-              : thread,
-          ),
-        }));
-        return updated;
-      } catch (err) {
-        if (err instanceof UnauthorizedError) {
-          handleUnauthorized();
-        }
-        throw err;
-      }
-    },
-    [handleUnauthorized, state],
-  );
-  const handleRenameThread = useCallback(
-    async (threadId: string, title: string) => {
-      await updateThreadMetadata(threadId, { title });
-      setEditingThreadId((current) => (current === threadId ? null : current));
-    },
-    [updateThreadMetadata],
-  );
-  const handleDeleteThread = useCallback(
-    async (thread: TalkThread) => {
-      if (pageKind !== 'ready' || !pageTalk) return;
-      const confirmed = window.confirm(
-        `Delete "${formatThreadLabel(thread)}"? This will permanently remove the thread and its messages.`,
-      );
-      if (!confirmed) return;
-      try {
-        await deleteTalkThread({
-          talkId: pageTalk.id,
-          threadId: thread.id,
-        });
-        // Garbage-collect this thread's doc-pane layout state so we
-        // don't leave a stale localStorage record behind.
-        if (typeof window !== 'undefined') {
-          try {
-            window.localStorage.removeItem(`clawtalk_doc_state:${thread.id}`);
-          } catch {
-            // Quota / private mode — ignore.
-          }
-        }
-        clearThreadScroll(pageTalk.id, thread.id);
-        const remaining = sortThreads(
-          threadState.threads.filter((candidate) => candidate.id !== thread.id),
-        );
-        setThreadState((current) => ({
-          ...current,
-          error: null,
-          threads: current.threads.filter(
-            (candidate) => candidate.id !== thread.id,
-          ),
-        }));
-        setEditingThreadId((current) =>
-          current === thread.id ? null : current,
-        );
-        if (activeThreadId === thread.id) {
-          const fallbackThreadId = remaining[0]?.id || null;
-          if (fallbackThreadId) {
-            navigate(buildThreadHref(talkId, fallbackThreadId, currentTab));
-          }
-        }
-      } catch (err) {
-        if (err instanceof UnauthorizedError) {
-          handleUnauthorized();
-          return;
-        }
-        setThreadState((current) => ({
-          ...current,
-          error:
-            err instanceof Error ? err.message : 'Failed to delete thread.',
-        }));
-      }
-    },
-    [
-      activeThreadId,
-      currentTab,
-      handleUnauthorized,
-      navigate,
-      state,
-      talkId,
-      threadState.threads,
-    ],
-  );
-  const handleRenameActiveThread = useCallback(
-    async (title: string) => {
-      if (!activeThread) return;
-      await handleRenameThread(activeThread.id, title);
-    },
-    [activeThread, handleRenameThread],
   );
   const {
     runHistory,
@@ -2145,95 +1842,6 @@ export function TalkDetailPage({
     }
   };
 
-  const handleSelectThread = useCallback(
-    (threadId: string) => {
-      navigate(buildThreadHref(talkId, threadId, currentTab));
-    },
-    [currentTab, navigate, talkId],
-  );
-
-  const openThreadMenu = useCallback(
-    (threadId: string, x: number, y: number) => {
-      if (!canEditAgents) return;
-      setThreadMenu({ threadId, x, y });
-    },
-    [canEditAgents],
-  );
-
-  const handleThreadSecondaryClick = useCallback(
-    (threadId: string) => (event: ReactMouseEvent<HTMLElement>) => {
-      if (event.button !== 2) return;
-      event.preventDefault();
-      event.stopPropagation();
-      openThreadMenu(threadId, event.clientX, event.clientY);
-    },
-    [openThreadMenu],
-  );
-
-  const handleThreadContextMenu = useCallback(
-    (threadId: string) => (event: ReactMouseEvent<HTMLElement>) => {
-      event.preventDefault();
-      event.stopPropagation();
-      openThreadMenu(threadId, event.clientX, event.clientY);
-    },
-    [openThreadMenu],
-  );
-
-  const handleCreateThread = useCallback(async () => {
-    if (pageKind !== 'ready' || !pageTalk) return;
-    try {
-      const nextThread = await createTalkThread({ talkId: pageTalk.id });
-      setThreadState((current) => ({
-        ...current,
-        threads: sortThreads([nextThread, ...current.threads]),
-      }));
-      pendingComposerFocusRef.current = true;
-      navigate(buildThreadHref(talkId, nextThread.id, currentTab));
-    } catch (err) {
-      if (err instanceof UnauthorizedError) {
-        handleUnauthorized();
-        return;
-      }
-      setThreadState((current) => ({
-        ...current,
-        error: err instanceof Error ? err.message : 'Failed to create thread.',
-      }));
-    }
-  }, [currentTab, handleUnauthorized, navigate, state, talkId]);
-
-  const handleSearch = useCallback(async () => {
-    const query = searchQueryRef.current.trim();
-    if (!query) {
-      setSearchResults([]);
-      setSearchError(null);
-      return;
-    }
-    setSearchLoading(true);
-    setSearchError(null);
-    try {
-      const results = await searchTalkMessages({ talkId, query });
-      setSearchResults(results);
-    } catch (err) {
-      if (err instanceof UnauthorizedError) {
-        handleUnauthorized();
-        return;
-      }
-      setSearchError(
-        err instanceof Error ? err.message : 'Failed to search talk messages.',
-      );
-    } finally {
-      setSearchLoading(false);
-    }
-  }, [handleUnauthorized, talkId]);
-
-  const handleSearchResultSelect = useCallback(
-    (result: TalkMessageSearchResult) => {
-      setSearchResults([]);
-      navigate(buildThreadHref(talkId, result.threadId));
-    },
-    [navigate, talkId],
-  );
-
   const handleClearUnread = () => {
     // User chose to jump to the newest — resume following.
     followBottomRef.current = true;
@@ -2581,24 +2189,10 @@ export function TalkDetailPage({
               handleThreadContextMenu={handleThreadContextMenu}
               handleRenameThread={handleRenameThread}
               handleSelectThread={handleSelectThread}
-              closeThreadMenu={() => setThreadMenu(null)}
-              onRenameMenuThread={(thread) => setEditingThreadId(thread.id)}
-              onToggleMenuThreadPin={(thread) => {
-                void updateThreadMetadata(thread.id, {
-                  pinned: !thread.isPinned,
-                }).catch((err) => {
-                  setThreadState((current) => ({
-                    ...current,
-                    error:
-                      err instanceof Error
-                        ? err.message
-                        : 'Failed to update thread.',
-                  }));
-                });
-              }}
-              onDeleteMenuThread={(thread) => {
-                void handleDeleteThread(thread);
-              }}
+              closeThreadMenu={closeThreadMenu}
+              onRenameMenuThread={handleRenameMenuThread}
+              onToggleMenuThreadPin={handleToggleMenuThreadPin}
+              onDeleteMenuThread={handleDeleteMenuThread}
               handleRenameActiveThread={handleRenameActiveThread}
               openHistoryEditor={openHistoryEditor}
               canEditHistory={canEditHistory}
