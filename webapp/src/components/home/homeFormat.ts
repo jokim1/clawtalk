@@ -191,6 +191,32 @@ export function classifyAction(
   return { kind: 'disabled', reason: HOME_WRITE_PENDING_REASON, label };
 }
 
+export type SnoozePreset = { label: string; until: string };
+
+/**
+ * Snooze duration presets relative to `now`. "Tomorrow" / "Next week" land at
+ * 09:00 local so an item resurfaces at the start of a working block rather than
+ * an arbitrary minute. All three are strictly in the future (the write API
+ * rejects past/over-a-year timestamps).
+ */
+export function snoozePresets(now: Date): SnoozePreset[] {
+  const inOneHour = new Date(now.getTime() + 60 * 60 * 1000);
+
+  const tomorrow = new Date(now);
+  tomorrow.setDate(tomorrow.getDate() + 1);
+  tomorrow.setHours(9, 0, 0, 0);
+
+  const nextWeek = new Date(now);
+  nextWeek.setDate(nextWeek.getDate() + 7);
+  nextWeek.setHours(9, 0, 0, 0);
+
+  return [
+    { label: 'In 1 hour', until: inOneHour.toISOString() },
+    { label: 'Tomorrow', until: tomorrow.toISOString() },
+    { label: 'Next week', until: nextWeek.toISOString() },
+  ];
+}
+
 /** First-letter initials (max 2) for a curator/avatar glyph. */
 export function initials(text: string, max = 1): string {
   const parts = text.trim().split(/\s+/).filter(Boolean);

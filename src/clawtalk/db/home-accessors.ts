@@ -1409,3 +1409,89 @@ export async function getHomeSummary(input: {
     },
   };
 }
+
+// ── Write / lifecycle accessors ───────────────────────────────────────────
+//
+// These run inside the per-request `withUserContext` set by the Home route, so
+// the `member_write` RLS policy on each table (see the greenfield migration
+// `member_write_tables` loop) scopes every UPDATE to the caller's workspace.
+// The explicit `workspace_id` predicate is belt-and-braces with that policy and
+// keeps the statements readable. Each returns the affected row's `{ id, status }`
+// or `null` when nothing matched (unknown id, foreign workspace, or a status the
+// transition does not apply to) so the route can answer 404.
+
+export type HomeInboxMutationResult = {
+  id: string;
+  status: HomeInboxStatus;
+};
+
+export type HomeRecommendationMutationResult = {
+  id: string;
+  status: HomeRecommendationStatus;
+};
+
+/**
+ * Dismiss an Inbox item (status → `dismissed`). Idempotent: re-dismissing an
+ * already-dismissed item is a no-op that still returns the row. Resolved /
+ * expired items are left untouched (returns null) so dismissal never resurrects
+ * or rewrites a terminal item.
+ */
+export async function dismissHomeInboxItem(input: {
+  workspaceId: string;
+  itemId: string;
+}): Promise<HomeInboxMutationResult | null> {
+  const db = getDbPg();
+  const rows = await db<HomeInboxMutationResult[]>`
+    update public.home_inbox_items
+       set status = 'dismissed'
+     where id = ${input.itemId}::uuid
+       and workspace_id = ${input.workspaceId}::uuid
+       and status in ('unread', 'read', 'snoozed', 'dismissed')
+    returning id, status
+  `;
+  return rows[0] ?? null;
+}
+
+/**
+ * Snooze an Inbox item until `until` (status → `snoozed`). The read query
+ * re-surfaces snoozed items once `snoozed_until <= now()`. Only applies to
+ * actionable items; terminal items return null.
+ */
+export async function snoozeHomeInboxItem(input: {
+  workspaceId: string;
+  itemId: string;
+  until: string;
+}): Promise<HomeInboxMutationResult | null> {
+  const db = getDbPg();
+  const rows = await db<HomeInboxMutationResult[]>`
+    update public.home_inbox_items
+       set status = 'snoozed',
+           snoozed_until = ${input.until}::timestamptz
+     where id = ${input.itemId}::uuid
+       and workspace_id = ${input.workspaceId}::uuid
+       and status in ('unread', 'read', 'snoozed')
+    returning id, status
+  `;
+  return rows[0] ?? null;
+}
+
+/**
+ * Dismiss a recommendation (status → `dismissed`). Idempotent over an already
+ * dismissed row; completed / expired / snoozed recommendations are left as-is
+ * (returns null).
+ */
+export async function dismissHomeRecommendation(input: {
+  workspaceId: string;
+  recommendationId: string;
+}): Promise<HomeRecommendationMutationResult | null> {
+  const db = getDbPg();
+  const rows = await db<HomeRecommendationMutationResult[]>`
+    update public.home_recommendations
+       set status = 'dismissed'
+     where id = ${input.recommendationId}::uuid
+       and workspace_id = ${input.workspaceId}::uuid
+       and status in ('active', 'dismissed')
+    returning id, status
+  `;
+  return rows[0] ?? null;
+}

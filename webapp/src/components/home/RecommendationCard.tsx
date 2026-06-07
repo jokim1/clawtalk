@@ -1,8 +1,8 @@
 /**
  * Recommendation card — hero + then-maybe follow-ups (docs/07 §7.9). Ported
  * from RecommendationCard in prototype/home-shared.jsx. The primary action is
- * routed when it resolves to a Talk/URL; mutation-only actions fall back to a
- * disabled control (see classifyAction).
+ * routed when it resolves to a Talk/URL; every card also carries a Dismiss
+ * control wired to the Home write API (the parent owns optimistic removal).
  */
 import { salon, salonFont } from '../../salon';
 import type { HomeRecommendation } from '../../lib/api';
@@ -12,6 +12,7 @@ import {
   Card,
   clampLines,
   KindGlyph,
+  LifecycleIconButton,
   TalkChip,
 } from './HomeKit';
 import {
@@ -25,9 +26,11 @@ import {
 export function RecommendationCard({
   rec,
   variant = 'hero',
+  onDismiss,
 }: {
   rec: HomeRecommendation;
   variant?: 'hero' | 'compact';
+  onDismiss: (id: string) => void;
 }): JSX.Element {
   const badge = REC_PRIORITY_BADGE[rec.priority] ?? REC_PRIORITY_BADGE.tidy;
   const icon = REC_KIND_ICON[rec.kind] ?? 'sparkle';
@@ -96,10 +99,24 @@ export function RecommendationCard({
           }}
         >
           {ref ? <TalkChip talkId={ref.talkId} title={ref.title} /> : null}
-          <div style={{ marginLeft: 'auto' }}>
-            <ActionButton
-              behavior={behavior}
-              size={variant === 'hero' ? 'md' : 'sm'}
+          <div
+            style={{
+              marginLeft: 'auto',
+              display: 'flex',
+              alignItems: 'center',
+              gap: 6,
+            }}
+          >
+            {behavior.kind !== 'disabled' ? (
+              <ActionButton
+                behavior={behavior}
+                size={variant === 'hero' ? 'md' : 'sm'}
+              />
+            ) : null}
+            <LifecycleIconButton
+              icon="x"
+              label="Dismiss recommendation"
+              onClick={() => onDismiss(rec.id)}
             />
           </div>
         </div>

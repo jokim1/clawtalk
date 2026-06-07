@@ -1,16 +1,20 @@
 /**
  * Inbox preview — top actionable arrivals/blockers/waits (docs/07 §6.8). Shows
  * the highest-scored items (already ranked by the API). Ported from the inbox
- * rows in prototype/home-shared.jsx. Primary actions route where possible;
- * mutation actions show the pending-write-API disabled state.
+ * rows in prototype/home-shared.jsx. Navigation actions route where possible;
+ * each row also carries Snooze + Dismiss lifecycle controls wired to the Home
+ * write API (the parent owns the list state + optimistic removal).
  */
-import { CTIcon, salon, salonFont } from '../../salon';
+import { useRef, useState } from 'react';
+
+import { CTIcon, Popover, salon, salonFont } from '../../salon';
 import type { HomeInboxItem, HomeInboxPayload } from '../../lib/api';
 import {
   ActionButton,
   Card,
   clampLines,
   HomeEmpty,
+  LifecycleIconButton,
   SectionHeader,
   TalkChip,
 } from './HomeKit';
@@ -18,16 +22,81 @@ import {
   classifyAction,
   INBOX_SEVERITY_BADGE,
   INBOX_TYPE_ICON,
+  snoozePresets,
   talkRef,
   targetToPath,
 } from './homeFormat';
 
+/** Snooze trigger + preset popover (1 hour / Tomorrow / Next week). */
+function SnoozeControl({
+  onSnooze,
+}: {
+  onSnooze: (until: string) => void;
+}): JSX.Element {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLButtonElement>(null);
+  return (
+    <>
+      <LifecycleIconButton
+        icon="clock"
+        label="Snooze"
+        buttonRef={ref}
+        onClick={() => setOpen((value) => !value)}
+      />
+      {open ? (
+        <Popover
+          anchorRect={ref.current?.getBoundingClientRect() ?? null}
+          onClose={() => setOpen(false)}
+          width={196}
+          align="right"
+          ariaLabel="Snooze options"
+        >
+          <div style={{ padding: 6, display: 'flex', flexDirection: 'column' }}>
+            {snoozePresets(new Date()).map((preset) => (
+              <button
+                key={preset.label}
+                type="button"
+                className="salon-btn"
+                onClick={() => {
+                  setOpen(false);
+                  onSnooze(preset.until);
+                }}
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 8,
+                  textAlign: 'left',
+                  padding: '8px 10px',
+                  borderRadius: 8,
+                  background: 'transparent',
+                  border: 'none',
+                  cursor: 'pointer',
+                  fontFamily: salonFont.sans,
+                  fontSize: 13,
+                  color: salon.ink,
+                }}
+              >
+                <CTIcon name="clock" size={13} stroke={salon.ink2} />
+                {preset.label}
+              </button>
+            ))}
+          </div>
+        </Popover>
+      ) : null}
+    </>
+  );
+}
+
 function InboxRow({
   item,
   first,
+  onDismiss,
+  onSnooze,
 }: {
   item: HomeInboxItem;
   first: boolean;
+  onDismiss: (id: string) => void;
+  onSnooze: (id: string, until: string) => void;
 }): JSX.Element {
   const sev = INBOX_SEVERITY_BADGE[item.severity] ?? INBOX_SEVERITY_BADGE.info;
   const icon = INBOX_TYPE_ICON[item.type] ?? 'chat';
@@ -106,10 +175,25 @@ function InboxRow({
             {sev.label}
           </span>
           {ref ? <TalkChip talkId={ref.talkId} title={ref.title} /> : null}
-          <div style={{ marginLeft: 'auto' }}>
-            <ActionButton
-              behavior={behavior}
-              variant={item.severity === 'blocking' ? 'primary' : 'secondary'}
+          <div
+            style={{
+              marginLeft: 'auto',
+              display: 'flex',
+              alignItems: 'center',
+              gap: 6,
+            }}
+          >
+            {behavior.kind !== 'disabled' ? (
+              <ActionButton
+                behavior={behavior}
+                variant={item.severity === 'blocking' ? 'primary' : 'secondary'}
+              />
+            ) : null}
+            <SnoozeControl onSnooze={(until) => onSnooze(item.id, until)} />
+            <LifecycleIconButton
+              icon="x"
+              label="Dismiss"
+              onClick={() => onDismiss(item.id)}
             />
           </div>
         </div>
@@ -120,8 +204,12 @@ function InboxRow({
 
 export function InboxPreview({
   payload,
+  onDismiss,
+  onSnooze,
 }: {
   payload: HomeInboxPayload;
+  onDismiss: (id: string) => void;
+  onSnooze: (id: string, until: string) => void;
 }): JSX.Element {
   const items = payload.items.slice(0, 5);
   const count = `${payload.counts.unread} unread · ${payload.counts.blocking} blocking`;
@@ -137,7 +225,13 @@ export function InboxPreview({
       ) : (
         <Card>
           {items.map((item, index) => (
-            <InboxRow key={item.id} item={item} first={index === 0} />
+            <InboxRow
+              key={item.id}
+              item={item}
+              first={index === 0}
+              onDismiss={onDismiss}
+              onSnooze={onSnooze}
+            />
           ))}
         </Card>
       )}

@@ -1,8 +1,15 @@
-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter } from 'react-router-dom';
 
 import { HomePage } from './HomePage';
+import { ApiError } from '../lib/api';
 import type {
   HomeInboxPayload,
   HomeNewsPayload,
@@ -11,12 +18,21 @@ import type {
 } from '../lib/api';
 import * as api from '../lib/api';
 
-vi.mock('../lib/api', () => ({
-  getHomeSummary: vi.fn(),
-  listHomeInbox: vi.fn(),
-  listHomeRecommendations: vi.fn(),
-  listHomeNews: vi.fn(),
-}));
+// Keep the real module (ApiError class + types) and only stub the data calls,
+// so HomePage's `err instanceof ApiError` 404 handling works under test.
+vi.mock('../lib/api', async (importActual) => {
+  const actual = await importActual<typeof import('../lib/api')>();
+  return {
+    ...actual,
+    getHomeSummary: vi.fn(),
+    listHomeInbox: vi.fn(),
+    listHomeRecommendations: vi.fn(),
+    listHomeNews: vi.fn(),
+    dismissHomeInboxItem: vi.fn(),
+    snoozeHomeInboxItem: vi.fn(),
+    dismissHomeRecommendation: vi.fn(),
+  };
+});
 
 const mockApi = vi.mocked(api);
 
@@ -164,6 +180,15 @@ function renderHome(): void {
   );
 }
 
+async function renderPopulated(): Promise<void> {
+  mockApi.getHomeSummary.mockResolvedValue(SUMMARY);
+  mockApi.listHomeInbox.mockResolvedValue(INBOX);
+  mockApi.listHomeRecommendations.mockResolvedValue(RECS);
+  mockApi.listHomeNews.mockResolvedValue(NEWS);
+  renderHome();
+  await screen.findByText('Critic replied in Pricing v2');
+}
+
 describe('HomePage', () => {
   beforeEach(() => {
     vi.resetAllMocks();
@@ -235,5 +260,86 @@ describe('HomePage', () => {
 
     expect(await screen.findByText('2 decisions need you.')).toBeTruthy();
     expect(mockApi.getHomeSummary).toHaveBeenCalledTimes(2);
+  });
+
+  it('dismisses an inbox item optimistically and calls the write API', async () => {
+    mockApi.dismissHomeInboxItem.mockResolvedValue({
+      id: 'i1',
+      status: 'dismissed',
+    });
+    await renderPopulated();
+
+    fireEvent.click(screen.getByLabelText('Dismiss'));
+
+    await waitFor(() =>
+      expect(screen.queryByText('Critic replied in Pricing v2')).toBeNull(),
+    );
+    expect(mockApi.dismissHomeInboxItem).toHaveBeenCalledWith('i1');
+  });
+
+  it('restores an inbox item and surfaces an error when the dismiss API fails', async () => {
+    mockApi.dismissHomeInboxItem.mockRejectedValue(new Error('boom'));
+    await renderPopulated();
+
+    fireEvent.click(screen.getByLabelText('Dismiss'));
+
+    // Removed optimistically, then restored after the failure.
+    await waitFor(() =>
+      expect(screen.getByText('Critic replied in Pricing v2')).toBeTruthy(),
+    );
+    expect(screen.getByRole('alert')).toBeTruthy();
+    expect(mockApi.dismissHomeInboxItem).toHaveBeenCalledWith('i1');
+  });
+
+  it('keeps an inbox item removed (no revert, no error) on a 404', async () => {
+    mockApi.dismissHomeInboxItem.mockRejectedValue(
+      new ApiError('gone', 404, 'not_found'),
+    );
+    await renderPopulated();
+
+    fireEvent.click(screen.getByLabelText('Dismiss'));
+
+    // The server already considers it gone, so the optimistic removal stands.
+    await waitFor(() =>
+      expect(screen.queryByText('Critic replied in Pricing v2')).toBeNull(),
+    );
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(mockApi.dismissHomeInboxItem).toHaveBeenCalledWith('i1');
+  });
+
+  it('snoozes an inbox item via a preset', async () => {
+    mockApi.snoozeHomeInboxItem.mockResolvedValue({
+      id: 'i1',
+      status: 'snoozed',
+    });
+    await renderPopulated();
+
+    fireEvent.click(screen.getByLabelText('Snooze'));
+    fireEvent.click(await screen.findByText('Tomorrow'));
+
+    await waitFor(() =>
+      expect(screen.queryByText('Critic replied in Pricing v2')).toBeNull(),
+    );
+    expect(mockApi.snoozeHomeInboxItem).toHaveBeenCalledTimes(1);
+    expect(mockApi.snoozeHomeInboxItem.mock.calls[0][0]).toBe('i1');
+    expect(typeof mockApi.snoozeHomeInboxItem.mock.calls[0][1]).toBe('string');
+  });
+
+  it('dismisses the hero recommendation and promotes the next one', async () => {
+    mockApi.dismissHomeRecommendation.mockResolvedValue({
+      id: 'r1',
+      status: 'dismissed',
+    });
+    await renderPopulated();
+    expect(screen.getByText('Synthesize Pricing v2')).toBeTruthy();
+
+    fireEvent.click(screen.getAllByLabelText('Dismiss recommendation')[0]);
+
+    await waitFor(() =>
+      expect(screen.queryByText('Synthesize Pricing v2')).toBeNull(),
+    );
+    // The then-maybe card survives (promoted into the hero slot).
+    expect(screen.getByText('Draft a decision doc')).toBeTruthy();
+    expect(mockApi.dismissHomeRecommendation).toHaveBeenCalledWith('r1');
   });
 });

@@ -21,10 +21,13 @@ import { DEV_USER_ID } from '../middleware/auth.js';
 import type { AuthContext } from '../types.js';
 import { _resetWorkerAppForTests, getWorkerApp } from '../worker-app.js';
 import {
+  dismissHomeInboxRoute,
+  dismissHomeRecommendationRoute,
   getHomeSummaryRoute,
   listHomeInboxRoute,
   listHomeNewsRoute,
   listHomeRecommendationsRoute,
+  snoozeHomeInboxRoute,
 } from './home.js';
 
 const USER_ID = '0c888888-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
@@ -1413,5 +1416,266 @@ describe('Home read-only routes', () => {
     expect(authed.status).toBe(200);
     const body = (await authed.json()) as { ok: boolean };
     expect(body.ok).toBe(true);
+  });
+});
+
+const RANDOM_UUID = '11111111-2222-3333-4444-555555555555';
+
+function dataOf<T>(result: { body: unknown }): T {
+  const body = result.body as { ok?: boolean; data?: T };
+  if (!body.ok || body.data === undefined) {
+    throw new Error(`expected ok result, got ${JSON.stringify(result.body)}`);
+  }
+  return body.data;
+}
+
+async function inboxIds(workspaceId: string): Promise<string[]> {
+  const result = await listHomeInboxRoute({ auth: auth(), workspaceId });
+  return dataOf<{ items: Array<{ id: string }> }>(result).items.map(
+    (i) => i.id,
+  );
+}
+
+async function recommendationIds(workspaceId: string): Promise<string[]> {
+  const result = await listHomeRecommendationsRoute({
+    auth: auth(),
+    workspaceId,
+  });
+  return dataOf<{ items: Array<{ id: string }> }>(result).items.map(
+    (i) => i.id,
+  );
+}
+
+describe('Home write routes', () => {
+  it('dismisses an Inbox item and removes it from the Inbox list', async () => {
+    const { workspaceId, talkId } = await createWorkspaceFixture();
+    const itemId = await seedInboxItem({
+      workspaceId,
+      talkId,
+      type: 'agent_replied',
+      title: 'Agent replied',
+      severity: 'action',
+    });
+    expect(await inboxIds(workspaceId)).toContain(itemId);
+
+    const result = await dismissHomeInboxRoute({
+      auth: auth(),
+      workspaceId,
+      itemId,
+    });
+    expect(result.statusCode).toBe(200);
+    expect(result.body).toMatchObject({
+      ok: true,
+      data: { id: itemId, status: 'dismissed' },
+    });
+    expect(await inboxIds(workspaceId)).not.toContain(itemId);
+  });
+
+  it('treats a repeat dismiss as idempotent', async () => {
+    const { workspaceId, talkId } = await createWorkspaceFixture();
+    const itemId = await seedInboxItem({
+      workspaceId,
+      talkId,
+      type: 'agent_replied',
+      title: 'Agent replied',
+      severity: 'action',
+    });
+    await dismissHomeInboxRoute({ auth: auth(), workspaceId, itemId });
+    const again = await dismissHomeInboxRoute({
+      auth: auth(),
+      workspaceId,
+      itemId,
+    });
+    expect(again.statusCode).toBe(200);
+    expect(again.body).toMatchObject({
+      ok: true,
+      data: { id: itemId, status: 'dismissed' },
+    });
+  });
+
+  it('returns 404 dismissing an unknown Inbox item', async () => {
+    const { workspaceId } = await createWorkspaceFixture();
+    const result = await dismissHomeInboxRoute({
+      auth: auth(),
+      workspaceId,
+      itemId: RANDOM_UUID,
+    });
+    expect(result.statusCode).toBe(404);
+    expect(result.body).toMatchObject({
+      ok: false,
+      error: { code: 'not_found' },
+    });
+  });
+
+  it('rejects a non-UUID Inbox item id', async () => {
+    const { workspaceId } = await createWorkspaceFixture();
+    const result = await dismissHomeInboxRoute({
+      auth: auth(),
+      workspaceId,
+      itemId: 'not-a-uuid',
+    });
+    expect(result.statusCode).toBe(400);
+    expect(result.body).toMatchObject({
+      ok: false,
+      error: { code: 'invalid_item_id' },
+    });
+  });
+
+  it('does not let another workspace dismiss an item', async () => {
+    const { workspaceId, talkId } = await createWorkspaceFixture();
+    const itemId = await seedInboxItem({
+      workspaceId,
+      talkId,
+      type: 'agent_replied',
+      title: 'Agent replied',
+      severity: 'action',
+    });
+    // OTHER_USER has their own workspace but is not a member of this one.
+    const result = await dismissHomeInboxRoute({
+      auth: auth(OTHER_USER_ID),
+      workspaceId,
+      itemId,
+    });
+    expect(result.statusCode).toBe(403);
+    expect(result.body).toMatchObject({
+      ok: false,
+      error: { code: 'workspace_forbidden' },
+    });
+    // The item is untouched and still visible to its owner.
+    expect(await inboxIds(workspaceId)).toContain(itemId);
+  });
+
+  it('snoozes an Inbox item out of the active list until it is due', async () => {
+    const { workspaceId, talkId } = await createWorkspaceFixture();
+    const itemId = await seedInboxItem({
+      workspaceId,
+      talkId,
+      type: 'agent_replied',
+      title: 'Agent replied',
+      severity: 'action',
+    });
+    const until = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+    const result = await snoozeHomeInboxRoute({
+      auth: auth(),
+      workspaceId,
+      itemId,
+      until,
+    });
+    expect(result.statusCode).toBe(200);
+    expect(result.body).toMatchObject({
+      ok: true,
+      data: { id: itemId, status: 'snoozed' },
+    });
+    expect(await inboxIds(workspaceId)).not.toContain(itemId);
+
+    // Once the snooze elapses, the read query re-surfaces the item.
+    await getDbPg()`
+      update public.home_inbox_items
+      set snoozed_until = now() - interval '1 minute'
+      where id = ${itemId}::uuid
+    `;
+    expect(await inboxIds(workspaceId)).toContain(itemId);
+  });
+
+  it('rejects a snooze without a future timestamp', async () => {
+    const { workspaceId, talkId } = await createWorkspaceFixture();
+    const itemId = await seedInboxItem({
+      workspaceId,
+      talkId,
+      type: 'agent_replied',
+      title: 'Agent replied',
+      severity: 'action',
+    });
+    const past = new Date(Date.now() - 60 * 1000).toISOString();
+    const result = await snoozeHomeInboxRoute({
+      auth: auth(),
+      workspaceId,
+      itemId,
+      until: past,
+    });
+    expect(result.statusCode).toBe(400);
+    expect(result.body).toMatchObject({
+      ok: false,
+      error: { code: 'invalid_until' },
+    });
+
+    const missing = await snoozeHomeInboxRoute({
+      auth: auth(),
+      workspaceId,
+      itemId,
+      until: undefined,
+    });
+    expect(missing.statusCode).toBe(400);
+    expect(missing.body).toMatchObject({
+      ok: false,
+      error: { code: 'invalid_until' },
+    });
+
+    // A future but non-ISO datetime (date-only) is rejected, not silently
+    // coerced — the contract is an ISO-8601 timestamp.
+    const dateOnly = await snoozeHomeInboxRoute({
+      auth: auth(),
+      workspaceId,
+      itemId,
+      until: '2099-01-01',
+    });
+    expect(dateOnly.statusCode).toBe(400);
+    expect(dateOnly.body).toMatchObject({
+      ok: false,
+      error: { code: 'invalid_until' },
+    });
+  });
+
+  it('dismisses a recommendation and removes it from the list', async () => {
+    const { workspaceId, talkId } = await createWorkspaceFixture();
+    const recId = await seedRecommendation({
+      workspaceId,
+      talkId,
+      kind: 'unresolved',
+      title: 'Resolve the open question',
+      priority: 'decide',
+      score: 90,
+    });
+    expect(await recommendationIds(workspaceId)).toContain(recId);
+
+    const result = await dismissHomeRecommendationRoute({
+      auth: auth(),
+      workspaceId,
+      recommendationId: recId,
+    });
+    expect(result.statusCode).toBe(200);
+    expect(result.body).toMatchObject({
+      ok: true,
+      data: { id: recId, status: 'dismissed' },
+    });
+    expect(await recommendationIds(workspaceId)).not.toContain(recId);
+  });
+
+  it('returns 404 dismissing an unknown recommendation', async () => {
+    const { workspaceId } = await createWorkspaceFixture();
+    const result = await dismissHomeRecommendationRoute({
+      auth: auth(),
+      workspaceId,
+      recommendationId: RANDOM_UUID,
+    });
+    expect(result.statusCode).toBe(404);
+    expect(result.body).toMatchObject({
+      ok: false,
+      error: { code: 'not_found' },
+    });
+  });
+
+  it('rejects a non-UUID recommendation id', async () => {
+    const { workspaceId } = await createWorkspaceFixture();
+    const result = await dismissHomeRecommendationRoute({
+      auth: auth(),
+      workspaceId,
+      recommendationId: 'nope',
+    });
+    expect(result.statusCode).toBe(400);
+    expect(result.body).toMatchObject({
+      ok: false,
+      error: { code: 'invalid_recommendation_id' },
+    });
   });
 });

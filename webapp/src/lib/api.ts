@@ -3820,3 +3820,44 @@ export async function listHomeNews(params?: {
     `/api/v1/home/news${homeQueryString(params)}`,
   );
 }
+
+export type HomeInboxMutationResult = {
+  id: string;
+  status: HomeInboxStatus;
+};
+
+export type HomeRecommendationMutationResult = {
+  id: string;
+  status: HomeRecommendationStatus;
+};
+
+/** Dismiss an Inbox item so it leaves the active Home Inbox. */
+export async function dismissHomeInboxItem(
+  itemId: string,
+): Promise<HomeInboxMutationResult> {
+  return apiMutationRequest<HomeInboxMutationResult>(
+    `/api/v1/home/inbox/${encodeURIComponent(itemId)}/dismiss`,
+    { method: 'POST' },
+  );
+}
+
+/** Snooze an Inbox item until `until` (ISO-8601); it re-surfaces when due. */
+export async function snoozeHomeInboxItem(
+  itemId: string,
+  until: string,
+): Promise<HomeInboxMutationResult> {
+  return apiMutationRequest<HomeInboxMutationResult>(
+    `/api/v1/home/inbox/${encodeURIComponent(itemId)}/snooze`,
+    { method: 'POST', includeJson: true, body: JSON.stringify({ until }) },
+  );
+}
+
+/** Dismiss a recommendation so it leaves the Recommendations rail. */
+export async function dismissHomeRecommendation(
+  recommendationId: string,
+): Promise<HomeRecommendationMutationResult> {
+  return apiMutationRequest<HomeRecommendationMutationResult>(
+    `/api/v1/home/recommendations/${encodeURIComponent(recommendationId)}/dismiss`,
+    { method: 'POST' },
+  );
+}

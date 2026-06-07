@@ -111,7 +111,7 @@ The unused table set is mostly intentional schema waiting for surfaces: Home, Fo
 
 ### 4c. Missing Surfaces
 
-- Home is built Salon-native on the read-only Home API (PR #550), read-first and now the `/` landing surface; the remaining gap is the Home **write/lifecycle** API (mark-read/resolve/dismiss/snooze, recommendation + news status) to activate the disabled inbox/recommendation/news actions.
+- Home is built Salon-native on the Home API (PR #550) and is the `/` landing surface. The **write/lifecycle** API now covers inbox dismiss/snooze + recommendation dismiss (member-write RLS, optimistic UI with entity-scoped revert; PR #550). Remaining lifecycle gap: inbox mark-read/resolve (need a read-tracking surface) and news add-to-context/snooze (needs a `home_news_matches.snoozed_until` migration + context-source write).
 - Documents sidebar entry links into the in-Talk doc pane, not a standalone Documents surface.
 - Agents are folded into Settings; standalone Agents and Agent profile are unbuilt.
 - Archive, New Talk sheet, and command palette are not production-complete.
@@ -159,8 +159,8 @@ Salon should be first-class before Home/Documents/Agents, otherwise those surfac
 
 ### W4. Home
 
-- Accessors/routes for inbox, recommendations, news, lifecycle actions.
-- Home page built in Salon.
+- Accessors/routes for inbox, recommendations, news. ✅ read; ✅ write for inbox dismiss/snooze + recommendation dismiss (PR #550). Remaining: mark-read/resolve, news add-to-context/snooze.
+- Home page built in Salon. ✅ (PR #550, read-first + the wired lifecycle actions above).
 - Read and resolve `job_blocked`/`job_output_ready` items.
 
 ### W5. De-facade

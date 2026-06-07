@@ -2,12 +2,17 @@ import type { Context, Hono, MiddlewareHandler } from 'hono';
 
 import { withUserContext } from '../../../db.js';
 import {
+  dismissHomeInboxItem,
+  dismissHomeRecommendation,
   getHomeSummary,
   listHomeInboxItems,
   listHomeNews,
   listHomeRecommendations,
+  snoozeHomeInboxItem,
+  type HomeInboxMutationResult,
   type HomeInboxPayload,
   type HomeNewsPayload,
+  type HomeRecommendationMutationResult,
   type HomeRecommendationsPayload,
   type HomeSummaryPayload,
 } from '../../db/home-accessors.js';
@@ -15,11 +20,15 @@ import {
   resolveWorkspaceForUser,
   type WorkspaceSummaryRecord,
 } from '../../workspaces/accessors.js';
+import { validateCsrfTokenPg } from '../middleware/csrf.js';
 import {
   checkRateLimit,
   type RateLimitResult,
 } from '../middleware/rate-limit.js';
 import type { ApiEnvelope, AuthContext } from '../types.js';
+
+/** Upper bound on how far ahead an Inbox item may be snoozed (one year). */
+const MAX_SNOOZE_MS = 365 * 24 * 60 * 60 * 1000;
 
 type RouteResult<T> = {
   statusCode: number;
@@ -60,6 +69,41 @@ function parseLimit(value: unknown): number | null {
 
 function parseCursor(value: unknown): string | null {
   return typeof value === 'string' && value.length > 0 ? value : null;
+}
+
+/**
+ * Validate a snooze `until` payload: an ISO-8601 timestamp strictly in the
+ * future and within one year. Returns the normalized ISO string or a reason.
+ */
+function parseSnoozeUntil(
+  value: unknown,
+): { ok: true; iso: string } | { ok: false; message: string } {
+  if (typeof value !== 'string' || value.trim() === '') {
+    return { ok: false, message: 'A snooze "until" timestamp is required.' };
+  }
+  // Require a real ISO-8601 datetime (date + time), not any loose string that
+  // `Date.parse` happens to accept (date-only, locale formats, etc.).
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(value.trim())) {
+    return {
+      ok: false,
+      message: 'Snooze "until" must be an ISO-8601 timestamp.',
+    };
+  }
+  const ts = Date.parse(value);
+  if (!Number.isFinite(ts)) {
+    return {
+      ok: false,
+      message: 'Snooze "until" must be an ISO-8601 timestamp.',
+    };
+  }
+  const now = Date.now();
+  if (ts <= now) {
+    return { ok: false, message: 'Snooze "until" must be in the future.' };
+  }
+  if (ts > now + MAX_SNOOZE_MS) {
+    return { ok: false, message: 'Snooze "until" must be within one year.' };
+  }
+  return { ok: true, iso: new Date(ts).toISOString() };
 }
 
 async function withHomeWorkspace<T>(
@@ -149,6 +193,68 @@ export async function listHomeNewsRoute(input: {
   );
 }
 
+export async function dismissHomeInboxRoute(input: {
+  auth: AuthContext;
+  workspaceId?: string | null;
+  itemId: string;
+}): Promise<RouteResult<HomeInboxMutationResult>> {
+  if (!isUuid(input.itemId)) {
+    return error(400, 'invalid_item_id', 'Inbox item id must be a UUID.');
+  }
+  return withHomeWorkspace(input, async ({ workspace }) => {
+    const result = await dismissHomeInboxItem({
+      workspaceId: workspace.id,
+      itemId: input.itemId,
+    });
+    if (!result) return error(404, 'not_found', 'Inbox item not found.');
+    return ok(result);
+  });
+}
+
+export async function snoozeHomeInboxRoute(input: {
+  auth: AuthContext;
+  workspaceId?: string | null;
+  itemId: string;
+  until: unknown;
+}): Promise<RouteResult<HomeInboxMutationResult>> {
+  if (!isUuid(input.itemId)) {
+    return error(400, 'invalid_item_id', 'Inbox item id must be a UUID.');
+  }
+  const until = parseSnoozeUntil(input.until);
+  if (!until.ok) return error(400, 'invalid_until', until.message);
+  return withHomeWorkspace(input, async ({ workspace }) => {
+    const result = await snoozeHomeInboxItem({
+      workspaceId: workspace.id,
+      itemId: input.itemId,
+      until: until.iso,
+    });
+    if (!result) return error(404, 'not_found', 'Inbox item not found.');
+    return ok(result);
+  });
+}
+
+export async function dismissHomeRecommendationRoute(input: {
+  auth: AuthContext;
+  workspaceId?: string | null;
+  recommendationId: string;
+}): Promise<RouteResult<HomeRecommendationMutationResult>> {
+  if (!isUuid(input.recommendationId)) {
+    return error(
+      400,
+      'invalid_recommendation_id',
+      'Recommendation id must be a UUID.',
+    );
+  }
+  return withHomeWorkspace(input, async ({ workspace }) => {
+    const result = await dismissHomeRecommendation({
+      workspaceId: workspace.id,
+      recommendationId: input.recommendationId,
+    });
+    if (!result) return error(404, 'not_found', 'Recommendation not found.');
+    return ok(result);
+  });
+}
+
 export function mountHomeRoutes(
   app: HomeApp,
   requireAuthMiddleware: HomeAuthMiddleware,
@@ -204,6 +310,82 @@ export function mountHomeRoutes(
     });
     return jsonResponse(result);
   });
+
+  app.post('/api/v1/home/inbox/:id/dismiss', async (c) => {
+    const auth = c.get('auth');
+    const rl = checkRateLimit({ principalId: auth.userId, bucket: 'write' });
+    if (!rl.allowed) return rateLimitedResponse(c, rl);
+    const csrfFail = checkCsrf(c, auth);
+    if (csrfFail) return csrfFail;
+    const result = await dismissHomeInboxRoute({
+      auth,
+      workspaceId: requestedWorkspaceId(c),
+      itemId: c.req.param('id'),
+    });
+    return jsonResponse(result);
+  });
+
+  app.post('/api/v1/home/inbox/:id/snooze', async (c) => {
+    const auth = c.get('auth');
+    const rl = checkRateLimit({ principalId: auth.userId, bucket: 'write' });
+    if (!rl.allowed) return rateLimitedResponse(c, rl);
+    const csrfFail = checkCsrf(c, auth);
+    if (csrfFail) return csrfFail;
+    const body = await readHomeJsonBody(c);
+    if (!body.ok) {
+      return jsonResponse(error(400, 'invalid_json', body.error));
+    }
+    const result = await snoozeHomeInboxRoute({
+      auth,
+      workspaceId: requestedWorkspaceId(c),
+      itemId: c.req.param('id'),
+      until: body.data.until,
+    });
+    return jsonResponse(result);
+  });
+
+  app.post('/api/v1/home/recommendations/:id/dismiss', async (c) => {
+    const auth = c.get('auth');
+    const rl = checkRateLimit({ principalId: auth.userId, bucket: 'write' });
+    if (!rl.allowed) return rateLimitedResponse(c, rl);
+    const csrfFail = checkCsrf(c, auth);
+    if (csrfFail) return csrfFail;
+    const result = await dismissHomeRecommendationRoute({
+      auth,
+      workspaceId: requestedWorkspaceId(c),
+      recommendationId: c.req.param('id'),
+    });
+    return jsonResponse(result);
+  });
+}
+
+/** Mirror of the worker-app CSRF guard for the Home write routes. */
+function checkCsrf(c: Context, auth: AuthContext): Response | null {
+  const csrf = validateCsrfTokenPg({
+    method: c.req.method,
+    authType: auth.authType,
+    cookieHeader: c.req.header('cookie'),
+    csrfHeader: c.req.header('x-csrf-token'),
+  });
+  if (csrf.ok) return null;
+  return c.json(
+    { ok: false, error: { code: 'csrf_failed', message: csrf.reason } },
+    403,
+  );
+}
+
+async function readHomeJsonBody(
+  c: Context,
+): Promise<
+  { ok: true; data: Record<string, unknown> } | { ok: false; error: string }
+> {
+  const bodyText = await c.req.text();
+  if (!bodyText.trim()) return { ok: true, data: {} };
+  try {
+    return { ok: true, data: JSON.parse(bodyText) as Record<string, unknown> };
+  } catch {
+    return { ok: false, error: 'Request body is not valid JSON' };
+  }
 }
 
 function jsonResponse(result: { statusCode: number; body: unknown }): Response {

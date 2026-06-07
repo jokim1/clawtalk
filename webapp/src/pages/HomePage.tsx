@@ -1,22 +1,29 @@
 /**
  * Home — the workspace attention router (docs/07-homepage-system-design.md).
  *
- * Read-only v1 built on the GET /api/v1/home/* API. Renders the curator
- * summary, stat strip, recommendations (hero + then-maybe), and an inbox/news
- * split. Navigation-shaped actions work today; mutation actions (dismiss /
- * snooze / resolve / add-to-context) render disabled until the Home write API
- * lands (see classifyAction in components/home/homeFormat).
+ * Built on the GET /api/v1/home/* read API plus the lifecycle write endpoints.
+ * Renders the curator summary, stat strip, recommendations (hero + then-maybe),
+ * and an inbox/news split. Inbox dismiss/snooze and recommendation dismiss are
+ * wired to the write API with page-owned optimistic state (entity-scoped revert
+ * on failure; a 404 is treated as already-gone). News add-to-context and inbox
+ * resolve/mark-read are still navigation/disabled pending their own surfaces.
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { Button, salon, salonFont } from '../salon';
 import {
+  ApiError,
+  dismissHomeInboxItem,
+  dismissHomeRecommendation,
   getHomeSummary,
   listHomeInbox,
   listHomeNews,
   listHomeRecommendations,
+  snoozeHomeInboxItem,
+  type HomeInboxItem,
   type HomeInboxPayload,
   type HomeNewsPayload,
+  type HomeRecommendation,
   type HomeRecommendationsPayload,
   type HomeSummaryPayload,
 } from '../lib/api';
@@ -58,11 +65,119 @@ const EMPTY_NEWS: HomeNewsPayload = {
   algorithmVersion: '',
 };
 
+/** Remove an Inbox item and decrement the affected counts (optimistic). */
+function removeInboxItem(
+  inbox: HomeInboxPayload,
+  id: string,
+): HomeInboxPayload {
+  const item = inbox.items.find((entry) => entry.id === id);
+  if (!item) return inbox;
+  const counts = { ...inbox.counts };
+  if (item.status === 'unread') counts.unread = Math.max(0, counts.unread - 1);
+  if (item.severity === 'blocking') {
+    counts.blocking = Math.max(0, counts.blocking - 1);
+  } else if (item.severity === 'action') {
+    counts.action = Math.max(0, counts.action - 1);
+  } else {
+    counts.info = Math.max(0, counts.info - 1);
+  }
+  return {
+    ...inbox,
+    items: inbox.items.filter((entry) => entry.id !== id),
+    counts,
+  };
+}
+
+/**
+ * Remove a recommendation (optimistic). If the hero is removed, the first
+ * then-maybe is promoted so the rail never shows an empty hero slot.
+ */
+function removeRecommendation(
+  recs: HomeRecommendationsPayload,
+  id: string,
+): HomeRecommendationsPayload {
+  const items = recs.items.filter((entry) => entry.id !== id);
+  if (recs.hero && recs.hero.id === id) {
+    return {
+      ...recs,
+      items,
+      hero: recs.thenMaybe[0] ?? null,
+      thenMaybe: recs.thenMaybe.slice(1),
+    };
+  }
+  return {
+    ...recs,
+    items,
+    thenMaybe: recs.thenMaybe.filter((entry) => entry.id !== id),
+  };
+}
+
+/**
+ * Re-insert an Inbox item at its prior index and restore its counts. Used to
+ * revert a single failed mutation without touching other items that may have
+ * been removed concurrently (entity-scoped revert, not a whole-state snapshot).
+ */
+function reinsertInboxItem(
+  inbox: HomeInboxPayload,
+  item: HomeInboxItem,
+  index: number,
+): HomeInboxPayload {
+  if (inbox.items.some((entry) => entry.id === item.id)) return inbox;
+  const items = [...inbox.items];
+  items.splice(Math.max(0, Math.min(index, items.length)), 0, item);
+  const counts = { ...inbox.counts };
+  if (item.status === 'unread') counts.unread += 1;
+  if (item.severity === 'blocking') counts.blocking += 1;
+  else if (item.severity === 'action') counts.action += 1;
+  else counts.info += 1;
+  return { ...inbox, items, counts };
+}
+
+/**
+ * A 404 means the server already considers the item gone (terminal or deleted),
+ * so the optimistic removal was correct — keep it removed instead of reverting.
+ */
+function isAlreadyGone(err: unknown): boolean {
+  return err instanceof ApiError && err.status === 404;
+}
+
+const ACTION_ERROR_MESSAGE = 'Couldn’t update that item. Try again.';
+
+/** Restore a single dismissed recommendation (entity-scoped revert). */
+function restoreRecommendation(
+  recs: HomeRecommendationsPayload,
+  rec: HomeRecommendation,
+  wasHero: boolean,
+): HomeRecommendationsPayload {
+  const present =
+    recs.hero?.id === rec.id ||
+    recs.items.some((entry) => entry.id === rec.id) ||
+    recs.thenMaybe.some((entry) => entry.id === rec.id);
+  if (present) return recs;
+  const items = [rec, ...recs.items];
+  if (wasHero) {
+    return {
+      ...recs,
+      items,
+      hero: rec,
+      thenMaybe: recs.hero ? [recs.hero, ...recs.thenMaybe] : recs.thenMaybe,
+    };
+  }
+  return { ...recs, items, thenMaybe: [rec, ...recs.thenMaybe] };
+}
+
 export function HomePage(): JSX.Element {
   const [state, setState] = useState<LoadState>({ status: 'loading' });
   // Tracks the in-flight load so a retry (or unmount) cancels the prior
   // request and no setState fires on an unmounted component.
   const activeLoad = useRef<{ cancelled: boolean } | null>(null);
+  // Mirrors the latest ready data so a mutation handler can capture the exact
+  // entity it removes (for an entity-scoped revert on failure) without a full
+  // reload + skeleton flash.
+  const readyDataRef = useRef<HomeData | null>(null);
+  // Surfaced when an optimistic write fails for a real reason (network / 5xx /
+  // rate limit) so the revert isn't silent. A 404 is treated as success.
+  const [actionError, setActionError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     if (activeLoad.current) activeLoad.current.cancelled = true;
@@ -108,6 +223,112 @@ export function HomePage(): JSX.Element {
     };
   }, [load]);
 
+  useEffect(() => {
+    if (state.status === 'ready') readyDataRef.current = state.data;
+  }, [state]);
+
+  // Optimistically remove an Inbox item, then revert just that item (at its
+  // prior index) if the write fails — never a whole-state snapshot, so an
+  // overlapping mutation can't be clobbered by a sibling's failure.
+  const mutateInbox = useCallback(
+    async (id: string, run: () => Promise<unknown>) => {
+      const inbox = readyDataRef.current?.inbox;
+      const index = inbox?.items.findIndex((entry) => entry.id === id) ?? -1;
+      const removed: HomeInboxItem | undefined =
+        index >= 0 ? inbox?.items[index] : undefined;
+      setActionError(null);
+      setState((prev) =>
+        prev.status === 'ready' && prev.data.inbox
+          ? {
+              status: 'ready',
+              data: {
+                ...prev.data,
+                inbox: removeInboxItem(prev.data.inbox, id),
+              },
+            }
+          : prev,
+      );
+      try {
+        await run();
+      } catch (err) {
+        if (isAlreadyGone(err)) return;
+        if (removed) {
+          setState((prev) =>
+            prev.status === 'ready' && prev.data.inbox
+              ? {
+                  status: 'ready',
+                  data: {
+                    ...prev.data,
+                    inbox: reinsertInboxItem(prev.data.inbox, removed, index),
+                  },
+                }
+              : prev,
+          );
+        }
+        setActionError(ACTION_ERROR_MESSAGE);
+      }
+    },
+    [],
+  );
+
+  const handleDismissInbox = useCallback(
+    (id: string) => void mutateInbox(id, () => dismissHomeInboxItem(id)),
+    [mutateInbox],
+  );
+
+  const handleSnoozeInbox = useCallback(
+    (id: string, until: string) =>
+      void mutateInbox(id, () => snoozeHomeInboxItem(id, until)),
+    [mutateInbox],
+  );
+
+  const handleDismissRecommendation = useCallback(async (id: string) => {
+    const recs = readyDataRef.current?.recommendations;
+    const wasHero = recs?.hero?.id === id;
+    const rec: HomeRecommendation | undefined = wasHero
+      ? (recs?.hero ?? undefined)
+      : (recs?.items.find((entry) => entry.id === id) ??
+        recs?.thenMaybe.find((entry) => entry.id === id));
+    setActionError(null);
+    setState((prev) =>
+      prev.status === 'ready' && prev.data.recommendations
+        ? {
+            status: 'ready',
+            data: {
+              ...prev.data,
+              recommendations: removeRecommendation(
+                prev.data.recommendations,
+                id,
+              ),
+            },
+          }
+        : prev,
+    );
+    try {
+      await dismissHomeRecommendation(id);
+    } catch (err) {
+      if (isAlreadyGone(err)) return;
+      if (rec) {
+        setState((prev) =>
+          prev.status === 'ready' && prev.data.recommendations
+            ? {
+                status: 'ready',
+                data: {
+                  ...prev.data,
+                  recommendations: restoreRecommendation(
+                    prev.data.recommendations,
+                    rec,
+                    wasHero ?? false,
+                  ),
+                },
+              }
+            : prev,
+        );
+      }
+      setActionError(ACTION_ERROR_MESSAGE);
+    }
+  }, []);
+
   return (
     <div
       className="ct-screen-enter ct-thin-scroll"
@@ -137,16 +358,66 @@ export function HomePage(): JSX.Element {
         </p>
       </header>
 
+      {actionError ? (
+        <div
+          role="alert"
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 10,
+            padding: '10px 14px',
+            borderRadius: 12,
+            background: '#fbecec',
+            color: '#7b2a30',
+            fontSize: 13,
+          }}
+        >
+          <span style={{ flex: 1 }}>{actionError}</span>
+          <button
+            type="button"
+            onClick={() => setActionError(null)}
+            aria-label="Dismiss error"
+            className="salon-btn"
+            style={{
+              border: 'none',
+              background: 'transparent',
+              color: '#7b2a30',
+              cursor: 'pointer',
+              fontSize: 13,
+            }}
+          >
+            Dismiss
+          </button>
+        </div>
+      ) : null}
+
       {state.status === 'loading' ? <HomeLoading /> : null}
       {state.status === 'error' ? (
         <HomeErrorCard message={state.message} onRetry={() => void load()} />
       ) : null}
-      {state.status === 'ready' ? <HomeContent data={state.data} /> : null}
+      {state.status === 'ready' ? (
+        <HomeContent
+          data={state.data}
+          onDismissInbox={handleDismissInbox}
+          onSnoozeInbox={handleSnoozeInbox}
+          onDismissRecommendation={handleDismissRecommendation}
+        />
+      ) : null}
     </div>
   );
 }
 
-function HomeContent({ data }: { data: HomeData }): JSX.Element {
+function HomeContent({
+  data,
+  onDismissInbox,
+  onSnoozeInbox,
+  onDismissRecommendation,
+}: {
+  data: HomeData;
+  onDismissInbox: (id: string) => void;
+  onSnoozeInbox: (id: string, until: string) => void;
+  onDismissRecommendation: (id: string) => void;
+}): JSX.Element {
   const recs = data.recommendations;
   const hero = recs?.hero ?? null;
   const thenMaybe = recs?.thenMaybe ?? [];
@@ -166,7 +437,13 @@ function HomeContent({ data }: { data: HomeData }): JSX.Element {
         />
         {hasRecs ? (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-            {hero ? <RecommendationCard rec={hero} variant="hero" /> : null}
+            {hero ? (
+              <RecommendationCard
+                rec={hero}
+                variant="hero"
+                onDismiss={onDismissRecommendation}
+              />
+            ) : null}
             {thenMaybe.length > 0 ? (
               <div
                 style={{
@@ -180,6 +457,7 @@ function HomeContent({ data }: { data: HomeData }): JSX.Element {
                     key={rec.id}
                     rec={rec}
                     variant="compact"
+                    onDismiss={onDismissRecommendation}
                   />
                 ))}
               </div>
@@ -202,7 +480,11 @@ function HomeContent({ data }: { data: HomeData }): JSX.Element {
           alignItems: 'start',
         }}
       >
-        <InboxPreview payload={data.inbox ?? EMPTY_INBOX} />
+        <InboxPreview
+          payload={data.inbox ?? EMPTY_INBOX}
+          onDismiss={onDismissInbox}
+          onSnooze={onSnoozeInbox}
+        />
         <NewsPreview payload={data.news ?? EMPTY_NEWS} />
       </div>
     </>

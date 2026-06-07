@@ -8,6 +8,7 @@ import {
   isSafeHttpUrl,
   newsImpactLabel,
   REC_PRIORITY_BADGE,
+  snoozePresets,
   talkRef,
   targetToPath,
   truncate,
@@ -150,5 +151,27 @@ describe('truncate', () => {
     expect(truncate('short', 30)).toBe('short');
     expect(truncate('x'.repeat(40), 10)).toHaveLength(10);
     expect(truncate('x'.repeat(40), 10).endsWith('…')).toBe(true);
+  });
+});
+
+describe('snoozePresets', () => {
+  it('returns three strictly-future ISO presets in ascending order', () => {
+    const now = new Date('2026-06-07T15:30:00Z');
+    const presets = snoozePresets(now);
+
+    expect(presets.map((p) => p.label)).toEqual([
+      'In 1 hour',
+      'Tomorrow',
+      'Next week',
+    ]);
+
+    const times = presets.map((p) => Date.parse(p.until));
+    expect(times.every((t) => Number.isFinite(t) && t > now.getTime())).toBe(
+      true,
+    );
+    expect(times[0]).toBeLessThan(times[1]);
+    expect(times[1]).toBeLessThan(times[2]);
+    // "In 1 hour" is exactly one hour out.
+    expect(times[0]).toBe(now.getTime() + 60 * 60 * 1000);
   });
 });

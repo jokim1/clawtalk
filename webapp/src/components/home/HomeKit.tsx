@@ -6,7 +6,7 @@
  * `salon.*`) and the Salon icon set. No Tailwind. Reused by every Home section
  * card so the cards stay visually identical.
  */
-import type { CSSProperties, ReactNode } from 'react';
+import type { CSSProperties, MouseEvent, ReactNode, Ref } from 'react';
 import { Link } from 'react-router-dom';
 
 import { CTIcon, salon, salonFont } from '../../salon';
@@ -321,6 +321,47 @@ export function ActionButton({
       style={{ ...style, opacity: 0.5, cursor: 'not-allowed' }}
     >
       {behavior.label}
+    </button>
+  );
+}
+
+/**
+ * Small round icon button for per-item lifecycle controls (dismiss / snooze).
+ * `buttonRef` lets a caller anchor a popover (snooze presets) to the trigger.
+ */
+export function LifecycleIconButton({
+  icon,
+  label,
+  onClick,
+  buttonRef,
+}: {
+  icon: CTIconName;
+  label: string;
+  onClick: (event: MouseEvent<HTMLButtonElement>) => void;
+  buttonRef?: Ref<HTMLButtonElement>;
+}): JSX.Element {
+  return (
+    <button
+      ref={buttonRef}
+      type="button"
+      onClick={onClick}
+      className="salon-btn"
+      title={label}
+      aria-label={label}
+      style={{
+        width: 28,
+        height: 28,
+        flexShrink: 0,
+        display: 'grid',
+        placeItems: 'center',
+        borderRadius: 9999,
+        background: 'var(--salon-card, #ffffff)',
+        color: salon.ink2,
+        border: `1px solid ${salon.line}`,
+        cursor: 'pointer',
+      }}
+    >
+      <CTIcon name={icon} size={13} stroke={salon.ink2} />
     </button>
   );
 }
