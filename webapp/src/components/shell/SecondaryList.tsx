@@ -23,15 +23,13 @@ import {
 import { createPortal } from 'react-dom';
 import { NavLink, useLocation } from 'react-router-dom';
 
-import { SidebarProfileMenu } from './SidebarProfileMenu';
-import { WorkspaceSwitcher } from './WorkspaceSwitcher';
+import { CTIcon, salon } from '../../salon';
 import type {
   ContentSidebarItem,
-  SessionUser,
   Talk,
   TalkSidebarFolder,
   TalkSidebarItem,
-} from '../lib/api';
+} from '../../lib/api';
 
 type TalkSidebarTalkView = TalkSidebarItem & {
   type: 'talk';
@@ -61,11 +59,7 @@ type Props = {
   contents: ContentSidebarItem[];
   loading: boolean;
   error: string | null;
-  user: SessionUser;
   mainTalkId: string | null;
-  onSwitchWorkspace: (workspaceId: string) => void | Promise<void>;
-  onSignOut: () => void;
-  signOutBusy: boolean;
   onNewTalk: () => void;
   onCreateFolder: () => Promise<TalkSidebarFolder>;
   onRenameTalk: (talkId: string, title: string) => void;
@@ -84,6 +78,10 @@ type Props = {
     destinationIndex: number;
   }) => Promise<void> | void;
   renameDraft: RenameDraft;
+  /** Open the ⌘K command palette (the search affordance). */
+  onOpenPalette: () => void;
+  /** Collapse the column (desktop) or close the drawer (mobile). */
+  onToggleSecondary: () => void;
 };
 
 type MenuState =
@@ -200,16 +198,29 @@ function buildMoveTargets(
   ];
 }
 
-export function ClawTalkSidebar({
+function countTalks(items: TalkSidebarItemView[]): {
+  total: number;
+  streaming: number;
+} {
+  let total = 0;
+  let streaming = 0;
+  const tally = (talk: TalkSidebarTalkView) => {
+    total += 1;
+    if (talk.isResponding) streaming += 1;
+  };
+  for (const item of items) {
+    if (item.type === 'talk') tally(item);
+    else item.talks.forEach(tally);
+  }
+  return { total, streaming };
+}
+
+export function SecondaryList({
   items,
   contents,
   loading,
   error,
-  user,
   mainTalkId,
-  onSwitchWorkspace,
-  onSignOut,
-  signOutBusy,
   onNewTalk,
   onCreateFolder,
   onRenameTalk,
@@ -219,6 +230,8 @@ export function ClawTalkSidebar({
   onDeleteFolder,
   onReorder,
   renameDraft,
+  onOpenPalette,
+  onToggleSecondary,
 }: Props): JSX.Element {
   const location = useLocation();
   // The Main NavLink targets /app/main, which redirects to the system
@@ -249,6 +262,8 @@ export function ClawTalkSidebar({
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 8 } }),
   );
+
+  const { total, streaming } = useMemo(() => countTalks(items), [items]);
 
   useEffect(() => {
     setExpandedFolderIds((current) => {
@@ -776,116 +791,112 @@ export function ClawTalkSidebar({
   };
 
   return (
-    <aside className="clawtalk-sidebar" aria-label="Primary navigation">
-      <WorkspaceSwitcher
-        workspaces={user.workspaces ?? []}
-        currentWorkspaceId={user.currentWorkspaceId}
-        onSwitchWorkspace={onSwitchWorkspace}
-      />
-
-      <nav className="clawtalk-sidebar-nav" aria-label="App sections">
-        <NavLink
-          to="/app/home"
-          end
-          className={({ isActive }) =>
-            `clawtalk-sidebar-link${isActive ? ' active' : ''}`
-          }
-        >
-          Home
-        </NavLink>
-        <NavLink
-          to="/app/archive"
-          end
-          className={({ isActive }) =>
-            `clawtalk-sidebar-link${isActive ? ' active' : ''}`
-          }
-        >
-          Archive
-        </NavLink>
-      </nav>
-
-      <div className="clawtalk-sidebar-section">
-        <div className="clawtalk-sidebar-section-header">
-          <div className="clawtalk-sidebar-section-label">Talks</div>
-          <div className="clawtalk-sidebar-section-actions">
-            <button
-              type="button"
-              className="clawtalk-sidebar-add"
-              ref={createMenuButtonRef}
-              aria-label="Create talk or folder"
-              onClick={() =>
-                setMenuState((current) =>
-                  current?.type === 'create' ? null : { type: 'create' },
-                )
-              }
-            >
-              +
-            </button>
-            {menuState?.type === 'create'
-              ? renderMenu(
-                  <>
-                    <button type="button" onClick={handleCreateTalkClick}>
-                      New Talk
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => void handleCreateFolderClick()}
-                    >
-                      New Folder
-                    </button>
-                  </>,
-                )
-              : null}
+    <aside className="ct-secondary" aria-label="Talks">
+      <div className="ct-secondary-head">
+        <div className="ct-secondary-head-titles">
+          <div className="ct-secondary-title">Talks</div>
+          <div className="ct-secondary-sub">
+            {total} active · {streaming} streaming
           </div>
         </div>
-
-        <NavLink
-          to="/app/main"
-          className={`clawtalk-sidebar-link clawtalk-sidebar-link-main${
-            isMainActive ? ' active' : ''
-          }`}
-        >
-          Main
-        </NavLink>
-
-        <div className="clawtalk-sidebar-talks" aria-label="Talk list">
-          {loading ? (
-            <p className="clawtalk-sidebar-empty">Loading talks…</p>
-          ) : error ? (
-            <p className="clawtalk-sidebar-empty">{error}</p>
-          ) : items.length === 0 ? (
-            <p className="clawtalk-sidebar-empty">
-              No talks yet. Use + to create one.
-            </p>
-          ) : (
-            <DndContext
-              sensors={sensors}
-              collisionDetection={closestCenter}
-              onDragStart={handleDragStart}
-              onDragEnd={handleDragEnd}
-              onDragCancel={() => setActiveDragId(null)}
-            >
-              <DropZone
-                id={encodeDndId({ kind: 'root-drop' })}
-                active={activeDragId !== null}
-              >
-                <div className="clawtalk-sidebar-tree">
-                  {items.map((item) =>
-                    item.type === 'folder'
-                      ? renderFolderRow(item)
-                      : renderTalkRow(item),
-                  )}
-                </div>
-              </DropZone>
-            </DndContext>
-          )}
+        <div className="ct-secondary-head-actions">
+          <button
+            type="button"
+            className="ct-secondary-icon-btn"
+            ref={createMenuButtonRef}
+            aria-label="Create talk or folder"
+            aria-haspopup="menu"
+            aria-expanded={menuState?.type === 'create'}
+            onClick={() =>
+              setMenuState((current) =>
+                current?.type === 'create' ? null : { type: 'create' },
+              )
+            }
+          >
+            <CTIcon name="plus" size={15} strokeWidth={1.9} />
+          </button>
+          <button
+            type="button"
+            className="ct-secondary-icon-btn ct-secondary-collapse"
+            aria-label="Hide talk list"
+            onClick={onToggleSecondary}
+          >
+            <CTIcon name="sidebar" size={15} strokeWidth={1.7} />
+          </button>
+          {menuState?.type === 'create'
+            ? renderMenu(
+                <>
+                  <button type="button" onClick={handleCreateTalkClick}>
+                    New Talk
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void handleCreateFolderClick()}
+                  >
+                    New Folder
+                  </button>
+                </>,
+              )
+            : null}
         </div>
       </div>
 
-      <div className="clawtalk-sidebar-content-section">
-        <div className="clawtalk-sidebar-section-header">
-          <div className="clawtalk-sidebar-section-label">Content</div>
-        </div>
+      <div className="ct-secondary-search">
+        <button
+          type="button"
+          className="ct-secondary-search-btn"
+          aria-label="Search talks"
+          onClick={onOpenPalette}
+        >
+          <CTIcon name="search" size={14} stroke={salon.ink2} />
+          <span className="ct-secondary-search-label">Search talks</span>
+          <kbd className="ct-secondary-search-kbd">⌘K</kbd>
+        </button>
+      </div>
+
+      <NavLink
+        to="/app/main"
+        className={`ct-secondary-row-link${isMainActive ? ' active' : ''}`}
+      >
+        <CTIcon name="chat" size={14} stroke={salon.ink2} strokeWidth={1.6} />
+        Main
+      </NavLink>
+
+      <div className="ct-secondary-tree" aria-label="Talk list">
+        {loading ? (
+          <p className="clawtalk-sidebar-empty">Loading talks…</p>
+        ) : error ? (
+          <p className="clawtalk-sidebar-empty">{error}</p>
+        ) : items.length === 0 ? (
+          <p className="clawtalk-sidebar-empty">
+            No talks yet. Use + to create one.
+          </p>
+        ) : (
+          <DndContext
+            sensors={sensors}
+            collisionDetection={closestCenter}
+            onDragStart={handleDragStart}
+            onDragEnd={handleDragEnd}
+            onDragCancel={() => setActiveDragId(null)}
+          >
+            <DropZone
+              id={encodeDndId({ kind: 'root-drop' })}
+              active={activeDragId !== null}
+            >
+              <div className="clawtalk-sidebar-tree">
+                {items.map((item) =>
+                  item.type === 'folder'
+                    ? renderFolderRow(item)
+                    : renderTalkRow(item),
+                )}
+              </div>
+            </DropZone>
+          </DndContext>
+        )}
+      </div>
+
+      <div className="ct-secondary-content">
+        <div className="ct-secondary-content-label">Content</div>
         {contents.length === 0 ? (
           <p className="clawtalk-sidebar-content-empty">
             Promote a Talk to start creating documents.
@@ -917,12 +928,16 @@ export function ClawTalkSidebar({
         )}
       </div>
 
-      <div className="clawtalk-sidebar-footer">
-        <SidebarProfileMenu
-          user={user}
-          onSignOut={onSignOut}
-          signOutBusy={signOutBusy}
-        />
+      <div className="ct-secondary-foot">
+        <NavLink
+          to="/app/archive"
+          className={({ isActive }) =>
+            `ct-secondary-row-link${isActive ? ' active' : ''}`
+          }
+        >
+          <CTIcon name="clock" size={14} stroke={salon.ink2} strokeWidth={1.6} />
+          Archive
+        </NavLink>
       </div>
     </aside>
   );

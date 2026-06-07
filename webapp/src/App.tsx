@@ -7,10 +7,10 @@ import {
   useNavigate,
 } from 'react-router-dom';
 
-import { ClawTalkMark } from './components/ClawTalkMark';
-import { ClawTalkSidebar } from './components/ClawTalkSidebar';
 import { CommandPalette, type CommandItem } from './components/CommandPalette';
 import { NewTalkSheet } from './components/NewTalkSheet';
+import { IconRail } from './components/shell/IconRail';
+import { SecondaryList } from './components/shell/SecondaryList';
 import { SignInView } from './components/SignInView';
 import {
   ApiError,
@@ -412,7 +412,10 @@ export function App() {
   const [sidebarLoading, setSidebarLoading] = useState(true);
   const [sidebarError, setSidebarError] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState<RenameDraft>(null);
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  // Desktop: the talk-list column can be collapsed (persisted). Mobile: it
+  // rides in as an overlay drawer instead (transient).
+  const [secondaryCollapsed, setSecondaryCollapsed] = useState(false);
+  const [secondaryDrawerOpen, setSecondaryDrawerOpen] = useState(false);
   const [newTalkOpen, setNewTalkOpen] = useState(false);
   // Element to restore focus to when the New Talk sheet is dismissed without
   // creating — captured at open-time, before the sheet's portal steals focus.
@@ -440,7 +443,7 @@ export function App() {
     if (typeof window === 'undefined') return;
     const stored = window.localStorage.getItem(SIDEBAR_COLLAPSED_STORAGE_KEY);
     if (stored === 'true') {
-      setSidebarCollapsed(true);
+      setSecondaryCollapsed(true);
     }
     setTalkReadMarkers(readTalkReadMarkers());
   }, []);
@@ -449,9 +452,9 @@ export function App() {
     if (typeof window === 'undefined') return;
     window.localStorage.setItem(
       SIDEBAR_COLLAPSED_STORAGE_KEY,
-      sidebarCollapsed ? 'true' : 'false',
+      secondaryCollapsed ? 'true' : 'false',
     );
-  }, [sidebarCollapsed]);
+  }, [secondaryCollapsed]);
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
@@ -640,6 +643,21 @@ export function App() {
           target.focus();
         }
       });
+    }
+  }, []);
+
+  // Collapse (desktop) or open-as-drawer (mobile) the secondary talk-list
+  // column. The breakpoint is read at click time so render stays media-agnostic
+  // and unit tests don't need a matchMedia polyfill to mount the shell.
+  const toggleSecondary = useCallback(() => {
+    const isMobile =
+      typeof window !== 'undefined' &&
+      typeof window.matchMedia === 'function' &&
+      window.matchMedia('(max-width: 1023px)').matches;
+    if (isMobile) {
+      setSecondaryDrawerOpen((value) => !value);
+    } else {
+      setSecondaryCollapsed((value) => !value);
     }
   }, []);
 
@@ -880,8 +898,6 @@ export function App() {
     [sidebarItems],
   );
 
-  const canManageAgents = auth.status === 'authenticated';
-
   const handleUserUpdated = useCallback((user: SessionUser) => {
     setAuth({ status: 'authenticated', user });
   }, []);
@@ -900,6 +916,19 @@ export function App() {
     location.pathname.startsWith('/app/talks/') &&
     location.pathname !== '/app/talks';
   const isMainRoute = location.pathname.startsWith('/app/main');
+  // The talk-list column rides along on talk-centric routes; management
+  // surfaces (Settings, agent profiles) get the full content width.
+  const secondaryAvailable =
+    location.pathname === '/' ||
+    location.pathname.startsWith('/app/home') ||
+    location.pathname.startsWith('/app/talks') ||
+    location.pathname.startsWith('/app/archive') ||
+    location.pathname.startsWith('/app/main');
+
+  // Close the mobile drawer whenever the route changes (e.g. picking a Talk).
+  useEffect(() => {
+    setSecondaryDrawerOpen(false);
+  }, [location.pathname]);
 
   useEffect(() => {
     if (!sidebarItems.length) return;
@@ -936,85 +965,49 @@ export function App() {
   }
 
   return (
-    <main
-      className={`app-shell${sidebarCollapsed ? ' app-shell-sidebar-collapsed' : ''}`}
+    <div
+      className="ct-shell"
+      data-secondary={secondaryAvailable ? 'on' : 'off'}
+      data-secondary-collapsed={secondaryCollapsed ? 'true' : 'false'}
+      data-secondary-drawer={secondaryDrawerOpen ? 'true' : 'false'}
     >
-      <header className="app-global-header">
-        <div className="app-global-header-left">
-          <button
-            type="button"
-            className="app-sidebar-toggle"
-            aria-label={
-              sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'
-            }
-            onClick={() => setSidebarCollapsed((current) => !current)}
-          >
-            {sidebarCollapsed ? '▸' : '◂'}
-          </button>
-          <div className="app-global-brand">
-            <ClawTalkMark />
-            <span className="app-global-brand-title">ClawTalk</span>
-          </div>
-          <form
-            className="app-global-search"
-            role="search"
-            onSubmit={(event) => event.preventDefault()}
-          >
-            <span className="app-global-search-icon" aria-hidden="true">
-              ⌕
-            </span>
-            {/* Read-only trigger: opens the ⌘K command palette rather than
-                being a free-text field. onClick (not onFocus) avoids a
-                focus-restore → reopen loop when the palette closes. */}
-            <input
-              type="search"
-              aria-label="Search"
-              placeholder="Search commands and Talks…"
-              readOnly
-              onClick={openPalette}
-              onKeyDown={(event) => {
-                if (event.key === 'Enter' || event.key === ' ') {
-                  event.preventDefault();
-                  openPalette();
-                }
-              }}
-            />
-          </form>
-        </div>
-        <div className="app-global-header-right">
-          <a
-            className="app-global-help-link"
-            href="https://clawtalk.app/help"
-            target="_blank"
-            rel="noreferrer"
-            aria-label="Help"
-            title="Help"
-          >
-            ?
-          </a>
-        </div>
-      </header>
-      {!sidebarCollapsed ? (
-        <ClawTalkSidebar
-          items={sidebarViewItems}
-          contents={sidebarContents}
-          loading={sidebarLoading}
-          error={sidebarError}
-          user={auth.user}
-          mainTalkId={mainTalkId}
-          onSwitchWorkspace={handleSwitchWorkspace}
-          onSignOut={handleSignOut}
-          signOutBusy={signOutBusy}
-          onNewTalk={openNewTalk}
-          onCreateFolder={handleCreateFolder}
-          onRenameTalk={handleRenameTalk}
-          onPatchTalk={handlePatchTalk}
-          onDeleteTalk={handleDeleteTalk}
-          onRenameFolder={handleRenameFolder}
-          onDeleteFolder={handleDeleteFolder}
-          onReorder={handleReorder}
-          renameDraft={renameDraft}
-        />
+      <IconRail
+        user={auth.user}
+        workspaces={auth.user.workspaces ?? []}
+        currentWorkspaceId={auth.user.currentWorkspaceId}
+        onSwitchWorkspace={handleSwitchWorkspace}
+        onSignOut={handleSignOut}
+        signOutBusy={signOutBusy}
+        onOpenPalette={openPalette}
+        onToggleSecondary={toggleSecondary}
+        secondaryAvailable={secondaryAvailable}
+      />
+      {secondaryAvailable ? (
+        <>
+          <div
+            className="ct-secondary-backdrop"
+            onClick={() => setSecondaryDrawerOpen(false)}
+            aria-hidden="true"
+          />
+          <SecondaryList
+            items={sidebarViewItems}
+            contents={sidebarContents}
+            loading={sidebarLoading}
+            error={sidebarError}
+            mainTalkId={mainTalkId}
+            onNewTalk={openNewTalk}
+            onCreateFolder={handleCreateFolder}
+            onRenameTalk={handleRenameTalk}
+            onPatchTalk={handlePatchTalk}
+            onDeleteTalk={handleDeleteTalk}
+            onRenameFolder={handleRenameFolder}
+            onDeleteFolder={handleDeleteFolder}
+            onReorder={handleReorder}
+            renameDraft={renameDraft}
+            onOpenPalette={openPalette}
+            onToggleSecondary={toggleSecondary}
+          />
+        </>
       ) : null}
       {newTalkOpen ? (
         <NewTalkSheet
@@ -1115,6 +1108,6 @@ export function App() {
           </Routes>
         </div>
       </div>
-    </main>
+    </div>
   );
 }

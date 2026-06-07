@@ -3,7 +3,7 @@ import { test, expect, type Page, type Route } from '@playwright/test';
 // E2E + responsive QA for the ⌘K command palette (lane-o Q2).
 //
 // Backend fully mocked via page.route (self-contained). Verifies the palette
-// opens via Ctrl/Cmd+K and via the header search field, filters, navigates to
+// opens via Ctrl/Cmd+K and via the talk-list search field, filters, navigates to
 // a Talk and to a Settings tab, closes on Escape, and renders at 390/1280.
 
 const USER_ID = '33333333-3333-3333-3333-333333333333';
@@ -92,12 +92,12 @@ test('navigates to a Settings tab via the palette', async ({ page }) => {
   await expect(page).toHaveURL(/\/app\/settings\?tab=agents/);
 });
 
-test('opens from the header search field and closes on Escape', async ({
+test('opens from the talk-list search field and closes on Escape', async ({
   page,
 }) => {
   await installMocks(page);
   await page.goto('/app/talks');
-  await page.getByRole('searchbox', { name: 'Search' }).click();
+  await page.getByRole('button', { name: 'Search talks' }).click();
   const combo = page.getByRole('combobox', {
     name: 'Search commands and Talks',
   });

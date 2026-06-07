@@ -80,6 +80,12 @@ async function openSheet(page: Page): Promise<void> {
   const addBtn = page.getByRole('button', { name: 'Create talk or folder' });
   const newTalkBtn = page.getByRole('button', { name: 'New Talk' });
   await addBtn.waitFor({ state: 'visible' });
+  // On narrow viewports the talk-list column is an off-screen drawer; open it
+  // via the rail toggle so the "+" is on-screen and clickable.
+  const box = await addBtn.boundingBox();
+  if (!box || box.x < 0) {
+    await page.getByRole('button', { name: 'Toggle talk list' }).click();
+  }
   // The app shell re-renders during boot; retry opening the create menu
   // idempotently (only click "+" when the menu isn't already open) until the
   // New Talk item is present, then open the sheet.

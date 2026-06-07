@@ -26,6 +26,11 @@
   --salon-ink-2: #6b6660;
   --salon-line: #e6e0d1;
   --salon-accent: #c8643a;
+  /* Text-bearing filled buttons put white text on the accent. #c8643a on #fff
+   * is only ~3.9:1 — below the WCAG AA 4.5:1 floor for normal text. So labelled
+   * primary buttons use a darker accent (~5.0:1 on #fff) while decorative accent
+   * uses (logo, live dots, borders, focus rings) keep the brighter brand hue. */
+  --salon-accent-strong: #b05530;
 
   /* §2 · Type families (loaded via <link> in index.html) */
   --salon-font-serif: 'Newsreader', Georgia, serif;
