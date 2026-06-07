@@ -7,7 +7,7 @@
 
 This doc fully specifies the 5 default agents that ship with every workspace. They are the heart of the product's value — get the role definitions, methodologies, and default model assignments right.
 
-**Canonical display seed:** `shared/data.jsx` → `CT_AGENTS` array. **Canonical prompt seed:** this doc. Port the full prompts and methodology text verbatim.
+**Canonical display seed:** `prototypes/shared/data.jsx` → `CT_AGENTS` array. **Canonical prompt seed:** this doc. Port the full prompts and methodology text verbatim.
 
 **Architecture note:** this doc is the canonical default content. The production agent architecture, editable fields, prompt assembly, snapshots, and eval strategy are specified in [`06-agent-system-design.md`](./06-agent-system-design.md).
 

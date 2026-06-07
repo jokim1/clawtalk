@@ -25,7 +25,7 @@ Historical audits, handoffs, runbooks, and tactical plans live under [archive/au
 
 1. **Cross-cutting decisions** → [DECISIONS.md](./DECISIONS.md).
 2. **Hierarchy / data model** → [08-information-architecture.md](./08-information-architecture.md).
-3. **UI / interaction** → the prototype (`ClawTalk Salon.html` + `prototype/*.jsx`).
+3. **UI / interaction** → the prototype (`prototypes/ClawTalk Salon.html` + `prototypes/prototype/*.jsx`).
 4. **Stack / runtime** → repo reality (Cloudflare Workers + Hono + Durable Objects + Hyperdrive + Queues) and [DECISIONS.md](./DECISIONS.md) D1.
 5. **What currently exists** → [REFACTOR-AUDIT.md](./REFACTOR-AUDIT.md) + [roadmap.md](./roadmap.md). Use old archived implementation notes only as provenance.
 6. **Product behavior** → `01-product-spec.md`. **Anything in [archive/](./archive/) is superseded.**
@@ -54,18 +54,18 @@ Historical audits, handoffs, runbooks, and tactical plans live under [archive/au
 
 | Path | What it is |
 |---|---|
-| `ClawTalk Salon.html` | The **working visual prototype** in React + Tailwind. Open it in a browser to see the entire product running with mocked state. This is the source of truth for visual + interaction design. Now includes the latest base-design updates: document tabs, the multi-workspace account switcher, and the resizable document pane. |
-| `ClawTalk Forge.html` | The **Forge** clickable prototype — `ClawTalk Salon.html` with `window.CT_FORGE_ENABLED` set, wiring in the autonomous content-improvement flow. See **[10-forge-design-handoff.md](./10-forge-design-handoff.md)**. |
-| `ClawTalk Forge - Exploration.html` | Forge design canvas — written rationale plus the entry-surface and gallery-layout options explored before settling on the shipped design. |
-| `prototype/*.jsx` | The prototype's source. Component-by-component. Read these alongside the screens you're building. The `forge-*.jsx` modules hold the Forge surfaces; the Salon modules carry Forge integration gated behind `CT_FORGE_ENABLED`. |
-| `design-canvas.jsx` | Source for the Forge exploration canvas (`ClawTalk Forge - Exploration.html`). |
-| `shared/data.jsx` | Mock data, brand marks, icons, and the canonical agent / team / role definitions. **Seed your DB from this file.** |
+| `prototypes/ClawTalk Salon.html` | The **working visual prototype** in React + Tailwind. Open it in a browser to see the entire product running with mocked state. This is the source of truth for visual + interaction design. Now includes the latest base-design updates: document tabs, the multi-workspace account switcher, and the resizable document pane. |
+| `prototypes/ClawTalk Forge.html` | The **Forge** clickable prototype — `prototypes/ClawTalk Salon.html` with `window.CT_FORGE_ENABLED` set, wiring in the autonomous content-improvement flow. See **[10-forge-design-handoff.md](./10-forge-design-handoff.md)**. |
+| `prototypes/ClawTalk Forge - Exploration.html` | Forge design canvas — written rationale plus the entry-surface and gallery-layout options explored before settling on the shipped design. |
+| `prototypes/prototype/*.jsx` | The prototype's source. Component-by-component. Read these alongside the screens you're building. The `forge-*.jsx` modules hold the Forge surfaces; the Salon modules carry Forge integration gated behind `CT_FORGE_ENABLED`. |
+| `prototypes/design-canvas.jsx` | Source for the Forge exploration canvas (`prototypes/ClawTalk Forge - Exploration.html`). |
+| `prototypes/shared/data.jsx` | Mock data, brand marks, icons, and the canonical agent / team / role definitions. **Seed your DB from this file.** |
 
 ---
 
 ## How to use this material
 
-1. **Read the prototype first.** Open `ClawTalk Salon.html` in a browser. Click every icon in the left rail, send a message, open the doc pane, hit ⌘K, open the Tools popover, archive a Talk. Get a feel for the product before reading any docs.
+1. **Read the prototype first.** Open `prototypes/ClawTalk Salon.html` in a browser. Click every icon in the left rail, send a message, open the doc pane, hit ⌘K, open the Tools popover, archive a Talk. Get a feel for the product before reading any docs.
 2. **Read `01-product-spec.md`** end to end. It tells you *what to build*.
 3. **Skim `02-visual-system.md`** — extract the tokens, then refer back as needed.
 4. **Read `03-agents.md` carefully.** The 5 default agents and their methodologies are the heart of the product's value. Get them right.
@@ -84,7 +84,7 @@ When ambiguity arises, the **prototype** is the canonical reference for UI, the 
 | # | Doc | What it gives you |
 |---|---|---|
 | 9 | **[09-autonomous-content-improvement-prd.md](./09-autonomous-content-improvement-prd.md)** | "Forge" — autonomously iterate a Document toward a scored quality bar, using the Synthetical/SSR platform as the scoring oracle. Population-based generate→score→improve loop over the greenfield Document model. The *what & why*. Post-MVP behind a feature flag. |
-| 10 | **[10-forge-design-handoff.md](./10-forge-design-handoff.md)** | "Forge" design + interaction handoff — the *how it looks & behaves*. Maps the clickable prototype (`ClawTalk Forge.html`) and its surfaces back to the PRD, with a suggested build order. Front-end mock; all scoring data simulated. |
+| 10 | **[10-forge-design-handoff.md](./10-forge-design-handoff.md)** | "Forge" design + interaction handoff — the *how it looks & behaves*. Maps the clickable prototype (`prototypes/ClawTalk Forge.html`) and its surfaces back to the PRD, with a suggested build order. Front-end mock; all scoring data simulated. |
 | 12 | **[12-jobs.md](./12-jobs.md)** | "Jobs" — scheduled single-agent prompts that fire a run on a Talk and land output as a message and/or a pending Document edit. The D6 redesign (no threads, workspace-scoped, short-backoff scheduler). |
 
 ---

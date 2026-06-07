@@ -29,7 +29,7 @@ V2 is defined by:
 
 - Canonical docs `docs/01` through `docs/12`.
 - The Salon visual system in `docs/02-visual-system.md`.
-- The reference prototype at `ClawTalk Salon.html`, `prototype/*.jsx`, and `shared/data.jsx`.
+- The reference prototype at `docs/prototypes/ClawTalk Salon.html`, `docs/prototypes/prototype/*.jsx`, and `docs/prototypes/shared/data.jsx`.
 - The greenfield schema at `supabase/migrations/0001_clawtalk_greenfield.sql`.
 
 The full surface area is roughly:

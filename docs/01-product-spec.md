@@ -3,7 +3,7 @@
 
 # ClawTalk · Product Spec
 
-**Read me first.** This is the canonical specification of ClawTalk — the product you're building. Every concept, data structure, screen, and flow lives here. The working visual prototype (`ClawTalk Salon.html` at the repo root) is the canonical reference for *what it looks like and how it feels*. This doc tells you *what it does*.
+**Read me first.** This is the canonical specification of ClawTalk — the product you're building. Every concept, data structure, screen, and flow lives here. The working visual prototype (`prototypes/ClawTalk Salon.html`) is the canonical reference for *what it looks like and how it feels*. This doc tells you *what it does*.
 
 ---
 
@@ -196,7 +196,7 @@ type Agent = {
 - Quant · GPT-5 Pro
 
 Full default system prompts and methodologies are in `03-agents.md`; display
-defaults, accents, and teams are in `shared/data.jsx`'s `CT_AGENTS` array. Port
+defaults, accents, and teams are in `prototypes/shared/data.jsx`'s `CT_AGENTS` array. Port
 canonical prompt and method text verbatim.
 
 ### 1.7 Team compositions (NEW)
@@ -478,7 +478,7 @@ If no primary document: single confirm "Archive Talk".
 
 Every new workspace seeds with:
 
-- **5 default agents** (Strategist, Critic, Researcher, Editor, Quant) — full prompts and methodologies in `03-agents.md`; display seed data in `shared/data.jsx`
+- **5 default agents** (Strategist, Critic, Researcher, Editor, Quant) — full prompts and methodologies in `03-agents.md`; display seed data in `prototypes/shared/data.jsx`
 - **3 default team compositions** (Pricing crew, Research crew, Hiring crew)
 - **The v1 tool catalog** (see §5.1) seeded with sensible enable-by-default flags (`web-search` ON, `gdrive-read` ON, `news-monitor` ON; others OFF)
 - **Empty folder list** — user creates folders or leaves Talks in Unfiled
