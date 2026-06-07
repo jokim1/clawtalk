@@ -7,7 +7,7 @@
  * snooze / resolve / add-to-context) render disabled until the Home write API
  * lands (see classifyAction in components/home/homeFormat).
  */
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { Button, salon, salonFont } from '../salon';
 import {
@@ -60,8 +60,15 @@ const EMPTY_NEWS: HomeNewsPayload = {
 
 export function HomePage(): JSX.Element {
   const [state, setState] = useState<LoadState>({ status: 'loading' });
+  // Tracks the in-flight load so a retry (or unmount) cancels the prior
+  // request and no setState fires on an unmounted component.
+  const activeLoad = useRef<{ cancelled: boolean } | null>(null);
 
-  const load = useCallback(async (signal: { cancelled: boolean }) => {
+  const load = useCallback(async () => {
+    if (activeLoad.current) activeLoad.current.cancelled = true;
+    const signal = { cancelled: false };
+    activeLoad.current = signal;
+
     setState({ status: 'loading' });
     // The summary is the spine (curator + stats); a failure there fails the
     // page. The three list calls degrade independently to empty sections.
@@ -95,10 +102,9 @@ export function HomePage(): JSX.Element {
   }, []);
 
   useEffect(() => {
-    const signal = { cancelled: false };
-    void load(signal);
+    void load();
     return () => {
-      signal.cancelled = true;
+      if (activeLoad.current) activeLoad.current.cancelled = true;
     };
   }, [load]);
 
@@ -133,10 +139,7 @@ export function HomePage(): JSX.Element {
 
       {state.status === 'loading' ? <HomeLoading /> : null}
       {state.status === 'error' ? (
-        <HomeErrorCard
-          message={state.message}
-          onRetry={() => void load({ cancelled: false })}
-        />
+        <HomeErrorCard message={state.message} onRetry={() => void load()} />
       ) : null}
       {state.status === 'ready' ? <HomeContent data={state.data} /> : null}
     </div>

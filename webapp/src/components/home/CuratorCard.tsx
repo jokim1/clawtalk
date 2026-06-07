@@ -6,7 +6,7 @@ import { Link } from 'react-router-dom';
 
 import { salon, salonFont } from '../../salon';
 import type { HomeSummaryPayload } from '../../lib/api';
-import { Eyebrow } from './HomeKit';
+import { clampLines, Eyebrow } from './HomeKit';
 import { targetToPath } from './homeFormat';
 
 export function CuratorCard({
@@ -51,6 +51,7 @@ export function CuratorCard({
         </div>
         <div
           style={{
+            ...clampLines(2),
             fontFamily: salonFont.serif,
             fontSize: 18,
             lineHeight: 1.35,
@@ -62,6 +63,7 @@ export function CuratorCard({
         {curator.summary ? (
           <div
             style={{
+              ...clampLines(3),
               fontSize: 12.5,
               lineHeight: 1.45,
               marginTop: 4,
@@ -84,7 +86,7 @@ export function CuratorCard({
             flexShrink: 0,
           }}
         >
-          Why this →
+          Why this <span aria-hidden="true">→</span>
         </Link>
       ) : null}
     </div>

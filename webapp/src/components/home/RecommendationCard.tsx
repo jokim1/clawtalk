@@ -6,7 +6,14 @@
  */
 import { salon, salonFont } from '../../salon';
 import type { HomeRecommendation } from '../../lib/api';
-import { ActionButton, Badge, Card, KindGlyph, TalkChip } from './HomeKit';
+import {
+  ActionButton,
+  Badge,
+  Card,
+  clampLines,
+  KindGlyph,
+  TalkChip,
+} from './HomeKit';
 import {
   classifyAction,
   REC_KIND_ICON,
@@ -53,6 +60,7 @@ export function RecommendationCard({
           <div style={{ flex: 1, minWidth: 0 }}>
             <div
               style={{
+                ...clampLines(2),
                 fontFamily: salonFont.serif,
                 fontSize: titleSize,
                 lineHeight: 1.3,
@@ -64,6 +72,7 @@ export function RecommendationCard({
             {rec.why ? (
               <div
                 style={{
+                  ...clampLines(3),
                   fontSize: 12.5,
                   lineHeight: 1.4,
                   marginTop: 4,

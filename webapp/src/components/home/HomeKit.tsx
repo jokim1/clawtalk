@@ -20,6 +20,20 @@ export const CARD_STYLE: CSSProperties = {
   padding: 16,
 };
 
+/**
+ * Multi-line truncation that also breaks long unbroken tokens (URLs, IDs) so
+ * card text cannot overflow its flex column at narrow (390px) widths.
+ */
+export function clampLines(lines: number): CSSProperties {
+  return {
+    display: '-webkit-box',
+    WebkitLineClamp: lines,
+    WebkitBoxOrient: 'vertical',
+    overflow: 'hidden',
+    overflowWrap: 'anywhere',
+  };
+}
+
 /** Rounded Salon card. `accentRail` draws the Decide-priority left bar. */
 export function Card({
   children,
@@ -88,6 +102,7 @@ export function SectionHeader({
         </span>
       ) : null}
       <div
+        aria-hidden="true"
         style={{
           flex: 1,
           height: 1,
@@ -289,6 +304,7 @@ export function ActionButton({
         className="salon-btn"
         style={style}
         onClick={onActivate}
+        aria-label={`${behavior.label} (opens in new window)`}
       >
         {behavior.label}
         <span aria-hidden="true">↗</span>

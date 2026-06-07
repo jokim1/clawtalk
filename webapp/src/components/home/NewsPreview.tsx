@@ -3,25 +3,17 @@
  * from NewsCard in prototype/home-shared.jsx. "Open" links out to the source;
  * "Add to context" is disabled until the Home write API lands.
  */
-import type { CSSProperties } from 'react';
-
 import { salon, salonFont } from '../../salon';
 import type { HomeNewsItem, HomeNewsPayload } from '../../lib/api';
 import {
   ActionButton,
   Card,
+  clampLines,
   HomeEmpty,
   SectionHeader,
   TalkChip,
 } from './HomeKit';
 import { HOME_WRITE_PENDING_REASON, newsImpactLabel } from './homeFormat';
-
-const clamp3: CSSProperties = {
-  display: '-webkit-box',
-  WebkitLineClamp: 3,
-  WebkitBoxOrient: 'vertical',
-  overflow: 'hidden',
-};
 
 function NewsCard({ item }: { item: HomeNewsItem }): JSX.Element {
   return (
@@ -48,7 +40,17 @@ function NewsCard({ item }: { item: HomeNewsItem }): JSX.Element {
             {(item.favicon ?? item.source ?? '·').slice(0, 2)}
           </span>
           {item.source ? (
-            <span style={{ fontSize: 11.5, fontWeight: 500, color: salon.ink }}>
+            <span
+              style={{
+                fontSize: 11.5,
+                fontWeight: 500,
+                color: salon.ink,
+                maxWidth: 160,
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+                whiteSpace: 'nowrap',
+              }}
+            >
               {item.source}
             </span>
           ) : null}
@@ -76,6 +78,8 @@ function NewsCard({ item }: { item: HomeNewsItem }): JSX.Element {
 
         <div
           style={{
+            ...clampLines(2),
+            minWidth: 0,
             fontFamily: salonFont.serif,
             fontSize: 16,
             lineHeight: 1.3,
@@ -87,7 +91,7 @@ function NewsCard({ item }: { item: HomeNewsItem }): JSX.Element {
         {item.excerpt ? (
           <div
             style={{
-              ...clamp3,
+              ...clampLines(3),
               fontSize: 12.5,
               lineHeight: 1.4,
               color: salon.ink2,

@@ -4,13 +4,12 @@
  * rows in prototype/home-shared.jsx. Primary actions route where possible;
  * mutation actions show the pending-write-API disabled state.
  */
-import type { CSSProperties } from 'react';
-
 import { CTIcon, salon, salonFont } from '../../salon';
 import type { HomeInboxItem, HomeInboxPayload } from '../../lib/api';
 import {
   ActionButton,
   Card,
+  clampLines,
   HomeEmpty,
   SectionHeader,
   TalkChip,
@@ -23,13 +22,6 @@ import {
   targetToPath,
 } from './homeFormat';
 
-const clamp2: CSSProperties = {
-  display: '-webkit-box',
-  WebkitLineClamp: 2,
-  WebkitBoxOrient: 'vertical',
-  overflow: 'hidden',
-};
-
 function InboxRow({
   item,
   first,
@@ -39,7 +31,7 @@ function InboxRow({
 }): JSX.Element {
   const sev = INBOX_SEVERITY_BADGE[item.severity];
   const icon = INBOX_TYPE_ICON[item.type] ?? 'chat';
-  const target = item.target as unknown as Record<string, unknown>;
+  const target = item.target as Record<string, unknown>;
   const ref = talkRef(target);
   const behavior = classifyAction(item.primaryAction, {
     to: targetToPath(target),
@@ -71,6 +63,7 @@ function InboxRow({
       <div style={{ flex: 1, minWidth: 0 }}>
         <div
           style={{
+            ...clampLines(2),
             fontSize: 13.5,
             fontWeight: 500,
             lineHeight: 1.35,
@@ -82,7 +75,7 @@ function InboxRow({
         {item.summary ? (
           <div
             style={{
-              ...clamp2,
+              ...clampLines(2),
               fontSize: 12.5,
               lineHeight: 1.4,
               marginTop: 2,

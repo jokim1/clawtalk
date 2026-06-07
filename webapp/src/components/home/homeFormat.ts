@@ -26,7 +26,7 @@ export type BadgeTone = {
 export const INBOX_SEVERITY_BADGE: Record<HomeInboxSeverity, BadgeTone> = {
   blocking: { label: 'Blocking', bg: '#fbecec', fg: '#7b2a30' },
   action: { label: 'Action', bg: '#faf1de', fg: '#7e5418' },
-  info: { label: 'Info', bg: 'var(--salon-paper-2, #f4ecdb)', fg: '#6b6660' },
+  info: { label: 'Info', bg: 'var(--salon-paper-2, #f4ecdb)', fg: '#5a534a' },
 };
 
 /** Recommendation priority → badge palette (docs/07 §7.9). */
@@ -34,7 +34,7 @@ export const REC_PRIORITY_BADGE: Record<HomeRecommendationPriority, BadgeTone> =
   {
     decide: { label: 'Decide', bg: '#fbecec', fg: '#7b2a30' },
     improve: { label: 'Improve', bg: '#faf1de', fg: '#7e5418' },
-    tidy: { label: 'Tidy', bg: 'var(--salon-paper-2, #f4ecdb)', fg: '#6b6660' },
+    tidy: { label: 'Tidy', bg: 'var(--salon-paper-2, #f4ecdb)', fg: '#5a534a' },
   };
 
 /** Recommendation kind → Salon stroke icon. */
