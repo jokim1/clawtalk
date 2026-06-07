@@ -1,6 +1,7 @@
 import { cleanup, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { MemoryRouter } from 'react-router-dom';
 
 import { RegisteredAgentsPanel } from './RegisteredAgentsPanel';
 import {
@@ -58,16 +59,18 @@ function renderPanel(
   props: Partial<Parameters<typeof RegisteredAgentsPanel>[0]> = {},
 ) {
   return render(
-    <RegisteredAgentsPanel
-      providers={PROVIDERS}
-      executorSettings={EXECUTOR_SETTINGS}
-      containerRuntimeAvailability="ready"
-      onUnauthorized={vi.fn()}
-      canManage
-      mainAgentId={null}
-      workspaceId="ws-1"
-      {...props}
-    />,
+    <MemoryRouter>
+      <RegisteredAgentsPanel
+        providers={PROVIDERS}
+        executorSettings={EXECUTOR_SETTINGS}
+        containerRuntimeAvailability="ready"
+        onUnauthorized={vi.fn()}
+        canManage
+        mainAgentId={null}
+        workspaceId="ws-1"
+        {...props}
+      />
+    </MemoryRouter>,
   );
 }
 

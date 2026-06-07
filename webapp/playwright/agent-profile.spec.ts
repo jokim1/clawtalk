@@ -1,7 +1,7 @@
 import { test, expect, type Page, type Route } from '@playwright/test';
 
-// Responsive QA for the Salon-ported Registered Agents panel (lane-o Q1).
-// Backend mocked via page.route; drives Settings → Agents.
+// Responsive QA for the standalone Agent profile route (lane-o). Backend mocked
+// via page.route; drives /app/agents/:agentId straight to the detail view.
 
 const USER_ID = '33333333-3333-3333-3333-333333333333';
 
@@ -20,15 +20,49 @@ function buildSession() {
 const AGENT = {
   id: 'agent-1',
   name: 'Strategist',
-  providerId: 'anthropic',
-  modelId: 'claude-opus-4-8',
+  providerId: 'provider.openai',
+  modelId: 'gpt-5',
   personaRole: 'Lead',
+  systemPrompt: 'You are the strategist. Keep the Talk on track.',
   description: 'Plans the work and keeps the Talk on track.',
   enabled: true,
-  credentialMode: null,
-  executionPreview: { ready: true, message: 'Ready to run.' },
+  credentialMode: 'api_key',
+  createdAt: '2026-06-01T00:00:00.000Z',
+  updatedAt: '2026-06-06T00:00:00.000Z',
+  executionPreview: {
+    surface: 'main',
+    backend: 'direct_http',
+    authPath: 'api_key',
+    selectedMode: 'api',
+    transport: 'direct',
+    reasonCode: null,
+    routeReason: 'normal',
+    ready: true,
+    message: 'Ready to run via direct HTTP.',
+  },
+  supportsVision: true,
   modelAutoUpgradedFrom: null,
+  modelAutoUpgradedAt: null,
   modelUpdateAvailable: null,
+};
+
+const CATALOG = {
+  defaultClaudeModelId: '',
+  claudeModelSuggestions: [],
+  additionalProviders: [
+    {
+      id: 'provider.openai',
+      name: 'OpenAI',
+      modelSuggestions: [
+        {
+          modelId: 'gpt-5',
+          displayName: 'GPT-5',
+          contextWindowTokens: 0,
+          defaultMaxOutputTokens: 0,
+        },
+      ],
+    },
+  ],
 };
 
 async function fulfillJson(route: Route, data: unknown, status = 200) {
@@ -50,51 +84,36 @@ async function installMocks(page: Page): Promise<void> {
   await page.route('**/api/v1/talks/sidebar', (route) =>
     fulfillJson(route, { items: [], mainTalkId: null, contents: [] }),
   );
+  // Catalog enrichment (provider/model labels). Registered after the catch-all
+  // and before the agent route; LIFO means the most specific wins.
   await page.route('**/api/v1/agents**', (route) =>
-    fulfillJson(route, {
-      defaultClaudeModelId: '',
-      claudeModelSuggestions: [],
-      additionalProviders: [],
-    }),
+    fulfillJson(route, CATALOG),
   );
-  await page.route('**/api/v1/registered-agents/main**', (route) =>
+  await page.route('**/api/v1/registered-agents/agent-1**', (route) =>
     fulfillJson(route, AGENT),
   );
-  await page.route('**/api/v1/registered-agents**', (route) => {
-    // /main is handled above (registered later wins in LIFO); this is the list.
-    if (route.request().url().includes('/registered-agents/main')) {
-      return fulfillJson(route, AGENT);
-    }
-    return fulfillJson(route, [AGENT]);
-  });
 }
 
 for (const vp of [
   { label: 'desktop-1280', width: 1280, height: 800 },
   { label: 'mobile-390', width: 390, height: 844 },
 ]) {
-  test(`Registered Agents panel renders at ${vp.label}`, async ({
-    page,
-  }, testInfo) => {
+  test(`Agent profile renders at ${vp.label}`, async ({ page }, testInfo) => {
     await installMocks(page);
     await page.setViewportSize({ width: vp.width, height: vp.height });
-    await page.goto('/app/settings?tab=agents');
+    await page.goto('/app/agents/agent-1');
 
-    // The ported panel + its Salon atoms.
-    await expect(page.getByText('Registered Agents')).toBeVisible();
-    // The agent card renders the name as an <h4> (the main-agent <select> also
-    // lists it, hence the role-scoped locator).
     await expect(
       page.getByRole('heading', { name: 'Strategist' }),
     ).toBeVisible();
-    await expect(page.getByRole('button', { name: 'Edit' })).toBeVisible();
-    // Each card links to the standalone Agent profile route (lane-o item 3).
-    const viewLink = page.getByRole('link', { name: 'View' });
-    await expect(viewLink).toBeVisible();
-    await expect(viewLink).toHaveAttribute('href', '/app/agents/agent-1');
+    // Resolved model label + keyboard-accessible primary action.
+    await expect(page.getByText('GPT-5')).toBeVisible();
+    await expect(
+      page.getByRole('link', { name: 'Edit in Settings' }),
+    ).toBeVisible();
 
     await page.screenshot({
-      path: testInfo.outputPath(`agents-panel-${vp.label}.png`),
+      path: testInfo.outputPath(`agent-profile-${vp.label}.png`),
       fullPage: true,
     });
   });

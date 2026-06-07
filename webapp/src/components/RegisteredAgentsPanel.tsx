@@ -1,4 +1,5 @@
 import { useState, useEffect, type CSSProperties } from 'react';
+import { Link } from 'react-router-dom';
 
 import {
   ApiError,
@@ -833,26 +834,46 @@ function AgentCardView({
               {agent.executionPreview.message}
             </p>
           </div>
-          {canManage && (
-            <div className="registered-agent-card-actions">
-              <Button
-                variant="secondary"
-                onClick={onEdit}
-                style={COMPACT_BUTTON}
-              >
-                Edit
-              </Button>
-              {!isMainAgent ? (
+          <div className="registered-agent-card-actions">
+            <Link
+              to={`/app/agents/${encodeURIComponent(agent.id)}`}
+              className="salon-btn"
+              style={{
+                ...COMPACT_BUTTON,
+                display: 'inline-flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                borderRadius: 9999,
+                background: salon.card,
+                color: salon.ink,
+                border: `1px solid ${salon.line}`,
+                fontWeight: 500,
+                textDecoration: 'none',
+              }}
+            >
+              View
+            </Link>
+            {canManage ? (
+              <>
                 <Button
-                  variant="danger"
-                  onClick={onDelete}
+                  variant="secondary"
+                  onClick={onEdit}
                   style={COMPACT_BUTTON}
                 >
-                  Delete
+                  Edit
                 </Button>
-              ) : null}
-            </div>
-          )}
+                {!isMainAgent ? (
+                  <Button
+                    variant="danger"
+                    onClick={onDelete}
+                    style={COMPACT_BUTTON}
+                  >
+                    Delete
+                  </Button>
+                ) : null}
+              </>
+            ) : null}
+          </div>
         </div>
 
         {agent.modelAutoUpgradedFrom && (

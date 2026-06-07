@@ -44,6 +44,7 @@ import { TalkDetailPage } from './pages/TalkDetailPage';
 import { TalkListPage } from './pages/TalkListPage';
 import { SettingsPage } from './pages/SettingsPage';
 import { HomePage } from './pages/HomePage';
+import { AgentProfilePage } from './pages/AgentProfilePage';
 
 type AuthState =
   | { status: 'loading' }
@@ -1059,6 +1060,15 @@ export function App() {
             <Route
               path="/app/agents"
               element={<Navigate to="/app/settings?tab=agents" replace />}
+            />
+            <Route
+              path="/app/agents/:agentId"
+              element={
+                <AgentProfilePage
+                  workspaceId={auth.user.currentWorkspaceId}
+                  onUnauthorized={handleUnauthorized}
+                />
+              }
             />
             <Route
               path="/app/settings"
