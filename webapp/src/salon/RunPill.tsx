@@ -2,7 +2,7 @@
  * Run-status pill. Ported from `RunPill` in shell.jsx (docs §4): filled
  * background + status dot + label. The dot pulses while `running`.
  */
-import { RUN_STATES } from './tokens';
+import { RUN_STATES, salonFont } from './tokens';
 import type { RunStatus } from './tokens';
 
 export interface RunPillProps {
@@ -23,6 +23,8 @@ export function RunPill({ status, label, title }: RunPillProps) {
         gap: 6,
         padding: '2px 8px',
         borderRadius: '9999px',
+        // Geist Mono for status pills (docs/02 §2: pills/metadata are mono).
+        fontFamily: salonFont.mono,
         fontSize: 11,
         fontWeight: 500,
         background: meta.bg,

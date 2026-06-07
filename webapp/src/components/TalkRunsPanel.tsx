@@ -179,7 +179,12 @@ export function TalkRunsPanel({
                 className="run-history-item"
               >
                 <div className="run-history-main">
-                  <RunPill status={SALON_RUN_STATUS[run.status]} />
+                  {/* label={run.status} preserves the exact prior raw-status
+                      text (e.g. awaiting_confirmation) this pill replaced. */}
+                  <RunPill
+                    status={SALON_RUN_STATUS[run.status]}
+                    label={run.status}
+                  />
                   <code>{run.id}</code>
                 </div>
                 {run.targetAgentNickname ? (
