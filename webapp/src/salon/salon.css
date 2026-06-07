@@ -5,10 +5,11 @@
  *   - `--salon-*` palette + type-family CSS vars (docs/02 §1/§2)
  *   - the `.ct-*` motion / scroll utilities and density modes
  *
- * The run-status + agent-accent palettes and radius scale (docs/02 §1/§3) are
- * value tables, not CSS vars — they live in `tokens.ts` (RUN_STATES /
- * AGENT_ACCENTS + inline radii) where they are typed and consumed, so each
- * token has a single source of truth instead of a CSS/TS split.
+ * The run-status + agent-accent palettes (docs/02 §1) are value tables, not CSS
+ * vars — they live in `tokens.ts` (RUN_STATES / AGENT_ACCENTS) where they are
+ * typed and consumed, so each palette has a single source of truth instead of a
+ * CSS/TS split. The radius scale (docs/02 §3) is likewise not a CSS var; it is
+ * applied inline in the primitives.
  *
  * It is intentionally NON-DESTRUCTIVE: it defines tokens and opt-in utility
  * classes but does not override the existing pre-Salon shell palette. Salon

@@ -2723,28 +2723,6 @@ a {
   border: 1px solid #ef4444;
 }
 
-.connector-modal-backdrop {
-  position: fixed;
-  inset: 0;
-  background: rgba(15, 23, 42, 0.45);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 1rem;
-  z-index: 50;
-}
-
-.connector-modal {
-  background: var(--color-bg, #fff);
-  border-radius: 0.5rem;
-  padding: 1.5rem;
-  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.2);
-  width: 100%;
-  max-width: 520px;
-  max-height: 90vh;
-  overflow-y: auto;
-}
-
 .slack-channel-picker-list {
   margin-top: 0.5rem;
   max-height: 320px;
@@ -2788,16 +2766,6 @@ a {
 .slack-channel-picker-meta {
   font-size: 0.78rem;
   color: var(--color-text-muted, rgba(0, 0, 0, 0.55));
-}
-
-.connector-modal h3 {
-  margin: 0 0 1rem;
-  font-size: 1.1rem;
-}
-
-.connector-delete-modal p {
-  margin: 0 0 1.25rem;
-  color: var(--color-text-muted, #6b7280);
 }
 
 .connector-kind-form {
