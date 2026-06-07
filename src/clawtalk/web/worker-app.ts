@@ -44,6 +44,8 @@
 //   /api/v1/contents/:contentId[/...]       — greenfield-api.ts document
 //                                         compatibility routes over
 //                                         documents/doc_blocks/document_edits
+//   /api/v1/documents[/...]                 — native document tabs, blocks,
+//                                         and document_edits routes
 //   /api/v1/events                  — events-upgrade.ts (user-scope
 //                                         WebSocket forwarded to the
 //                                         UserEventHub DO)
@@ -134,6 +136,7 @@ import {
 } from './routes/agent-oauth.js';
 import { mountGreenfieldApiRoutes } from './routes/greenfield-api.js';
 import { mountHomeRoutes } from './routes/home.js';
+import { mountDocumentRoutes } from './routes/documents.js';
 import { reorderGreenfieldTalkSidebarRoute } from './routes/greenfield-core.js';
 import { getGreenfieldRunContextRoute } from './routes/greenfield-detail.js';
 import {
@@ -312,6 +315,7 @@ function buildApp(): Hono<{ Variables: Variables }> {
 
   mountGreenfieldApiRoutes(app);
   mountHomeRoutes(app, requireAuthMiddleware);
+  mountDocumentRoutes(app, requireAuthMiddleware);
 
   // ── ai-agents.ts: page composite + provider credentials ──────
   app.get('/api/v1/agents', async (c) => {

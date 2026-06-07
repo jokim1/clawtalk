@@ -1,6 +1,6 @@
 # ClawTalk Refactor — Full Completion Audit
 
-> **Status:** live audit snapshot at commit `16f6d89` (merged PR #541), 2026-06-06.
+> **Status:** live audit snapshot at commit `16f6d89` (merged PR #541), updated 2026-06-07 for the Phase 5 native Documents API unblocker.
 > **Purpose:** answer how much of the greenfield refactor is actually complete, what remains, and how to improve the plan so Codex + Claude/Opus can execute with minimal human interruption.
 > **Method:** second-pass audit against current main after PR #541, including docs, code LOC, facade consumers, runtime routes, visual-system markers, Jobs status, and eval presence.
 
@@ -16,7 +16,7 @@ The backend/data cutover is real. The product refactor is not done.
 | Frontend structural decomposition | ~50% 🔄 | `TalkDetailPage.tsx` is 5,429 LOC and `SettingsPage.tsx` is 2,147 LOC. Talk panels, composer, thread view, reducer, and stream hook are extracted; the page-owned controller bulk remains. |
 | De-facade | ~0% ⛔ | Compat facades still serve the webapp: synthetic threads, runs-with-`threadId`, flat content markdown/html, snapshot compat, policy/tool/connectors facades, and run-context synthesis. |
 | Visual system (Salon) | Foundation in review 🔄 | Salon foundation shipped in PR #547: `webapp/src/salon/*` CSS-variable tokens (`--salon-*`), fonts (Newsreader/Geist/Geist Mono), brand mark, and the primitive library (CTMark/CTIcon/Avatar/AgentAvatar/RunPill/Chip/Kbd/Button/Input/Modal/Sheet/Popover) with behavior-preserving proof migrations + a smoke suite. Remaining: broad re-skin of the 7,284 LOC pre-Salon `webapp/src/styles.css`. |
-| Net-new product surfaces | ~5% ⛔ | Live app covers Talk list, Talk detail, and Settings. Home, native Documents, standalone Agents, Archive, command palette, New Talk sheet, and Forge are unbuilt or skeletal. |
+| Net-new product surfaces | ~5% ⛔ | Live app covers Talk list, Talk detail, and Settings. Home, native Documents UI/editor, standalone Agents, Archive, command palette, New Talk sheet, and Forge are unbuilt or skeletal. Native Documents backend routes/client methods now exist for the UI lane. |
 | Eval gate | ~5% ⛔ | `docs/eval-suite.md` exists, but there is no `eval/` directory and no `npm run eval`. |
 
 The biggest missing work is Salon, native Documents, Home, de-facade, eval gate, and final surface completion. Forge remains post-MVP.
@@ -51,7 +51,7 @@ The current refactor plan is a subset of that denominator. It must be explicit a
 | 3 | Execution backend | ✅ Done |
 | 4 | API shell cleanup / legacy retirement | ✅ Done |
 | 5 | Frontend shell + Talk rewrite | 🔄 Mid-flight. Structure improved, but Talk controller bulk and Salon remain. |
-| 6 | Documents | 🔄 Backend compatibility path exists; native Documents UI/editor not built. |
+| 6 | Documents | 🔄 Native backend API/client path exists for list/detail tabs+blocks+pending edits and edit accept/reject; native Documents UI/editor not built. |
 | 7 | Agents/tools/connectors/context | 🔄 Backend mostly greenfield behind facades; frontend still consumes compat shapes; standalone Agents page not built. |
 | 8 | Jobs | 🔄 Backend and Talk Jobs panel mostly usable. Missing `emit_document_append`, `job_output_ready`, and Home read surface. |
 | 9 | Home, Settings, polish, eval gate | ⛔ Home/eval/Salon not built; Settings still has inline Profile/Tools/OAuth state. |
@@ -88,7 +88,7 @@ Duplicate route registrations also need cleanup: `reorderGreenfieldTalkSidebarRo
 ### 3b. Net-new Backends
 
 - Home has schema and `job_blocked` writes, but no real read surface.
-- Native Documents accessors exist under the detail path, but the frontend consumes flat compat content.
+- Native Documents routes/client methods now expose list/detail tabs, blocks, pending edits, and accept/reject over `documents`/`doc_tabs`/`doc_blocks`/`document_edits`. The frontend Documents UI still needs to consume that native path instead of flat compat content.
 - Forge tables exist, but runtime and UI are intentionally post-MVP.
 
 ### 3c. Provisioned-but-unused Schema
@@ -152,6 +152,7 @@ Salon should be first-class before Home/Documents/Agents, otherwise those surfac
 
 ### W3. Native Documents
 
+- Native Documents API/client path exists for list/detail tabs+blocks+pending edits and accept/reject.
 - Documents page and full editor.
 - In-Talk doc pane over native tabs/blocks.
 - Pending edit accept/reject UX.

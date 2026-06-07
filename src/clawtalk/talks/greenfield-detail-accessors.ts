@@ -1192,6 +1192,7 @@ export async function acceptGreenfieldDocumentEdit(input: {
   documentId: string;
   editId: string;
   expectedContentVersion?: number;
+  expectedTargetTabListVersion?: number;
 }): Promise<GreenfieldDocumentEditResolveResult> {
   const document = await getGreenfieldDocumentById(input);
   if (!document) return { kind: 'not_found' };
@@ -1215,6 +1216,7 @@ export async function acceptGreenfieldDocumentEdit(input: {
     workspaceId: input.workspaceId,
     documentId: input.documentId,
     tabIds: [ref.tab_id],
+    expectedContentVersion: input.expectedTargetTabListVersion,
   });
   if (versionCheck.kind !== 'ok') return versionCheck;
   const edit = await loadPendingGreenfieldDocumentEditForUpdate(input);
@@ -1239,6 +1241,7 @@ export async function acceptGreenfieldDocumentEdits(input: {
   documentId: string;
   editIds: string[];
   expectedContentVersion?: number;
+  expectedTargetTabListVersion?: number;
 }): Promise<GreenfieldDocumentEditResolveResult> {
   const document = await getGreenfieldDocumentById(input);
   if (!document) return { kind: 'not_found' };
@@ -1264,6 +1267,7 @@ export async function acceptGreenfieldDocumentEdits(input: {
     workspaceId: input.workspaceId,
     documentId: input.documentId,
     tabIds: refs.map((ref) => ref.tab_id),
+    expectedContentVersion: input.expectedTargetTabListVersion,
   });
   if (versionCheck.kind !== 'ok') return versionCheck;
 
@@ -1340,6 +1344,7 @@ export async function acceptGreenfieldDocumentEditRun(input: {
   documentId: string;
   runId: string;
   expectedContentVersion?: number;
+  expectedTargetTabListVersion?: number;
 }): Promise<GreenfieldDocumentEditResolveResult> {
   const edits = await listPendingGreenfieldDocumentEditsByRun(input);
   if (edits.length === 0) return { kind: 'not_found' };
@@ -1348,6 +1353,7 @@ export async function acceptGreenfieldDocumentEditRun(input: {
     documentId: input.documentId,
     editIds: edits.map((edit) => edit.id),
     expectedContentVersion: input.expectedContentVersion,
+    expectedTargetTabListVersion: input.expectedTargetTabListVersion,
   });
   if (result.kind !== 'ok') return result;
   return { ...result, runId: input.runId };

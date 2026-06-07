@@ -324,6 +324,8 @@ Handoff: Findings with file/line references and pass/fail recommendation.
 
 Codex should build/verify API and data paths when needed; Claude/Opus owns the Salon-native UI/editor.
 
+Status update, 2026-06-07: the Codex backend unblocker branch adds native `/api/v1/documents` routes and typed `webapp/src/lib/api.ts` methods for list/detail tabs+blocks+pending edits plus edit/run/all accept/reject. Remaining Phase 3 product work is the Salon-native Documents page/editor and in-Talk doc pane consuming this native path; do not extend the `bodyMarkdown`/`bodyHtml` facade for that UI.
+
 > **Run mode (Claude/Opus, set once before pasting the goal):** put the session in unattended mode — (1) enable auto / auto-accept so tool calls within a turn run without per-call prompts; (2) run `/effort ultracode` so Claude sends xhigh reasoning effort and **auto-orchestrates a dynamic workflow for each substantial slice** of this lane. This is the most net-new, branchy build in Phase 5, so run the whole Documents (D) lane under `/effort ultracode` rather than per-prompt keywords. Then paste the block below as a single message — setting the goal starts the first turn immediately; do not send a separate kickoff prompt and do not send a bare `/goal` (that only prints status). The bare word "workflow" no longer triggers anything; orchestration comes from `/effort ultracode` (or the literal keyword `ultracode` for a one-off slice).
 
 Codex:
