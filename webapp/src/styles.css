@@ -1497,26 +1497,6 @@ a {
   text-decoration: underline;
 }
 
-.auth-shell {
-  min-height: 100vh;
-  display: grid;
-  place-items: center;
-  padding: 1rem;
-}
-
-.auth-panel {
-  width: min(460px, 100%);
-  background: #ffffff;
-  border: 1px solid #cdd7e7;
-  border-radius: 16px;
-  padding: 1.25rem;
-  box-shadow: 0 10px 24px rgba(20, 38, 84, 0.08);
-}
-
-.auth-panel h1 {
-  margin-top: 0;
-}
-
 .primary-btn,
 .secondary-btn {
   border: 0;
@@ -1541,41 +1521,6 @@ a {
 .secondary-btn:disabled {
   cursor: not-allowed;
   opacity: 0.7;
-}
-
-.dev-form {
-  margin-top: 1rem;
-  border-top: 1px solid #dde5f0;
-  padding-top: 1rem;
-  display: grid;
-  gap: 0.75rem;
-}
-
-.dev-form h2 {
-  margin: 0;
-  font-size: 1rem;
-}
-
-.dev-form label {
-  display: grid;
-  gap: 0.25rem;
-  font-size: 0.9rem;
-}
-
-.dev-form input {
-  border: 1px solid #c7d2e5;
-  border-radius: 8px;
-  padding: 0.55rem;
-  font-size: 0.95rem;
-}
-
-.dev-form button {
-  width: fit-content;
-  border: 1px solid #8ca1c8;
-  border-radius: 8px;
-  background: #f7f9ff;
-  padding: 0.45rem 0.8rem;
-  cursor: pointer;
 }
 
 .page-shell {
