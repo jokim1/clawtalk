@@ -26,7 +26,10 @@ export interface NewTalkSheetProps {
   onClose: () => void;
 }
 
-export function NewTalkSheet({ onCreate, onClose }: NewTalkSheetProps): JSX.Element {
+export function NewTalkSheet({
+  onCreate,
+  onClose,
+}: NewTalkSheetProps): JSX.Element {
   const [title, setTitle] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -50,7 +53,9 @@ export function NewTalkSheet({ onCreate, onClose }: NewTalkSheetProps): JSX.Elem
       await onCreate(title.trim());
       // Parent closes the sheet on success (it also navigates to the new Talk).
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Could not create the Talk.');
+      setError(
+        err instanceof Error ? err.message : 'Could not create the Talk.',
+      );
       setBusy(false);
       submittingRef.current = false;
     }
@@ -71,7 +76,11 @@ export function NewTalkSheet({ onCreate, onClose }: NewTalkSheetProps): JSX.Elem
           <Button variant="secondary" onClick={onClose}>
             Cancel
           </Button>
-          <Button variant="primary" onClick={() => void submit()} disabled={busy}>
+          <Button
+            variant="primary"
+            onClick={() => void submit()}
+            disabled={busy}
+          >
             {busy ? 'Creating…' : 'Create Talk'}
           </Button>
         </>

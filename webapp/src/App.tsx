@@ -9,6 +9,7 @@ import {
 
 import { ClawTalkMark } from './components/ClawTalkMark';
 import { ClawTalkSidebar } from './components/ClawTalkSidebar';
+import { CommandPalette, type CommandItem } from './components/CommandPalette';
 import { NewTalkSheet } from './components/NewTalkSheet';
 import { SignInView } from './components/SignInView';
 import {
@@ -414,6 +415,16 @@ export function App() {
   // Element to restore focus to when the New Talk sheet is dismissed without
   // creating — captured at open-time, before the sheet's portal steals focus.
   const newTalkRestoreRef = useRef<Element | null>(null);
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const paletteRestoreRef = useRef<Element | null>(null);
+  // Mirror open-state into a ref so the global ⌘K listener (registered once)
+  // can toggle without re-subscribing on every open/close.
+  const paletteOpenRef = useRef(false);
+  paletteOpenRef.current = paletteOpen;
+  // Mirror auth so the global ⌘K listener ignores keystrokes outside the
+  // authenticated app shell (e.g. the SignIn screen's dev-login fields).
+  const authedRef = useRef(false);
+  authedRef.current = auth.status === 'authenticated';
   const [talkReadMarkers, setTalkReadMarkers] = useState<
     Record<string, TalkReadMarker>
   >({});
@@ -584,6 +595,14 @@ export function App() {
     setNewTalkOpen(true);
   }, []);
 
+  // New Talk invoked from the command palette: the palette input is unmounting,
+  // so inherit the palette's own restore target (its opener) for the sheet —
+  // otherwise cancelling the sheet would land focus on <body>.
+  const openNewTalkFromCommand = useCallback(() => {
+    newTalkRestoreRef.current = paletteRestoreRef.current;
+    setNewTalkOpen(true);
+  }, []);
+
   const closeNewTalk = useCallback(() => {
     setNewTalkOpen(false);
     const target = newTalkRestoreRef.current;
@@ -596,6 +615,119 @@ export function App() {
       });
     }
   }, []);
+
+  const openPalette = useCallback(() => {
+    paletteRestoreRef.current = document.activeElement;
+    setPaletteOpen(true);
+  }, []);
+
+  const closePalette = useCallback(() => {
+    setPaletteOpen(false);
+    const target = paletteRestoreRef.current;
+    paletteRestoreRef.current = null;
+    if (target instanceof HTMLElement) {
+      requestAnimationFrame(() => {
+        // Only restore if nothing else claimed focus — a command may open
+        // another surface (e.g. the New Talk sheet) that should keep focus.
+        if (target.isConnected && document.activeElement === document.body) {
+          target.focus();
+        }
+      });
+    }
+  }, []);
+
+  // Global ⌘K / Ctrl+K toggles the command palette (authenticated shell only).
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (!authedRef.current) return;
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
+        event.preventDefault();
+        if (paletteOpenRef.current) closePalette();
+        else openPalette();
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [openPalette, closePalette]);
+
+  // Drop any open overlays when leaving the authenticated shell so they can't
+  // resurface on the next sign-in.
+  useEffect(() => {
+    if (auth.status !== 'authenticated') {
+      setPaletteOpen(false);
+      setNewTalkOpen(false);
+    }
+  }, [auth.status]);
+
+  const paletteItems = useMemo<CommandItem[]>(() => {
+    const nav: CommandItem[] = [
+      {
+        id: 'nav-home',
+        label: 'Home',
+        hint: 'Go to',
+        keywords: 'dashboard',
+        run: () => navigate('/app/home'),
+      },
+      {
+        id: 'nav-talks',
+        label: 'Talks',
+        hint: 'Go to',
+        run: () => navigate('/app/talks'),
+      },
+      {
+        id: 'nav-settings-profile',
+        label: 'Settings · Profile',
+        hint: 'Go to',
+        keywords: 'account',
+        run: () => navigate('/app/settings?tab=profile'),
+      },
+      {
+        id: 'nav-settings-keys',
+        label: 'Settings · API Keys',
+        hint: 'Go to',
+        keywords: 'providers secrets byok',
+        run: () => navigate('/app/settings?tab=api-keys'),
+      },
+      {
+        id: 'nav-settings-agents',
+        label: 'Settings · Agents',
+        hint: 'Go to',
+        keywords: 'ai models personas',
+        run: () => navigate('/app/settings?tab=agents'),
+      },
+      {
+        id: 'nav-settings-tools',
+        label: 'Settings · Tools',
+        hint: 'Go to',
+        run: () => navigate('/app/settings?tab=tools'),
+      },
+      {
+        id: 'nav-settings-connectors',
+        label: 'Settings · Connectors',
+        hint: 'Go to',
+        keywords: 'integrations slack google',
+        run: () => navigate('/app/settings?tab=connectors'),
+      },
+    ];
+    const actions: CommandItem[] = [
+      {
+        id: 'action-new-talk',
+        label: 'New Talk',
+        hint: 'Action',
+        keywords: 'create',
+        run: openNewTalkFromCommand,
+      },
+    ];
+    const talks: CommandItem[] = flattenSidebarTalks(sidebarItems).map(
+      (talk) => ({
+        id: `talk-${talk.id}`,
+        label: talk.title || 'Untitled talk',
+        hint: 'Talk',
+        run: () => navigate(`/app/talks/${talk.id}`),
+      }),
+    );
+    return [...actions, ...nav, ...talks];
+  }, [navigate, openNewTalkFromCommand, sidebarItems]);
 
   const handleCreateFolder = useCallback(async () => {
     const folder = await createTalkFolder('');
@@ -816,7 +948,22 @@ export function App() {
             <span className="app-global-search-icon" aria-hidden="true">
               ⌕
             </span>
-            <input type="search" aria-label="Search" placeholder="Search..." />
+            {/* Read-only trigger: opens the ⌘K command palette rather than
+                being a free-text field. onClick (not onFocus) avoids a
+                focus-restore → reopen loop when the palette closes. */}
+            <input
+              type="search"
+              aria-label="Search"
+              placeholder="Search commands and Talks…"
+              readOnly
+              onClick={openPalette}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter' || event.key === ' ') {
+                  event.preventDefault();
+                  openPalette();
+                }
+              }}
+            />
           </form>
         </div>
         <div className="app-global-header-right">
@@ -864,6 +1011,9 @@ export function App() {
           }}
           onClose={closeNewTalk}
         />
+      ) : null}
+      {paletteOpen ? (
+        <CommandPalette items={paletteItems} onClose={closePalette} />
       ) : null}
       <div className="app-main">
         <div

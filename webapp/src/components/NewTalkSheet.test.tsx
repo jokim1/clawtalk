@@ -9,7 +9,9 @@ afterEach(cleanup);
 describe('NewTalkSheet', () => {
   it('renders a titled sheet and focuses the title field on open', () => {
     render(<NewTalkSheet onCreate={vi.fn(async () => {})} onClose={vi.fn()} />);
-    expect(screen.getByRole('heading', { name: 'New Talk' })).toBeInTheDocument();
+    expect(
+      screen.getByRole('heading', { name: 'New Talk' }),
+    ).toBeInTheDocument();
     expect(screen.getByLabelText('Title')).toHaveFocus();
   });
 

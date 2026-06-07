@@ -53,32 +53,32 @@ describe('ClawTalkSidebar', () => {
 
   it('renders menus in a portal and repositions them above the trigger when needed', async () => {
     const user = userEvent.setup();
-    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (
-      this: HTMLElement,
-    ) {
-      const element = this;
-      if (element.getAttribute('aria-label') === 'Manage D1 Retro') {
-        return rect({
-          top: 560,
-          bottom: 592,
-          left: 230,
-          right: 262,
-          width: 32,
-          height: 32,
-        });
-      }
-      if (element.classList.contains('clawtalk-sidebar-menu-portal')) {
-        return rect({
-          top: 0,
-          bottom: 180,
-          left: 0,
-          right: 170,
-          width: 170,
-          height: 180,
-        });
-      }
-      return rect({ width: 100, height: 32, right: 100, bottom: 32 });
-    });
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(
+      function (this: HTMLElement) {
+        const element = this;
+        if (element.getAttribute('aria-label') === 'Manage D1 Retro') {
+          return rect({
+            top: 560,
+            bottom: 592,
+            left: 230,
+            right: 262,
+            width: 32,
+            height: 32,
+          });
+        }
+        if (element.classList.contains('clawtalk-sidebar-menu-portal')) {
+          return rect({
+            top: 0,
+            bottom: 180,
+            left: 0,
+            right: 170,
+            width: 170,
+            height: 180,
+          });
+        }
+        return rect({ width: 100, height: 32, right: 100, bottom: 32 });
+      },
+    );
 
     Object.defineProperty(window, 'innerWidth', {
       configurable: true,

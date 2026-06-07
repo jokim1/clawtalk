@@ -815,10 +815,7 @@ export function ClawTalkSidebar({
             {menuState?.type === 'create'
               ? renderMenu(
                   <>
-                    <button
-                      type="button"
-                      onClick={handleCreateTalkClick}
-                    >
+                    <button type="button" onClick={handleCreateTalkClick}>
                       New Talk
                     </button>
                     <button

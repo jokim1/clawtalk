@@ -32,10 +32,7 @@ async function fulfillJson(route: Route, data: unknown, status = 200) {
 
 type CreateCapture = { lastTitle: string | null };
 
-async function installMocks(
-  page: Page,
-  capture: CreateCapture,
-): Promise<void> {
+async function installMocks(page: Page, capture: CreateCapture): Promise<void> {
   // Catch-all first (LIFO) so the specific handlers below win.
   await page.route('**/api/v1/**', (route) => fulfillJson(route, {}));
   await page.route('**/api/v1/session/me', (route) =>
@@ -146,6 +143,8 @@ for (const vp of [
     await expect(page.getByRole('button', { name: 'Cancel' })).toBeVisible();
 
     // Responsive-render artifact (lands under test-results/, attached to the report).
-    await page.screenshot({ path: testInfo.outputPath(`new-talk-${vp.label}.png`) });
+    await page.screenshot({
+      path: testInfo.outputPath(`new-talk-${vp.label}.png`),
+    });
   });
 }
