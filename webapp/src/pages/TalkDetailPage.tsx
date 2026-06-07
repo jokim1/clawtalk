@@ -13,7 +13,6 @@ import {
   ContentSidebarItem,
   getTalk,
   getTalkAgents,
-  getTalkRunContext,
   getTalkRuns,
   listTalkThreads,
   listTalkMessages,
@@ -21,7 +20,6 @@ import {
   TalkMessage,
   TalkRun,
   TalkSnapshot,
-  TalkRunContextSnapshot,
   UnauthorizedError,
 } from '../lib/api';
 import { TalkToolsPanel } from '../components/TalkToolsPanel';
@@ -30,10 +28,7 @@ import { TalkContextPanel } from '../components/TalkContextPanel';
 import { TalkJobsPanel } from '../components/TalkJobsPanel';
 import { TalkConnectorsPanel } from '../components/connectors/TalkConnectorsPanel';
 import { TalkAgentsPanel } from '../components/TalkAgentsPanel';
-import {
-  TalkRunsPanel,
-  type RunContextPanelState,
-} from '../components/TalkRunsPanel';
+import { TalkRunsPanel } from '../components/TalkRunsPanel';
 import { TalkHistoryEditor } from '../components/TalkHistoryEditor';
 import { TalkDetailShell } from '../components/Talk/TalkDetailShell';
 import { TalkTabContent } from '../components/Talk/TalkTabContent';
@@ -60,6 +55,7 @@ import {
   useTalkComposerInputController,
   useTalkSendController,
 } from '../hooks/useTalkComposerController';
+import { useTalkRunContextController } from '../hooks/useTalkRunContextController';
 import { createInitialDetailState, detailReducer } from '../lib/talkRunReducer';
 import { useQueryClient } from '@tanstack/react-query';
 import {
@@ -214,12 +210,8 @@ export function TalkDetailPage({
   const canManageTalkConnectors =
     accessRole === 'owner' || accessRole === 'admin';
 
-  const [runContextPanels, setRunContextPanels] = useState<
-    Record<string, RunContextPanelState>
-  >({});
   const timelineRef = useRef<HTMLDivElement | null>(null);
   const endRef = useRef<HTMLDivElement | null>(null);
-  const runContextPanelsRef = useRef<Record<string, RunContextPanelState>>({});
   const pendingComposerFocusRef = useRef(false);
   const pendingRunHistoryScrollRef = useRef<string | null>(null);
   const threadSnapshotVersionRef = useRef(0);
@@ -309,7 +301,14 @@ export function TalkDetailPage({
     onUnauthorized: handleUnauthorized,
   });
 
-  runContextPanelsRef.current = runContextPanels;
+  const {
+    runContextPanels,
+    resetRunContextPanels,
+    handleToggleRunContext,
+  } = useTalkRunContextController({
+    talkId,
+    onUnauthorized: handleUnauthorized,
+  });
 
   useEffect(() => {
     threadSnapshotVersionRef.current += 1;
@@ -704,8 +703,8 @@ export function TalkDetailPage({
     deletedMessageIdsRef.current = new Set();
     resetTalkThreads();
     resetTalkAgents();
-    setRunContextPanels({});
-  }, [resetTalkAgents, resetTalkThreads, talkId]);
+    resetRunContextPanels();
+  }, [resetRunContextPanels, resetTalkAgents, resetTalkThreads, talkId]);
 
   // Hydrate non-RQ side-effects the moment the snapshot resolves: the
   // thread list (kept in component state because the threads tab edits
@@ -1096,80 +1095,6 @@ export function TalkDetailPage({
     scrollToBottom('smooth');
     dispatch({ type: 'CLEAR_UNREAD' });
   };
-
-  const handleToggleRunContext = useCallback(
-    async (runId: string) => {
-      const current = runContextPanelsRef.current[runId];
-      if (current?.open) {
-        setRunContextPanels((existing) => ({
-          ...existing,
-          [runId]: {
-            ...(existing[runId] || {
-              open: false,
-              status: 'idle',
-              snapshot: null,
-            }),
-            open: false,
-          },
-        }));
-        return;
-      }
-
-      if (current?.status === 'loaded') {
-        setRunContextPanels((existing) => ({
-          ...existing,
-          [runId]: {
-            ...(existing[runId] || {
-              open: false,
-              status: 'idle',
-              snapshot: null,
-            }),
-            open: true,
-          },
-        }));
-        return;
-      }
-
-      setRunContextPanels((existing) => ({
-        ...existing,
-        [runId]: {
-          open: true,
-          status: 'loading',
-          snapshot: existing[runId]?.snapshot ?? null,
-        },
-      }));
-
-      try {
-        const snapshot = await getTalkRunContext({ talkId, runId });
-        setRunContextPanels((existing) => ({
-          ...existing,
-          [runId]: {
-            open: true,
-            status: 'loaded',
-            snapshot,
-          },
-        }));
-      } catch (err) {
-        if (err instanceof UnauthorizedError) {
-          handleUnauthorized();
-          return;
-        }
-        setRunContextPanels((existing) => ({
-          ...existing,
-          [runId]: {
-            open: true,
-            status: 'error',
-            snapshot: null,
-            message:
-              err instanceof Error
-                ? err.message
-                : 'Failed to load run context.',
-          },
-        }));
-      }
-    },
-    [handleUnauthorized, talkId],
-  );
 
   const jumpToMessage = (messageId: string) => {
     const element = messageElementRefs.current.get(messageId);
