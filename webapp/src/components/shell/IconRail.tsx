@@ -139,7 +139,6 @@ export function IconRail({
         <RailButton
           label="Toggle talk list"
           active={false}
-          pressed={false}
           onClick={onToggleSecondary}
         >
           <CTIcon name="sidebar" size={18} strokeWidth={1.7} />
@@ -182,7 +181,17 @@ export function IconRail({
             onSwitchWorkspace={onSwitchWorkspace}
             onSignOut={onSignOut}
             signOutBusy={signOutBusy}
-            onClose={() => setProfileOpen(false)}
+            onClose={() => {
+              setProfileOpen(false);
+              // Restore focus to the trigger for keyboard users (Escape /
+              // backdrop dismiss). The rail persists across navigation, so this
+              // is a safe landing spot even when a menu link routed away.
+              requestAnimationFrame(() => {
+                if (profileBtnRef.current?.isConnected) {
+                  profileBtnRef.current.focus();
+                }
+              });
+            }}
           />
         ) : null}
       </div>

@@ -925,10 +925,11 @@ export function App() {
     location.pathname.startsWith('/app/archive') ||
     location.pathname.startsWith('/app/main');
 
-  // Close the mobile drawer whenever the route changes (e.g. picking a Talk).
+  // Close the mobile drawer on any navigation — including content/doc links
+  // that change only the query string (?thread=…&doc=1), not the pathname.
   useEffect(() => {
     setSecondaryDrawerOpen(false);
-  }, [location.pathname]);
+  }, [location.pathname, location.search]);
 
   useEffect(() => {
     if (!sidebarItems.length) return;

@@ -1,4 +1,4 @@
-import { cleanup, render, screen } from '@testing-library/react';
+import { cleanup, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter, useLocation } from 'react-router-dom';
@@ -113,6 +113,18 @@ describe('IconRail', () => {
       screen.getByRole('button', { name: /Owner Example — account/ }),
     );
     expect(screen.getByRole('menuitem', { name: 'Log out' })).toBeTruthy();
+  });
+
+  it('restores focus to the avatar trigger when the menu closes on Escape', async () => {
+    const user = userEvent.setup();
+    renderRail('/app/home');
+    const trigger = screen.getByRole('button', {
+      name: /Owner Example — account/,
+    });
+    await user.click(trigger);
+    expect(screen.getByRole('menuitem', { name: 'Log out' })).toBeTruthy();
+    await user.keyboard('{Escape}');
+    await waitFor(() => expect(trigger).toHaveFocus());
   });
 });
 
