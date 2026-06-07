@@ -99,16 +99,29 @@ describe('Salon primitives', () => {
 
   it('Modal closes on Escape and on backdrop mousedown', () => {
     const onClose = vi.fn();
-    const { container } = render(
+    render(
       <Modal onClose={onClose} ariaLabel="demo">
         <p>body</p>
       </Modal>,
     );
     fireEvent.keyDown(window, { key: 'Escape' });
     expect(onClose).toHaveBeenCalledTimes(1);
-    const backdrop = container.querySelector('.ct-screen-enter') as HTMLElement;
+    // Overlay is portaled to body, so query the document, not the render container.
+    const backdrop = document.querySelector('.ct-screen-enter') as HTMLElement;
     fireEvent.mouseDown(backdrop);
     expect(onClose).toHaveBeenCalledTimes(2);
+  });
+
+  it('Modal portals to document.body (escapes ancestor stacking contexts)', () => {
+    const { container } = render(
+      <Modal onClose={() => {}} ariaLabel="demo">
+        <p>portaled</p>
+      </Modal>,
+    );
+    // The dialog mounts on body, not inside the call-site's render subtree —
+    // so a transformed/overflow-clipped ancestor can never trap or clip it.
+    expect(container.querySelector('[role="dialog"]')).toBeNull();
+    expect(document.body.querySelector('[role="dialog"]')).toBeTruthy();
   });
 
   it('Modal keeps open on inner-content mousedown (stopPropagation)', () => {
@@ -152,6 +165,16 @@ describe('Salon primitives', () => {
     ) as HTMLElement;
     fireEvent.mouseDown(backdrop);
     expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('Popover portals to document.body', () => {
+    const { container } = render(
+      <Popover onClose={() => {}} ariaLabel="menu">
+        <button>Item</button>
+      </Popover>,
+    );
+    expect(container.querySelector('[role="dialog"]')).toBeNull();
+    expect(document.body.querySelector('[role="dialog"]')).toBeTruthy();
   });
 
   it('CTMark + CTIcon render SVGs', () => {

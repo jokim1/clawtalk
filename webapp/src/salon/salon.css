@@ -2,9 +2,13 @@
  *
  * Ported (not copied) from the reference prototype `ClawTalk Salon.html` and
  * docs/02-visual-system.md. This is the foundation layer:
- *   - `--salon-*` color tokens, type-family vars, radius scale
- *   - run-status + agent-accent tokens
+ *   - `--salon-*` palette + type-family CSS vars (docs/02 §1/§2)
  *   - the `.ct-*` motion / scroll utilities and density modes
+ *
+ * The run-status + agent-accent palettes and radius scale (docs/02 §1/§3) are
+ * value tables, not CSS vars — they live in `tokens.ts` (RUN_STATES /
+ * AGENT_ACCENTS + inline radii) where they are typed and consumed, so each
+ * token has a single source of truth instead of a CSS/TS split.
  *
  * It is intentionally NON-DESTRUCTIVE: it defines tokens and opt-in utility
  * classes but does not override the existing pre-Salon shell palette. Salon
@@ -22,49 +26,11 @@
   --salon-line: #e6e0d1;
   --salon-accent: #c8643a;
 
-  /* §1 · Run-status tokens (bg / fg / dot / border), from CT_RUN_STATES */
-  --salon-status-queued-bg: #f5f4f0;
-  --salon-status-queued-fg: #6b6660;
-  --salon-status-queued-dot: #a8a29e;
-  --salon-status-queued-border: #e6e2da;
-  --salon-status-running-bg: #eaf3ee;
-  --salon-status-running-fg: #235041;
-  --salon-status-running-dot: #3f6b5c;
-  --salon-status-running-border: #c9dfd3;
-  --salon-status-awaiting-bg: #faf1de;
-  --salon-status-awaiting-fg: #7e5418;
-  --salon-status-awaiting-dot: #c8893a;
-  --salon-status-awaiting-border: #ead7a4;
-  --salon-status-completed-bg: #eaeff9;
-  --salon-status-completed-fg: #27407a;
-  --salon-status-completed-dot: #3d5688;
-  --salon-status-completed-border: #c9d5ee;
-  --salon-status-failed-bg: #fbecec;
-  --salon-status-failed-fg: #7b2a30;
-  --salon-status-failed-dot: #a8434a;
-  --salon-status-failed-border: #ecc4c7;
-  --salon-status-cancelled-bg: #f4efe6;
-  --salon-status-cancelled-fg: #5e5645;
-  --salon-status-cancelled-dot: #8b7e6a;
-  --salon-status-cancelled-border: #dcd2be;
-
-  /* §1 · Agent accent tokens */
-  --salon-agent-strategist: #c8643a;
-  --salon-agent-critic: #8e3b59;
-  --salon-agent-researcher: #3f6b5c;
-  --salon-agent-editor: #3d5688;
-  --salon-agent-quant: #2a6f7e;
-
   /* §2 · Type families (loaded via <link> in index.html) */
   --salon-font-serif: 'Newsreader', Georgia, serif;
   --salon-font-display: 'Instrument Serif', Georgia, serif;
   --salon-font-sans: 'Geist', 'IBM Plex Sans', system-ui, sans-serif;
   --salon-font-mono: 'Geist Mono', 'JetBrains Mono', ui-monospace, monospace;
-
-  /* §3 · Radius scale */
-  --salon-radius-card: 16px;
-  --salon-radius-input: 10px;
-  --salon-radius-full: 9999px;
 }
 
 /* §5 · Motion — subtle screen-transition fade. */

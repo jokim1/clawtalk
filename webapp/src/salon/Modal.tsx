@@ -3,8 +3,18 @@
  * sheet with a 10vh top offset, backdrop blur, escape-close, and backdrop
  * click-to-dismiss (guarded to the backdrop itself). Width clamps on narrow
  * viewports so it stays responsive.
+ *
+ * Rendered through a portal to `document.body` so the `position: fixed` overlay
+ * + `zIndex` are evaluated against the viewport's root stacking context — never
+ * trapped or clipped by an ancestor that establishes a stacking context /
+ * containing block (transform, filter, will-change, contain, overflow). This is
+ * the same pattern the app's other floating layers use (ThreadContextMenu,
+ * ClawTalkSidebar menu), so Salon overlays are robust at every call-site by
+ * construction, not just the ones migrated so far. zIndex 1000 matches that
+ * existing top layer.
  */
 import { useEffect } from 'react';
+import { createPortal } from 'react-dom';
 import { salon } from './tokens';
 import type { ReactNode } from 'react';
 
@@ -31,7 +41,9 @@ export function Modal({
     return () => window.removeEventListener('keydown', onKey);
   }, [onClose]);
 
-  return (
+  if (typeof document === 'undefined') return null;
+
+  return createPortal(
     <div
       className="ct-screen-enter"
       style={{
@@ -71,6 +83,7 @@ export function Modal({
       >
         {children}
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }

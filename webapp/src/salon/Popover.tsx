@@ -3,7 +3,12 @@
  * `ToolsPopover` in prototype/tools.jsx (docs §4). Positions itself from an
  * anchor's DOMRect, clamps its left edge to the viewport, and caps its height
  * with internal scroll so long lists never overflow off-screen.
+ *
+ * Like Modal, rendered through a portal to `document.body` so its fixed backdrop
+ * + panel escape any ancestor stacking context / overflow clip and stack above
+ * the app at zIndex 1000/1001 (see Modal.tsx for the rationale).
  */
+import { createPortal } from 'react-dom';
 import { salon } from './tokens';
 import type { ReactNode } from 'react';
 
@@ -36,7 +41,9 @@ export function Popover({
       }
     : { right: 16 };
 
-  return (
+  if (typeof document === 'undefined') return null;
+
+  return createPortal(
     <>
       <div
         style={{ position: 'fixed', inset: 0, zIndex: 1000 }}
@@ -67,6 +74,7 @@ export function Popover({
       >
         {children}
       </div>
-    </>
+    </>,
+    document.body,
   );
 }
