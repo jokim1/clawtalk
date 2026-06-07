@@ -783,7 +783,7 @@ export function ClawTalkSidebar({
 
       <nav className="clawtalk-sidebar-nav" aria-label="App sections">
         <NavLink
-          to="/app/talks"
+          to="/app/home"
           end
           className={({ isActive }) =>
             `clawtalk-sidebar-link${isActive ? ' active' : ''}`

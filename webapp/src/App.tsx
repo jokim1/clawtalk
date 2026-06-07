@@ -41,6 +41,7 @@ import { clearActiveThreadMemory } from './lib/useTalkSnapshot';
 import { TalkDetailPage } from './pages/TalkDetailPage';
 import { TalkListPage } from './pages/TalkListPage';
 import { SettingsPage } from './pages/SettingsPage';
+import { HomePage } from './pages/HomePage';
 
 type AuthState =
   | { status: 'loading' }
@@ -833,7 +834,8 @@ export function App() {
           className={`app-main-content${isTalkRoute || isMainRoute ? ' app-main-content-talk' : ''}`}
         >
           <Routes>
-            <Route path="/" element={<Navigate to="/app/talks" replace />} />
+            <Route path="/" element={<Navigate to="/app/home" replace />} />
+            <Route path="/app/home" element={<HomePage />} />
             <Route
               path="/app/talks"
               element={
