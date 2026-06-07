@@ -59,7 +59,7 @@ One baseline migration file, executed top-to-bottom in a transaction. Steps insi
 ### Step 3 · First-signin workspace bootstrap
 
 - [ ] On the first successful auth (Google OAuth or device-code), create the user row (if absent) + their first `workspaces` row + an `owner` `workspace_members` row in one transaction, per §11 §1.
-- [ ] Seed that workspace with 5 default `agents` rows (one per user-facing template — `strategist`/`critic`/`researcher`/`editor`/`quant`) and 3 default `team_compositions` from `03-agents.md` / prototype `shared/data.jsx`. The 2 system Forge agents are also inserted but flagged `is_system=true` so they're hidden from the roster.
+- [ ] Seed that workspace with 5 default `agents` rows (one per user-facing template — `strategist`/`critic`/`researcher`/`editor`/`quant`) and 3 default `team_compositions` from `03-agents.md` / prototype `prototypes/shared/data.jsx`. The 2 system Forge agents are also inserted but flagged `is_system=true` so they're hidden from the roster.
 
 **Done when:** baseline applies clean on an empty/reset Supabase DB; §11 §14 verification suite passes (24/24); Joseph signs in and lands in a fresh workspace with 5 user-facing agents + 3 team compositions seeded; `SELECT * FROM agents WHERE workspace_id=…` excludes `is_system=true` rows at the accessor layer.
 
@@ -71,8 +71,8 @@ One baseline migration file, executed top-to-bottom in a transaction. Steps insi
 - [ ] Workspace creation, switching, member invites; role updates and member removal are admin-only writes per §11 §12.2.
 - [ ] Session management: HttpOnly access/refresh cookies + double-submit CSRF (the kept identity model from the shipped repo).
 - [ ] `GET /me` returns user + workspaces + `currentWorkspaceId`.
-- [ ] Frontend: sign-in screen (reference: `SignInScreen` in `prototype/screens.jsx`).
-- [ ] Frontend: workspace switcher popover from the profile avatar (reference: `ProfileMenu` in `prototype/shell.jsx`).
+- [ ] Frontend: sign-in screen (reference: `SignInScreen` in `prototypes/prototype/screens.jsx`).
+- [ ] Frontend: workspace switcher popover from the profile avatar (reference: `ProfileMenu` in `prototypes/prototype/shell.jsx`).
 
 **Done when:** a fresh user can sign in via Google OAuth, hit `GET /me`, and switch between two workspaces with the cookie + CSRF flow intact.
 
@@ -103,9 +103,9 @@ The heart of the product. Don't skimp.
 - [ ] **Run orchestrator:** Ordered + Parallel mode. Queue + execute agents in sequence (Ordered) or fan-out (Parallel). State machine: `queued → running → awaiting? → completed/failed/cancelled` (§11 §3 `runs.status`). Uses `response_group_id` + `sequence_index` for sequencing. Roster freeze per fire writes `talk_agent_snapshots` rows sharing a `snapshot_group_id`; the acting agent's snapshot id is the run's `agent_snapshot_id` (§11 §3 / §4).
 - [ ] **Cloudflare Queues dispatch:** `/chat` enqueues on `TALK_RUN_QUEUE`; `queue-consumer.ts` performs atomic claim (`update runs set status='running' where id=$1 and status='queued' returning *`) so at-least-once delivery is safe (§12 §5).
 - [ ] **WebSocket streaming:** `04-api-contracts.md` §9. Token deltas, status transitions, tool calls, message commits, talk-state patches. Streamed via per-user `UserEventHub` DO (WebSocket Hibernation) reading from `event_outbox`.
-- [ ] **Frontend talk thread UI:** rounds, agent attribution (via `messages.agent_snapshot_id` so historical attribution is immutable — P1-5), run-state pills, live streaming with cursor, queued state, cancelled state. Reference: `TalkScreen` + `AgentMessage` + `UserMessage` in `prototype/screens.jsx` + `prototype/shell.jsx`.
+- [ ] **Frontend talk thread UI:** rounds, agent attribution (via `messages.agent_snapshot_id` so historical attribution is immutable — P1-5), run-state pills, live streaming with cursor, queued state, cancelled state. Reference: `TalkScreen` + `AgentMessage` + `UserMessage` in `prototypes/prototype/screens.jsx` + `prototypes/prototype/shell.jsx`.
 - [ ] **Composer:** address-to chips (reads live `talk_agents`), mode/rounds chips, ⌘+Enter send, ⌘. cancel.
-- [ ] **Talk header buttons:** Cancel runs / Agents / Tools / Context / Connectors / Document / ⋯. Each popover from `01-product-spec.md` §3 and `prototype/talk-dialogs.jsx`.
+- [ ] **Talk header buttons:** Cancel runs / Agents / Tools / Context / Connectors / Document / ⋯. Each popover from `01-product-spec.md` §3 and `prototypes/prototype/talk-dialogs.jsx`.
 - [ ] **⋯ menu:** Run history, Move to folder, Rename, Duplicate, Export, Archive.
 
 This phase is the largest. Allocate accordingly.

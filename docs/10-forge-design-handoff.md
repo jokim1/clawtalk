@@ -15,28 +15,28 @@ against the PRD ([`09-autonomous-content-improvement-prd.md`](./09-autonomous-co
 
 | File | What it is |
 |---|---|
-| [`../ClawTalk Forge.html`](../ClawTalk%20Forge.html) | The clickable prototype. Forked ClawTalk "Salon" app with Forge wired in. Open it and the demo lands on the Pricing Talk with the doc pane open. |
-| [`../ClawTalk Forge - Exploration.html`](../ClawTalk%20Forge%20-%20Exploration.html) | Design canvas: written rationale + the entry-surface and gallery-layout options that were explored. |
+| [`prototypes/ClawTalk Forge.html`](./prototypes/ClawTalk%20Forge.html) | The clickable prototype. Forked ClawTalk "Salon" app with Forge wired in. Open it and the demo lands on the Pricing Talk with the doc pane open. |
+| [`prototypes/ClawTalk Forge - Exploration.html`](./prototypes/ClawTalk%20Forge%20-%20Exploration.html) | Design canvas: written rationale + the entry-surface and gallery-layout options that were explored. |
 | [`09-autonomous-content-improvement-prd.md`](./09-autonomous-content-improvement-prd.md) | The source PRD (unchanged). |
 
-### Forge source modules (loaded by `../ClawTalk Forge.html`)
+### Forge source modules (loaded by `prototypes/ClawTalk Forge.html`)
 
 | File | Contents |
 |---|---|
-| `../prototype/forge-data.jsx` | Mock Synthetical assets (personas, audiences, reference sets, survey questions), the simulated runs history, per-persona verbatim responses + Likert spreads, and the connection-state helpers. |
-| `../prototype/forge-config.jsx` | Shared atoms — `ForgeMark`, `ScoreChip`, `PersonaCard`, `ForgeField`, `ForgeSlider` (slider **+ click-to-type** value) — and the full objective config (`ForgeConfig`). |
-| `../prototype/forge-page.jsx` | The **Forge page** (rail destination + sub-nav), Runs list, Run detail (chart + trust + leaderboard + per-persona responses), Audiences, Setup, Onboarding, the compact in-doc **launcher**, and `ForgeMount`. |
-| `../prototype/forge-stages.jsx` | The score line chart + the original full-overlay run/gallery stages (superseded by the page, kept for reference). |
-| `../prototype/forge-canvas.jsx` | Exploration artboards for `../ClawTalk Forge - Exploration.html`. |
+| `prototypes/prototype/forge-data.jsx` | Mock Synthetical assets (personas, audiences, reference sets, survey questions), the simulated runs history, per-persona verbatim responses + Likert spreads, and the connection-state helpers. |
+| `prototypes/prototype/forge-config.jsx` | Shared atoms — `ForgeMark`, `ScoreChip`, `PersonaCard`, `ForgeField`, `ForgeSlider` (slider **+ click-to-type** value) — and the full objective config (`ForgeConfig`). |
+| `prototypes/prototype/forge-page.jsx` | The **Forge page** (rail destination + sub-nav), Runs list, Run detail (chart + trust + leaderboard + per-persona responses), Audiences, Setup, Onboarding, the compact in-doc **launcher**, and `ForgeMount`. |
+| `prototypes/prototype/forge-stages.jsx` | The score line chart + the original full-overlay run/gallery stages (superseded by the page, kept for reference). |
+| `prototypes/prototype/forge-canvas.jsx` | Exploration artboards for `prototypes/ClawTalk Forge - Exploration.html`. |
 
 ### Integration touchpoints (all gated by `window.CT_FORGE_ENABLED`)
 
-The Forge flag is set in `../ClawTalk Forge.html` before scripts load, so the
-base Salon app (`../ClawTalk Salon.html`) is untouched when the flag is absent.
+The Forge flag is set in `prototypes/ClawTalk Forge.html` before scripts load, so the
+base Salon app (`prototypes/ClawTalk Salon.html`) is untouched when the flag is absent.
 
-- `../prototype/shell.jsx` — adds the **Forge** item to the icon rail (`IconRail`) and the **Improve** button to the document pane (`DocPane`).
-- `../prototype/documents.jsx` — adds the **Improve** button to the full-screen document view (`DocEditorScreen`).
-- `../prototype/app.jsx` — registers the `forge` route and mounts `ForgeMount`.
+- `prototypes/prototype/shell.jsx` — adds the **Forge** item to the icon rail (`IconRail`) and the **Improve** button to the document pane (`DocPane`).
+- `prototypes/prototype/documents.jsx` — adds the **Improve** button to the full-screen document view (`DocEditorScreen`).
+- `prototypes/prototype/app.jsx` — registers the `forge` route and mounts `ForgeMount`.
 
 > The same five modules also carry the latest base-design updates that ship
 > regardless of the Forge flag: Google-Docs-style **document tabs**, the
@@ -75,7 +75,7 @@ base Salon app (`../ClawTalk Salon.html`) is untouched when the flag is absent.
 **Everything is a front-end mock.** There is no Synthetical API call, no
 backend, no real scoring. Specifically:
 - Personas, audiences, reference sets, runs, candidates, scores, and persona
-  responses are static fixtures in `../prototype/forge-data.jsx`.
+  responses are static fixtures in `prototypes/prototype/forge-data.jsx`.
 - The "live run" is a timed animation, not real iteration.
 - "Set winner as document" shows a success state; it does not patch content.
 - The Synthetical connection is a `localStorage` toggle (`ct-forge-connected`).

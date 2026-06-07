@@ -344,7 +344,7 @@ Claude/Opus:
 ```text
 /goal
 Objective: Build the Salon-native Documents page/editor and in-Talk document pane on the native Documents API (documents/doc_tabs/doc_blocks/document_edits), without reintroducing markdown/html content facades.
-Scope: Documents route/page, editor shell, tab/block rendering, pending-edit review UI (view/accept/reject honoring the document_edits CAS/version-bump rules), in-Talk doc pane, and related webapp tests. Reference docs/02-visual-system.md and ClawTalk Salon.html for Salon tokens/primitives.
+Scope: Documents route/page, editor shell, tab/block rendering, pending-edit review UI (view/accept/reject honoring the document_edits CAS/version-bump rules), in-Talk doc pane, and related webapp tests. Reference docs/02-visual-system.md and docs/prototypes/ClawTalk Salon.html for Salon tokens/primitives.
 Non-goals: Reintroducing markdown/html content facades, Forge winner gallery, broad Salon token redesign, backend schema invention, or editing TalkDetailPage controller bulk beyond mounting the in-Talk pane.
 
 Orchestration (this session is /effort ultracode): orchestrate this build as a dynamic-workflow PIPELINE of slices — (1) Documents route/page shell, (2) tab/block editor rendering, (3) pending-edit accept/reject interactions, (4) in-Talk doc pane, (5) responsive QA — discovering sub-slices within each stage as needed. Per stage, run an adversarial-verify pass (a skeptic subagent that re-reads the diff for missed states / broken CAS handling) and, before completion, a completeness critic that confirms every Flow-checklist item below has a passing test and every required element is present in a DOM snapshot. Stay inside this goal's scope. ECHO each subagent's evidence back into THIS main conversation — the exact commands run, their exit codes, the names of the tests that passed, and the saved screenshot paths — because the after-every-turn evaluator reads ONLY this transcript and runs nothing; it cannot see inside subagents.
@@ -363,7 +363,7 @@ Done-when (transcript-checkable — the evaluator runs nothing and views no imag
   - `gh run list --branch [branch] --limit 1 --json conclusion,status` shows conclusion=success (output pasted).
 Bound: report progress each turn (what changed, which gate/stage ran, exit codes). Stop and hand off after 25 turns or 60 minutes even if unmet, summarizing the remaining Flow-checklist items and what blocks them. If a turn bound is hit with work remaining, resume with --continue (the condition carries; the counter resets) — do not rewrite the prompt.
 
-Human gate: only for an editor interaction choice not covered by docs/02-visual-system.md, ClawTalk Salon.html, or the canonical Documents spec; otherwise pick the simplest accept/reject UX matching the prototype and note the choice in the handoff — do not stop to ask.
+Human gate: only for an editor interaction choice not covered by docs/02-visual-system.md, docs/prototypes/ClawTalk Salon.html, or the canonical Documents spec; otherwise pick the simplest accept/reject UX matching the prototype and note the choice in the handoff — do not stop to ask.
 Handoff: Update docs/roadmap.md and docs/REFACTOR-AUDIT.md if status changed; list the Flow-checklist items verified with their test names, screenshot paths, facade-read grep before/after, the three review outcomes, and the CI conclusion.
 ```
 
