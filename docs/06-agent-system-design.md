@@ -6,7 +6,7 @@
 This doc specifies how ClawTalk agents should work in production. It is the
 engineering and product architecture for agents. The canonical default agent
 content still lives in [`03-agents.md`](./03-agents.md), and display/team seed
-data still comes from [`shared/data.jsx`](../shared/data.jsx).
+data still comes from [`prototypes/shared/data.jsx`](./prototypes/shared/data.jsx).
 
 The main decision: ClawTalk should not expose or store a large set of technical
 agent characteristics as first-class editable fields. Those characteristics are
@@ -1098,7 +1098,7 @@ Do not store user-editable raw system prompts here in v1.
 - `version int not null`
 - `updated_at`
 
-The canonical default content for the five user-facing roles comes from `03-agents.md` and `shared/data.jsx`. The two Forge system-agent roles seed their `job` / `method_default` from [`09-autonomous-content-improvement-prd.md`](./09-autonomous-content-improvement-prd.md)'s rewriter/critic responsibilities; final `system_prompt` text is written during implementation.
+The canonical default content for the five user-facing roles comes from `03-agents.md` and `prototypes/shared/data.jsx`. The two Forge system-agent roles seed their `job` / `method_default` from [`09-autonomous-content-improvement-prd.md`](./09-autonomous-content-improvement-prd.md)'s rewriter/critic responsibilities; final `system_prompt` text is written during implementation.
 
 ### 10.3 `team_compositions`
 
@@ -1266,11 +1266,11 @@ Note: `provider` is an open string because `llm_providers` is extensible (live m
 
 ## 12. Seeding Rules
 
-**Owner: API.** Workspace seeding runs server-side inside the `POST /workspaces` handler (the API edge — not the client, not a background worker). The handler inserts all seed rows in **one transaction** alongside the `workspaces` row insert; partial seeds are never visible. Source-of-truth tables live in §11 §4 (`agent_role_templates` as the runtime catalog) — the handler reads those plus the prompt/method text from `03-agents.md` and the display fields from `shared/data.jsx`.
+**Owner: API.** Workspace seeding runs server-side inside the `POST /workspaces` handler (the API edge — not the client, not a background worker). The handler inserts all seed rows in **one transaction** alongside the `workspaces` row insert; partial seeds are never visible. Source-of-truth tables live in §11 §4 (`agent_role_templates` as the runtime catalog) — the handler reads those plus the prompt/method text from `03-agents.md` and the display fields from `prototypes/shared/data.jsx`.
 
 On workspace creation, in one txn the API inserts:
 
-1. **Five default `agents` rows** — Strategist, Critic, Researcher, Quant, Editor. Seeded from `agent_role_templates` (§11 §4) for `model_id`, `temperature`, `role_template_version`; prompts and methodology from `03-agents.md`; display fields (accents, initials, icons, sort_order) from `shared/data.jsx`. Mark each `is_default = true`, `is_custom = false`, `is_system = false`. Store `created_from_template_version`. **Prompt template variables** (e.g., `{{user_name}}` in the Strategist prompt) are interpolated at runtime by the prompt-assembly path (§7), NOT at seed time — so the same `agent_role_templates.system_prompt` row serves every user. The runtime substitutes `{{user_name}}` with `users.name` of the active asker at prompt-assembly step 4 (§7 step 4).
+1. **Five default `agents` rows** — Strategist, Critic, Researcher, Quant, Editor. Seeded from `agent_role_templates` (§11 §4) for `model_id`, `temperature`, `role_template_version`; prompts and methodology from `03-agents.md`; display fields (accents, initials, icons, sort_order) from `prototypes/shared/data.jsx`. Mark each `is_default = true`, `is_custom = false`, `is_system = false`. Store `created_from_template_version`. **Prompt template variables** (e.g., `{{user_name}}` in the Strategist prompt) are interpolated at runtime by the prompt-assembly path (§7), NOT at seed time — so the same `agent_role_templates.system_prompt` row serves every user. The runtime substitutes `{{user_name}}` with `users.name` of the active asker at prompt-assembly step 4 (§7 step 4).
 2. **Two system Forge agents** — `forge_rewriter` and `forge_critic`, both with `is_system = true` (RLS-hidden from `GET /agents` per §11 §12; see §11.3.6 / §11 API contract).
 3. **Three default `team_compositions` rows** — Pricing crew, Research crew, Hiring crew (§6). `default_tools_json` materializes per-Talk via the §6 contract.
 
@@ -1282,7 +1282,7 @@ Seed tests should prove:
 
 - every new workspace has five enabled default agents and two system Forge agents
 - every new workspace has three default teams
-- seeded fields match `shared/data.jsx`
+- seeded fields match `prototypes/shared/data.jsx`
 - prompt/method text matches `03-agents.md`
 - reset restores the template defaults
 - re-running the seed is a no-op (no duplicate rows)

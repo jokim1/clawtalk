@@ -3,7 +3,7 @@
 
 # ClawTalk · Visual System
 
-The chosen direction is **Salon** — warm, editorial, paper-cream. Notion + Anthropic territory with multi-agent reasoning UI grafted on top. Use these tokens exactly. The working reference is `ClawTalk Salon.html`; this doc abstracts what's there into reusable tokens.
+The chosen direction is **Salon** — warm, editorial, paper-cream. Notion + Anthropic territory with multi-agent reasoning UI grafted on top. Use these tokens exactly. The working reference is `prototypes/ClawTalk Salon.html`; this doc abstracts what's there into reusable tokens.
 
 ---
 
@@ -91,7 +91,7 @@ Note: Strategist shares the accent hue with the brand. Acceptable — they're co
 These are *patterns*, not strict implementations. Look at the prototype source for exact React.
 
 ### Run pill
-Status indicator next to every agent message. Filled background + dot + label. See `RunPill` in `prototype/shell.jsx`.
+Status indicator next to every agent message. Filled background + dot + label. See `RunPill` in `prototypes/prototype/shell.jsx`.
 
 ### Agent avatar
 Round, colored circle with monospace initials (e.g. "SL"). Optional ring for emphasis. See `AgentAvatar`.
@@ -115,7 +115,7 @@ Perplexity-Discover-style. Wide layout with text left, colored thumbnail block r
 Anchored to a button, floats above content with backdrop dismiss. Used for Tools / Context / Connectors / Cmd-K / Workspace switcher. See `ToolsPopover` for the canonical implementation.
 
 ### Modal
-Centered sheet with 10vh top offset, backdrop blur, scoped close-on-escape. See `Modal` wrapper in `prototype/talk-dialogs.jsx`.
+Centered sheet with 10vh top offset, backdrop blur, scoped close-on-escape. See `Modal` wrapper in `prototypes/prototype/talk-dialogs.jsx`.
 
 ### Sheet (form modal)
 Larger modal with sectioned form layout. See `NewTalkSheet`.
@@ -124,7 +124,7 @@ Larger modal with sectioned form layout. See `NewTalkSheet`.
 
 ## §5 · Motion
 
-- **Subtle screen fade-in:** `opacity 0 → 1` + 4px vertical translate over 220ms ease-out. Applied on route change. See `.ct-screen-enter` in `ClawTalk Salon.html`.
+- **Subtle screen fade-in:** `opacity 0 → 1` + 4px vertical translate over 220ms ease-out. Applied on route change. See `.ct-screen-enter` in `prototypes/ClawTalk Salon.html`.
 - **Streaming cursor:** 7×18px filled block, agent's accent color, 800ms steps(1) blink. See `.ct-caret`.
 - **Pulse:** Dot indicators for live/streaming things. 1.6s ease-in-out opacity 1 → 0.35 → 1. See `.ct-pulse`.
 - **No bouncy animations.** No spring physics. The product is editorial-quiet, not playful.
@@ -133,7 +133,7 @@ Larger modal with sectioned form layout. See `NewTalkSheet`.
 
 ## §6 · Iconography
 
-Custom stroke-icon set in `shared/data.jsx` → `CTIcon` component. Names: `search`, `plus`, `folder`, `chat`, `doc`, `settings`, `arrow`, `send`, `sparkle`, `paperclip`, `mic`, `cmd`, `chevron-r`, `chevron-d`, `sidebar`, `panel`, `check`, `x`, `more`, `play`, `pause`, `bolt`, `globe`, `home`, `eye`, `logout`.
+Custom stroke-icon set in `prototypes/shared/data.jsx` → `CTIcon` component. Names: `search`, `plus`, `folder`, `chat`, `doc`, `settings`, `arrow`, `send`, `sparkle`, `paperclip`, `mic`, `cmd`, `chevron-r`, `chevron-d`, `sidebar`, `panel`, `check`, `x`, `more`, `play`, `pause`, `bolt`, `globe`, `home`, `eye`, `logout`.
 
 **Stroke width:** 1.5–1.7 default; 1.8–2.2 for emphasis.
 
@@ -143,7 +143,7 @@ Custom stroke-icon set in `shared/data.jsx` → `CTIcon` component. Names: `sear
 
 ## §7 · Brand mark
 
-See `CTMarkSalon` in `shared/data.jsx`. Three claw streaks over a rounded paper-cut speech bubble. Renders at 16–80px cleanly. Always use the function — do not embed as PNG.
+See `CTMarkSalon` in `prototypes/shared/data.jsx`. Three claw streaks over a rounded paper-cut speech bubble. Renders at 16–80px cleanly. Always use the function — do not embed as PNG.
 
 Available sizes used:
 - 28px (sidebar, inline)
