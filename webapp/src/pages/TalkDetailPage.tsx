@@ -28,7 +28,6 @@ import {
   listTalkThreads,
   listTalkMessages,
   searchTalkMessages,
-  patchTalkMetadata,
   sendTalkMessage,
   Talk,
   TalkAgent,
@@ -92,6 +91,7 @@ import { useTalkDocumentController } from '../hooks/useTalkDocumentController';
 import { useTalkRunViewModel } from '../hooks/useTalkRunViewModel';
 import { useTalkContextController } from '../hooks/useTalkContextController';
 import { useTalkJobsController } from '../hooks/useTalkJobsController';
+import { useTalkOrchestrationController } from '../hooks/useTalkOrchestrationController';
 import { createInitialDetailState, detailReducer } from '../lib/talkRunReducer';
 import { useQueryClient } from '@tanstack/react-query';
 import {
@@ -102,11 +102,8 @@ import {
 import {
   appendTalkMessageToSnapshot,
   createWsCacheRouter,
-  patchTalkInSnapshot,
   prependOlderTalkMessagesToSnapshot,
 } from '../lib/wsCacheRouter';
-
-type TalkOrchestrationMode = Talk['orchestrationMode'];
 
 type ThreadListState = {
   threads: TalkThread[];
@@ -642,7 +639,6 @@ export function TalkDetailPage({
   >(new Map());
   const threadStateRef = useRef<ThreadListState>(threadState);
   const searchQueryRef = useRef(searchQuery);
-  const orchestrationMenuRef = useRef<HTMLDivElement | null>(null);
   const [loadingOlderMessages, setLoadingOlderMessages] = useState(false);
   // Tracks whether the server has more history past the current view.
   // Initial value follows snapshot.hasOlderMessages; flips to false the
@@ -689,12 +685,6 @@ export function TalkDetailPage({
     status: 'idle' | 'saving' | 'error' | 'success';
     message?: string;
   }>({ status: 'idle' });
-  const [orchestrationState, setOrchestrationState] = useState<{
-    status: 'idle' | 'saving' | 'error';
-    message?: string;
-  }>({ status: 'idle' });
-  const [orchestrationMenuOpen, setOrchestrationMenuOpen] = useState(false);
-
   const titleInputRef = useRef<HTMLInputElement | null>(null);
   const messageElementRefs = useRef<Map<string, HTMLElement>>(new Map());
   const autoStickToBottomRef = useRef<ScrollBehavior | null>(null);
@@ -1113,7 +1103,6 @@ export function TalkDetailPage({
     setAgentState({ status: 'idle' });
     setHistoryEditorOpen(false);
     setHistoryEditState({ status: 'idle' });
-    setOrchestrationState({ status: 'idle' });
     setRunContextPanels({});
     return () => {
       if (threadRefreshTimerRef.current) {
@@ -1614,40 +1603,24 @@ export function TalkDetailPage({
     [effectiveAgents],
   );
 
-  const orchestrationMode: TalkOrchestrationMode =
-    pageKind === 'ready' && pageTalk ? pageTalk.orchestrationMode : 'ordered';
-  const showOrchestrationSelector = agents.length >= 2;
-  useEffect(() => {
-    if (showOrchestrationSelector && orchestrationState.status !== 'saving') {
-      return;
-    }
-    setOrchestrationMenuOpen(false);
-  }, [orchestrationState.status, showOrchestrationSelector]);
-  useEffect(() => {
-    if (!orchestrationMenuOpen) return;
-
-    const handlePointerDown = (event: MouseEvent) => {
-      if (
-        orchestrationMenuRef.current &&
-        !orchestrationMenuRef.current.contains(event.target as Node)
-      ) {
-        setOrchestrationMenuOpen(false);
-      }
-    };
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') {
-        setOrchestrationMenuOpen(false);
-      }
-    };
-
-    document.addEventListener('mousedown', handlePointerDown);
-    document.addEventListener('keydown', handleKeyDown);
-
-    return () => {
-      document.removeEventListener('mousedown', handlePointerDown);
-      document.removeEventListener('keydown', handleKeyDown);
-    };
-  }, [orchestrationMenuOpen]);
+  const {
+    orchestrationMenuRef,
+    orchestrationMenuOpen,
+    setOrchestrationMenuOpen,
+    orchestrationMode,
+    orchestrationState,
+    showOrchestrationSelector,
+    handleOrchestrationModeChange,
+  } = useTalkOrchestrationController({
+    talkId,
+    userId,
+    pageKind,
+    pageTalk,
+    agentCount: agents.length,
+    activeThreadIdRef,
+    queryClient,
+    onUnauthorized: handleUnauthorized,
+  });
   const selectedTargetAgents = useMemo(
     () => effectiveAgents.filter((agent) => targetAgentIds.includes(agent.id)),
     [effectiveAgents, targetAgentIds],
@@ -2766,47 +2739,6 @@ export function TalkDetailPage({
       openThreadMenu(threadId, event.clientX, event.clientY);
     },
     [openThreadMenu],
-  );
-
-  const handleOrchestrationModeChange = useCallback(
-    async (nextMode: TalkOrchestrationMode) => {
-      if (pageKind !== 'ready' || !pageTalk) return;
-      if (pageTalk.orchestrationMode === nextMode) return;
-
-      setOrchestrationState({ status: 'saving' });
-      try {
-        const updatedTalk = await patchTalkMetadata({
-          talkId: pageTalk.id,
-          orchestrationMode: nextMode,
-        });
-        patchTalkInSnapshot({
-          queryClient,
-          userId,
-          talkId,
-          threadId: activeThreadIdRef.current,
-          patch: {
-            orchestrationMode: updatedTalk.orchestrationMode,
-            title: updatedTalk.title,
-            version: updatedTalk.version,
-            updatedAt: updatedTalk.updatedAt,
-          },
-        });
-        setOrchestrationState({ status: 'idle' });
-      } catch (err) {
-        if (err instanceof UnauthorizedError) {
-          handleUnauthorized();
-          return;
-        }
-        setOrchestrationState({
-          status: 'error',
-          message:
-            err instanceof Error
-              ? err.message
-              : 'Failed to update response mode.',
-        });
-      }
-    },
-    [handleUnauthorized, pageKind, pageTalk, queryClient, talkId, userId],
   );
 
   const handleCreateThread = useCallback(async () => {
