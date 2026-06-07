@@ -421,6 +421,11 @@ export function App() {
   // can toggle without re-subscribing on every open/close.
   const paletteOpenRef = useRef(false);
   paletteOpenRef.current = paletteOpen;
+  // Mirror the New Talk sheet's open-state so ⌘K won't stack the palette over
+  // it: both are Modals with window-level Escape, and stacking would let one
+  // Escape close both overlays (dropping the sheet's typed draft).
+  const newTalkOpenRef = useRef(false);
+  newTalkOpenRef.current = newTalkOpen;
   // Mirror auth so the global ⌘K listener ignores keystrokes outside the
   // authenticated app shell (e.g. the SignIn screen's dev-login fields).
   const authedRef = useRef(false);
@@ -643,7 +648,8 @@ export function App() {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
         event.preventDefault();
         if (paletteOpenRef.current) closePalette();
-        else openPalette();
+        // Don't stack the palette over another open overlay (the New Talk sheet).
+        else if (!newTalkOpenRef.current) openPalette();
       }
     };
     window.addEventListener('keydown', onKey);

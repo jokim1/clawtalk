@@ -106,6 +106,35 @@ test('opens from the header search field and closes on Escape', async ({
   await expect(combo).toHaveCount(0);
 });
 
+test('Ctrl/Cmd+K does not stack the palette over the New Talk sheet', async ({
+  page,
+}) => {
+  await installMocks(page);
+  await page.goto('/app/talks');
+  // Open the New Talk sheet from the sidebar.
+  await page
+    .getByRole('button', { name: 'Create talk or folder' })
+    .waitFor({ state: 'visible' });
+  const newTalkBtn = page.getByRole('button', { name: 'New Talk' });
+  await expect(async () => {
+    if (!(await newTalkBtn.isVisible())) {
+      await page
+        .getByRole('button', { name: 'Create talk or folder' })
+        .click({ timeout: 1500 });
+    }
+    await expect(newTalkBtn).toBeVisible({ timeout: 1500 });
+  }).toPass({ timeout: 20000 });
+  await newTalkBtn.click();
+  await expect(page.getByRole('heading', { name: 'New Talk' })).toBeVisible();
+
+  // ⌘K must NOT stack the palette over the open sheet.
+  await page.keyboard.press('Control+k');
+  await expect(
+    page.getByRole('combobox', { name: 'Search commands and Talks' }),
+  ).toHaveCount(0);
+  await expect(page.getByRole('heading', { name: 'New Talk' })).toBeVisible();
+});
+
 for (const vp of [
   { label: 'desktop-1280', width: 1280, height: 800 },
   { label: 'mobile-390', width: 390, height: 844 },
