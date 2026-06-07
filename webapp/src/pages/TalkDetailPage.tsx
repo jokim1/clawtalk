@@ -32,8 +32,6 @@ import {
   sendTalkMessage,
   Talk,
   TalkAgent,
-  TalkJob,
-  TalkJobRunSummary,
   TalkMessage,
   TalkMessageSearchResult,
   TalkMessageAttachment,
@@ -53,11 +51,7 @@ import { SavedSourcesPanel } from '../components/SavedSourcesPanel';
 import { TalkContextPanel } from '../components/TalkContextPanel';
 import {
   TalkJobsPanel,
-  buildDefaultJobDraft,
   type JobAgentOption,
-  type JobLoadStatus,
-  type TalkJobDraft,
-  type TalkJobsStatusState,
 } from '../components/TalkJobsPanel';
 import {
   buildSourceMentionOptions,
@@ -97,6 +91,7 @@ import {
 import { useTalkDocumentController } from '../hooks/useTalkDocumentController';
 import { useTalkRunViewModel } from '../hooks/useTalkRunViewModel';
 import { useTalkContextController } from '../hooks/useTalkContextController';
+import { useTalkJobsController } from '../hooks/useTalkJobsController';
 import { createInitialDetailState, detailReducer } from '../lib/talkRunReducer';
 import { useQueryClient } from '@tanstack/react-query';
 import {
@@ -700,28 +695,6 @@ export function TalkDetailPage({
   }>({ status: 'idle' });
   const [orchestrationMenuOpen, setOrchestrationMenuOpen] = useState(false);
 
-  // Page-owned Jobs state. TalkJobsPanel is presentational: every piece an async
-  // mutation writes — the list, selection, draft, runs, and mutation status —
-  // lives here so a save/run that resolves after the panel unmounts (tab switch)
-  // still updates the live state, not an orphaned copy, and the half-filled form
-  // survives the round-trip. The panel self-fetches only the read-only tool
-  // scope. See TalkJobsPanel.
-  const [talkJobs, setTalkJobs] = useState<TalkJob[]>([]);
-  const [talkJobsLoaded, setTalkJobsLoaded] = useState(false);
-  const [talkJobsStatus, setTalkJobsStatus] = useState<TalkJobsStatusState>({
-    status: 'idle',
-  });
-  const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
-  const [creatingJob, setCreatingJob] = useState(false);
-  const [jobDraft, setJobDraft] = useState<TalkJobDraft>(() =>
-    buildDefaultJobDraft(),
-  );
-  const [selectedJobRuns, setSelectedJobRuns] = useState<TalkJobRunSummary[]>(
-    [],
-  );
-  const [selectedJobRunsStatus, setSelectedJobRunsStatus] =
-    useState<JobLoadStatus>({ status: 'idle' });
-
   const titleInputRef = useRef<HTMLInputElement | null>(null);
   const messageElementRefs = useRef<Map<string, HTMLElement>>(new Map());
   const autoStickToBottomRef = useRef<ScrollBehavior | null>(null);
@@ -1086,17 +1059,29 @@ export function TalkDetailPage({
     [resyncTalkState],
   );
 
-  // After a Run-Now settles in TalkJobsPanel: if the job's thread is the active
-  // thread, resync the thread/run views. Encapsulates the page-private
-  // activeThreadIdRef + resyncTalkState so the panel needs neither.
-  const handleJobRunSettled = useCallback(
-    async (jobThreadId: string | null) => {
-      if (jobThreadId === activeThreadIdRef.current) {
-        await resyncTalkState({ refreshThreads: true });
-      }
-    },
-    [resyncTalkState],
-  );
+  const {
+    talkJobs,
+    setTalkJobs,
+    talkJobsLoaded,
+    setTalkJobsLoaded,
+    talkJobsStatus,
+    setTalkJobsStatus,
+    selectedJobId,
+    setSelectedJobId,
+    creatingJob,
+    setCreatingJob,
+    jobDraft,
+    setJobDraft,
+    selectedJobRuns,
+    setSelectedJobRuns,
+    selectedJobRunsStatus,
+    setSelectedJobRunsStatus,
+    handleJobRunSettled,
+  } = useTalkJobsController({
+    talkId,
+    activeThreadIdRef,
+    resyncTalkState,
+  });
 
   // Tracks the last (talkId, activeThreadId) we fully hydrated from the
   // snapshot. PR C: same-thread refetches no longer dispatch into the
@@ -1130,15 +1115,6 @@ export function TalkDetailPage({
     setHistoryEditState({ status: 'idle' });
     setOrchestrationState({ status: 'idle' });
     setRunContextPanels({});
-    // Page-owned Jobs state (TalkJobsPanel self-fetches only the tool scope).
-    setTalkJobs([]);
-    setTalkJobsLoaded(false);
-    setTalkJobsStatus({ status: 'idle' });
-    setSelectedJobId(null);
-    setCreatingJob(false);
-    setJobDraft(buildDefaultJobDraft());
-    setSelectedJobRuns([]);
-    setSelectedJobRunsStatus({ status: 'idle' });
     return () => {
       if (threadRefreshTimerRef.current) {
         clearTimeout(threadRefreshTimerRef.current);
