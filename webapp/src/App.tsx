@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Navigate,
   Route,
@@ -9,6 +9,7 @@ import {
 
 import { ClawTalkMark } from './components/ClawTalkMark';
 import { ClawTalkSidebar } from './components/ClawTalkSidebar';
+import { NewTalkSheet } from './components/NewTalkSheet';
 import { SignInView } from './components/SignInView';
 import {
   ApiError,
@@ -409,6 +410,10 @@ export function App() {
   const [sidebarError, setSidebarError] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState<RenameDraft>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [newTalkOpen, setNewTalkOpen] = useState(false);
+  // Element to restore focus to when the New Talk sheet is dismissed without
+  // creating — captured at open-time, before the sheet's portal steals focus.
+  const newTalkRestoreRef = useRef<Element | null>(null);
   const [talkReadMarkers, setTalkReadMarkers] = useState<
     Record<string, TalkReadMarker>
   >({});
@@ -562,15 +567,35 @@ export function App() {
     [handleUnauthorized],
   );
 
-  const handleCreateTalk = useCallback(async () => {
-    const talk = await createTalk('');
-    setSidebarItems((current) => insertTopLevelTalk(current, talk));
-    setSidebarError(null);
-    setRenameDraft({ talkId: talk.id, draft: talk.title });
-    navigate(`/app/talks/${talk.id}`);
-    void refreshSidebar();
-    return talk;
-  }, [navigate, refreshSidebar]);
+  const handleCreateTalk = useCallback(
+    async (title: string) => {
+      const talk = await createTalk(title);
+      setSidebarItems((current) => insertTopLevelTalk(current, talk));
+      setSidebarError(null);
+      navigate(`/app/talks/${talk.id}`);
+      void refreshSidebar();
+      return talk;
+    },
+    [navigate, refreshSidebar],
+  );
+
+  const openNewTalk = useCallback(() => {
+    newTalkRestoreRef.current = document.activeElement;
+    setNewTalkOpen(true);
+  }, []);
+
+  const closeNewTalk = useCallback(() => {
+    setNewTalkOpen(false);
+    const target = newTalkRestoreRef.current;
+    newTalkRestoreRef.current = null;
+    if (target instanceof HTMLElement) {
+      // Defer so focus lands after the portal unmounts; re-check isConnected
+      // at focus time since the trigger could have been removed meanwhile.
+      requestAnimationFrame(() => {
+        if (target.isConnected) target.focus();
+      });
+    }
+  }, []);
 
   const handleCreateFolder = useCallback(async () => {
     const folder = await createTalkFolder('');
@@ -818,7 +843,7 @@ export function App() {
           onSwitchWorkspace={handleSwitchWorkspace}
           onSignOut={handleSignOut}
           signOutBusy={signOutBusy}
-          onCreateTalk={handleCreateTalk}
+          onNewTalk={openNewTalk}
           onCreateFolder={handleCreateFolder}
           onRenameTalk={handleRenameTalk}
           onPatchTalk={handlePatchTalk}
@@ -827,6 +852,17 @@ export function App() {
           onDeleteFolder={handleDeleteFolder}
           onReorder={handleReorder}
           renameDraft={renameDraft}
+        />
+      ) : null}
+      {newTalkOpen ? (
+        <NewTalkSheet
+          onCreate={async (title) => {
+            await handleCreateTalk(title);
+            // Success navigates into the new Talk; close without restoring
+            // focus to the (now off-screen) trigger.
+            setNewTalkOpen(false);
+          }}
+          onClose={closeNewTalk}
         />
       ) : null}
       <div className="app-main">

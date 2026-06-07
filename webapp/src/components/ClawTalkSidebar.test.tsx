@@ -7,7 +7,6 @@ import { ClawTalkSidebar } from './ClawTalkSidebar';
 import type {
   ContentSidebarItem,
   SessionUser,
-  Talk,
   TalkSidebarFolder,
   TalkSidebarItem,
 } from '../lib/api';
@@ -19,23 +18,6 @@ function buildUser(): SessionUser {
     displayName: 'Owner Example',
     role: 'owner',
     createdAt: '2026-01-01T00:00:00.000Z',
-  };
-}
-
-function buildTalk(): Talk {
-  return {
-    id: 'talk-created',
-    ownerId: 'owner-1',
-    title: 'Created Talk',
-    orchestrationMode: 'ordered',
-    agents: [],
-    status: 'active',
-    folderId: null,
-    sortOrder: 0,
-    version: 1,
-    createdAt: '2026-03-09T00:00:00.000Z',
-    updatedAt: '2026-03-09T00:00:00.000Z',
-    accessRole: 'owner',
   };
 }
 
@@ -129,7 +111,7 @@ describe('ClawTalkSidebar', () => {
           onSwitchWorkspace={vi.fn()}
           onSignOut={vi.fn()}
           signOutBusy={false}
-          onCreateTalk={vi.fn(async () => buildTalk())}
+          onNewTalk={vi.fn()}
           onCreateFolder={vi.fn(async () => buildFolder())}
           onRenameTalk={vi.fn()}
           onPatchTalk={vi.fn(async () => undefined)}
@@ -180,7 +162,7 @@ describe('ClawTalkSidebar', () => {
           onSwitchWorkspace={vi.fn()}
           onSignOut={vi.fn()}
           signOutBusy={false}
-          onCreateTalk={vi.fn(async () => buildTalk())}
+          onNewTalk={vi.fn()}
           onCreateFolder={vi.fn(async () => buildFolder())}
           onRenameTalk={vi.fn()}
           onPatchTalk={vi.fn(async () => undefined)}
@@ -239,7 +221,7 @@ describe('ClawTalkSidebar', () => {
           onSwitchWorkspace={vi.fn()}
           onSignOut={vi.fn()}
           signOutBusy={false}
-          onCreateTalk={vi.fn(async () => buildTalk())}
+          onNewTalk={vi.fn()}
           onCreateFolder={vi.fn(async () => buildFolder())}
           onRenameTalk={vi.fn()}
           onPatchTalk={vi.fn(async () => undefined)}

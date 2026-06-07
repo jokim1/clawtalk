@@ -66,7 +66,7 @@ type Props = {
   onSwitchWorkspace: (workspaceId: string) => void | Promise<void>;
   onSignOut: () => void;
   signOutBusy: boolean;
-  onCreateTalk: () => Promise<Talk>;
+  onNewTalk: () => void;
   onCreateFolder: () => Promise<TalkSidebarFolder>;
   onRenameTalk: (talkId: string, title: string) => void;
   onPatchTalk: (input: {
@@ -210,7 +210,7 @@ export function ClawTalkSidebar({
   onSwitchWorkspace,
   onSignOut,
   signOutBusy,
-  onCreateTalk,
+  onNewTalk,
   onCreateFolder,
   onRenameTalk,
   onPatchTalk,
@@ -369,13 +369,15 @@ export function ClawTalkSidebar({
     );
   };
 
-  const handleCreateTalkClick = async () => {
+  const handleCreateTalkClick = () => {
+    // Return focus to the stable "+" trigger BEFORE the menu unmounts: the
+    // sheet's focus-restore (App.openNewTalk reads document.activeElement)
+    // must capture a node that stays mounted, not this menu item which is
+    // about to be detached by setMenuState(null).
+    createMenuButtonRef.current?.focus();
     setMenuState(null);
-    try {
-      await onCreateTalk();
-    } catch {
-      // Parent handles refresh/error surfaces.
-    }
+    // Opens the New Talk sheet (parent-owned); naming + create happen there.
+    onNewTalk();
   };
 
   const handleCreateFolderClick = async () => {
@@ -815,7 +817,7 @@ export function ClawTalkSidebar({
                   <>
                     <button
                       type="button"
-                      onClick={() => void handleCreateTalkClick()}
+                      onClick={handleCreateTalkClick}
                     >
                       New Talk
                     </button>
