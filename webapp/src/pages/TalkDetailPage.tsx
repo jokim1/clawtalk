@@ -17,16 +17,12 @@ import {
   ApiError,
   cancelTalkRuns,
   ContentSidebarItem,
-  ContextGoal,
-  ContextRule,
-  ContextSource,
   createTalkThread,
   deleteTalkMessages,
   deleteTalkThread,
   getAiAgents,
   getTalk,
   getTalkAgents,
-  getTalkContext,
   getTalkRunContext,
   getTalkRuns,
   listTalkThreads,
@@ -54,10 +50,7 @@ import {
 } from '../lib/api';
 import { TalkToolsPanel } from '../components/TalkToolsPanel';
 import { SavedSourcesPanel } from '../components/SavedSourcesPanel';
-import {
-  TalkContextPanel,
-  type ContextStatusState,
-} from '../components/TalkContextPanel';
+import { TalkContextPanel } from '../components/TalkContextPanel';
 import {
   TalkJobsPanel,
   buildDefaultJobDraft,
@@ -103,6 +96,7 @@ import {
 } from '../hooks/useTalkDetailTabs';
 import { useTalkDocumentController } from '../hooks/useTalkDocumentController';
 import { useTalkRunViewModel } from '../hooks/useTalkRunViewModel';
+import { useTalkContextController } from '../hooks/useTalkContextController';
 import { createInitialDetailState, detailReducer } from '../lib/talkRunReducer';
 import { useQueryClient } from '@tanstack/react-query';
 import {
@@ -706,28 +700,6 @@ export function TalkDetailPage({
   }>({ status: 'idle' });
   const [orchestrationMenuOpen, setOrchestrationMenuOpen] = useState(false);
 
-  // Context tab state
-  const [contextGoal, setContextGoal] = useState<ContextGoal | null>(null);
-  const [contextRules, setContextRules] = useState<ContextRule[]>([]);
-  const [contextSources, setContextSources] = useState<ContextSource[]>([]);
-  const [contextLoaded, setContextLoaded] = useState(false);
-  // Page-owned status shared with TalkContextPanel: drives the load gate and the
-  // goal/rule mutation feedback. Kept on the page (not the tab-mounted panel) so
-  // the 'saving' lockout and any in-flight mutation survive the user leaving and
-  // re-entering the Context tab.
-  const [contextStatus, setContextStatus] = useState<ContextStatusState>({
-    status: 'idle',
-  });
-  // Goal/rule draft state for TalkContextPanel, page-owned (like jobDraft) so
-  // unsaved edits survive leaving and re-entering the Context tab. These are
-  // sparse in-progress *overrides*: goalDraft === null / a missing ruleDrafts
-  // entry means "no override — render the live goal/rule prop". An override is
-  // set as the user types and cleared again on a successful (or no-op) save, so
-  // a mutation that resolves after a tab switch is reflected from the refreshed
-  // props and can't be reverted by a stale draft.
-  const [goalDraft, setGoalDraft] = useState<string | null>(null);
-  const [newRuleText, setNewRuleText] = useState('');
-  const [ruleDrafts, setRuleDrafts] = useState<Record<string, string>>({});
   // Page-owned Jobs state. TalkJobsPanel is presentational: every piece an async
   // mutation writes — the list, selection, draft, runs, and mutation status —
   // lives here so a save/run that resolves after the panel unmounts (tab switch)
@@ -779,11 +751,6 @@ export function TalkDetailPage({
   useEffect(() => {
     dispatch({ type: 'THREAD_SELECTED', threadId: activeThreadId });
   }, [activeThreadId]);
-
-  const activeRuleCount = useMemo(
-    () => contextRules.filter((rule) => rule.isActive).length,
-    [contextRules],
-  );
 
   const currentThreadHasContent = useMemo(
     () =>
@@ -923,6 +890,29 @@ export function TalkDetailPage({
   const handleUnauthorized = useCallback(() => {
     onUnauthorizedRef.current();
   }, []);
+
+  const {
+    activeRuleCount,
+    contextGoal,
+    setContextGoal,
+    contextRules,
+    setContextRules,
+    contextSources,
+    setContextSources,
+    contextStatus,
+    setContextStatus,
+    goalDraft,
+    setGoalDraft,
+    newRuleText,
+    setNewRuleText,
+    ruleDrafts,
+    setRuleDrafts,
+  } = useTalkContextController({
+    talkId,
+    currentTab,
+    pageKind,
+    onUnauthorized: handleUnauthorized,
+  });
 
   const refreshThreadListNow = useCallback(async () => {
     if (threadRefreshInFlightRef.current) {
@@ -1096,21 +1086,6 @@ export function TalkDetailPage({
     [resyncTalkState],
   );
 
-  const refreshContext = useCallback(
-    async (options?: { showLoading?: boolean }) => {
-      if (options?.showLoading) {
-        setContextStatus({ status: 'loading' });
-      }
-      const ctx = await getTalkContext(talkId);
-      setContextGoal(ctx.goal);
-      setContextRules(ctx.rules);
-      setContextSources(ctx.sources);
-      setContextLoaded(true);
-      setContextStatus({ status: 'idle' });
-    },
-    [talkId],
-  );
-
   // After a Run-Now settles in TalkJobsPanel: if the job's thread is the active
   // thread, resync the thread/run views. Encapsulates the page-private
   // activeThreadIdRef + resyncTalkState so the panel needs neither.
@@ -1155,14 +1130,6 @@ export function TalkDetailPage({
     setHistoryEditState({ status: 'idle' });
     setOrchestrationState({ status: 'idle' });
     setRunContextPanels({});
-    setContextLoaded(false);
-    setContextGoal(null);
-    setContextRules([]);
-    setContextSources([]);
-    setContextStatus({ status: 'idle' });
-    setGoalDraft(null);
-    setNewRuleText('');
-    setRuleDrafts({});
     // Page-owned Jobs state (TalkJobsPanel self-fetches only the tool scope).
     setTalkJobs([]);
     setTalkJobsLoaded(false);
@@ -1971,79 +1938,6 @@ export function TalkDetailPage({
   );
   const manageConnectorsHref = '/app/connectors';
   const isRenaming = renameDraft?.talkId === talkId;
-
-  // Load Talk context once so Rules badges and context surfaces stay hydrated.
-  useEffect(() => {
-    if (pageKind !== 'ready') return;
-    if (contextLoaded) return;
-
-    let cancelled = false;
-
-    const loadContext = async () => {
-      try {
-        await refreshContext({
-          showLoading: currentTab === 'context',
-        });
-        if (cancelled) return;
-      } catch (err) {
-        if (err instanceof UnauthorizedError) {
-          handleUnauthorized();
-          return;
-        }
-        if (!cancelled) {
-          setContextStatus({
-            status: 'error',
-            message:
-              err instanceof Error ? err.message : 'Failed to load context.',
-          });
-        }
-      }
-    };
-
-    void loadContext();
-    return () => {
-      cancelled = true;
-    };
-  }, [contextLoaded, currentTab, handleUnauthorized, refreshContext, pageKind]);
-
-  useEffect(() => {
-    if (pageKind !== 'ready' || currentTab !== 'context' || !contextLoaded) {
-      return;
-    }
-    if (!contextSources.some((source) => source.status === 'pending')) {
-      return;
-    }
-
-    let cancelled = false;
-    const interval = window.setInterval(() => {
-      void refreshContext().catch((err) => {
-        if (cancelled) return;
-        if (err instanceof UnauthorizedError) {
-          handleUnauthorized();
-          return;
-        }
-        setContextStatus({
-          status: 'error',
-          message:
-            err instanceof Error
-              ? err.message
-              : 'Failed to refresh saved source status.',
-        });
-      });
-    }, 2000);
-
-    return () => {
-      cancelled = true;
-      window.clearInterval(interval);
-    };
-  }, [
-    contextLoaded,
-    contextSources,
-    currentTab,
-    handleUnauthorized,
-    refreshContext,
-    pageKind,
-  ]);
 
   const openHistoryEditor = useCallback(() => {
     if (pageKind !== 'ready') return;
