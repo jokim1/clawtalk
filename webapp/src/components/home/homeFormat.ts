@@ -142,7 +142,7 @@ export function targetToPath(
   target: Record<string, unknown> | null | undefined,
 ): string | null {
   const talkId = readString(target, 'talkId');
-  if (talkId) return `/app/talks/${talkId}`;
+  if (talkId) return `/app/talks/${encodeURIComponent(talkId)}`;
   const kind = readString(target, 'kind');
   if (kind === 'connector') return '/app/settings?tab=connectors';
   if (kind === 'system') return '/app/settings';
@@ -164,6 +164,11 @@ export const HOME_WRITE_PENDING_REASON =
  * actions (dismiss/snooze/resolve/add-to-context) resolve to a disabled control
  * that explains the pending write API rather than silently doing nothing.
  */
+/** True only for http(s) URLs — blocks javascript:/data:/custom-scheme hrefs. */
+export function isSafeHttpUrl(url: string | null | undefined): boolean {
+  return typeof url === 'string' && /^https?:\/\//i.test(url.trim());
+}
+
 export function classifyAction(
   action: HomeAction | null | undefined,
   fallback?: { to?: string | null },
@@ -171,11 +176,16 @@ export function classifyAction(
   const label = action?.label?.trim() || 'Open';
   if (action) {
     const url = readString(action.payload, 'url');
-    if (url && /^https?:\/\//i.test(url)) {
+    if (url && isSafeHttpUrl(url)) {
       return { kind: 'href', href: url, label };
     }
     const talkId = readString(action.payload, 'talkId');
-    if (talkId) return { kind: 'nav', to: `/app/talks/${talkId}`, label };
+    if (talkId)
+      return {
+        kind: 'nav',
+        to: `/app/talks/${encodeURIComponent(talkId)}`,
+        label,
+      };
   }
   if (fallback?.to) return { kind: 'nav', to: fallback.to, label };
   return { kind: 'disabled', reason: HOME_WRITE_PENDING_REASON, label };

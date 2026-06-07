@@ -13,7 +13,11 @@ import {
   SectionHeader,
   TalkChip,
 } from './HomeKit';
-import { HOME_WRITE_PENDING_REASON, newsImpactLabel } from './homeFormat';
+import {
+  HOME_WRITE_PENDING_REASON,
+  isSafeHttpUrl,
+  newsImpactLabel,
+} from './homeFormat';
 
 function NewsCard({ item }: { item: HomeNewsItem }): JSX.Element {
   return (
@@ -139,7 +143,15 @@ function NewsCard({ item }: { item: HomeNewsItem }): JSX.Element {
               variant="secondary"
             />
             <ActionButton
-              behavior={{ kind: 'href', href: item.url, label: 'Open' }}
+              behavior={
+                isSafeHttpUrl(item.url)
+                  ? { kind: 'href', href: item.url, label: 'Open' }
+                  : {
+                      kind: 'disabled',
+                      reason: 'Link unavailable (untrusted URL).',
+                      label: 'Open',
+                    }
+              }
               variant="secondary"
             />
           </div>

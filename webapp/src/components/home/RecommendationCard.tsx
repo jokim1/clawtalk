@@ -29,11 +29,13 @@ export function RecommendationCard({
   rec: HomeRecommendation;
   variant?: 'hero' | 'compact';
 }): JSX.Element {
-  const badge = REC_PRIORITY_BADGE[rec.priority];
+  const badge = REC_PRIORITY_BADGE[rec.priority] ?? REC_PRIORITY_BADGE.tidy;
   const icon = REC_KIND_ICON[rec.kind] ?? 'sparkle';
   const ref = talkRef(rec.provenance);
   const behavior = classifyAction(rec.action, {
-    to: ref ? `/app/talks/${ref.talkId}` : targetToPath(rec.provenance),
+    to: ref
+      ? `/app/talks/${encodeURIComponent(ref.talkId)}`
+      : targetToPath(rec.provenance),
   });
   const titleSize = variant === 'hero' ? 18 : 15;
 

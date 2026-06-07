@@ -29,7 +29,7 @@ function InboxRow({
   item: HomeInboxItem;
   first: boolean;
 }): JSX.Element {
-  const sev = INBOX_SEVERITY_BADGE[item.severity];
+  const sev = INBOX_SEVERITY_BADGE[item.severity] ?? INBOX_SEVERITY_BADGE.info;
   const icon = INBOX_TYPE_ICON[item.type] ?? 'chat';
   const target = item.target as Record<string, unknown>;
   const ref = talkRef(target);

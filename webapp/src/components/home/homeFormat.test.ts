@@ -5,6 +5,7 @@ import {
   formatStatValue,
   HOME_WRITE_PENDING_REASON,
   INBOX_SEVERITY_BADGE,
+  isSafeHttpUrl,
   newsImpactLabel,
   REC_PRIORITY_BADGE,
   talkRef,
@@ -84,11 +85,35 @@ describe('classifyAction', () => {
       label: 'Go',
     });
   });
+
+  it('percent-encodes talk ids so a crafted id cannot reshape the route', () => {
+    expect(
+      classifyAction({
+        type: 'open',
+        label: 'Open',
+        payload: { talkId: 'a/b?c' },
+      }),
+    ).toMatchObject({ kind: 'nav', to: '/app/talks/a%2Fb%3Fc' });
+  });
+});
+
+describe('isSafeHttpUrl', () => {
+  it('accepts http(s) and rejects dangerous schemes', () => {
+    expect(isSafeHttpUrl('https://example.com')).toBe(true);
+    expect(isSafeHttpUrl('http://example.com')).toBe(true);
+    expect(isSafeHttpUrl('  https://trimmed.example  ')).toBe(true);
+    expect(isSafeHttpUrl('javascript:alert(1)')).toBe(false);
+    expect(isSafeHttpUrl('data:text/html,x')).toBe(false);
+    expect(isSafeHttpUrl('ftp://example.com')).toBe(false);
+    expect(isSafeHttpUrl('')).toBe(false);
+    expect(isSafeHttpUrl(null)).toBe(false);
+  });
 });
 
 describe('targetToPath', () => {
   it('maps talk / connector / system targets, else null', () => {
     expect(targetToPath({ talkId: 't1' })).toBe('/app/talks/t1');
+    expect(targetToPath({ talkId: 'x/y' })).toBe('/app/talks/x%2Fy');
     expect(targetToPath({ kind: 'connector' })).toBe(
       '/app/settings?tab=connectors',
     );

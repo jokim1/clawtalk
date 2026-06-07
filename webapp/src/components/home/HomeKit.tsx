@@ -195,7 +195,7 @@ export function TalkChip({
 }): JSX.Element {
   return (
     <Link
-      to={`/app/talks/${talkId}`}
+      to={`/app/talks/${encodeURIComponent(talkId)}`}
       className="salon-btn"
       style={{
         display: 'inline-flex',
