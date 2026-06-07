@@ -9,14 +9,12 @@ import {
 import { Link, useNavigate, useParams } from 'react-router-dom';
 
 import {
-  ApiError,
   ContentSidebarItem,
   getTalk,
   getTalkAgents,
   getTalkRuns,
   listTalkThreads,
   listTalkMessages,
-  Talk,
   TalkMessage,
   TalkRun,
   TalkSnapshot,
@@ -57,12 +55,12 @@ import {
   useTalkSendController,
 } from '../hooks/useTalkComposerController';
 import { useTalkRunContextController } from '../hooks/useTalkRunContextController';
+import { useTalkSnapshotPageState } from '../hooks/useTalkSnapshotPageState';
 import { createInitialDetailState, detailReducer } from '../lib/talkRunReducer';
 import { useQueryClient } from '@tanstack/react-query';
 import {
   rememberActiveThreadForTalk,
   snapshotQueryKey,
-  useTalkSnapshot,
 } from '../lib/useTalkSnapshot';
 import {
   createWsCacheRouter,
@@ -72,26 +70,6 @@ import {
 const SCROLL_STICK_THRESHOLD_PX = 120;
 
 const EMPTY_MESSAGES: TalkMessage[] = [];
-
-// Stable conversion from the snapshot's wire shape to the webapp's Talk
-// type (defaults `title` to '' and `agents` to []) so render-site reads
-// against `snapshot.talk` get the same shape the old reducer mirrored.
-function snapshotTalkToTalk(snapshotTalk: TalkSnapshot['talk']): Talk {
-  return {
-    id: snapshotTalk.id,
-    ownerId: snapshotTalk.ownerId,
-    title: snapshotTalk.title ?? '',
-    orchestrationMode: snapshotTalk.orchestrationMode,
-    agents: [],
-    status: snapshotTalk.status,
-    folderId: snapshotTalk.folderId,
-    sortOrder: snapshotTalk.sortOrder,
-    version: snapshotTalk.version,
-    createdAt: snapshotTalk.createdAt,
-    updatedAt: snapshotTalk.updatedAt,
-    accessRole: snapshotTalk.accessRole,
-  };
-}
 
 function snapshotRunsToTalkRuns(snapshotRuns: TalkSnapshot['runs']): TalkRun[] {
   return snapshotRuns.map((row) => ({
@@ -145,7 +123,19 @@ export function TalkDetailPage({
   const initialResolvedThreadId =
     requestedThreadId ?? getLastThreadForTalk(talkId);
   const queryClient = useQueryClient();
-  const snapshotQuery = useTalkSnapshot({
+  const {
+    snapshotQuery,
+    talkSnapshot,
+    pageKind,
+    pageErrorMessage,
+    pageTalk,
+    activeTalkWorkspaceId,
+    canEditAgents,
+    canEditJobs,
+    canEditDoc,
+    canManageTalkConnectors,
+    resetSnapshotFallback,
+  } = useTalkSnapshotPageState({
     userId,
     talkId,
     threadId: initialResolvedThreadId,
@@ -157,59 +147,6 @@ export function TalkDetailPage({
     undefined,
     createInitialDetailState,
   );
-
-  // Derived snapshot accessors — PR C: server data lives in React
-  // Query. Render-site reads pull from these instead of the reducer.
-  //
-  // Once the page has rendered with snapshot data, we stay 'ready' even
-  // during background refetches and thread-switch rekeys (which drop
-  // snapshotQuery.data back to undefined). Flipping pageKind back to
-  // 'loading' would unmount the ready-branch tree — replacing the
-  // thread rail / composer DOM nodes — which breaks any handler that
-  // captured a DOM reference (e.g. handleDeleteThread holding a
-  // threadRail node) and causes a visible page-level loading flash.
-  const lastSnapshotRef = useRef<TalkSnapshot | null>(null);
-  // Only fall back to the last-good snapshot when it belongs to the
-  // currently-routed talk. Cross-talk navigation drops the fallback
-  // immediately so the previous talk's messages/title can't render
-  // against the new talkId — and so handlers reading pageTalk.id can't
-  // mutate the previous Talk before the new snapshot resolves.
-  if (snapshotQuery.data) {
-    lastSnapshotRef.current = snapshotQuery.data;
-  } else if (
-    lastSnapshotRef.current &&
-    lastSnapshotRef.current.talk.id !== talkId
-  ) {
-    lastSnapshotRef.current = null;
-  }
-  const talkSnapshot = snapshotQuery.data ?? lastSnapshotRef.current;
-  const snapshotError = snapshotQuery.error;
-  const snapshotIs404 =
-    snapshotError instanceof ApiError && snapshotError.status === 404;
-  const pageKind: 'loading' | 'ready' | 'unavailable' | 'error' = snapshotIs404
-    ? 'unavailable'
-    : snapshotError
-      ? 'error'
-      : !talkSnapshot
-        ? 'loading'
-        : 'ready';
-  const pageErrorMessage: string | null = snapshotIs404
-    ? 'Talk not found'
-    : snapshotError instanceof Error
-      ? snapshotError.message
-      : null;
-  const pageTalk: Talk | null = useMemo(
-    () => (talkSnapshot ? snapshotTalkToTalk(talkSnapshot.talk) : null),
-    [talkSnapshot?.talk],
-  );
-  const activeTalkWorkspaceId = talkSnapshot?.talk.workspaceId ?? null;
-  const accessRole = pageKind === 'ready' ? pageTalk?.accessRole : null;
-  const canEditAgents =
-    accessRole === 'owner' || accessRole === 'admin' || accessRole === 'editor';
-  const canEditJobs = canEditAgents;
-  const canEditDoc = canEditAgents;
-  const canManageTalkConnectors =
-    accessRole === 'owner' || accessRole === 'admin';
 
   const timelineRef = useRef<HTMLDivElement | null>(null);
   const endRef = useRef<HTMLDivElement | null>(null);
@@ -699,13 +636,19 @@ export function TalkDetailPage({
   useEffect(() => {
     dispatch({ type: 'TALK_RESET' });
     hydratedKeyRef.current = null;
-    lastSnapshotRef.current = null;
+    resetSnapshotFallback();
     messageElementRefs.current.clear();
     deletedMessageIdsRef.current = new Set();
     resetTalkThreads();
     resetTalkAgents();
     resetRunContextPanels();
-  }, [resetRunContextPanels, resetTalkAgents, resetTalkThreads, talkId]);
+  }, [
+    resetRunContextPanels,
+    resetSnapshotFallback,
+    resetTalkAgents,
+    resetTalkThreads,
+    talkId,
+  ]);
 
   // Hydrate non-RQ side-effects the moment the snapshot resolves: the
   // thread list (kept in component state because the threads tab edits
