@@ -56,6 +56,7 @@ export function Chip({
     return (
       <button
         type="button"
+        className="salon-btn"
         onClick={onClick}
         disabled={disabled}
         title={title}

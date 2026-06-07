@@ -13,6 +13,7 @@ import {
   Kbd,
   Modal,
   Popover,
+  RUN_STATES,
   RunPill,
   Sheet,
   Textarea,
@@ -29,6 +30,16 @@ describe('Salon primitives', () => {
   it('RunPill honors an explicit label override (preserves source text)', () => {
     render(<RunPill status="awaiting" label="awaiting_confirmation" />);
     expect(screen.getByText('awaiting_confirmation')).toBeTruthy();
+  });
+
+  it('RunPill renders the correct label for every run status', () => {
+    (Object.keys(RUN_STATES) as Array<keyof typeof RUN_STATES>).forEach(
+      (status) => {
+        const { unmount } = render(<RunPill status={status} />);
+        expect(screen.getByText(RUN_STATES[status].label)).toBeTruthy();
+        unmount();
+      },
+    );
   });
 
   it('Chip is an interactive button that forwards aria-pressed + onClick', () => {

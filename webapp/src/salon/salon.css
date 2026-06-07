@@ -152,6 +152,8 @@ body.density-compact {
 }
 
 .salon-field {
+  background: var(--salon-paper, #fbf7ef);
+  border: 1px solid var(--salon-line, #e6e0d1);
   transition:
     border-color 140ms ease,
     box-shadow 140ms ease;

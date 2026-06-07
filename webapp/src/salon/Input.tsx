@@ -11,11 +11,12 @@ import type {
   TextareaHTMLAttributes,
 } from 'react';
 
+// Base background + border live in the `.salon-field` class (salon.css) so the
+// `:focus` accent border can override them — inline styles would win and leave
+// the focus border dead. Only layout/typography is set inline here.
 const fieldBase = (serif: boolean): CSSProperties => ({
   width: '100%',
-  background: salon.paper,
   color: salon.ink,
-  border: `1px solid ${salon.line}`,
   outline: 'none',
   fontFamily: serif ? salonFont.serif : salonFont.sans,
 });

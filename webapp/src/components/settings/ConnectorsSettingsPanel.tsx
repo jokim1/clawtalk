@@ -355,7 +355,9 @@ export function ConnectorsSettingsPanel({
 
       {modal.kind !== 'closed' ? (
         <Modal
-          onClose={onCloseModal}
+          onClose={() => {
+            if (!formSubmitting) onCloseModal();
+          }}
           width={560}
           ariaLabel="Connector settings"
         >

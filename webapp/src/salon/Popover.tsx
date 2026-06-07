@@ -1,7 +1,8 @@
 /**
  * Popover. Anchored floating panel with backdrop dismiss, ported from
  * `ToolsPopover` in prototype/tools.jsx (docs §4). Positions itself from an
- * anchor's DOMRect; clamps to the viewport so it stays on-screen.
+ * anchor's DOMRect, clamps its left edge to the viewport, and caps its height
+ * with internal scroll so long lists never overflow off-screen.
  */
 import { salon } from './tokens';
 import type { ReactNode } from 'react';
@@ -25,15 +26,15 @@ export function Popover({
   align = 'right',
   ariaLabel,
 }: PopoverProps) {
-  const position = anchorRect
+  const top = anchorRect ? anchorRect.bottom + 6 : 80;
+  const horizontal = anchorRect
     ? {
-        top: anchorRect.bottom + 6,
         left:
           align === 'right'
             ? Math.max(8, anchorRect.right - width)
             : Math.max(8, anchorRect.left),
       }
-    : { top: 80, right: 16 };
+    : { right: 16 };
 
   return (
     <>
@@ -45,18 +46,23 @@ export function Popover({
       <div
         role="dialog"
         aria-label={ariaLabel}
-        className="ct-screen-enter"
+        className="ct-screen-enter ct-thin-scroll"
         style={{
           position: 'fixed',
           zIndex: 1001,
+          top,
+          ...horizontal,
           width,
           maxWidth: 'calc(100vw - 16px)',
+          // Cap to the space below the anchor and scroll long content, so a
+          // popover near the viewport bottom never clips its lower items.
+          maxHeight: `calc(100vh - ${top}px - 16px)`,
           background: salon.card,
           border: `1px solid ${salon.line}`,
           borderRadius: 16,
           overflow: 'hidden',
+          overflowY: 'auto',
           boxShadow: '0 30px 60px rgba(31, 27, 22, 0.22)',
-          ...position,
         }}
       >
         {children}

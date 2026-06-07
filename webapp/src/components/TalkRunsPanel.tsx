@@ -179,10 +179,7 @@ export function TalkRunsPanel({
                 className="run-history-item"
               >
                 <div className="run-history-main">
-                  <RunPill
-                    status={SALON_RUN_STATUS[run.status]}
-                    label={run.status}
-                  />
+                  <RunPill status={SALON_RUN_STATUS[run.status]} />
                   <code>{run.id}</code>
                 </div>
                 {run.targetAgentNickname ? (
