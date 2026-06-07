@@ -12,14 +12,11 @@ import {
 import { Link, useNavigate, useParams } from 'react-router-dom';
 
 import {
-  AgentProviderCard,
-  AiAgentsPageData,
   ApiError,
   cancelTalkRuns,
   ContentSidebarItem,
   createTalkThread,
   deleteTalkThread,
-  getAiAgents,
   getTalk,
   getTalkAgents,
   getTalkRunContext,
@@ -29,7 +26,6 @@ import {
   searchTalkMessages,
   sendTalkMessage,
   Talk,
-  TalkAgent,
   TalkMessage,
   TalkMessageSearchResult,
   TalkMessageAttachment,
@@ -38,19 +34,13 @@ import {
   TalkRunContextSnapshot,
   TalkThread,
   uploadTalkAttachment,
-  updateTalkAgents,
   updateTalkThread,
-  listRegisteredAgents,
-  type RegisteredAgent,
   UnauthorizedError,
 } from '../lib/api';
 import { TalkToolsPanel } from '../components/TalkToolsPanel';
 import { SavedSourcesPanel } from '../components/SavedSourcesPanel';
 import { TalkContextPanel } from '../components/TalkContextPanel';
-import {
-  TalkJobsPanel,
-  type JobAgentOption,
-} from '../components/TalkJobsPanel';
+import { TalkJobsPanel } from '../components/TalkJobsPanel';
 import {
   buildSourceMentionOptions,
   type SourceMentionOption,
@@ -64,12 +54,6 @@ import {
 import { TalkHistoryEditor } from '../components/TalkHistoryEditor';
 import { TalkDetailShell } from '../components/Talk/TalkDetailShell';
 import { TalkTabContent } from '../components/Talk/TalkTabContent';
-import {
-  formatTalkRole,
-  buildAgentLabel,
-  type AgentCreationDraft,
-  type TalkAgentExecutionGuardrail,
-} from '../lib/talkAgents';
 import {
   getLastThreadForTalk,
   setLastThreadForTalk,
@@ -92,6 +76,7 @@ import { useTalkContextController } from '../hooks/useTalkContextController';
 import { useTalkJobsController } from '../hooks/useTalkJobsController';
 import { useTalkOrchestrationController } from '../hooks/useTalkOrchestrationController';
 import { useTalkHistoryController } from '../hooks/useTalkHistoryController';
+import { useTalkAgentsController } from '../hooks/useTalkAgentsController';
 import { createInitialDetailState, detailReducer } from '../lib/talkRunReducer';
 import { useQueryClient } from '@tanstack/react-query';
 import {
@@ -116,13 +101,6 @@ const TALK_MESSAGE_MAX_CHARS = 20_000;
 const COMPOSER_TEXTAREA_MIN_HEIGHT_PX = 48;
 const COMPOSER_TEXTAREA_MAX_HEIGHT_PX = 240;
 const GREENFIELD_MESSAGE_ATTACHMENTS_ENABLED = false;
-
-type TalkAgentSourceOption = {
-  id: string;
-  label: string;
-  sourceKind: 'claude_default' | 'provider';
-  providerId: string | null;
-};
 
 const EMPTY_MESSAGES: TalkMessage[] = [];
 
@@ -195,282 +173,6 @@ function sortThreads(threads: TalkThread[]): TalkThread[] {
     if (Number.isFinite(delta) && delta !== 0) return delta;
     return rightAt.localeCompare(leftAt);
   });
-}
-
-function getConfiguredProviders(
-  data: AiAgentsPageData | null,
-): AgentProviderCard[] {
-  if (!data) return [];
-  // Any credential surface the execution-resolver will accept: personal
-  // or workspace api_key, personal or workspace OAuth subscription. The
-  // ChatGPT Codex provider is subscription_only — gating on
-  // hasCredential alone would hide it after a user connected ChatGPT.
-  return data.additionalProviders.filter(
-    (provider) =>
-      provider.hasCredential ||
-      provider.workspaceHasCredential ||
-      provider.hasPersonalSubscription ||
-      provider.hasWorkspaceSubscription,
-  );
-}
-
-function buildTalkAgentSourceOptions(input: {
-  providers: AgentProviderCard[];
-}): TalkAgentSourceOption[] {
-  return [
-    {
-      id: 'claude_default',
-      label: 'Claude',
-      sourceKind: 'claude_default',
-      providerId: null,
-    },
-    ...input.providers.map((provider) => ({
-      id: provider.id,
-      label: provider.name,
-      sourceKind: 'provider' as const,
-      providerId: provider.id,
-    })),
-  ];
-}
-
-function getModelSuggestionsForSource(input: {
-  sourceKind: 'claude_default' | 'provider';
-  providerId: string | null;
-  aiAgents: AiAgentsPageData | null;
-}): Array<{
-  modelId: string;
-  displayName: string;
-  supportsVision: boolean;
-}> {
-  if (!input.aiAgents) return [];
-  if (input.sourceKind === 'claude_default') {
-    return input.aiAgents.claudeModelSuggestions.map((model) => ({
-      modelId: model.modelId,
-      displayName: model.displayName,
-      supportsVision: model.supportsVision === true,
-    }));
-  }
-
-  const provider = input.aiAgents.additionalProviders.find(
-    (entry) => entry.id === input.providerId,
-  );
-  return (provider?.modelSuggestions || []).map((model) => ({
-    modelId: model.modelId,
-    displayName: model.displayName,
-    supportsVision: model.supportsVision === true,
-  }));
-}
-
-function talkAgentSupportsVision(
-  agent: Pick<TalkAgent, 'sourceKind' | 'providerId' | 'modelId'>,
-  registeredAgent:
-    | Pick<RegisteredAgent, 'providerId' | 'modelId' | 'supportsVision'>
-    | undefined,
-  aiAgents: AiAgentsPageData | null,
-): boolean {
-  // Main slot (modelId=null on the TalkAgent row): trust the registered
-  // agent's supportsVision, which is the backend's ground truth from
-  // resolveModelCapabilities. Avoids the modelSuggestions lookup, which
-  // can miss for subscription providers whose curated rows aren't
-  // materialized as suggestions (e.g. Codex's gpt-5.4).
-  if (!agent.modelId?.trim()) {
-    return registeredAgent?.supportsVision === true;
-  }
-
-  if (!aiAgents) return false;
-
-  // Provider-pinned agents (TalkAgent row has its own modelId): look up
-  // vision capability via the provider's modelSuggestions. Fall back to
-  // the registered agent's supportsVision when the suggestion list misses.
-  const provider = aiAgents.additionalProviders.find(
-    (entry) => entry.id === agent.providerId,
-  );
-  if (provider) {
-    const model = provider.modelSuggestions.find(
-      (entry) => entry.modelId === agent.modelId,
-    );
-    if (model) return model.supportsVision === true;
-  }
-  if (agent.providerId === 'provider.anthropic') {
-    const claudeModel = aiAgents.claudeModelSuggestions.find(
-      (entry) => entry.modelId === agent.modelId,
-    );
-    if (claudeModel) return claudeModel.supportsVision === true;
-  }
-  return registeredAgent?.supportsVision === true;
-}
-
-function buildAutoNicknameBase(input: {
-  sourceKind: 'claude_default' | 'provider';
-  providerId: string | null;
-  modelId: string | null;
-  modelDisplayName?: string | null;
-  aiAgents: AiAgentsPageData | null;
-}): string {
-  if (input.modelDisplayName?.trim()) return input.modelDisplayName.trim();
-  const suggestions = getModelSuggestionsForSource({
-    sourceKind: input.sourceKind,
-    providerId: input.providerId,
-    aiAgents: input.aiAgents,
-  });
-  const found = suggestions.find((entry) => entry.modelId === input.modelId);
-  if (found?.displayName) return found.displayName;
-  if (input.modelId?.trim()) return input.modelId.trim();
-  return input.sourceKind === 'claude_default' ? 'Claude' : 'Provider';
-}
-
-function buildUniqueNickname(
-  base: string,
-  agents: TalkAgent[],
-  excludeId?: string,
-): string {
-  const used = new Set(
-    agents
-      .filter((agent) => agent.id !== excludeId)
-      .map((agent) => agent.nickname.trim())
-      .filter(Boolean),
-  );
-  if (!used.has(base)) return base;
-  let index = 2;
-  while (used.has(`${base} ${index}`)) {
-    index += 1;
-  }
-  return `${base} ${index}`;
-}
-
-function applySourceModelSelection(
-  agent: TalkAgent,
-  input: {
-    sourceKind: 'claude_default' | 'provider';
-    providerId: string | null;
-    modelId: string;
-  },
-  allAgents: TalkAgent[],
-  aiAgents: AiAgentsPageData | null,
-): TalkAgent {
-  const suggestions = getModelSuggestionsForSource({
-    sourceKind: input.sourceKind,
-    providerId: input.providerId,
-    aiAgents,
-  });
-  const selectedModel =
-    suggestions.find((entry) => entry.modelId === input.modelId) ||
-    suggestions[0] ||
-    null;
-  const modelId = selectedModel?.modelId || input.modelId || null;
-  const modelDisplayName = selectedModel?.displayName || input.modelId || null;
-  const nickname =
-    agent.nicknameMode === 'custom'
-      ? agent.nickname
-      : buildUniqueNickname(
-          buildAutoNicknameBase({
-            sourceKind: input.sourceKind,
-            providerId: input.providerId,
-            modelId,
-            modelDisplayName,
-            aiAgents,
-          }),
-          allAgents,
-          agent.id,
-        );
-  return {
-    ...agent,
-    sourceKind: input.sourceKind,
-    providerId: input.sourceKind === 'provider' ? input.providerId : null,
-    modelId,
-    modelDisplayName,
-    nickname,
-  };
-}
-
-function buildNewAgentDraft(
-  _aiAgents: AiAgentsPageData | null,
-): AgentCreationDraft {
-  // modelId is overloaded to store the selected registered agent ID.
-  // Start empty so the dropdown shows the "Choose a registered agent…" placeholder
-  // and the Add button is disabled until the user selects one.
-  return {
-    sourceKind: 'provider',
-    providerId: null,
-    modelId: '',
-    role: 'assistant',
-  };
-}
-
-function buildTargetSelection(
-  agents: TalkAgent[],
-  current: string[],
-): string[] {
-  const valid = current.filter((id) => agents.some((agent) => agent.id === id));
-  if (valid.length > 0) return valid;
-  const primary = agents.find((agent) => agent.isPrimary);
-  return primary ? [primary.id] : agents[0] ? [agents[0].id] : [];
-}
-
-function summarizeAgentLabels(labels: string[]): string {
-  if (labels.length === 0) return 'One or more selected agents';
-  if (labels.length === 1) return labels[0]!;
-  if (labels.length === 2) return `${labels[0]} and ${labels[1]}`;
-  return `${labels.slice(0, -1).join(', ')}, and ${labels.at(-1)}`;
-}
-
-function buildTalkAgentExecutionGuardrail(
-  agent: TalkAgent,
-  registeredAgent: RegisteredAgent | undefined,
-): TalkAgentExecutionGuardrail {
-  if (!registeredAgent) {
-    return {
-      kind: 'direct_safe',
-      badgeLabel: null,
-      message: null,
-    };
-  }
-
-  const preview = registeredAgent.executionPreview;
-  if (!preview.ready) {
-    return {
-      kind: 'unavailable',
-      badgeLabel: 'Unavailable',
-      message: preview.message,
-    };
-  }
-
-  return {
-    kind: 'direct_safe',
-    badgeLabel: null,
-    message: null,
-  };
-}
-
-function serializeTalkAgentForDraftCompare(agent: TalkAgent): string {
-  return JSON.stringify({
-    id: agent.id,
-    nickname: agent.nickname,
-    nicknameMode: agent.nicknameMode,
-    sourceKind: agent.sourceKind,
-    providerId: agent.providerId,
-    modelId: agent.modelId,
-    modelDisplayName: agent.modelDisplayName,
-    role: agent.role,
-    isPrimary: agent.isPrimary,
-    displayOrder: agent.displayOrder,
-  });
-}
-
-function haveSameTalkAgentDraftState(
-  left: TalkAgent[],
-  right: TalkAgent[],
-): boolean {
-  if (left.length !== right.length) return false;
-  for (let index = 0; index < left.length; index += 1) {
-    if (
-      serializeTalkAgentForDraftCompare(left[index]) !==
-      serializeTalkAgentForDraftCompare(right[index])
-    ) {
-      return false;
-    }
-  }
-  return true;
 }
 
 export function TalkDetailPage({
@@ -562,6 +264,13 @@ export function TalkDetailPage({
     [talkSnapshot?.talk],
   );
   const activeTalkWorkspaceId = talkSnapshot?.talk.workspaceId ?? null;
+  const accessRole = pageKind === 'ready' ? pageTalk?.accessRole : null;
+  const canEditAgents =
+    accessRole === 'owner' || accessRole === 'admin' || accessRole === 'editor';
+  const canEditJobs = canEditAgents;
+  const canEditDoc = canEditAgents;
+  const canManageTalkConnectors =
+    accessRole === 'owner' || accessRole === 'admin';
 
   const [threadState, setThreadState] = useState<ThreadListState>({
     threads: [],
@@ -658,28 +367,6 @@ export function TalkDetailPage({
     atIndex: number;
     selectedIndex: number;
   } | null>(null);
-  const [agents, setAgents] = useState<TalkAgent[]>([]);
-  const [agentDrafts, setAgentDrafts] = useState<TalkAgent[]>([]);
-  const [aiAgentsData, setAiAgentsData] = useState<AiAgentsPageData | null>(
-    null,
-  );
-  const [registeredAgentsCatalog, setRegisteredAgentsCatalog] = useState<
-    RegisteredAgent[]
-  >([]);
-  const [agentsCatalogError, setAgentsCatalogError] = useState<string | null>(
-    null,
-  );
-  const [targetAgentIds, setTargetAgentIds] = useState<string[]>([]);
-  const [newAgentDraft, setNewAgentDraft] = useState<AgentCreationDraft>({
-    sourceKind: 'claude_default',
-    providerId: null,
-    modelId: '',
-    role: 'assistant',
-  });
-  const [agentState, setAgentState] = useState<{
-    status: 'idle' | 'saving' | 'error' | 'success';
-    message?: string;
-  }>({ status: 'idle' });
   const titleInputRef = useRef<HTMLInputElement | null>(null);
   const messageElementRefs = useRef<Map<string, HTMLElement>>(new Map());
   const autoStickToBottomRef = useRef<ScrollBehavior | null>(null);
@@ -848,6 +535,49 @@ export function TalkDetailPage({
   const handleUnauthorized = useCallback(() => {
     onUnauthorizedRef.current();
   }, []);
+
+  const {
+    agents,
+    agentDrafts,
+    setAgentDrafts,
+    newAgentDraft,
+    setNewAgentDraft,
+    agentState,
+    setAgentState,
+    agentsCatalogError,
+    registeredAgentsCatalog,
+    targetAgentIds,
+    effectiveAgents,
+    jobAgentOptions,
+    hasPendingFooterAgentSelection,
+    hasUnsavedAgentChanges,
+    talkAgentExecutionGuardrailsById,
+    agentLabelById,
+    selectedTargetAgentCount,
+    selectedGuardrailAgentIds,
+    composerGuardrailMessage,
+    sendBlockedByGuardrail,
+    hasVisionNonDocAgent,
+    resetTalkAgents,
+    hydrateTalkAgents,
+    toggleTargetAgent,
+    handleAgentNicknameChange,
+    handleAgentRoleChange,
+    handleSetPrimaryAgent,
+    handleResetNickname,
+    handleRemoveAgent,
+    handleAddAgent,
+    handleSaveAgents,
+  } = useTalkAgentsController({
+    pageKind,
+    pageTalkId: pageTalk?.id ?? null,
+    activeTalkWorkspaceId,
+    canEditAgents,
+    hasPendingImageAttachments: pendingAttachments.some(
+      (attachment) => attachment.isImage,
+    ),
+    onUnauthorized: handleUnauthorized,
+  });
 
   const {
     activeRuleCount,
@@ -1091,11 +821,7 @@ export function TalkDetailPage({
     setSearchResults([]);
     setSearchLoading(false);
     setSearchError(null);
-    setAgents([]);
-    setAgentDrafts([]);
-    setTargetAgentIds([]);
-    setAgentsCatalogError(null);
-    setAgentState({ status: 'idle' });
+    resetTalkAgents();
     setRunContextPanels({});
     return () => {
       if (threadRefreshTimerRef.current) {
@@ -1103,7 +829,7 @@ export function TalkDetailPage({
         threadRefreshTimerRef.current = null;
       }
     };
-  }, [talkId]);
+  }, [resetTalkAgents, talkId]);
 
   // Hydrate non-RQ side-effects the moment the snapshot resolves: the
   // thread list (kept in component state because the threads tab edits
@@ -1159,9 +885,7 @@ export function TalkDetailPage({
           getTalkAgents(talkId),
         ]);
         if (cancelled) return;
-        setAgents(talkAgents);
-        setAgentDrafts(talkAgents);
-        setTargetAgentIds(buildTargetSelection(talkAgents, []));
+        hydrateTalkAgents(talkAgents);
         // MERGE_HISTORICAL_RUNS is a pure overlay — order-independent
         // vs the snapshot effect's SNAPSHOT_HYDRATED, since neither
         // clobbers in-flight live state on existing run ids.
@@ -1176,7 +900,7 @@ export function TalkDetailPage({
     return () => {
       cancelled = true;
     };
-  }, [handleUnauthorized, talkId]);
+  }, [handleUnauthorized, hydrateTalkAgents, talkId]);
 
   useEffect(() => {
     if (threadState.loading) return;
@@ -1372,49 +1096,6 @@ export function TalkDetailPage({
     };
   }, [activeThreadId, currentTab, isNearBottom, pageKind]);
 
-  useEffect(() => {
-    if (pageKind !== 'ready' || !activeTalkWorkspaceId) {
-      setAiAgentsData(null);
-      setRegisteredAgentsCatalog([]);
-      setAgentsCatalogError(null);
-      return;
-    }
-
-    let cancelled = false;
-    const loadAiAgents = async () => {
-      try {
-        const [next, regAgents] = await Promise.all([
-          getAiAgents({ workspaceId: activeTalkWorkspaceId }),
-          listRegisteredAgents({ workspaceId: activeTalkWorkspaceId }),
-        ]);
-        if (cancelled) return;
-        setAiAgentsData(next);
-        setRegisteredAgentsCatalog(regAgents);
-        setAgentsCatalogError(null);
-        setNewAgentDraft((current) =>
-          current.modelId ? current : buildNewAgentDraft(next),
-        );
-      } catch (err) {
-        if (err instanceof UnauthorizedError) {
-          handleUnauthorized();
-          return;
-        }
-        if (!cancelled) {
-          setAiAgentsData(null);
-          setRegisteredAgentsCatalog([]);
-          setAgentsCatalogError(
-            err instanceof Error ? err.message : 'Failed to load AI agents.',
-          );
-        }
-      }
-    };
-
-    void loadAiAgents();
-    return () => {
-      cancelled = true;
-    };
-  }, [activeTalkWorkspaceId, handleUnauthorized, pageKind]);
-
   const ensureKnownThread = useCallback(
     (threadId?: string | null): boolean => {
       if (!threadId) return false;
@@ -1517,85 +1198,6 @@ export function TalkDetailPage({
     state.liveResponsesByRunId,
   ]);
 
-  const accessRole = pageKind === 'ready' ? pageTalk?.accessRole : null;
-  const canEditAgents =
-    accessRole === 'owner' || accessRole === 'admin' || accessRole === 'editor';
-  const canEditJobs = canEditAgents;
-  const canEditDoc = canEditAgents;
-  // Pre-built agent options for TalkJobsPanel's target-agent picker (the panel
-  // owns neither the roster nor buildAgentLabel).
-  const jobAgentOptions = useMemo<JobAgentOption[]>(
-    () =>
-      agents.map((agent) => ({
-        id: agent.id,
-        label: buildAgentLabel(agent),
-        isPrimary: agent.isPrimary,
-      })),
-    [agents],
-  );
-
-  const canManageTalkConnectors =
-    accessRole === 'owner' || accessRole === 'admin';
-
-  const configuredProviders = useMemo(
-    () => getConfiguredProviders(aiAgentsData),
-    [aiAgentsData],
-  );
-  const sourceOptions = useMemo(
-    () => buildTalkAgentSourceOptions({ providers: configuredProviders }),
-    [configuredProviders],
-  );
-  const newAgentModelOptions = useMemo(
-    () =>
-      getModelSuggestionsForSource({
-        sourceKind: newAgentDraft.sourceKind,
-        providerId: newAgentDraft.providerId,
-        aiAgents: aiAgentsData,
-      }),
-    [aiAgentsData, newAgentDraft.providerId, newAgentDraft.sourceKind],
-  );
-  const hasUnsavedAgentChanges = useMemo(
-    () => !haveSameTalkAgentDraftState(agents, agentDrafts),
-    [agentDrafts, agents],
-  );
-  const hasPendingFooterAgentSelection =
-    newAgentDraft.modelId.trim().length > 0;
-  const effectiveAgents = hasUnsavedAgentChanges ? agentDrafts : agents;
-  useEffect(() => {
-    setTargetAgentIds((current) =>
-      buildTargetSelection(effectiveAgents, current),
-    );
-  }, [effectiveAgents]);
-  const registeredAgentsById = useMemo(
-    () =>
-      new Map(
-        registeredAgentsCatalog.map((agent) => [agent.id, agent] as const),
-      ),
-    [registeredAgentsCatalog],
-  );
-  const talkAgentExecutionGuardrailsById = useMemo(
-    () =>
-      effectiveAgents.reduce<Record<string, TalkAgentExecutionGuardrail>>(
-        (acc, agent) => {
-          acc[agent.id] = buildTalkAgentExecutionGuardrail(
-            agent,
-            registeredAgentsById.get(agent.id),
-          );
-          return acc;
-        },
-        {},
-      ),
-    [effectiveAgents, registeredAgentsById],
-  );
-  const agentLabelById = useMemo(
-    () =>
-      effectiveAgents.reduce<Record<string, string>>((acc, agent) => {
-        acc[agent.id] = buildAgentLabel(agent);
-        return acc;
-      }, {}),
-    [effectiveAgents],
-  );
-
   const {
     orchestrationMenuRef,
     orchestrationMenuOpen,
@@ -1614,92 +1216,15 @@ export function TalkDetailPage({
     queryClient,
     onUnauthorized: handleUnauthorized,
   });
-  const selectedTargetAgents = useMemo(
-    () => effectiveAgents.filter((agent) => targetAgentIds.includes(agent.id)),
-    [effectiveAgents, targetAgentIds],
-  );
-  const selectedUnavailableAgents = useMemo(
-    () =>
-      selectedTargetAgents.filter(
-        (agent) =>
-          talkAgentExecutionGuardrailsById[agent.id]?.kind === 'unavailable',
-      ),
-    [selectedTargetAgents, talkAgentExecutionGuardrailsById],
-  );
-  const pendingImageAttachments = useMemo(
-    () => pendingAttachments.filter((attachment) => attachment.isImage),
-    [pendingAttachments],
-  );
-  const selectedNonVisionAgents = useMemo(
-    () =>
-      pendingImageAttachments.length === 0
-        ? []
-        : selectedTargetAgents.filter(
-            (agent) =>
-              !talkAgentSupportsVision(
-                agent,
-                registeredAgentsById.get(agent.id),
-                aiAgentsData,
-              ),
-          ),
-    [
-      aiAgentsData,
-      pendingImageAttachments.length,
-      registeredAgentsById,
-      selectedTargetAgents,
-    ],
-  );
-  const composerGuardrailMessage = useMemo(() => {
-    if (selectedUnavailableAgents.length > 0) {
-      const labels = selectedUnavailableAgents.map((agent) =>
-        buildAgentLabel(agent),
-      );
-      if (labels.length === 1) {
-        const status =
-          talkAgentExecutionGuardrailsById[selectedUnavailableAgents[0]!.id];
-        return `${labels[0]} does not have a valid execution path right now. ${
-          status?.message || 'Adjust the selected agents before sending.'
-        }`;
-      }
-      return `${summarizeAgentLabels(labels)} do not currently have a valid execution path. Adjust the selected agents before sending.`;
-    }
-
-    if (selectedNonVisionAgents.length > 0) {
-      const labels = selectedNonVisionAgents.map((agent) =>
-        buildAgentLabel(agent),
-      );
-      if (labels.length === 1) {
-        return `${labels[0]} does not support image attachments. Switch to a vision-capable model or remove the images before sending.`;
-      }
-      return `${summarizeAgentLabels(labels)} do not support image attachments. Switch to vision-capable models or remove the images before sending.`;
-    }
-
-    return null;
-  }, [
-    aiAgentsData,
-    selectedNonVisionAgents,
-    selectedUnavailableAgents,
-    talkAgentExecutionGuardrailsById,
-  ]);
-  const selectedGuardrailAgentIds = useMemo(
-    () =>
-      new Set(
-        [...selectedUnavailableAgents, ...selectedNonVisionAgents].map(
-          (agent) => agent.id,
-        ),
-      ),
-    [selectedNonVisionAgents, selectedUnavailableAgents],
-  );
-  const sendBlockedByGuardrail = Boolean(composerGuardrailMessage);
   const composerTargetHelp = useMemo(() => {
-    if (selectedTargetAgents.length <= 1) {
+    if (selectedTargetAgentCount <= 1) {
       return 'Only the selected agent will respond.';
     }
     if (orchestrationMode === 'ordered') {
       return 'Selected agents will respond in order, with the final response synthesizing earlier perspectives.';
     }
     return 'Selected agents will each respond independently.';
-  }, [orchestrationMode, selectedTargetAgents.length]);
+  }, [orchestrationMode, selectedTargetAgentCount]);
   const messageLookup = useMemo(
     () =>
       new Map(pageMessages.map((message) => [message.id, message] as const)),
@@ -2313,14 +1838,7 @@ export function TalkDetailPage({
   }, [currentTab]);
 
   const handleToggleTarget = (agentId: string) => {
-    setTargetAgentIds((current) => {
-      const selected = current.includes(agentId);
-      if (selected) {
-        if (current.length === 1) return current;
-        return current.filter((id) => id !== agentId);
-      }
-      return [...current, agentId];
-    });
+    toggleTargetAgent(agentId);
     if (pageKind === 'ready' && state.sendState.status === 'error') {
       dispatch({ type: 'SEND_CLEARED' });
     }
@@ -2723,271 +2241,6 @@ export function TalkDetailPage({
     dispatch({ type: 'CLEAR_UNREAD' });
   };
 
-  const handleAgentSourceChange = (
-    agentId: string,
-    sourceKind: 'claude_default' | 'provider',
-    providerId: string | null,
-  ) => {
-    setAgentDrafts((current) =>
-      current.map((agent) => {
-        if (agent.id !== agentId) return agent;
-        const suggestions = getModelSuggestionsForSource({
-          sourceKind,
-          providerId,
-          aiAgents: aiAgentsData,
-        });
-        const nextModelId =
-          suggestions.find((entry) => entry.modelId === agent.modelId)
-            ?.modelId ||
-          suggestions[0]?.modelId ||
-          '';
-        return applySourceModelSelection(
-          agent,
-          { sourceKind, providerId, modelId: nextModelId },
-          current,
-          aiAgentsData,
-        );
-      }),
-    );
-    setAgentState({ status: 'idle' });
-  };
-
-  const handleAgentModelChange = (agentId: string, modelId: string) => {
-    setAgentDrafts((current) =>
-      current.map((agent) =>
-        agent.id === agentId
-          ? applySourceModelSelection(
-              agent,
-              {
-                sourceKind: agent.sourceKind,
-                providerId:
-                  agent.sourceKind === 'provider' ? agent.providerId : null,
-                modelId,
-              },
-              current,
-              aiAgentsData,
-            )
-          : agent,
-      ),
-    );
-    setAgentState({ status: 'idle' });
-  };
-
-  const handleAgentNicknameChange = (agentId: string, nickname: string) => {
-    setAgentDrafts((current) =>
-      current.map((agent) =>
-        agent.id === agentId
-          ? {
-              ...agent,
-              nickname,
-              nicknameMode: 'custom',
-            }
-          : agent,
-      ),
-    );
-    setAgentState({ status: 'idle' });
-  };
-
-  const handleResetNickname = (agentId: string) => {
-    setAgentDrafts((current) =>
-      current.map((agent) => {
-        if (agent.id !== agentId) return agent;
-        // Use registered agent name if available, otherwise fall back to
-        // the old source-based nickname builder.
-        const regAgent = registeredAgentsCatalog.find(
-          (ra) => ra.id === agent.id,
-        );
-        const base = regAgent
-          ? regAgent.name
-          : buildAutoNicknameBase({
-              sourceKind: agent.sourceKind,
-              providerId: agent.providerId,
-              modelId: agent.modelId,
-              modelDisplayName: agent.modelDisplayName,
-              aiAgents: aiAgentsData,
-            });
-        return {
-          ...agent,
-          nickname: buildUniqueNickname(base, current, agent.id),
-          nicknameMode: 'auto',
-        };
-      }),
-    );
-    setAgentState({ status: 'idle' });
-  };
-
-  const handleAgentRoleChange = (agentId: string, role: TalkAgent['role']) => {
-    setAgentDrafts((current) =>
-      current.map((agent) =>
-        agent.id === agentId ? { ...agent, role } : agent,
-      ),
-    );
-    setAgentState({ status: 'idle' });
-  };
-
-  const handleSetPrimaryAgent = (agentId: string) => {
-    setAgentDrafts((current) =>
-      current.map((agent) => ({
-        ...agent,
-        isPrimary: agent.id === agentId,
-      })),
-    );
-    setAgentState({ status: 'idle' });
-  };
-
-  const handleRemoveAgent = (agentId: string) => {
-    setAgentDrafts((current) => {
-      const remaining = current.filter((agent) => agent.id !== agentId);
-      if (remaining.length === 0) return current;
-      if (!remaining.some((agent) => agent.isPrimary)) {
-        remaining[0] = { ...remaining[0], isPrimary: true };
-      }
-      return remaining.map((agent, index) => ({
-        ...agent,
-        displayOrder: index,
-      }));
-    });
-    setTargetAgentIds((current) => {
-      const next = current.filter((id) => id !== agentId);
-      return next.length > 0 ? next : [];
-    });
-    setAgentState({ status: 'idle' });
-  };
-
-  const materializePendingFooterAgent = (
-    currentDrafts: TalkAgent[],
-  ): {
-    nextAgents: TalkAgent[];
-    nextDraft: AgentCreationDraft;
-    added: boolean;
-    error: string | null;
-  } => {
-    const selectedAgentId = newAgentDraft.modelId.trim();
-    if (!selectedAgentId) {
-      return {
-        nextAgents: currentDrafts,
-        nextDraft: newAgentDraft,
-        added: false,
-        error: null,
-      };
-    }
-
-    const regAgent = registeredAgentsCatalog.find(
-      (ra) => ra.id === selectedAgentId && ra.enabled,
-    );
-    if (!regAgent) {
-      return {
-        nextAgents: currentDrafts,
-        nextDraft: newAgentDraft,
-        added: false,
-        error:
-          'Selected registered agent is no longer available. Refresh and try again.',
-      };
-    }
-
-    if (currentDrafts.some((agent) => agent.id === regAgent.id)) {
-      return {
-        nextAgents: currentDrafts,
-        nextDraft: newAgentDraft,
-        added: false,
-        error: 'Selected registered agent is already assigned to this talk.',
-      };
-    }
-
-    const nickname = buildUniqueNickname(regAgent.name, currentDrafts);
-    return {
-      nextAgents: [
-        ...currentDrafts,
-        {
-          id: regAgent.id,
-          nickname,
-          nicknameMode: 'auto',
-          sourceKind: 'provider',
-          role: newAgentDraft.role,
-          isPrimary: false,
-          displayOrder: currentDrafts.length,
-          health: 'ready',
-          providerId: regAgent.providerId,
-          modelId: regAgent.modelId,
-          modelDisplayName: null,
-          // Capabilities are resolved server-side; an unsaved draft defaults
-          // to false. Drafts don't drive the render-pages affordance — that
-          // reads the persisted `agents` list, not `agentDrafts`.
-          supportsVision: false,
-          supportsPdfDocuments: false,
-        },
-      ],
-      nextDraft: {
-        ...newAgentDraft,
-        modelId: '',
-        providerId: null,
-      },
-      added: true,
-      error: null,
-    };
-  };
-
-  const handleAddAgent = () => {
-    const materialized = materializePendingFooterAgent(agentDrafts);
-    if (materialized.error) {
-      setAgentState({ status: 'error', message: materialized.error });
-      return;
-    }
-    if (!materialized.added) return;
-    setAgentDrafts(materialized.nextAgents);
-    setNewAgentDraft(materialized.nextDraft);
-    setAgentState({ status: 'idle' });
-  };
-
-  const handleSaveAgents = async () => {
-    if (pageKind !== 'ready' || !pageTalk || !canEditAgents) return;
-    const materialized = materializePendingFooterAgent(agentDrafts);
-    if (materialized.error) {
-      setAgentState({ status: 'error', message: materialized.error });
-      return;
-    }
-    if (materialized.added) {
-      setAgentDrafts(materialized.nextAgents);
-      setNewAgentDraft(materialized.nextDraft);
-    }
-    setAgentState({ status: 'saving' });
-    try {
-      const saved = await updateTalkAgents({
-        talkId: pageTalk.id,
-        agents: materialized.nextAgents.map((agent, index) => ({
-          id: agent.id,
-          nickname: agent.nickname.trim(),
-          nicknameMode: agent.nicknameMode,
-          sourceKind: agent.sourceKind,
-          providerId: agent.sourceKind === 'provider' ? agent.providerId : null,
-          modelId: agent.modelId,
-          modelDisplayName: agent.modelDisplayName,
-          role: agent.role,
-          isPrimary: agent.isPrimary,
-          displayOrder: index,
-          health: agent.health,
-          supportsVision: agent.supportsVision,
-          supportsPdfDocuments: agent.supportsPdfDocuments,
-        })),
-      });
-      setAgents(saved);
-      setAgentDrafts(saved);
-      setNewAgentDraft(materialized.nextDraft);
-      setTargetAgentIds((current) => buildTargetSelection(saved, current));
-      setAgentState({ status: 'success', message: 'Talk agents updated.' });
-    } catch (err) {
-      if (err instanceof UnauthorizedError) {
-        handleUnauthorized();
-        return;
-      }
-      setAgentState({
-        status: 'error',
-        message:
-          err instanceof Error ? err.message : 'Failed to update talk agents',
-      });
-    }
-  };
-
   const handleToggleRunContext = useCallback(
     async (runId: string) => {
       const current = runContextPanelsRef.current[runId];
@@ -3224,9 +2477,7 @@ export function TalkDetailPage({
                     sources={contextSources}
                     setSources={setContextSources}
                     canEdit={canEditAgents}
-                    hasVisionNonDocAgent={agents.some(
-                      (a) => a.supportsVision && !a.supportsPdfDocuments,
-                    )}
+                    hasVisionNonDocAgent={hasVisionNonDocAgent}
                     onUnauthorized={handleUnauthorized}
                   />
 

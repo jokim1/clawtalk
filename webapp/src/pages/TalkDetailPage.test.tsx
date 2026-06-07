@@ -1443,6 +1443,75 @@ describe('TalkDetailPage', () => {
     expect(within(statusPills).getByText('GPT-5 Mini (Critic)')).toBeTruthy();
   });
 
+  it('applies an in-flight agent save after the Agents tab unmounts', async () => {
+    const user = userEvent.setup();
+    let savedRequest: SavedTalkAgentRequest | undefined;
+    let resolveSave:
+      | ((agents: TalkAgent[]) => void)
+      | undefined;
+
+    installTalkDetailFetch({
+      messages: [],
+      runs: [],
+      talkAgents: [
+        buildTalkAgent({
+          id: 'agent-claude',
+          nickname: 'Claude Sonnet 4.6',
+          sourceKind: 'claude_default',
+          role: 'assistant',
+          isPrimary: true,
+          displayOrder: 0,
+          health: 'ready',
+          providerId: null,
+          modelId: 'claude-sonnet-4-6',
+          modelDisplayName: 'Claude Sonnet 4.6',
+        }),
+      ],
+      onPutAgents: (body) => {
+        savedRequest = body;
+        return new Promise<TalkAgent[]>((resolve) => {
+          resolveSave = (agents) => resolve(agents);
+        });
+      },
+    });
+
+    renderDetailPage('/app/talks/talk-1/agents');
+    await screen.findByRole('heading', { name: 'Agents' });
+
+    await user.selectOptions(screen.getByLabelText('Agent'), 'agent-openai');
+    await user.selectOptions(screen.getAllByLabelText('Role')[1], 'critic');
+    await user.click(screen.getByRole('button', { name: 'Add + Save Agents' }));
+
+    const tabs = within(
+      screen.getByRole('navigation', { name: 'Talk sections' }),
+    );
+    await user.click(tabs.getByRole('link', { name: 'Talk' }));
+    await screen.findByLabelText('Talk timeline');
+
+    if (!savedRequest || !resolveSave) {
+      throw new Error('Expected in-flight talk agents save');
+    }
+    resolveSave(
+      savedRequest.agents.map((agent, index) => ({
+        ...agent,
+        displayOrder: index,
+        health: 'ready',
+      })),
+    );
+
+    const statusPills = screen.getByRole('list', { name: 'Talk agent status' });
+    await waitFor(() =>
+      expect(within(statusPills).getByText('GPT-5 Mini (Critic)')).toBeTruthy(),
+    );
+    expect(
+      screen.queryByText('Save agent changes before sending a message.'),
+    ).toBeNull();
+
+    await user.click(tabs.getByRole('link', { name: 'Agents' }));
+    expect(await screen.findByText('Talk agents updated.')).toBeTruthy();
+    expect(screen.getAllByLabelText('Registered Agent')).toHaveLength(2);
+  });
+
   it('shows an inline error when a pending footer agent becomes invalid before save', async () => {
     const user = userEvent.setup();
     let putCalled = false;
@@ -4958,7 +5027,7 @@ function installTalkDetailFetch(input?: {
     bodyMarkdown?: string;
     bodyHtml?: string;
   }) => Content;
-  onPutAgents?: (body: SavedTalkAgentRequest) => TalkAgent[];
+  onPutAgents?: (body: SavedTalkAgentRequest) => Promise<TalkAgent[]> | TalkAgent[];
   onGetContext?: () => TalkContext;
   onCreateContextSource?: (body: {
     sourceType: ContextSource['sourceType'];
@@ -5921,17 +5990,18 @@ function installTalkDetailFetch(input?: {
           String(init?.body || '{}'),
         ) as SavedTalkAgentRequest;
         const saved =
-          input?.onPutAgents?.(body) ??
-          body.agents.map((agent, index) => ({
-            ...agent,
-            displayOrder: index,
-            health:
-              agent.sourceKind === 'claude_default'
-                ? 'ready'
-                : agent.providerId === 'provider.openai'
-                  ? 'invalid'
-                  : 'unknown',
-          }));
+          (input?.onPutAgents
+            ? await input.onPutAgents(body)
+            : body.agents.map((agent, index) => ({
+                ...agent,
+                displayOrder: index,
+                health:
+                  agent.sourceKind === 'claude_default'
+                    ? 'ready'
+                    : agent.providerId === 'provider.openai'
+                      ? 'invalid'
+                      : 'unknown',
+              })));
         return jsonResponse(200, {
           ok: true,
           data: { talkId: 'talk-1', agents: saved },
