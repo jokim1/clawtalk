@@ -53,7 +53,7 @@ The current refactor plan is a subset of that denominator. It must be explicit a
 | 5 | Frontend shell + Talk rewrite | 🔄 Mid-flight. Structure improved, but Talk controller bulk and Salon remain. |
 | 6 | Documents | 🔄 Native backend API/client path exists for list/detail tabs+blocks+pending edits and edit accept/reject; native Documents UI/editor not built. |
 | 7 | Agents/tools/connectors/context | 🔄 Backend mostly greenfield behind facades; frontend still consumes compat shapes; standalone Agents page not built. |
-| 8 | Jobs | 🔄 Backend and Talk Jobs panel mostly usable. Missing `emit_document_append`, `job_output_ready`, and Home read surface. |
+| 8 | Jobs | 🔄 Backend and Talk Jobs panel mostly usable. This branch adds `emit_document_append` and `job_output_ready` inbox/outbox production; Home UI surfacing and DB-backed verification remain. |
 | 9 | Home, Settings, polish, eval gate | ⛔ Home/eval/Salon not built; Settings still has inline Profile/Tools/OAuth state. |
 | 10 | Forge | ⛔ Schema/docs only, intentionally post-MVP. |
 
@@ -179,7 +179,7 @@ Salon should be first-class before Home/Documents/Agents, otherwise those surfac
 ### W7. Capability Gaps
 
 - Attachments are a known regression. Default is defer for v1 unless chat-upload multimodal becomes launch-critical.
-- Jobs need `emit_document_append` and `job_output_ready`.
+- Jobs `emit_document_append` and `job_output_ready` producer paths are implemented on the current Phase 5 backend branch; Home UI surfacing and DB-backed verification remain.
 - Non-Google connector OAuth UI remains incomplete.
 - Dark mode and full WCAG pass need explicit goals after light Salon exists.
 

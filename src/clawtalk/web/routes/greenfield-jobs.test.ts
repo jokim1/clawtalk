@@ -76,7 +76,11 @@ async function seedAuthUser(id: string, email: string): Promise<void> {
 
 async function deleteUsers(): Promise<void> {
   const db = getDbPg();
-  await db`delete from public.event_outbox where topic like 'talk:%'`;
+  await db`
+    delete from public.event_outbox
+    where topic like 'talk:%'
+       or topic like 'user:%'
+  `;
   await db`delete from public.workspaces where owner_id in (${USER_ID}::uuid, ${OTHER_USER_ID}::uuid)`;
   await db`delete from auth.users where id in (${USER_ID}::uuid, ${OTHER_USER_ID}::uuid)`;
 }

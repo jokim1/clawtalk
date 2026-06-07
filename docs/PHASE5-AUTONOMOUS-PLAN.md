@@ -381,6 +381,7 @@ Objective: Implement Home backend routes/accessors over native home_* data witho
 Scope: home item accessors, routes, lifecycle actions, recommendation/news/inbox read models, tests, and docs status.
 Non-goals: Salon UI implementation, Forge, unrelated scheduler rewrites, or new recommendation algorithms beyond the current deterministic contract.
 Acceptance: Home API exposes inbox, recommendations, news, and lifecycle actions with idempotent behavior and permissions; job_blocked/job_output_ready can surface where specified.
+Status note: the current Phase 5 backend branch adds job `emit_document_append` and `job_output_ready` inbox/outbox producers; Home UI surfacing is still separate from this backend note.
 Verify: targeted backend tests for read models, lifecycle idempotency, permissions, and job-related items; npm run typecheck; relevant npm run test subset.
 Human gate: only if docs conflict on Home ranking/action semantics.
 Handoff: API contract changes, tests, unresolved product questions, and review outcomes.

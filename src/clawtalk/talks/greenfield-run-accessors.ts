@@ -60,6 +60,26 @@ interface PendingOutboxNotify {
   ownerIds: string[];
 }
 
+interface GreenfieldJobOutputTargets {
+  jobId: string;
+  title: string;
+  emitTalkMessage: boolean;
+  emitDocumentAppend: boolean;
+}
+
+interface JobDocumentAppendTarget {
+  document_id: string;
+  tab_id: string;
+  list_version: number;
+  after_block_id: string | null;
+}
+
+interface InsertedJobDocumentEdit {
+  editId: string;
+  documentId: string;
+  tabId: string;
+}
+
 function terminalStatuses(): GreenfieldRunStatus[] {
   return ['completed', 'failed', 'cancelled'];
 }
@@ -133,6 +153,269 @@ function messageProviderReplayData(
     replay.codexMessageItems = metadata.codexMessageItems;
   }
   return Object.keys(replay).length > 0 ? replay : null;
+}
+
+function boolFromSnapshot(value: string | null, fallback: boolean): boolean {
+  if (value === 'true') return true;
+  if (value === 'false') return false;
+  return fallback;
+}
+
+function isForeignKeyViolation(err: unknown): boolean {
+  return (
+    typeof err === 'object' &&
+    err !== null &&
+    'code' in err &&
+    (err as { code?: unknown }).code === '23503'
+  );
+}
+
+async function getJobOutputTargetsOnSql(
+  sql: Sql,
+  run: GreenfieldQueueRunRecord,
+): Promise<GreenfieldJobOutputTargets | null> {
+  if (!run.job_id) return null;
+  const rows = await sql<
+    Array<{
+      id: string;
+      title: string;
+      emit_talk_message: boolean;
+      emit_document_append: boolean;
+      snapshot_emit_talk_message: string | null;
+      snapshot_emit_document_append: string | null;
+    }>
+  >`
+    select
+      j.id,
+      j.title,
+      j.emit_talk_message,
+      j.emit_document_append,
+      rps.tool_manifest_json #>> '{jobOutputTargets,emitTalkMessage}'
+        as snapshot_emit_talk_message,
+      rps.tool_manifest_json #>> '{jobOutputTargets,emitDocumentAppend}'
+        as snapshot_emit_document_append
+    from public.runs r
+    join public.jobs j
+      on j.workspace_id = r.workspace_id
+     and j.id = r.job_id
+    left join public.run_prompt_snapshots rps
+      on rps.workspace_id = r.workspace_id
+     and rps.id = r.prompt_snapshot_id
+    where r.workspace_id = ${run.workspace_id}::uuid
+      and r.id = ${run.id}::uuid
+    limit 1
+    for update of j
+  `;
+  const row = rows[0];
+  if (!row) return null;
+  return {
+    jobId: row.id,
+    title: row.title,
+    emitTalkMessage: boolFromSnapshot(
+      row.snapshot_emit_talk_message,
+      row.emit_talk_message,
+    ),
+    emitDocumentAppend: boolFromSnapshot(
+      row.snapshot_emit_document_append,
+      row.emit_document_append,
+    ),
+  };
+}
+
+async function getJobDocumentAppendTargetOnSql(
+  sql: Sql,
+  run: GreenfieldQueueRunRecord,
+): Promise<JobDocumentAppendTarget | null> {
+  const rows = await sql<JobDocumentAppendTarget[]>`
+    select
+      d.id as document_id,
+      primary_tab.id as tab_id,
+      primary_tab.list_version,
+      last_block.id as after_block_id
+    from public.documents d
+    join lateral (
+      select dt.id, dt.list_version
+      from public.doc_tabs dt
+      where dt.workspace_id = d.workspace_id
+        and dt.document_id = d.id
+      order by dt.sort_order asc, dt.id asc
+      limit 1
+    ) primary_tab on true
+    left join lateral (
+      select db.id
+      from public.doc_blocks db
+      where db.workspace_id = d.workspace_id
+        and db.document_id = d.id
+        and db.tab_id = primary_tab.id
+      order by db.sort_order desc, db.id desc
+      limit 1
+    ) last_block on true
+    where d.workspace_id = ${run.workspace_id}::uuid
+      and d.primary_talk_id = ${run.talk_id}::uuid
+    order by d.id asc
+    limit 1
+  `;
+  return rows[0] ?? null;
+}
+
+async function insertJobDocumentEditWithAgentOnSql(input: {
+  sql: Sql;
+  run: GreenfieldQueueRunRecord;
+  target: JobDocumentAppendTarget;
+  responseContent: string;
+  agentId: string | null;
+}): Promise<string> {
+  const rows = await input.sql<{ id: string }[]>`
+    insert into public.document_edits (
+      workspace_id,
+      document_id,
+      tab_id,
+      block_id,
+      base_block_version,
+      base_list_version,
+      after_block_id,
+      proposed_by_agent_id,
+      proposed_by_run_id,
+      op,
+      new_kind,
+      new_text,
+      new_attrs_json,
+      source
+    )
+    values (
+      ${input.run.workspace_id}::uuid,
+      ${input.target.document_id}::uuid,
+      ${input.target.tab_id}::uuid,
+      null,
+      null,
+      ${input.target.list_version},
+      ${input.target.after_block_id ?? null}::uuid,
+      ${input.agentId ?? null}::uuid,
+      ${input.run.id}::uuid,
+      'insert',
+      'p',
+      ${input.responseContent},
+      null,
+      'job'
+    )
+    returning id
+  `;
+  return rows[0]!.id;
+}
+
+async function insertJobDocumentAppendOnSql(input: {
+  sql: Sql;
+  run: GreenfieldQueueRunRecord;
+  responseContent: string;
+}): Promise<InsertedJobDocumentEdit> {
+  const target = await getJobDocumentAppendTargetOnSql(input.sql, input.run);
+  if (!target) {
+    throw new Error('Job document append target not found');
+  }
+
+  let editId: string;
+  try {
+    await input.sql`savepoint job_document_append_agent_fk`;
+    editId = await insertJobDocumentEditWithAgentOnSql({
+      sql: input.sql,
+      run: input.run,
+      target,
+      responseContent: input.responseContent,
+      agentId: input.run.target_agent_id,
+    });
+    await input.sql`release savepoint job_document_append_agent_fk`;
+  } catch (err) {
+    if (!input.run.target_agent_id || !isForeignKeyViolation(err)) throw err;
+    await input.sql`rollback to savepoint job_document_append_agent_fk`;
+    await input.sql`release savepoint job_document_append_agent_fk`;
+    editId = await insertJobDocumentEditWithAgentOnSql({
+      sql: input.sql,
+      run: input.run,
+      target,
+      responseContent: input.responseContent,
+      agentId: null,
+    });
+  }
+
+  return {
+    editId,
+    documentId: target.document_id,
+    tabId: target.tab_id,
+  };
+}
+
+async function insertJobOutputReadyInboxItemOnSql(input: {
+  sql: Sql;
+  run: GreenfieldQueueRunRecord;
+  job: GreenfieldJobOutputTargets;
+  responseMessageId: string | null;
+  documentEdit: InsertedJobDocumentEdit | null;
+}): Promise<string> {
+  const targetJson = {
+    jobId: input.job.jobId,
+    talkId: input.run.talk_id,
+    runId: input.run.id,
+    emittedMessageId: input.responseMessageId,
+    emittedEditId: input.documentEdit?.editId ?? null,
+  };
+  const primaryAction = input.documentEdit
+    ? {
+        type: 'open_document_edit',
+        talkId: input.run.talk_id,
+        documentId: input.documentEdit.documentId,
+        editId: input.documentEdit.editId,
+      }
+    : {
+        type: 'open_talk_run',
+        talkId: input.run.talk_id,
+        runId: input.run.id,
+      };
+  const rows = await input.sql<{ id: string }[]>`
+    insert into public.home_inbox_items (
+      workspace_id,
+      type,
+      target_kind,
+      target_json,
+      talk_id,
+      document_id,
+      run_id,
+      tab_id,
+      job_id,
+      ref_id,
+      severity,
+      title,
+      summary,
+      reason,
+      primary_action_json,
+      group_key
+    )
+    values (
+      ${input.run.workspace_id}::uuid,
+      'job_output_ready',
+      'job',
+      ${input.sql.json(targetJson as never)},
+      ${input.run.talk_id}::uuid,
+      ${input.documentEdit?.documentId ?? null}::uuid,
+      ${input.run.id}::uuid,
+      ${input.documentEdit?.tabId ?? null}::uuid,
+      ${input.job.jobId}::uuid,
+      ${input.run.id}::uuid,
+      'info',
+      ${`${input.job.title} finished`},
+      ${
+        input.documentEdit
+          ? 'The job proposed a Document edit for review.'
+          : 'The job posted a Talk message.'
+      },
+      'job_run_completed',
+      ${input.sql.json(primaryAction as never)},
+      ${`job:${input.job.jobId}:output`}
+    )
+    on conflict (workspace_id, type, ref_id) where ref_id is not null
+    do update set updated_at = public.home_inbox_items.updated_at
+    returning id
+  `;
+  return rows[0]!.id;
 }
 
 export async function getGreenfieldQueueRunById(
@@ -326,44 +609,51 @@ export async function completeGreenfieldRun(input: {
     `;
       if (updated.length !== 1) return null;
 
+      const jobOutputTargets = await getJobOutputTargetsOnSql(txSql, run);
       const clientMetadata = messageAppendedMetadata(input.responseMetadata, {
         providerId: run.provider_id,
         modelId: run.model_id,
       });
-      const messages = await txSql<Array<{ id: string; created_at: string }>>`
-      insert into public.messages (
-        id,
-        workspace_id,
-        talk_id,
-        round,
-        author_kind,
-        agent_snapshot_id,
-        run_id,
-        body,
-        metadata_json
-      )
-      values (
-        ${input.responseMessageId}::uuid,
-        ${run.workspace_id}::uuid,
-        ${run.talk_id}::uuid,
-        ${run.round},
-        'agent',
-        ${run.agent_snapshot_id}::uuid,
-        ${run.id}::uuid,
-        ${input.responseContent},
-        ${txSql.json(clientMetadata as never)}
-      )
-      returning id, created_at
-    `;
-      const responseMessage = messages[0]!;
-      const providerReplay = messageProviderReplayData(input.responseMetadata);
-      const replaySourceAgentId = run.target_agent_id;
-      if (
-        providerReplay &&
-        replaySourceAgentId &&
-        fitsProviderReplayBudget(providerReplay)
-      ) {
-        await txSql`
+      let responseMessage: { id: string; created_at: string } | null = null;
+      const shouldEmitTalkMessage =
+        !jobOutputTargets || jobOutputTargets.emitTalkMessage;
+      if (shouldEmitTalkMessage) {
+        const messages = await txSql<Array<{ id: string; created_at: string }>>`
+          insert into public.messages (
+            id,
+            workspace_id,
+            talk_id,
+            round,
+            author_kind,
+            agent_snapshot_id,
+            run_id,
+            body,
+            metadata_json
+          )
+          values (
+            ${input.responseMessageId}::uuid,
+            ${run.workspace_id}::uuid,
+            ${run.talk_id}::uuid,
+            ${run.round},
+            'agent',
+            ${run.agent_snapshot_id}::uuid,
+            ${run.id}::uuid,
+            ${input.responseContent},
+            ${txSql.json(clientMetadata as never)}
+          )
+          returning id, created_at
+        `;
+        responseMessage = messages[0]!;
+        const providerReplay = messageProviderReplayData(
+          input.responseMetadata,
+        );
+        const replaySourceAgentId = run.target_agent_id;
+        if (
+          providerReplay &&
+          replaySourceAgentId &&
+          fitsProviderReplayBudget(providerReplay)
+        ) {
+          await txSql`
           insert into public.message_provider_replay (
             workspace_id,
             talk_id,
@@ -391,7 +681,17 @@ export async function completeGreenfieldRun(input: {
             model_id = excluded.model_id,
             provider_data_json = excluded.provider_data_json
         `;
+        }
       }
+
+      const documentEdit =
+        jobOutputTargets?.emitDocumentAppend === true
+          ? await insertJobDocumentAppendOnSql({
+              sql: txSql,
+              run,
+              responseContent: input.responseContent,
+            })
+          : null;
 
       await txSql`
       update public.talks
@@ -401,23 +701,31 @@ export async function completeGreenfieldRun(input: {
     `;
       await updateJobTerminalBookkeepingOnSql(txSql, run, 'completed');
 
-      const messageAppendedEventId = await emitOutboxEventOnSql(txSql, {
-        topic: `talk:${run.talk_id}`,
-        eventType: 'message_appended',
-        payload: {
-          talkId: run.talk_id,
-          threadId: run.thread_id,
-          messageId: responseMessage.id,
-          runId: run.id,
-          role: 'assistant',
-          agentId: input.agentId ?? run.target_agent_id,
-          agentNickname: input.agentNickname ?? run.target_agent_name,
-          content: input.responseContent,
-          createdAt: responseMessage.created_at,
-          metadata: clientMetadata,
-        },
-        ownerIds: run.owner_ids,
-      });
+      const notifies: PendingOutboxNotify[] = [];
+      if (responseMessage) {
+        const messageAppendedEventId = await emitOutboxEventOnSql(txSql, {
+          topic: `talk:${run.talk_id}`,
+          eventType: 'message_appended',
+          payload: {
+            talkId: run.talk_id,
+            threadId: run.thread_id,
+            messageId: responseMessage.id,
+            runId: run.id,
+            role: 'assistant',
+            agentId: input.agentId ?? run.target_agent_id,
+            agentNickname: input.agentNickname ?? run.target_agent_name,
+            content: input.responseContent,
+            createdAt: responseMessage.created_at,
+            metadata: clientMetadata,
+          },
+          ownerIds: run.owner_ids,
+        });
+        notifies.push({
+          topic: `talk:${run.talk_id}`,
+          eventId: messageAppendedEventId,
+          ownerIds: run.owner_ids,
+        });
+      }
 
       const runCompletedEventId = await emitOutboxEventOnSql(txSql, {
         topic: `talk:${run.talk_id}`,
@@ -428,7 +736,7 @@ export async function completeGreenfieldRun(input: {
           runId: run.id,
           runKind: run.run_kind,
           triggerMessageId: run.trigger_message_id,
-          responseMessageId: responseMessage.id,
+          responseMessageId: responseMessage?.id ?? null,
           responseGroupId: run.response_group_id,
           sequenceIndex: run.sequence_index,
           executorAlias: input.agentNickname ?? run.target_agent_name,
@@ -437,18 +745,43 @@ export async function completeGreenfieldRun(input: {
         },
         ownerIds: run.owner_ids,
       });
-      return [
-        {
-          topic: `talk:${run.talk_id}`,
-          eventId: messageAppendedEventId,
-          ownerIds: run.owner_ids,
-        },
-        {
-          topic: `talk:${run.talk_id}`,
-          eventId: runCompletedEventId,
-          ownerIds: run.owner_ids,
-        },
-      ] satisfies PendingOutboxNotify[];
+      notifies.push({
+        topic: `talk:${run.talk_id}`,
+        eventId: runCompletedEventId,
+        ownerIds: run.owner_ids,
+      });
+
+      if (jobOutputTargets) {
+        const inboxItemId = await insertJobOutputReadyInboxItemOnSql({
+          sql: txSql,
+          run,
+          job: jobOutputTargets,
+          responseMessageId: responseMessage?.id ?? null,
+          documentEdit,
+        });
+        for (const ownerId of run.owner_ids) {
+          const eventId = await emitOutboxEventOnSql(txSql, {
+            topic: `user:${ownerId}`,
+            eventType: 'job_output_ready',
+            payload: {
+              jobId: jobOutputTargets.jobId,
+              runId: run.id,
+              talkId: run.talk_id,
+              emittedMessageId: responseMessage?.id ?? undefined,
+              emittedEditId: documentEdit?.editId ?? undefined,
+              inboxItemId,
+            },
+            ownerIds: [ownerId],
+          });
+          notifies.push({
+            topic: `user:${ownerId}`,
+            eventId,
+            ownerIds: [ownerId],
+          });
+        }
+      }
+
+      return notifies;
     }),
   );
   if (pendingNotifies) {

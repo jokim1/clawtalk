@@ -1243,9 +1243,6 @@ export async function createGreenfieldJob(input: {
   const emitTalkMessage = input.emitTalkMessage !== false;
   const emitDocumentAppend = input.emitDocumentAppend === true;
   assertReadOnlyJobToolScope(sourceScope);
-  if (emitDocumentAppend) {
-    throw new Error('Document append job output is not enabled yet');
-  }
   if (!emitTalkMessage && !emitDocumentAppend) {
     throw new Error('A job must emit a Talk message or a Document append');
   }
@@ -1393,9 +1390,6 @@ export async function patchGreenfieldJob(input: {
         input.emitDocumentAppend !== undefined
           ? input.emitDocumentAppend
           : current.emitDocumentAppend;
-      if (emitDocumentAppend) {
-        throw new Error('Document append job output is not enabled yet');
-      }
       if (!emitTalkMessage && !emitDocumentAppend) {
         throw new Error('A job must emit a Talk message or a Document append');
       }
@@ -2278,6 +2272,10 @@ async function claimDueGreenfieldJobRun(input: {
         ${txSql.json({
           ...toolManifest,
           agentCredentialMode: credentialKindSnapshot,
+          jobOutputTargets: {
+            emitTalkMessage: lockedJob.emitTalkMessage,
+            emitDocumentAppend: lockedJob.emitDocumentAppend,
+          },
         } as never)},
         ${lockedJob.prompt}
       )
@@ -2693,6 +2691,10 @@ export async function createGreenfieldJobRunNow(input: {
         ${txSql.json({
           ...toolManifest,
           agentCredentialMode: credentialKindSnapshot,
+          jobOutputTargets: {
+            emitTalkMessage: lockedJob.emitTalkMessage,
+            emitDocumentAppend: lockedJob.emitDocumentAppend,
+          },
         } as never)},
         ${lockedJob.prompt}
       )
