@@ -793,6 +793,15 @@ export function ClawTalkSidebar({
         >
           Home
         </NavLink>
+        <NavLink
+          to="/app/archive"
+          end
+          className={({ isActive }) =>
+            `clawtalk-sidebar-link${isActive ? ' active' : ''}`
+          }
+        >
+          Archive
+        </NavLink>
       </nav>
 
       <div className="clawtalk-sidebar-section">

@@ -928,6 +928,23 @@ export async function listTalks(): Promise<Talk[]> {
   return envelope.talks;
 }
 
+/** Archived talks only — the `include_archived` list filtered to `status==='archived'`. */
+export async function listArchivedTalks(): Promise<Talk[]> {
+  const envelope = await apiRequest<{
+    talks: Talk[];
+    page: { limit: number; offset: number; count: number };
+  }>('/api/v1/talks?include_archived=true');
+  return envelope.talks.filter((talk) => talk.status === 'archived');
+}
+
+/** Restore an archived talk (clears `archived_at`). */
+export async function unarchiveTalk(talkId: string): Promise<void> {
+  await apiMutationRequest<{ restored: true }>(
+    `/api/v1/talks/${encodeURIComponent(talkId)}/unarchive`,
+    { method: 'POST' },
+  );
+}
+
 export async function createTalk(title: string): Promise<Talk> {
   const envelope = await apiMutationRequest<{ talk: Talk }>('/api/v1/talks', {
     method: 'POST',

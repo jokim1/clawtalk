@@ -44,6 +44,7 @@ import { TalkDetailPage } from './pages/TalkDetailPage';
 import { TalkListPage } from './pages/TalkListPage';
 import { SettingsPage } from './pages/SettingsPage';
 import { HomePage } from './pages/HomePage';
+import { ArchivePage } from './pages/ArchivePage';
 import { AgentProfilePage } from './pages/AgentProfilePage';
 
 type AuthState =
@@ -682,6 +683,13 @@ export function App() {
         run: () => navigate('/app/talks'),
       },
       {
+        id: 'nav-archive',
+        label: 'Archive',
+        hint: 'Go to',
+        keywords: 'archived restore talks',
+        run: () => navigate('/app/archive'),
+      },
+      {
         id: 'nav-settings-profile',
         label: 'Settings · Profile',
         hint: 'Go to',
@@ -1029,6 +1037,10 @@ export function App() {
           <Routes>
             <Route path="/" element={<Navigate to="/app/home" replace />} />
             <Route path="/app/home" element={<HomePage />} />
+            <Route
+              path="/app/archive"
+              element={<ArchivePage onRestored={() => void refreshSidebar()} />}
+            />
             <Route
               path="/app/talks"
               element={

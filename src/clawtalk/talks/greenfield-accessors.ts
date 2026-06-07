@@ -617,6 +617,21 @@ export async function archiveGreenfieldTalk(input: {
   return rows.length > 0;
 }
 
+export async function unarchiveGreenfieldTalk(input: {
+  workspaceId: string;
+  talkId: string;
+}): Promise<boolean> {
+  const db = getDbPg();
+  const rows = await db<{ id: string }[]>`
+    update public.talks
+    set archived_at = null
+    where workspace_id = ${input.workspaceId}::uuid
+      and id = ${input.talkId}::uuid
+    returning id
+  `;
+  return rows.length > 0;
+}
+
 export async function listGreenfieldTalkAgents(input: {
   workspaceId: string;
   talkId: string;

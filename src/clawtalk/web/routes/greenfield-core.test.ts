@@ -4,6 +4,7 @@ import { closePgDatabase, getDbPg, initPgDatabase } from '../../../db.js';
 import type { AuthContext } from '../types.js';
 import {
   archiveGreenfieldTalkRoute,
+  unarchiveGreenfieldTalkRoute,
   createGreenfieldFolderRoute,
   createGreenfieldTalkRoute,
   getGreenfieldMeRoute,
@@ -353,6 +354,49 @@ describe('greenfield core routes', () => {
     expect(all.body).toMatchObject({
       ok: true,
       data: { talks: [{ id: created.body.data.talk.id, status: 'archived' }] },
+    });
+
+    const restored = await unarchiveGreenfieldTalkRoute({
+      auth: auth(),
+      workspaceId,
+      talkId: created.body.data.talk.id,
+    });
+    expect(restored.body).toEqual({ ok: true, data: { restored: true } });
+
+    const activeAgain = await listGreenfieldTalksRoute({
+      auth: auth(),
+      workspaceId,
+    });
+    expect(activeAgain.body).toMatchObject({
+      ok: true,
+      data: { talks: [{ id: created.body.data.talk.id, status: 'active' }] },
+    });
+  });
+
+  it('returns 404 unarchiving an unknown talk and 400 on a bad id', async () => {
+    const workspaceId = await currentWorkspaceId();
+    const missing = await unarchiveGreenfieldTalkRoute({
+      auth: auth(),
+      workspaceId,
+      // Valid RFC-4122 v4 UUID (version 4 / variant 8) that does not exist —
+      // greenfield's isUuid requires the version+variant nibbles.
+      talkId: '00000000-0000-4000-8000-000000000000',
+    });
+    expect(missing.statusCode).toBe(404);
+    expect(missing.body).toMatchObject({
+      ok: false,
+      error: { code: 'talk_not_found' },
+    });
+
+    const bad = await unarchiveGreenfieldTalkRoute({
+      auth: auth(),
+      workspaceId,
+      talkId: 'not-a-uuid',
+    });
+    expect(bad.statusCode).toBe(400);
+    expect(bad.body).toMatchObject({
+      ok: false,
+      error: { code: 'invalid_talk_id' },
     });
   });
 
