@@ -1390,9 +1390,11 @@ export async function rejectContentEditRun(input: {
 export async function listDocuments(input?: {
   workspaceId?: string | null;
   includeUnlinked?: boolean;
+  limit?: number;
 }): Promise<NativeDocumentSummary[]> {
   const params = new URLSearchParams();
   params.set('include_unlinked', String(input?.includeUnlinked ?? true));
+  if (input?.limit != null) params.set('limit', String(input.limit));
   const path = withWorkspaceQuery(
     `/api/v1/documents?${params.toString()}`,
     input?.workspaceId,

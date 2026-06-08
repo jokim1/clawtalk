@@ -3,6 +3,7 @@ import { useLocation } from 'react-router-dom';
 
 export type TalkDetailTabKey =
   | 'talk'
+  | 'documents'
   | 'agents'
   | 'context'
   | 'connectors'
@@ -11,6 +12,7 @@ export type TalkDetailTabKey =
 
 export type TalkDetailTabLinks = {
   threadAwareTalkTabHref: string;
+  documentsTabHref: string;
   agentsTabHref: string;
   contextTabHref: string;
   workspaceConnectorsTabHref: string;
@@ -24,6 +26,7 @@ export function getTabFromPath(
   talkId: string,
 ): TalkDetailTabKey {
   const base = `/app/talks/${talkId}`;
+  if (pathname === `${base}/documents`) return 'documents';
   if (pathname === `${base}/agents`) return 'agents';
   if (pathname === `${base}/context`) return 'context';
   if (
@@ -74,6 +77,9 @@ export function useTalkDetailTabLinks(input: {
     const threadAwareTalkTabHref = activeThreadId
       ? buildThreadHref(talkId, activeThreadId)
       : talkTabHref;
+    const documentsTabHref = activeThreadId
+      ? buildThreadHref(talkId, activeThreadId, 'documents')
+      : `/app/talks/${talkId}/documents`;
     const agentsTabHref = activeThreadId
       ? buildThreadHref(talkId, activeThreadId, 'agents')
       : `/app/talks/${talkId}/agents`;
@@ -95,6 +101,7 @@ export function useTalkDetailTabLinks(input: {
 
     return {
       threadAwareTalkTabHref,
+      documentsTabHref,
       agentsTabHref,
       contextTabHref,
       workspaceConnectorsTabHref,

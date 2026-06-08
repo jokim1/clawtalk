@@ -3,323 +3,53 @@
  * `/api/v1/documents/:id` detail route. Renders the document's native tabs and
  * blocks (never a markdown/html body facade) and a pending-edit review panel.
  *
- * Accept/reject is page-owned: each action calls the native accept/reject API
- * and replaces the page's document state with the returned `NativeDocument`, so
- * version bumps and pending-edit removal come straight from the server. A 409
- * `version_conflict` (the document changed under the reviewer) is handled by a
- * quiet refetch + a notice, leaving the conflicting edit pending. We do not send
- * `expectedContentVersion`: the server's per-edit base-version check is the CAS,
- * and a single value is ambiguous for accept-all (which spans tabs).
- *
- * Bulk actions (accept-all / reject-all / per-run) send the exact set of edit
- * ids the reviewer has on screen. The server gates that set against its current
- * pending set and aborts the whole action with a 409 `edit_set_mismatch` if they
- * differ, so a pending edit created after page load (e.g. a job proposal) can
- * never be accepted or rejected unseen. That 409 is recoverable: quiet refetch +
- * a notice, then the reviewer re-checks the refreshed list.
+ * All load + accept/reject state lives in `useNativeDocumentReview`; this page is
+ * the standalone presentation of it (the in-Talk documents pane is the other
+ * consumer). The page is remounted per `documentId` (see App.tsx) so the hook
+ * only ever handles one document.
  */
-import {
-  useCallback,
-  useEffect,
-  useId,
-  useMemo,
-  useRef,
-  useState,
-} from 'react';
+import { useId, useRef } from 'react';
 import { Link, useParams } from 'react-router-dom';
 
 import { Button, salon, salonFont } from '../salon';
-import {
-  ApiError,
-  acceptAllDocumentEdits,
-  acceptDocumentEdit,
-  acceptDocumentEditRun,
-  getDocument,
-  rejectAllDocumentEdits,
-  rejectDocumentEdit,
-  rejectDocumentEditRun,
-  type NativeDocument,
-  type NativeDocumentEdit,
-} from '../lib/api';
 import { DocumentBlocks } from '../components/documents/DocumentBlocks';
 import { PendingEditList } from '../components/documents/PendingEditList';
 import {
   documentSummaryMeta,
   formatDocDate,
-  type PendingRunGroup,
 } from '../components/documents/documentsFormat';
-
-type Phase = 'loading' | 'ready' | 'error' | 'not-found';
-
-function addTo(set: Set<string>, value: string): Set<string> {
-  const next = new Set(set);
-  next.add(value);
-  return next;
-}
-
-function removeFrom(set: Set<string>, value: string): Set<string> {
-  const next = new Set(set);
-  next.delete(value);
-  return next;
-}
+import { useNativeDocumentReview } from '../hooks/useNativeDocumentReview';
 
 export function DocumentDetailPage(): JSX.Element {
   const params = useParams<{ documentId: string }>();
   const documentId = params.documentId ?? '';
 
-  const [doc, setDoc] = useState<NativeDocument | null>(null);
-  const [phase, setPhase] = useState<Phase>('loading');
-  const [loadError, setLoadError] = useState<string>('');
-  const [activeTabId, setActiveTabId] = useState<string | null>(null);
-
-  const [actionError, setActionError] = useState<string | null>(null);
-  const [conflictNotice, setConflictNotice] = useState<string | null>(null);
-  const [busyEditIds, setBusyEditIds] = useState<Set<string>>(new Set());
-  const [busyRunIds, setBusyRunIds] = useState<Set<string>>(new Set());
-  const [allBusy, setAllBusy] = useState(false);
-
-  const activeLoad = useRef<{ cancelled: boolean } | null>(null);
+  const {
+    doc,
+    phase,
+    loadError,
+    setActiveTabId,
+    activeTab,
+    pendingByBlock,
+    actionError,
+    conflictNotice,
+    setActionError,
+    setConflictNotice,
+    busyEditIds,
+    busyRunIds,
+    allBusy,
+    reload,
+    acceptEdit,
+    rejectEdit,
+    acceptRun,
+    rejectRun,
+    acceptAll,
+    rejectAll,
+  } = useNativeDocumentReview(documentId);
 
   // Tab roving-focus refs for the WAI-ARIA tablist keyboard pattern.
   const tabBaseId = useId();
   const tabButtonsRef = useRef<Map<string, HTMLButtonElement>>(new Map());
-
-  // Apply a server document, keeping the active tab if it still exists. The
-  // route remounts this page per documentId (DocumentDetailRoute in App.tsx), so
-  // one instance only ever handles a single document — a stale accept/reject
-  // from a previous document resolves on an unmounted instance, not here, so no
-  // cross-document guard is needed.
-  const applyDocument = useCallback((next: NativeDocument) => {
-    setDoc(next);
-    setActiveTabId((current) => {
-      if (current && next.tabs.some((tab) => tab.id === current))
-        return current;
-      return next.tabs[0]?.id ?? null;
-    });
-  }, []);
-
-  const load = useCallback(
-    async ({ quiet = false }: { quiet?: boolean } = {}) => {
-      if (!documentId) {
-        setPhase('not-found');
-        return;
-      }
-      if (activeLoad.current) activeLoad.current.cancelled = true;
-      const signal = { cancelled: false };
-      activeLoad.current = signal;
-      if (!quiet) setPhase('loading');
-      try {
-        const next = await getDocument({ documentId });
-        if (signal.cancelled) return;
-        applyDocument(next);
-        setPhase('ready');
-      } catch (err) {
-        if (signal.cancelled) return;
-        if (err instanceof ApiError && err.status === 404) {
-          setPhase('not-found');
-          return;
-        }
-        if (quiet) {
-          // A background refetch failed; keep the current view but flag it.
-          setActionError('Couldn’t refresh this document. Try again.');
-          return;
-        }
-        setLoadError(
-          err instanceof Error
-            ? err.message
-            : 'This document is unavailable right now.',
-        );
-        setPhase('error');
-      }
-    },
-    [applyDocument, documentId],
-  );
-
-  useEffect(() => {
-    void load();
-    return () => {
-      if (activeLoad.current) activeLoad.current.cancelled = true;
-    };
-  }, [load]);
-
-  // Resolve a mutation failure. The native accept path returns three distinct
-  // 409 codes: `version_conflict` is recoverable (the document moved on, so
-  // refetch and re-review), while `anchor_missing` / `invalid_pending_edit` mean
-  // the edit can never apply against the current document — a plain re-accept
-  // would loop, so we tell the reviewer to reject it. A 404 (edit/run already
-  // resolved elsewhere) syncs by quiet refetch; anything else is retryable.
-  const handleMutationError = useCallback(
-    async (err: unknown) => {
-      if (err instanceof ApiError && err.status === 409) {
-        if (err.code === 'edit_set_mismatch') {
-          // A bulk accept/reject was gated: new pending edits appeared since the
-          // reviewer loaded the list, so the server applied nothing. Refresh so
-          // the new edits render, then let the reviewer re-check before retrying.
-          setConflictNotice(
-            'New edits arrived while you were reviewing. We refreshed the list — please re-check before accepting or rejecting in bulk.',
-          );
-          await load({ quiet: true });
-          return;
-        }
-        const inapplicable =
-          err.code === 'anchor_missing' || err.code === 'invalid_pending_edit';
-        setConflictNotice(
-          inapplicable
-            ? 'This proposed change no longer fits the current document — reject it to clear it.'
-            : 'This document changed while you were reviewing. We refreshed it — please re-check the remaining edits.',
-        );
-        await load({ quiet: true });
-        return;
-      }
-      if (err instanceof ApiError && err.status === 404) {
-        await load({ quiet: true });
-        return;
-      }
-      setActionError('Couldn’t apply that change. Try again.');
-    },
-    [load],
-  );
-
-  const handleAcceptEdit = useCallback(
-    async (edit: NativeDocumentEdit) => {
-      setActionError(null);
-      setConflictNotice(null);
-      setBusyEditIds((set) => addTo(set, edit.id));
-      try {
-        const { document } = await acceptDocumentEdit({
-          documentId,
-          editId: edit.id,
-        });
-        applyDocument(document);
-      } catch (err) {
-        await handleMutationError(err);
-      } finally {
-        setBusyEditIds((set) => removeFrom(set, edit.id));
-      }
-    },
-    [applyDocument, documentId, handleMutationError],
-  );
-
-  const handleRejectEdit = useCallback(
-    async (edit: NativeDocumentEdit) => {
-      setActionError(null);
-      setConflictNotice(null);
-      setBusyEditIds((set) => addTo(set, edit.id));
-      try {
-        const { document } = await rejectDocumentEdit({
-          documentId,
-          editId: edit.id,
-        });
-        applyDocument(document);
-      } catch (err) {
-        await handleMutationError(err);
-      } finally {
-        setBusyEditIds((set) => removeFrom(set, edit.id));
-      }
-    },
-    [applyDocument, documentId, handleMutationError],
-  );
-
-  const handleAcceptRun = useCallback(
-    async (group: PendingRunGroup) => {
-      if (group.runId == null) return;
-      const runId = group.runId;
-      setActionError(null);
-      setConflictNotice(null);
-      setBusyRunIds((set) => addTo(set, runId));
-      try {
-        // Gate on exactly the run's edits the reviewer saw, so an edit appended
-        // to this run after page load can't be accepted unseen.
-        const { document } = await acceptDocumentEditRun({
-          documentId,
-          runId,
-          reviewedEditIds: group.edits.map((edit) => edit.id),
-        });
-        applyDocument(document);
-      } catch (err) {
-        await handleMutationError(err);
-      } finally {
-        setBusyRunIds((set) => removeFrom(set, runId));
-      }
-    },
-    [applyDocument, documentId, handleMutationError],
-  );
-
-  const handleRejectRun = useCallback(
-    async (group: PendingRunGroup) => {
-      if (group.runId == null) return;
-      const runId = group.runId;
-      setActionError(null);
-      setConflictNotice(null);
-      setBusyRunIds((set) => addTo(set, runId));
-      try {
-        const { document } = await rejectDocumentEditRun({
-          documentId,
-          runId,
-          reviewedEditIds: group.edits.map((edit) => edit.id),
-        });
-        applyDocument(document);
-      } catch (err) {
-        await handleMutationError(err);
-      } finally {
-        setBusyRunIds((set) => removeFrom(set, runId));
-      }
-    },
-    [applyDocument, documentId, handleMutationError],
-  );
-
-  const handleAcceptAll = useCallback(async () => {
-    if (!doc) return;
-    // Gate on exactly the pending edits currently on screen; the server aborts
-    // with `edit_set_mismatch` if a new one slipped in since this render.
-    const reviewedEditIds = doc.pendingEdits.map((edit) => edit.id);
-    setActionError(null);
-    setConflictNotice(null);
-    setAllBusy(true);
-    try {
-      const { document } = await acceptAllDocumentEdits({
-        documentId,
-        reviewedEditIds,
-      });
-      applyDocument(document);
-    } catch (err) {
-      await handleMutationError(err);
-    } finally {
-      setAllBusy(false);
-    }
-  }, [applyDocument, doc, documentId, handleMutationError]);
-
-  const handleRejectAll = useCallback(async () => {
-    if (!doc) return;
-    const reviewedEditIds = doc.pendingEdits.map((edit) => edit.id);
-    setActionError(null);
-    setConflictNotice(null);
-    setAllBusy(true);
-    try {
-      const { document } = await rejectAllDocumentEdits({
-        documentId,
-        reviewedEditIds,
-      });
-      applyDocument(document);
-    } catch (err) {
-      await handleMutationError(err);
-    } finally {
-      setAllBusy(false);
-    }
-  }, [applyDocument, doc, documentId, handleMutationError]);
-
-  const activeTab = useMemo(
-    () =>
-      doc?.tabs.find((tab) => tab.id === activeTabId) ?? doc?.tabs[0] ?? null,
-    [activeTabId, doc],
-  );
-  const pendingByBlock = useMemo(() => {
-    const set = new Set<string>();
-    for (const edit of doc?.pendingEdits ?? []) {
-      if (edit.blockId) set.add(edit.blockId);
-    }
-    return set;
-  }, [doc]);
 
   const tabIdFor = (tabId: string) => `${tabBaseId}-tab-${tabId}`;
   const tabPanelId = `${tabBaseId}-panel`;
@@ -439,7 +169,7 @@ export function DocumentDetailPage(): JSX.Element {
           <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
             <div style={{ fontSize: 13, color: salon.ink2 }}>{loadError}</div>
             <div>
-              <Button variant="secondary" onClick={() => void load()}>
+              <Button variant="secondary" onClick={() => void reload()}>
                 Try again
               </Button>
             </div>
@@ -607,12 +337,12 @@ export function DocumentDetailPage(): JSX.Element {
               busyEditIds={busyEditIds}
               busyRunIds={busyRunIds}
               allBusy={allBusy}
-              onAcceptEdit={(edit) => void handleAcceptEdit(edit)}
-              onRejectEdit={(edit) => void handleRejectEdit(edit)}
-              onAcceptRun={(group) => void handleAcceptRun(group)}
-              onRejectRun={(group) => void handleRejectRun(group)}
-              onAcceptAll={() => void handleAcceptAll()}
-              onRejectAll={() => void handleRejectAll()}
+              onAcceptEdit={(edit) => void acceptEdit(edit)}
+              onRejectEdit={(edit) => void rejectEdit(edit)}
+              onAcceptRun={(group) => void acceptRun(group)}
+              onRejectRun={(group) => void rejectRun(group)}
+              onAcceptAll={() => void acceptAll()}
+              onRejectAll={() => void rejectAll()}
             />
           ) : (
             <div style={{ fontSize: 13, color: salon.ink2 }}>

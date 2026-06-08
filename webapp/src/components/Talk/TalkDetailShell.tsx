@@ -187,6 +187,12 @@ export function TalkDetailShell({
                     Talk
                   </Link>
                   <Link
+                    to={tabLinks.documentsTabHref}
+                    className={`talk-tab ${currentTab === 'documents' ? 'talk-tab-active' : ''}`}
+                  >
+                    Documents
+                  </Link>
+                  <Link
                     to={tabLinks.agentsTabHref}
                     className={`talk-tab ${currentTab === 'agents' ? 'talk-tab-active' : ''}`}
                   >
