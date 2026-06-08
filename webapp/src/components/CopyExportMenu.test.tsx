@@ -10,21 +10,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { CopyExportMenu } from './CopyExportMenu';
 import {
-  legacyContentExportProjection,
   nativeDocumentToExportSource,
+  type DocExportSource,
 } from '../lib/doc-export';
 import type { NativeDocument } from '../lib/api';
 
-const MARKDOWN_SRC = legacyContentExportProjection({
-  format: 'markdown' as const,
-  markdown: '# Hi\n\nWorld',
-  html: null,
-});
-const HTML_SRC = legacyContentExportProjection({
-  format: 'html' as const,
-  markdown: null,
-  html: '<h1>Hi</h1><p>World</p>',
-});
 const NATIVE_SRC = nativeDocumentToExportSource({
   format: 'markdown',
   tabs: [
@@ -65,6 +55,12 @@ const NATIVE_SRC = nativeDocumentToExportSource({
     },
   ],
 } satisfies Pick<NativeDocument, 'format' | 'tabs'>);
+
+const EMPTY_NATIVE_SRC: DocExportSource = {
+  kind: 'native-document-blocks',
+  format: 'markdown',
+  tabs: [{ title: 'Main', blocks: [] }],
+};
 
 afterEach(() => {
   cleanup();
@@ -118,7 +114,7 @@ describe('CopyExportMenu', () => {
     it('renders the trigger button by default', () => {
       render(
         <CopyExportMenu
-          source={MARKDOWN_SRC}
+          source={NATIVE_SRC}
           documentTitle="My doc"
         />,
       );
@@ -131,7 +127,7 @@ describe('CopyExportMenu', () => {
     it('opens the menu on click', () => {
       render(
         <CopyExportMenu
-          source={MARKDOWN_SRC}
+          source={NATIVE_SRC}
           documentTitle="My doc"
         />,
       );
@@ -142,11 +138,7 @@ describe('CopyExportMenu', () => {
     it('disables the trigger and shows tooltip when doc is empty', () => {
       render(
         <CopyExportMenu
-          source={legacyContentExportProjection({
-            format: 'markdown',
-            markdown: '',
-            html: null,
-          })}
+          source={EMPTY_NATIVE_SRC}
           documentTitle="Empty"
         />,
       );
@@ -176,27 +168,13 @@ describe('CopyExportMenu', () => {
       expect(mimes).toContain('text/plain');
     });
 
-    it('Copy as Markdown uses writeText with legacy markdown projection', async () => {
-      const { writeTextMock } = setupClipboard();
-      render(
-        <CopyExportMenu
-          source={MARKDOWN_SRC}
-          documentTitle="My doc"
-        />,
-      );
-      fireEvent.click(screen.getByRole('button', { name: /Copy \/ Export/i }));
-      fireEvent.click(
-        screen.getByRole('menuitem', { name: 'Copy as Markdown' }),
-      );
-      await waitFor(() =>
-        expect(writeTextMock).toHaveBeenCalledWith(MARKDOWN_SRC.markdown),
-      );
-    });
-
     it('Copy as Markdown serializes native blocks', async () => {
       const { writeTextMock } = setupClipboard();
       render(
-        <CopyExportMenu source={NATIVE_SRC} documentTitle="Native doc" />,
+        <CopyExportMenu
+          source={NATIVE_SRC}
+          documentTitle="My doc"
+        />,
       );
       fireEvent.click(screen.getByRole('button', { name: /Copy \/ Export/i }));
       fireEvent.click(
@@ -210,15 +188,11 @@ describe('CopyExportMenu', () => {
       expect(writeTextMock.mock.calls[0]?.[0]).toContain('- Native item');
     });
 
-    it('Copy as Plain strips markdown syntax', async () => {
+    it('Copy as Plain writes native plain text without markdown syntax', async () => {
       const { writeTextMock } = setupClipboard();
       render(
         <CopyExportMenu
-          source={legacyContentExportProjection({
-            format: 'markdown',
-            markdown: '# Heading\n\n**bold**',
-            html: null,
-          })}
+          source={NATIVE_SRC}
           documentTitle="My doc"
         />,
       );
@@ -228,10 +202,9 @@ describe('CopyExportMenu', () => {
       );
       await waitFor(() => expect(writeTextMock).toHaveBeenCalled());
       const text = writeTextMock.mock.calls[0]?.[0] as string;
-      expect(text).toContain('Heading');
-      expect(text).toContain('bold');
+      expect(text).toContain('Native heading');
+      expect(text).toContain('Native item');
       expect(text).not.toContain('#');
-      expect(text).not.toContain('**');
     });
   });
 
@@ -240,7 +213,7 @@ describe('CopyExportMenu', () => {
       const { createSpy, clickSpy } = setupDownload();
       render(
         <CopyExportMenu
-          source={HTML_SRC}
+          source={NATIVE_SRC}
           documentTitle="My doc"
         />,
       );
@@ -272,7 +245,7 @@ describe('CopyExportMenu', () => {
       const { createSpy } = setupDownload();
       render(
         <CopyExportMenu
-          source={MARKDOWN_SRC}
+          source={NATIVE_SRC}
           documentTitle="My doc"
         />,
       );
@@ -294,7 +267,7 @@ describe('CopyExportMenu', () => {
       });
       render(
         <CopyExportMenu
-          source={MARKDOWN_SRC}
+          source={NATIVE_SRC}
           documentTitle="My doc"
         />,
       );

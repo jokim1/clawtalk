@@ -33,12 +33,10 @@
     "dompurify": "^3.4.6",
     "idb-keyval": "^6.2.4",
     "lucide-react": "^1.16.0",
-    "marked": "^18.0.4",
     "pdfjs-dist": "^5.7.284",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
-    "react-router-dom": "^6.30.4",
-    "turndown": "^7.2.4"
+    "react-router-dom": "^6.30.4"
   },
   "devDependencies": {
     "@playwright/test": "^1.60.0",
@@ -48,7 +46,6 @@
     "@types/dompurify": "^3.0.5",
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",
-    "@types/turndown": "^5.0.6",
     "@vitejs/plugin-react": "^5.1.4",
     "jsdom": "^25.0.1",
     "msw": "^2.6.4",

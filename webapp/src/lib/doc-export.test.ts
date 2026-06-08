@@ -8,97 +8,16 @@ import {
   downloadAsMarkdown,
   downloadAsPlain,
   isDocEmpty,
-  legacyContentExportProjection,
   nativeDocumentToExportSource,
   renderHtml,
   renderMarkdown,
   renderPlainText,
   sanitizeFilename,
-  stripHtmlTags,
-  stripMarkdown,
 } from './doc-export';
 import type { NativeDocument, NativeDocumentBlock } from './api';
 
 describe('doc-export', () => {
   describe('conversion matrix', () => {
-    describe('markdown source', () => {
-      const src = legacyContentExportProjection({
-        format: 'markdown',
-        markdown:
-          '# Heading\n\nA paragraph with [a link](https://x.com).\n\n- one\n- two',
-        html: null,
-      });
-
-      it('renderMarkdown returns raw legacy markdown projection', () => {
-        expect(renderMarkdown(src)).toBe(src.markdown);
-      });
-
-      it('renderHtml produces <h1>, <p>, <a>, <ul>', () => {
-        const html = renderHtml(src);
-        expect(html).toContain('<h1');
-        expect(html).toContain('Heading');
-        expect(html).toContain('<p');
-        expect(html).toContain('<a href="https://x.com">a link</a>');
-        expect(html).toContain('<ul');
-        expect(html).toContain('<li');
-      });
-
-      it('renderPlainText drops syntax and preserves text', () => {
-        const text = renderPlainText(src);
-        expect(text).toContain('Heading');
-        expect(text).toContain('A paragraph with a link');
-        expect(text).toContain('one');
-        expect(text).toContain('two');
-        expect(text).not.toContain('#');
-        expect(text).not.toContain('[a link]');
-        expect(text).not.toContain('(https://x.com)');
-      });
-    });
-
-    describe('html source', () => {
-      const src = legacyContentExportProjection({
-        format: 'html',
-        markdown: null,
-        html:
-          '<h1>Heading</h1><p>A paragraph with <a href="https://x.com">a link</a>.</p><ul><li>one</li><li>two</li></ul>',
-      });
-
-      it('renderHtml returns raw legacy HTML projection', () => {
-        expect(renderHtml(src)).toBe(src.html);
-      });
-
-      it('renderMarkdown produces #-headings, list dashes, and link syntax', () => {
-        const md = renderMarkdown(src);
-        // Turndown sets atx headings by config
-        expect(md).toMatch(/^#\s+Heading/m);
-        expect(md).toContain('[a link](https://x.com)');
-        expect(md).toMatch(/^[-]\s+one/m);
-        expect(md).toMatch(/^[-]\s+two/m);
-      });
-
-      it('renderPlainText strips tags and preserves text', () => {
-        const text = renderPlainText(src);
-        expect(text).toContain('Heading');
-        expect(text).toContain('A paragraph with a link.');
-        expect(text).toContain('one');
-        expect(text).toContain('two');
-        expect(text).not.toContain('<');
-      });
-    });
-
-    describe('edge cases', () => {
-      it('renders empty bodies as empty strings (not "null")', () => {
-        const empty = legacyContentExportProjection({
-          format: 'markdown',
-          markdown: null,
-          html: null,
-        });
-        expect(renderMarkdown(empty)).toBe('');
-        expect(renderHtml(empty)).toBe('');
-        expect(renderPlainText(empty)).toBe('');
-      });
-    });
-
     describe('native document block source', () => {
       const native = nativeDocumentToExportSource(
         makeNativeDoc({
@@ -278,24 +197,6 @@ describe('doc-export', () => {
     });
   });
 
-  describe('stripMarkdown / stripHtmlTags helpers', () => {
-    it('stripMarkdown drops fenced code fences but keeps content', () => {
-      const text = stripMarkdown('```js\nconst x = 1\n```');
-      expect(text).toContain('const x = 1');
-      expect(text).not.toContain('```');
-    });
-
-    it('stripHtmlTags decodes common entities', () => {
-      const text = stripHtmlTags('<p>5 &gt; 4 &amp; 3 &lt; 4</p>');
-      expect(text).toContain('5 > 4 & 3 < 4');
-    });
-
-    it('stripHtmlTags adds newlines between block elements', () => {
-      const text = stripHtmlTags('<p>one</p><p>two</p>');
-      expect(text).toBe('one\ntwo');
-    });
-  });
-
   describe('clipboard', () => {
     let writeMock: ReturnType<typeof vi.fn>;
     let writeTextMock: ReturnType<typeof vi.fn>;
@@ -327,11 +228,15 @@ describe('doc-export', () => {
     });
 
     it('clipboardCopyHtml writes BOTH text/html and text/plain', async () => {
-      const src = legacyContentExportProjection({
-        format: 'markdown',
-        markdown: '# Hi\n\nWorld',
-        html: null,
-      });
+      const src = nativeDocumentToExportSource(
+        makeNativeDoc({
+          tabs: [
+            makeTab({
+              blocks: [makeBlock({ kind: 'h1', text: 'Hi' })],
+            }),
+          ],
+        }),
+      );
       await clipboardCopyHtml(src);
       expect(writeMock).toHaveBeenCalledTimes(1);
       const items = writeMock.mock.calls[0]?.[0] as Array<{
@@ -344,21 +249,29 @@ describe('doc-export', () => {
     });
 
     it('clipboardCopyMarkdown writes markdown via writeText', async () => {
-      const src = legacyContentExportProjection({
-        format: 'markdown',
-        markdown: '# H',
-        html: null,
-      });
+      const src = nativeDocumentToExportSource(
+        makeNativeDoc({
+          tabs: [
+            makeTab({
+              blocks: [makeBlock({ kind: 'h1', text: 'H' })],
+            }),
+          ],
+        }),
+      );
       await clipboardCopyMarkdown(src);
       expect(writeTextMock).toHaveBeenCalledWith('# H');
     });
 
     it('clipboardCopyPlain writes plain text via writeText', async () => {
-      const src = legacyContentExportProjection({
-        format: 'markdown',
-        markdown: '# Hi',
-        html: null,
-      });
+      const src = nativeDocumentToExportSource(
+        makeNativeDoc({
+          tabs: [
+            makeTab({
+              blocks: [makeBlock({ kind: 'h1', text: 'Hi' })],
+            }),
+          ],
+        }),
+      );
       await clipboardCopyPlain(src);
       expect(writeTextMock).toHaveBeenCalledWith('Hi');
     });
@@ -397,11 +310,15 @@ describe('doc-export', () => {
     });
 
     it('downloadAsHtml creates a blob URL + triggers anchor click', () => {
-      const src = legacyContentExportProjection({
-        format: 'markdown',
-        markdown: '# Hi',
-        html: null,
-      });
+      const src = nativeDocumentToExportSource(
+        makeNativeDoc({
+          tabs: [
+            makeTab({
+              blocks: [makeBlock({ kind: 'h1', text: 'Hi' })],
+            }),
+          ],
+        }),
+      );
       downloadAsHtml(src, { filenameBase: 'My Doc' });
       expect(createSpy).toHaveBeenCalledTimes(1);
       const blob = createSpy.mock.calls[0]?.[0] as Blob;
@@ -410,22 +327,30 @@ describe('doc-export', () => {
     });
 
     it('downloadAsMarkdown uses .md extension + text/markdown MIME', () => {
-      const src = legacyContentExportProjection({
-        format: 'markdown',
-        markdown: '# Hi',
-        html: null,
-      });
+      const src = nativeDocumentToExportSource(
+        makeNativeDoc({
+          tabs: [
+            makeTab({
+              blocks: [makeBlock({ kind: 'h1', text: 'Hi' })],
+            }),
+          ],
+        }),
+      );
       downloadAsMarkdown(src, { filenameBase: 'My Doc' });
       const blob = createSpy.mock.calls[0]?.[0] as Blob;
       expect(blob.type).toMatch(/text\/markdown/);
     });
 
     it('downloadAsPlain uses .txt extension + text/plain MIME', () => {
-      const src = legacyContentExportProjection({
-        format: 'markdown',
-        markdown: '# Hi',
-        html: null,
-      });
+      const src = nativeDocumentToExportSource(
+        makeNativeDoc({
+          tabs: [
+            makeTab({
+              blocks: [makeBlock({ kind: 'h1', text: 'Hi' })],
+            }),
+          ],
+        }),
+      );
       downloadAsPlain(src, { filenameBase: 'My Doc' });
       const blob = createSpy.mock.calls[0]?.[0] as Blob;
       expect(blob.type).toMatch(/text\/plain/);
@@ -450,60 +375,26 @@ describe('doc-export', () => {
   });
 
   describe('isDocEmpty', () => {
-    it('returns true for null/whitespace bodies', () => {
+    it('returns true for empty native blocks', () => {
       expect(
         isDocEmpty(
-          legacyContentExportProjection({
-            format: 'markdown',
-            markdown: null,
-            html: null,
-          }),
+          nativeDocumentToExportSource(
+            makeNativeDoc({ tabs: [makeTab({ blocks: [] })] }),
+          ),
         ),
       ).toBe(true);
       expect(
         isDocEmpty(
-          legacyContentExportProjection({
-            format: 'markdown',
-            markdown: '  \n  ',
-            html: null,
-          }),
-        ),
-      ).toBe(true);
-      expect(
-        isDocEmpty(
-          legacyContentExportProjection({
-            format: 'html',
-            markdown: null,
-            html: '   ',
-          }),
-        ),
-      ).toBe(true);
-      expect(
-        isDocEmpty(
-          nativeDocumentToExportSource(makeNativeDoc({ tabs: [makeTab({ blocks: [] })] })),
+          nativeDocumentToExportSource(
+            makeNativeDoc({
+              tabs: [makeTab({ blocks: [makeBlock({ text: '  \n  ' })] })],
+            }),
+          ),
         ),
       ).toBe(true);
     });
 
-    it('returns false for non-empty bodies', () => {
-      expect(
-        isDocEmpty(
-          legacyContentExportProjection({
-            format: 'markdown',
-            markdown: '# Hi',
-            html: null,
-          }),
-        ),
-      ).toBe(false);
-      expect(
-        isDocEmpty(
-          legacyContentExportProjection({
-            format: 'html',
-            markdown: null,
-            html: '<p>Hi</p>',
-          }),
-        ),
-      ).toBe(false);
+    it('returns false for non-empty native blocks', () => {
       expect(
         isDocEmpty(
           nativeDocumentToExportSource(
