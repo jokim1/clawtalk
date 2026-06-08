@@ -70,6 +70,7 @@ The cutover is comprehensive enough to build on:
 ### 3a. Compat-facade Inventory
 
 Each facade should get a deletion ticket with owner, consumers, native replacement, and deletion test.
+The current readiness ledger and grep script live in [DE-FACADE-READINESS.md](DE-FACADE-READINESS.md) and `scripts/de-facade-readiness.sh`.
 
 | # | Facade | Current role | Native replacement |
 |---|---|---|---|
