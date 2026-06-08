@@ -134,7 +134,7 @@ describe('TalkDocPane', () => {
     cleanup();
   });
 
-  it('renders the native document by id (no bodyMarkdown/bodyHtml facade)', async () => {
+  it('renders the native document by id without the flat content facade', async () => {
     mockApi.getDocument.mockResolvedValue(makeDoc());
     renderPane();
 

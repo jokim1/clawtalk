@@ -18,8 +18,8 @@ import { ThreadRowTitleEditor } from '../ThreadRowTitleEditor';
 import { ThreadStartButton } from '../ThreadStartButton';
 import { ToolChipsBar } from '../ToolChipsBar';
 import type {
-  ContentFormat,
   ContextSource,
+  NativeDocumentFormat,
   TalkAgent,
   TalkMessage,
   TalkMessageSearchResult,
@@ -114,7 +114,7 @@ type TalkTabContentProps = {
   // the active thread has no document, so the split layout collapses to chat.
   primaryDocumentId: string | null;
   primaryDocumentTitle: string;
-  primaryDocumentFormat: ContentFormat;
+  primaryDocumentFormat: NativeDocumentFormat;
   workspaceId: string | null;
   docReloadSignal: number;
   isNarrowViewport: boolean;

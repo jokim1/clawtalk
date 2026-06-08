@@ -1,15 +1,15 @@
 import type { FormEvent, RefObject } from 'react';
 
-import type { ContentFormat } from '../../lib/api';
+import type { NativeDocumentFormat } from '../../lib/api';
 
 type TalkDocumentCreateModalProps = {
   title: string;
-  format: ContentFormat;
+  format: NativeDocumentFormat;
   submitting: boolean;
   error: string | null;
   inputRef: RefObject<HTMLInputElement>;
   onTitleChange: (title: string) => void;
-  onFormatChange: (format: ContentFormat) => void;
+  onFormatChange: (format: NativeDocumentFormat) => void;
   onClose: () => void;
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
 };

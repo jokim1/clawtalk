@@ -301,13 +301,11 @@ export function TalkDetailPage({
   });
 
   // Native primary-document metadata derived from the snapshot — id/title/
-  // format only, never a flat content body read. `content.id` is the native
-  // document id (the snapshot's `content` is a metadata projection over
-  // `documents`), so the in-Talk doc pane and the `@doc` mention resolve off
-  // this without the legacy flat content body facade.
-  const primaryDocumentId = talkSnapshot?.content?.id ?? null;
-  const primaryDocumentTitle = talkSnapshot?.content?.title ?? '';
-  const primaryDocumentFormat = talkSnapshot?.content?.contentFormat ?? 'markdown';
+  // format only, never a flat content body read.
+  const primaryDocumentId = talkSnapshot?.primaryDocument?.id ?? null;
+  const primaryDocumentTitle = talkSnapshot?.primaryDocument?.title ?? '';
+  const primaryDocumentFormat =
+    talkSnapshot?.primaryDocument?.format ?? 'markdown';
 
   // Bumped on each content-edit stream event so the native doc pane reloads
   // its blocks/pending edits in place (replaces the legacy content refetch).
