@@ -12,6 +12,7 @@ import type { NativeDocument, NativeDocumentEdit } from '../../lib/api';
 import {
   EDIT_OP_LABEL,
   groupPendingEditsByRun,
+  insertAnchorLabel,
   previewEdit,
   tabTitleForEdit,
   type PendingRunGroup,
@@ -87,6 +88,7 @@ function EditCard({
   onReject: () => void;
 }): JSX.Element {
   const preview = previewEdit(doc, edit);
+  const anchor = insertAnchorLabel(doc, edit);
   return (
     <li
       style={{
@@ -116,6 +118,9 @@ function EditCard({
           {tabTitleForEdit(doc, edit)}
         </span>
       </div>
+      {anchor ? (
+        <span style={{ fontSize: 12, color: salon.ink2 }}>{anchor}</span>
+      ) : null}
       {preview.beforeText != null ? (
         <PreviewText label="Current" text={preview.beforeText} tone="before" />
       ) : null}
@@ -158,6 +163,12 @@ export function PendingEditList({
 }: Props): JSX.Element {
   const groups = groupPendingEditsByRun(doc.pendingEdits);
   const total = doc.pendingEdits.length;
+  // Serialize every accept/reject across the panel: each action resolves to a
+  // full server document snapshot, so allowing two in flight at once risks a
+  // late, stale snapshot resurrecting an edit a newer action already removed.
+  // One at a time keeps the view consistent (each button still shows its own
+  // "Working…" label via its busy flag).
+  const anyBusy = allBusy || busyEditIds.size > 0 || busyRunIds.size > 0;
 
   return (
     <section
@@ -188,18 +199,10 @@ export function PendingEditList({
           </span>
         </h2>
         <div style={{ display: 'flex', gap: 8 }}>
-          <Button
-            variant="primary"
-            disabled={allBusy || busyEditIds.size > 0 || busyRunIds.size > 0}
-            onClick={onAcceptAll}
-          >
+          <Button variant="primary" disabled={anyBusy} onClick={onAcceptAll}>
             {allBusy ? 'Working…' : 'Accept all'}
           </Button>
-          <Button
-            variant="secondary"
-            disabled={allBusy || busyEditIds.size > 0 || busyRunIds.size > 0}
-            onClick={onRejectAll}
-          >
+          <Button variant="secondary" disabled={anyBusy} onClick={onRejectAll}>
             Reject all
           </Button>
         </div>
@@ -207,7 +210,7 @@ export function PendingEditList({
 
       {groups.map((group) => {
         const runBusy = group.runId != null && busyRunIds.has(group.runId);
-        const groupDisabled = allBusy || runBusy;
+        const groupDisabled = anyBusy;
         return (
           <div
             key={group.runId ?? group.edits[0]?.id}

@@ -12,6 +12,7 @@ import {
   formatDocDate,
   findBlockById,
   groupPendingEditsByRun,
+  insertAnchorLabel,
   pendingEditCountForBlock,
   previewEdit,
   tabTitleForEdit,
@@ -172,6 +173,26 @@ describe('groupPendingEditsByRun', () => {
     expect(groups[0].edits.map((e) => e.id)).toEqual(['a', 'b']);
     expect(groups[1]).toMatchObject({ runId: null, agentName: 'An agent' });
     expect(groups[1].edits.map((e) => e.id)).toEqual(['c']);
+  });
+});
+
+describe('insertAnchorLabel', () => {
+  it('returns null for non-insert ops', () => {
+    expect(insertAnchorLabel(doc(), edit({ op: 'replace' }))).toBeNull();
+    expect(insertAnchorLabel(doc(), edit({ op: 'delete' }))).toBeNull();
+  });
+  it('labels a top insert and an anchored insert', () => {
+    expect(
+      insertAnchorLabel(doc(), edit({ op: 'insert', afterBlockId: null })),
+    ).toBe('Insert at the top');
+    expect(
+      insertAnchorLabel(doc(), edit({ op: 'insert', afterBlockId: 'block-1' })),
+    ).toBe('Insert after: Original paragraph.');
+  });
+  it('flags an insert whose anchor block is gone', () => {
+    expect(
+      insertAnchorLabel(doc(), edit({ op: 'insert', afterBlockId: 'ghost' })),
+    ).toBe('Insert after a removed block');
   });
 });
 

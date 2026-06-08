@@ -11,7 +11,14 @@
  * `expectedContentVersion`: the server's per-edit base-version check is the CAS,
  * and a single value is ambiguous for accept-all (which spans tabs).
  */
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import { Link, useParams } from 'react-router-dom';
 
 import { Button, salon, salonFont } from '../salon';
@@ -65,9 +72,25 @@ export function DocumentDetailPage(): JSX.Element {
   const [allBusy, setAllBusy] = useState(false);
 
   const activeLoad = useRef<{ cancelled: boolean } | null>(null);
+  // The currently-viewed document id, read at apply time. The detail-route
+  // component instance is reused across :documentId changes (no remount), so a
+  // mutation that resolves AFTER the user navigated to another document must not
+  // clobber the new document's state — applyDocument no-ops if the returned
+  // document is no longer the one on screen.
+  const documentIdRef = useRef(documentId);
+  useEffect(() => {
+    documentIdRef.current = documentId;
+  }, [documentId]);
 
-  // Apply a server document, keeping the active tab if it still exists.
+  // Tab roving-focus refs for the WAI-ARIA tablist keyboard pattern.
+  const tabBaseId = useId();
+  const tabButtonsRef = useRef<Map<string, HTMLButtonElement>>(new Map());
+
+  // Apply a server document, keeping the active tab if it still exists. Stable
+  // (reads documentIdRef, not a closed-over id) so a single instance guards both
+  // load() and every mutation handler against a stale cross-document response.
   const applyDocument = useCallback((next: NativeDocument) => {
+    if (next.id !== documentIdRef.current) return;
     setDoc(next);
     setActiveTabId((current) => {
       if (current && next.tabs.some((tab) => tab.id === current))
@@ -120,14 +143,21 @@ export function DocumentDetailPage(): JSX.Element {
     };
   }, [load]);
 
-  // Resolve a mutation failure: a version conflict quietly refetches and
-  // notifies; a 404 (edit/run already resolved elsewhere) syncs by refetch;
-  // anything else surfaces a retryable action error.
+  // Resolve a mutation failure. The native accept path returns three distinct
+  // 409 codes: `version_conflict` is recoverable (the document moved on, so
+  // refetch and re-review), while `anchor_missing` / `invalid_pending_edit` mean
+  // the edit can never apply against the current document — a plain re-accept
+  // would loop, so we tell the reviewer to reject it. A 404 (edit/run already
+  // resolved elsewhere) syncs by quiet refetch; anything else is retryable.
   const handleMutationError = useCallback(
     async (err: unknown) => {
       if (err instanceof ApiError && err.status === 409) {
+        const inapplicable =
+          err.code === 'anchor_missing' || err.code === 'invalid_pending_edit';
         setConflictNotice(
-          'This document changed while you were reviewing. We refreshed it — please re-check the remaining edits.',
+          inapplicable
+            ? 'This proposed change no longer fits the current document — reject it to clear it.'
+            : 'This document changed while you were reviewing. We refreshed it — please re-check the remaining edits.',
         );
         await load({ quiet: true });
         return;
@@ -260,6 +290,31 @@ export function DocumentDetailPage(): JSX.Element {
     return set;
   }, [doc]);
 
+  const tabIdFor = (tabId: string) => `${tabBaseId}-tab-${tabId}`;
+  const tabPanelId = `${tabBaseId}-panel`;
+
+  // WAI-ARIA tablist keyboard nav: arrows move (wrapping), Home/End jump, and
+  // focus follows selection so the roving tabindex stays on the active tab.
+  const handleTabKeyDown = (
+    event: React.KeyboardEvent<HTMLButtonElement>,
+    index: number,
+  ) => {
+    const tabs = doc?.tabs ?? [];
+    if (tabs.length < 2) return;
+    let nextIndex: number | null = null;
+    if (event.key === 'ArrowRight') nextIndex = (index + 1) % tabs.length;
+    else if (event.key === 'ArrowLeft')
+      nextIndex = (index - 1 + tabs.length) % tabs.length;
+    else if (event.key === 'Home') nextIndex = 0;
+    else if (event.key === 'End') nextIndex = tabs.length - 1;
+    if (nextIndex === null) return;
+    const nextTab = tabs[nextIndex];
+    if (!nextTab) return;
+    event.preventDefault();
+    setActiveTabId(nextTab.id);
+    tabButtonsRef.current.get(nextTab.id)?.focus();
+  };
+
   return (
     <div
       className="ct-screen-enter ct-thin-scroll"
@@ -323,8 +378,25 @@ export function DocumentDetailPage(): JSX.Element {
               it.
             </div>
             <div>
-              <Link to="/app/documents" className="salon-btn">
-                <Button variant="secondary">Back to documents</Button>
+              <Link
+                to="/app/documents"
+                className="salon-btn"
+                style={{
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  height: 36,
+                  padding: '0 16px',
+                  borderRadius: 9999,
+                  fontFamily: salonFont.sans,
+                  fontSize: 13,
+                  fontWeight: 500,
+                  color: salon.ink,
+                  background: salon.card,
+                  border: `1px solid ${salon.line}`,
+                  textDecoration: 'none',
+                }}
+              >
+                Back to documents
               </Link>
             </div>
           </div>
@@ -438,15 +510,23 @@ export function DocumentDetailPage(): JSX.Element {
               aria-label="Document tabs"
               style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}
             >
-              {doc.tabs.map((tab) => {
+              {doc.tabs.map((tab, index) => {
                 const active = tab.id === activeTab?.id;
                 return (
                   <button
                     key={tab.id}
+                    ref={(el) => {
+                      if (el) tabButtonsRef.current.set(tab.id, el);
+                      else tabButtonsRef.current.delete(tab.id);
+                    }}
                     type="button"
                     role="tab"
+                    id={tabIdFor(tab.id)}
                     aria-selected={active}
+                    aria-controls={tabPanelId}
+                    tabIndex={active ? 0 : -1}
                     onClick={() => setActiveTabId(tab.id)}
+                    onKeyDown={(event) => handleTabKeyDown(event, index)}
                     className="salon-btn"
                     style={{
                       height: 32,
@@ -469,6 +549,14 @@ export function DocumentDetailPage(): JSX.Element {
           ) : null}
 
           <article
+            role={doc.tabs.length > 1 ? 'tabpanel' : undefined}
+            id={doc.tabs.length > 1 ? tabPanelId : undefined}
+            aria-labelledby={
+              doc.tabs.length > 1 && activeTab
+                ? tabIdFor(activeTab.id)
+                : undefined
+            }
+            tabIndex={doc.tabs.length > 1 ? 0 : undefined}
             style={{
               background: salon.card,
               border: `1px solid ${salon.line}`,

@@ -145,6 +145,24 @@ export function groupPendingEditsByRun(
   return order.map((key) => byKey.get(key) as PendingRunGroup);
 }
 
+/**
+ * Where an insert edit lands, as a short hint for the review card. Returns null
+ * for non-insert ops. Resolves `afterBlockId` against the loaded document so the
+ * reviewer can see the insertion point instead of a location-less proposal.
+ */
+export function insertAnchorLabel(
+  doc: NativeDocument,
+  edit: NativeDocumentEdit,
+): string | null {
+  if (edit.op !== 'insert') return null;
+  if (!edit.afterBlockId) return 'Insert at the top';
+  const anchor = findBlockById(doc, edit.afterBlockId);
+  if (!anchor) return 'Insert after a removed block';
+  const text = anchor.text.trim();
+  const truncated = text.length > 60 ? `${text.slice(0, 60)}…` : text;
+  return `Insert after: ${truncated || BLOCK_KIND_LABEL[anchor.kind]}`;
+}
+
 /** Count of pending edits whose target is the given block. */
 export function pendingEditCountForBlock(
   doc: NativeDocument,

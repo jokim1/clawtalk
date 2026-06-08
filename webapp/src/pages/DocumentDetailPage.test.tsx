@@ -286,4 +286,103 @@ describe('DocumentDetailPage', () => {
     );
     expect(await screen.findByText(/No pending edits/)).toBeTruthy();
   });
+
+  it('distinguishes a non-recoverable 409 (anchor_missing) from a version conflict', async () => {
+    mockApi.getDocument.mockResolvedValue(
+      makeDoc({ pendingEditCount: 1, pendingEdits: [edit()] }),
+    );
+    mockApi.acceptDocumentEdit.mockRejectedValue(
+      new ApiError('anchor gone', 409, 'anchor_missing'),
+    );
+    renderDetail();
+    await screen.findByText('Pending edits');
+
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Accept replace paragraph' }),
+    );
+
+    expect(await screen.findByText(/no longer fits/)).toBeTruthy();
+    expect(screen.queryByText(/changed while you were reviewing/)).toBeNull();
+    // Still pending so the reviewer can reject it.
+    expect(screen.getByText('Replace paragraph')).toBeTruthy();
+  });
+
+  it('moves the active tab with the keyboard and wires the tabpanel', async () => {
+    mockApi.getDocument.mockResolvedValue(
+      makeDoc({
+        tabCount: 2,
+        tabs: [
+          tab({ id: 'tab-1', title: 'Main', blocks: [block()] }),
+          tab({
+            id: 'tab-2',
+            title: 'Research',
+            blocks: [
+              block({
+                id: 'block-2',
+                tabId: 'tab-2',
+                kind: 'h2',
+                text: 'Research notes',
+              }),
+            ],
+          }),
+        ],
+      }),
+    );
+    renderDetail();
+
+    const mainTab = await screen.findByRole('tab', { name: 'Main' });
+    expect(mainTab.getAttribute('aria-selected')).toBe('true');
+    // The panel is labelled by the active tab.
+    const panel = screen.getByRole('tabpanel');
+    expect(panel.getAttribute('aria-labelledby')).toBe(mainTab.id);
+
+    fireEvent.keyDown(mainTab, { key: 'ArrowRight' });
+
+    const researchTab = await screen.findByRole('tab', { name: 'Research' });
+    expect(researchTab.getAttribute('aria-selected')).toBe('true');
+    expect(screen.getByText('Research notes')).toBeTruthy();
+    expect(screen.getByRole('tabpanel').getAttribute('aria-labelledby')).toBe(
+      researchTab.id,
+    );
+  });
+
+  it('serializes panel actions: locks the panel while an accept is in flight', async () => {
+    mockApi.getDocument.mockResolvedValue(
+      makeDoc({ pendingEditCount: 1, pendingEdits: [edit()] }),
+    );
+    let resolveAccept: (value: {
+      editId: string;
+      runId: string;
+      document: NativeDocument;
+    }) => void = () => {};
+    mockApi.acceptDocumentEdit.mockReturnValue(
+      new Promise((resolve) => {
+        resolveAccept = resolve;
+      }),
+    );
+    renderDetail();
+    await screen.findByText('Pending edits');
+
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Accept replace paragraph' }),
+    );
+
+    // One action in flight => Accept all (and every other control) is locked.
+    await waitFor(() =>
+      expect(
+        (
+          screen.getByRole('button', {
+            name: 'Accept all',
+          }) as HTMLButtonElement
+        ).disabled,
+      ).toBe(true),
+    );
+
+    resolveAccept({
+      editId: 'edit-1',
+      runId: 'run-1',
+      document: makeDoc({ pendingEditCount: 0, pendingEdits: [] }),
+    });
+    expect(await screen.findByText(/No pending edits/)).toBeTruthy();
+  });
 });
