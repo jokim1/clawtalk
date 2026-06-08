@@ -40,10 +40,6 @@
 //                                         attachment storage lands
 //   /api/v1/talks/:talkId/threads[/...]     — greenfield-api.ts (list +
 //                                         create + PATCH + DELETE)
-//   /api/v1/threads/:threadId/content
-//   /api/v1/contents/:contentId[/...]       — greenfield-api.ts document
-//                                         compatibility routes over
-//                                         documents/doc_blocks/document_edits
 //   /api/v1/documents[/...]                 — native document tabs, blocks,
 //                                         and document_edits routes
 //   /api/v1/events                  — events-upgrade.ts (user-scope
@@ -284,7 +280,6 @@ function buildApp(): Hono<{ Variables: Variables }> {
   app.use('/api/v1/teams', requireAuthMiddleware);
   app.use('/api/v1/talks', requireAuthMiddleware);
   app.use('/api/v1/talks/*', requireAuthMiddleware);
-  app.use('/api/v1/contents/*', requireAuthMiddleware);
   app.use('/api/v1/threads/*', requireAuthMiddleware);
   app.use('/api/v1/talk-folders', requireAuthMiddleware);
   app.use('/api/v1/talk-folders/*', requireAuthMiddleware);

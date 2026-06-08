@@ -4912,21 +4912,14 @@ function installTalkDetailFetch(input?: {
   dataConnectors?: TalkConnectorDataConnectorRow[];
   connectorChannels?: TalkConnectorChannelRow[];
   aiAgents?: AiAgentsPageData;
-  // Doc-pane integration: pre-existing content keyed by threadId, plus
-  // optional spies so tests can assert on POST and PATCH bodies.
+  // Doc-pane integration: pre-existing content keyed by threadId, plus an
+  // optional spy so tests can assert on native document creation.
   contentByThreadId?: Record<string, TestContent>;
   onCreateDocument?: (body: {
     talkId: string;
     threadId: string | null;
     title: string;
     format?: string;
-  }) => TestContent;
-  onPatchContent?: (body: {
-    contentId: string;
-    expectedVersion: number;
-    title?: string;
-    bodyMarkdown?: string;
-    bodyHtml?: string;
   }) => TestContent;
   onPutAgents?: (body: SavedTalkAgentRequest) => Promise<TalkAgent[]> | TalkAgent[];
   onGetContext?: () => TalkContext;
@@ -5994,69 +5987,6 @@ function installTalkDetailFetch(input?: {
         return jsonResponse(200, {
           ok: true,
           data: { source: updated },
-        });
-      }
-
-      // ── Content (doc-pane) routes ────────────────────────────────
-      if (path === '/api/v1/talks/talk-1/content' && method === 'GET') {
-        // Talk-scoped GET resolves to the default thread's content.
-        const content = contentByThreadId[DEFAULT_THREAD_ID] ?? null;
-        return jsonResponse(200, {
-          ok: true,
-          data: { content, pendingEdits: [] },
-        });
-      }
-      const threadContentMatch = path.match(
-        /^\/api\/v1\/threads\/([^/]+)\/content$/,
-      );
-      if (threadContentMatch && method === 'GET') {
-        const threadId = decodeURIComponent(threadContentMatch[1]);
-        const content = contentByThreadId[threadId] ?? null;
-        return jsonResponse(200, {
-          ok: true,
-          data: { content, pendingEdits: [] },
-        });
-      }
-      const patchContentMatch = path.match(/^\/api\/v1\/contents\/([^/]+)$/);
-      if (patchContentMatch && method === 'PATCH') {
-        const contentId = decodeURIComponent(patchContentMatch[1]);
-        const body = JSON.parse(String(init?.body || '{}')) as {
-          expectedVersion: number;
-          title?: string;
-          bodyMarkdown?: string;
-          bodyHtml?: string;
-        };
-        // Resolve the row by id and apply the patch in memory.
-        const threadId = Object.keys(contentByThreadId).find(
-          (tid) => contentByThreadId[tid].id === contentId,
-        );
-        if (!threadId) {
-          return jsonResponse(404, {
-            ok: false,
-            error: { code: 'not_found', message: 'Content not found.' },
-          });
-        }
-        const current = contentByThreadId[threadId];
-        const next: TestContent = input?.onPatchContent?.({
-          contentId,
-          expectedVersion: body.expectedVersion,
-          title: body.title,
-          bodyMarkdown: body.bodyMarkdown,
-          bodyHtml: body.bodyHtml,
-        }) ?? {
-          ...current,
-          title: body.title ?? current.title,
-          bodyMarkdown: body.bodyMarkdown ?? current.bodyMarkdown,
-          bodyHtml:
-            typeof body.bodyHtml === 'string'
-              ? body.bodyHtml
-              : current.bodyHtml,
-          bodyVersion: current.bodyVersion + 1,
-        };
-        contentByThreadId[threadId] = next;
-        return jsonResponse(200, {
-          ok: true,
-          data: { content: next, acceptedPendingEditIds: [] },
         });
       }
 
