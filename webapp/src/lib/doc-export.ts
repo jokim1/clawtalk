@@ -1,15 +1,10 @@
 // Conversion + clipboard + file-download helpers used by the Copy / Export
-// menu. The canonical source is native document blocks; the explicitly named
-// legacy projection remains only for compatibility coverage while the final
-// flat-content facade cleanup retires the shared content DTO.
+// menu. The canonical source is native document blocks.
 //
 // Clipboard writes for "Copy as HTML" set BOTH text/html and
 // text/plain MIMEs so rich-text destinations (Google Docs, Substack)
 // preserve formatting and plain-text destinations get a graceful
 // fallback. Markdown / Plain copy use the simpler writeText path.
-
-import { marked } from 'marked';
-import TurndownService from 'turndown';
 
 import type { NativeDocument, NativeDocumentBlock } from './api';
 
@@ -31,16 +26,7 @@ export interface NativeDocumentExportSource {
   tabs: NativeDocumentExportTab[];
 }
 
-export interface LegacyContentExportProjection {
-  kind: 'legacy-content-projection';
-  format: DocFormat;
-  markdown: string | null;
-  html: string | null;
-}
-
-export type DocExportSource =
-  | NativeDocumentExportSource
-  | LegacyContentExportProjection;
+export type DocExportSource = NativeDocumentExportSource;
 
 export function nativeDocumentToExportSource(
   document: Pick<NativeDocument, 'format' | 'tabs'>,
@@ -58,57 +44,16 @@ export function nativeDocumentToExportSource(
   };
 }
 
-export function legacyContentExportProjection(input: {
-  format: DocFormat;
-  markdown: string | null;
-  html: string | null;
-}): LegacyContentExportProjection {
-  return {
-    kind: 'legacy-content-projection',
-    format: input.format,
-    markdown: input.markdown,
-    html: input.html,
-  };
-}
-
-// Configure turndown once. ATX headings (`# h1`) match the rest of
-// clawtalk's markdown surface; bullet marker `-` matches the existing
-// serializer output.
-const turndown = new TurndownService({
-  headingStyle: 'atx',
-  bulletListMarker: '-',
-  codeBlockStyle: 'fenced',
-});
-
-// Configure marked for synchronous string output without extensions.
-// `breaks: false` matches CommonMark; `gfm: true` matches the markdown
-// surface most users (and clawtalk's parser) treat as default.
-marked.setOptions({ gfm: true, breaks: false });
-
 export function renderHtml(src: DocExportSource): string {
-  if (src.kind === 'native-document-blocks') return renderNativeHtml(src);
-  if (src.format === 'html') return src.html ?? '';
-  const md = src.markdown ?? '';
-  if (md.trim() === '') return '';
-  // marked.parse is synchronous when no async extensions are
-  // registered; cast to string for the caller.
-  return marked.parse(md, { async: false }) as string;
+  return renderNativeHtml(src);
 }
 
 export function renderMarkdown(src: DocExportSource): string {
-  if (src.kind === 'native-document-blocks') return renderNativeMarkdown(src);
-  if (src.format === 'markdown') return src.markdown ?? '';
-  const html = src.html ?? '';
-  if (html.trim() === '') return '';
-  return turndown.turndown(html);
+  return renderNativeMarkdown(src);
 }
 
 export function renderPlainText(src: DocExportSource): string {
-  if (src.kind === 'native-document-blocks') {
-    return renderNativePlainText(src);
-  }
-  if (src.format === 'markdown') return stripMarkdown(src.markdown ?? '');
-  return stripHtmlTags(src.html ?? '');
+  return renderNativePlainText(src);
 }
 
 function renderNativeMarkdown(src: NativeDocumentExportSource): string {
@@ -245,69 +190,6 @@ function escapeHtml(input: string): string {
     .replace(/'/g, '&#39;');
 }
 
-// Tiny markdown→plain pass: strip leading bullets/heading marks,
-// inline `code` / *bold* / _italic_ / [link](url) syntax, then
-// collapse extra whitespace. Not a full parse — pragmatic enough for
-// "paste somewhere that doesn't render markdown".
-export function stripMarkdown(input: string): string {
-  let text = input;
-  // Fenced code blocks: drop fences, keep content
-  text = text.replace(/```[\s\S]*?```/g, (block) =>
-    block.replace(/```[^\n]*\n?/, '').replace(/```$/, ''),
-  );
-  // Images ![alt](url) → alt
-  text = text.replace(/!\[([^\]]*)\]\([^)]+\)/g, '$1');
-  // Links [text](url) → text
-  text = text.replace(/\[([^\]]+)\]\([^)]+\)/g, '$1');
-  // Headings, blockquotes, list markers at line start
-  text = text.replace(/^[\s]{0,3}#{1,6}\s+/gm, '');
-  text = text.replace(/^>\s?/gm, '');
-  text = text.replace(/^[\s]*[-*+]\s+/gm, '');
-  text = text.replace(/^[\s]*\d+\.\s+/gm, '');
-  // Inline marks
-  text = text.replace(/\*\*([^*]+)\*\*/g, '$1');
-  text = text.replace(/__([^_]+)__/g, '$1');
-  text = text.replace(/\*([^*]+)\*/g, '$1');
-  text = text.replace(/_([^_]+)_/g, '$1');
-  text = text.replace(/~~([^~]+)~~/g, '$1');
-  text = text.replace(/`([^`]+)`/g, '$1');
-  // Horizontal rules
-  text = text.replace(/^[\s]*(?:-{3,}|\*{3,}|_{3,})[\s]*$/gm, '');
-  // Collapse 3+ newlines to 2
-  text = text.replace(/\n{3,}/g, '\n\n').trim();
-  return text;
-}
-
-// Tiny HTML→plain pass: drop tags, decode the few entities that show
-// up commonly, then collapse whitespace.
-export function stripHtmlTags(input: string): string {
-  let text = input;
-  // Replace block-level closers with line breaks so paragraphs stay
-  // separated when tags vanish.
-  text = text.replace(
-    /<\/(?:p|h[1-6]|li|blockquote|pre|tr|div|figcaption)>/gi,
-    '\n',
-  );
-  text = text.replace(/<br\s*\/?>/gi, '\n');
-  text = text.replace(/<\/(?:thead|tbody|tfoot|table)>/gi, '\n\n');
-  // Strip remaining tags
-  text = text.replace(/<[^>]+>/g, '');
-  // Decode common entities
-  text = text
-    .replace(/&nbsp;/g, ' ')
-    .replace(/&amp;/g, '&')
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'");
-  // Collapse repeated newlines + trailing whitespace
-  text = text
-    .replace(/[ \t]+\n/g, '\n')
-    .replace(/\n{3,}/g, '\n\n')
-    .trim();
-  return text;
-}
-
 // ---- Clipboard ---------------------------------------------------
 
 export async function clipboardCopyHtml(src: DocExportSource): Promise<void> {
@@ -401,16 +283,10 @@ export function downloadAsPlain(
   triggerDownload(blob, `${sanitizeFilename(opts.filenameBase)}.txt`);
 }
 
-// True when both bodies are empty/whitespace; the menu uses this to
+// True when every native block is empty/whitespace; the menu uses this to
 // disable copy/export.
 export function isDocEmpty(src: DocExportSource): boolean {
-  if (src.kind === 'native-document-blocks') {
-    return src.tabs.every((tab) =>
-      tab.blocks.every((block) => block.text.trim() === ''),
-    );
-  }
-  if (src.format === 'markdown') {
-    return (src.markdown ?? '').trim() === '';
-  }
-  return (src.html ?? '').trim() === '';
+  return src.tabs.every((tab) =>
+    tab.blocks.every((block) => block.text.trim() === ''),
+  );
 }

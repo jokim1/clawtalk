@@ -97,8 +97,6 @@ export type Content = {
   title: string;
   contentKind: string;
   contentFormat: ContentFormat;
-  bodyMarkdown: string;
-  bodyHtml: string | null;
   bodyVersion: number;
   anchorMap: Record<string, unknown>;
   createdAt: string;

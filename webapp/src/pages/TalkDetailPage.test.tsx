@@ -56,6 +56,10 @@ vi.mock('../lib/talkStream', () => ({
 }));
 
 type StreamCallbacks = Parameters<typeof openTalkStream>[0];
+type TestContent = Content & {
+  bodyMarkdown: string;
+  bodyHtml: string | null;
+};
 type SavedTalkAgentRequest = {
   agents: TalkAgent[];
 };
@@ -4637,7 +4641,7 @@ function buildTalkConnectorChannelRow(
   };
 }
 
-function buildContent(input: Partial<Content> = {}): Content {
+function buildContent(input: Partial<TestContent> = {}): TestContent {
   return {
     id: input.id ?? 'content-default',
     talkId: input.talkId ?? 'talk-1',
@@ -4666,7 +4670,7 @@ function buildContent(input: Partial<Content> = {}): Content {
 // doc pane (which reads native `documents` blocks, not bodyMarkdown/bodyHtml)
 // can render in these page-level tests. Native block/edit behavior is covered
 // directly by TalkDocPane.test.tsx and TalkDocumentsPanel.test.tsx.
-function buildNativeDoc(content: Content): NativeDocument {
+function buildNativeDoc(content: TestContent): NativeDocument {
   const bodyText =
     content.bodyMarkdown.trim() ||
     (content.bodyHtml ?? '').replace(/<[^>]*>/g, '').trim() ||
@@ -4906,20 +4910,20 @@ function installTalkDetailFetch(input?: {
   aiAgents?: AiAgentsPageData;
   // Doc-pane integration: pre-existing content keyed by threadId, plus
   // optional spies so tests can assert on POST and PATCH bodies.
-  contentByThreadId?: Record<string, Content>;
+  contentByThreadId?: Record<string, TestContent>;
   onCreateContent?: (body: {
     talkId: string | null;
     threadId: string | null;
     title: string;
     format?: string;
-  }) => Content;
+  }) => TestContent;
   onPatchContent?: (body: {
     contentId: string;
     expectedVersion: number;
     title?: string;
     bodyMarkdown?: string;
     bodyHtml?: string;
-  }) => Content;
+  }) => TestContent;
   onPutAgents?: (body: SavedTalkAgentRequest) => Promise<TalkAgent[]> | TalkAgent[];
   onGetContext?: () => TalkContext;
   onCreateContextSource?: (body: {
@@ -5072,7 +5076,7 @@ function installTalkDetailFetch(input?: {
     buildTalkConnectorChannelRow(),
   ];
   const aiAgents = input?.aiAgents ?? buildAiAgentsData();
-  const contentByThreadId: Record<string, Content> = {
+  const contentByThreadId: Record<string, TestContent> = {
     ...(input?.contentByThreadId ?? {}),
   };
 
@@ -6076,7 +6080,7 @@ function installTalkDetailFetch(input?: {
           });
         }
         const current = contentByThreadId[threadId];
-        const next: Content = input?.onPatchContent?.({
+        const next: TestContent = input?.onPatchContent?.({
           contentId,
           expectedVersion: body.expectedVersion,
           title: body.title,
