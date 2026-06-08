@@ -80,7 +80,7 @@ const facades = [
     tokens:
       'active_tool_families|talk_tools|toolFamily|toolFamilies|/workspace/channels|/workspace/data-connectors|/connectors|TalkConnectorsPanel|ConnectorsSettingsPanel',
     imports:
-      'TalkConnectorsPanel|ConnectorsSettingsPanel|WorkspaceChannel|WorkspaceDataConnector|TalkConnectorDataConnectorRow|tool-families',
+      'TalkConnectorsPanel|ConnectorsSettingsPanel|WorkspaceChannel|WorkspaceDataConnector|TalkConnectorDataConnectorRow|ToolChipsBar|tool-catalog',
     routes:
       '/api/v1/workspace/channels|/api/v1/workspace/data-connectors|/api/v1/talks/:talkId/connectors|talk_tools|toolFamily',
     dynamic:

@@ -131,4 +131,46 @@ describe('worker-app retired flat-content compatibility routes', () => {
       );
     }
   });
+
+  it('falls through deleted thread REST routes to the worker catch-all', async () => {
+    const app = getWorkerApp();
+    const jwt = await mintJwt();
+    const routeChecks = [
+      {
+        method: 'GET',
+        path: '/api/v1/talks/10000000-0000-4000-8000-000000000aaa/threads',
+      },
+      {
+        method: 'POST',
+        path: '/api/v1/talks/10000000-0000-4000-8000-000000000aaa/threads',
+      },
+      {
+        method: 'PATCH',
+        path: '/api/v1/talks/10000000-0000-4000-8000-000000000aaa/threads/10000000-0000-4000-8000-000000000bbb',
+      },
+      {
+        method: 'DELETE',
+        path: '/api/v1/talks/10000000-0000-4000-8000-000000000aaa/threads/10000000-0000-4000-8000-000000000bbb',
+      },
+    ] as const;
+
+    for (const check of routeChecks) {
+      const res = await app.request(
+        new Request(`https://app.test${check.path}`, {
+          method: check.method,
+          headers: { authorization: `Bearer ${jwt}` },
+        }),
+        undefined,
+        envForWorker(),
+      );
+      expect(res.status, `${check.method} ${check.path}`).toBe(501);
+      const body = (await res.json()) as {
+        ok: boolean;
+        error?: { code?: string };
+      };
+      expect(body.error?.code, `${check.method} ${check.path}`).toBe(
+        'not_implemented_in_worker',
+      );
+    }
+  });
 });

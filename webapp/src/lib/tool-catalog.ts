@@ -1,6 +1,6 @@
-// Tool family display metadata for the Talk chip bar (ToolChipsBar —
-// active-now toggles). Tools are a property of the Talk only; there is no
-// per-agent tool surface, so the chip bar is the single consumer.
+// Talk tool display metadata for the chip bar (ToolChipsBar — active-now
+// toggles). Tools are a property of the Talk only; there is no per-agent tool
+// surface, so the chip bar is the single consumer.
 //
 // Heavy families (shell/filesystem/browser) are intentionally excluded — the
 // Claude container that ran them is gone, so they never appear on the bar.

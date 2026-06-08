@@ -38,8 +38,6 @@
 //                                         routes over jobs/runs
 //   /api/v1/talks/:talkId/attachments[/...] — unavailable until greenfield
 //                                         attachment storage lands
-//   /api/v1/talks/:talkId/threads[/...]     — greenfield-api.ts (list +
-//                                         create + PATCH + DELETE)
 //   /api/v1/documents[/...]                 — native document tabs, blocks,
 //                                         and document_edits routes
 //   /api/v1/events                  — events-upgrade.ts (user-scope

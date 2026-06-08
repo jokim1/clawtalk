@@ -436,14 +436,6 @@ describe('App', () => {
           },
         }),
       ],
-      '/api/v1/talks/talk-missing/threads': [
-        jsonResponse(200, {
-          ok: true,
-          data: {
-            threads: [],
-          },
-        }),
-      ],
       '/api/v1/talks/talk-missing/agents': [
         jsonResponse(200, {
           ok: true,

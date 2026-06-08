@@ -9,7 +9,7 @@
 // The chip set ORDER is locked to TOOL_FAMILY_ORDER so this bar reads
 // consistently with the agent-config "Tool capabilities" section
 // (RegisteredAgentsPanel). Both surfaces import labels from the same
-// shared module — see webapp/src/lib/tool-families.ts.
+// shared module — see webapp/src/lib/tool-catalog.ts.
 
 import { useCallback, useEffect, useState } from 'react';
 
@@ -23,7 +23,7 @@ import {
   TOOL_FAMILY_ORDER,
   TOOL_HINTS,
   TOOL_NAMES,
-} from '../lib/tool-families';
+} from '../lib/tool-catalog';
 import { Chip } from '../salon';
 
 export interface ToolChipsBarProps {

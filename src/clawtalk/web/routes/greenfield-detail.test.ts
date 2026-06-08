@@ -8,14 +8,11 @@ import {
   listGreenfieldAgentsRoute,
 } from './greenfield-core.js';
 import {
-  createGreenfieldThreadRoute,
   deleteGreenfieldMessagesRoute,
   getGreenfieldRunContextRoute,
   getGreenfieldSnapshotRoute,
   listGreenfieldMessagesRoute,
   listGreenfieldRunsRoute,
-  listGreenfieldThreadsRoute,
-  patchGreenfieldThreadRoute,
   searchGreenfieldMessagesRoute,
 } from './greenfield-detail.js';
 
@@ -351,39 +348,6 @@ describe('greenfield detail routes', () => {
       },
     });
 
-    const threads = await listGreenfieldThreadsRoute({
-      auth: auth(),
-      workspaceId,
-      talkId,
-    });
-    expect(threads.body).toMatchObject({
-      ok: true,
-      data: { threads: [{ id: talkId, talk_id: talkId, is_default: 1 }] },
-    });
-
-    const createdThread = await createGreenfieldThreadRoute({
-      auth: auth(),
-      workspaceId,
-      talkId,
-    });
-    expect(createdThread.statusCode).toBe(409);
-    expect(createdThread.body).toMatchObject({
-      ok: false,
-      error: { code: 'threads_not_supported' },
-    });
-
-    const patchedThread = await patchGreenfieldThreadRoute({
-      auth: auth(),
-      workspaceId,
-      talkId,
-      threadId: talkId,
-    });
-    expect(patchedThread.statusCode).toBe(409);
-    expect(patchedThread.body).toMatchObject({
-      ok: false,
-      error: { code: 'thread_metadata_not_supported' },
-    });
-
     const runs = await listGreenfieldRunsRoute({
       auth: auth(),
       workspaceId,
@@ -616,23 +580,6 @@ describe('greenfield detail routes', () => {
         ],
       },
     });
-  });
-
-  it('rejects malformed talk ids before omitted-workspace scope resolution casts', async () => {
-    const results = await Promise.all([
-      listGreenfieldThreadsRoute({
-        auth: auth(),
-        talkId: 'not-a-uuid',
-      }),
-    ]);
-
-    for (const result of results) {
-      expect(result.statusCode).toBe(400);
-      expect(result.body).toMatchObject({
-        ok: false,
-        error: { code: 'invalid_talk_id' },
-      });
-    }
   });
 
   it('deletes selected messages and rejects non-default thread ids', async () => {
