@@ -59,6 +59,17 @@ function isUuid(value: string): boolean {
   return UUID_RE.test(value);
 }
 
+function requireHomeWriter(
+  workspace: WorkspaceSummaryRecord,
+): RouteResult<never> | null {
+  if (workspace.role !== 'guest') return null;
+  return error(
+    403,
+    'workspace_writer_required',
+    'Workspace write access is required.',
+  );
+}
+
 function parseLimit(value: unknown): number | null {
   if (value === null || value === undefined || value === '') return null;
   if (typeof value === 'number') return value;
@@ -202,6 +213,8 @@ export async function dismissHomeInboxRoute(input: {
     return error(400, 'invalid_item_id', 'Inbox item id must be a UUID.');
   }
   return withHomeWorkspace(input, async ({ workspace }) => {
+    const writerError = requireHomeWriter(workspace);
+    if (writerError) return writerError;
     const result = await dismissHomeInboxItem({
       workspaceId: workspace.id,
       itemId: input.itemId,
@@ -223,6 +236,8 @@ export async function snoozeHomeInboxRoute(input: {
   const until = parseSnoozeUntil(input.until);
   if (!until.ok) return error(400, 'invalid_until', until.message);
   return withHomeWorkspace(input, async ({ workspace }) => {
+    const writerError = requireHomeWriter(workspace);
+    if (writerError) return writerError;
     const result = await snoozeHomeInboxItem({
       workspaceId: workspace.id,
       itemId: input.itemId,
@@ -246,6 +261,8 @@ export async function dismissHomeRecommendationRoute(input: {
     );
   }
   return withHomeWorkspace(input, async ({ workspace }) => {
+    const writerError = requireHomeWriter(workspace);
+    if (writerError) return writerError;
     const result = await dismissHomeRecommendation({
       workspaceId: workspace.id,
       recommendationId: input.recommendationId,

@@ -143,7 +143,10 @@ export function targetToPath(
 ): string | null {
   const talkId = readString(target, 'talkId');
   if (talkId) return `/app/talks/${encodeURIComponent(talkId)}`;
+  const documentId = readString(target, 'documentId');
+  if (documentId) return `/app/documents/${encodeURIComponent(documentId)}`;
   const kind = readString(target, 'kind');
+  if (kind === 'document') return '/app/documents';
   if (kind === 'connector') return '/app/settings?tab=connectors';
   if (kind === 'system') return '/app/settings';
   return null;
@@ -186,6 +189,16 @@ export function classifyAction(
         to: `/app/talks/${encodeURIComponent(talkId)}`,
         label,
       };
+    if (action.type === 'open_document_edit') {
+      const documentId = readString(action.payload, 'documentId');
+      return {
+        kind: 'nav',
+        to: documentId
+          ? `/app/documents/${encodeURIComponent(documentId)}`
+          : '/app/documents',
+        label,
+      };
+    }
   }
   if (fallback?.to) return { kind: 'nav', to: fallback.to, label };
   return { kind: 'disabled', reason: HOME_WRITE_PENDING_REASON, label };

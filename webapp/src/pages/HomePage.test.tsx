@@ -189,6 +189,21 @@ async function renderPopulated(): Promise<void> {
   await screen.findByText('Critic replied in Pricing v2');
 }
 
+async function renderHomeData(input: {
+  summary: HomeSummaryPayload;
+  inbox: HomeInboxPayload;
+  recommendations: HomeRecommendationsPayload;
+  news: HomeNewsPayload;
+  waitForText: string;
+}): Promise<void> {
+  mockApi.getHomeSummary.mockResolvedValue(input.summary);
+  mockApi.listHomeInbox.mockResolvedValue(input.inbox);
+  mockApi.listHomeRecommendations.mockResolvedValue(input.recommendations);
+  mockApi.listHomeNews.mockResolvedValue(input.news);
+  renderHome();
+  await screen.findAllByText(input.waitForText);
+}
+
 describe('HomePage', () => {
   beforeEach(() => {
     vi.resetAllMocks();
@@ -325,6 +340,39 @@ describe('HomePage', () => {
     expect(typeof mockApi.snoozeHomeInboxItem.mock.calls[0][1]).toBe('string');
   });
 
+  it('keeps the curator in sync when snoozing the current inbox item', async () => {
+    mockApi.snoozeHomeInboxItem.mockResolvedValue({
+      id: 'i1',
+      status: 'snoozed',
+    });
+    await renderHomeData({
+      summary: {
+        ...SUMMARY,
+        curator: {
+          kind: 'inbox',
+          title: 'Critic replied in Pricing v2',
+          summary: '488 tokens out, 2104 in.',
+          itemId: 'i1',
+          target: { kind: 'talk', talkId: 't-pricing' },
+        },
+      },
+      inbox: INBOX,
+      recommendations: EMPTY_RECS,
+      news: NEWS,
+      waitForText: 'Critic replied in Pricing v2',
+    });
+
+    fireEvent.click(screen.getByLabelText('Snooze'));
+    fireEvent.click(await screen.findByText('Tomorrow'));
+
+    await waitFor(() =>
+      expect(screen.queryByText('Critic replied in Pricing v2')).toBeNull(),
+    );
+    expect(screen.getAllByText('Notion raises Business pricing 10%')).toHaveLength(
+      2,
+    );
+  });
+
   it('dismisses the hero recommendation and promotes the next one', async () => {
     mockApi.dismissHomeRecommendation.mockResolvedValue({
       id: 'r1',
@@ -339,7 +387,41 @@ describe('HomePage', () => {
       expect(screen.queryByText('Synthesize Pricing v2')).toBeNull(),
     );
     // The then-maybe card survives (promoted into the hero slot).
-    expect(screen.getByText('Draft a decision doc')).toBeTruthy();
+    expect(screen.queryByText('2 decisions need you.')).toBeNull();
+    expect(screen.getAllByText('Draft a decision doc')).toHaveLength(2);
     expect(mockApi.dismissHomeRecommendation).toHaveBeenCalledWith('r1');
+  });
+
+  it('keeps the curator in sync when dismissing the current inbox item', async () => {
+    mockApi.dismissHomeInboxItem.mockResolvedValue({
+      id: 'i1',
+      status: 'dismissed',
+    });
+    await renderHomeData({
+      summary: {
+        ...SUMMARY,
+        curator: {
+          kind: 'inbox',
+          title: 'Critic replied in Pricing v2',
+          summary: '488 tokens out, 2104 in.',
+          itemId: 'i1',
+          target: { kind: 'talk', talkId: 't-pricing' },
+        },
+      },
+      inbox: INBOX,
+      recommendations: EMPTY_RECS,
+      news: NEWS,
+      waitForText: 'Critic replied in Pricing v2',
+    });
+
+    fireEvent.click(screen.getByLabelText('Dismiss'));
+
+    await waitFor(() =>
+      expect(screen.queryByText('Critic replied in Pricing v2')).toBeNull(),
+    );
+    expect(screen.getAllByText('Notion raises Business pricing 10%')).toHaveLength(
+      2,
+    );
+    expect(mockApi.dismissHomeInboxItem).toHaveBeenCalledWith('i1');
   });
 });

@@ -65,6 +65,109 @@ const EMPTY_NEWS: HomeNewsPayload = {
   algorithmVersion: '',
 };
 
+function recommendationTarget(
+  rec: HomeRecommendation,
+): Record<string, unknown> {
+  const target = { ...rec.provenance, ...rec.action.payload };
+  return Object.keys(target).length > 0
+    ? target
+    : { kind: 'recommendation', recommendationId: rec.id };
+}
+
+function recommendationCurator(
+  rec: HomeRecommendation,
+): HomeSummaryPayload['curator'] {
+  return {
+    kind: 'recommendation',
+    title: rec.title,
+    summary: rec.why,
+    itemId: rec.id,
+    target: recommendationTarget(rec),
+  };
+}
+
+function inboxCurator(item: HomeInboxItem): HomeSummaryPayload['curator'] {
+  return {
+    kind: 'inbox',
+    title: item.title,
+    summary: item.summary,
+    itemId: item.id,
+    target: item.target,
+  };
+}
+
+function newsCurator(
+  news: HomeNewsPayload['items'][number],
+): HomeSummaryPayload['curator'] {
+  return {
+    kind: 'news',
+    title: news.headline,
+    summary: news.whyItMatters,
+    itemId: news.id,
+    target: { kind: 'news', talkId: news.talkId },
+  };
+}
+
+function idleCurator(): HomeSummaryPayload['curator'] {
+  return {
+    kind: 'idle',
+    title: 'Start a Talk',
+    summary:
+      'Create a Talk to bring agents, sources, and follow-up work together.',
+    itemId: null,
+    target: null,
+  };
+}
+
+function firstSevereInboxItem(
+  inbox: HomeInboxPayload | null,
+): HomeInboxItem | null {
+  return (
+    inbox?.items.find(
+      (item) => item.severity === 'blocking' || item.severity === 'action',
+    ) ?? null
+  );
+}
+
+function recomputeSummary(
+  data: HomeData,
+  options?: { recommendationDelta?: number },
+): HomeData {
+  if (!data.summary) return data;
+  const currentCurator = data.summary.curator;
+  const summaryCounts = {
+    ...data.summary.counts,
+    ...(data.inbox ? { inbox: data.inbox.counts } : {}),
+    recommendations: Math.max(
+      0,
+      data.summary.counts.recommendations +
+        (options?.recommendationDelta ?? 0),
+    ),
+  };
+  const hero = data.recommendations?.hero ?? null;
+  const severeInbox = firstSevereInboxItem(data.inbox);
+  const topNews = data.news?.items[0] ?? null;
+  const curator =
+    currentCurator.kind === 'talk'
+      ? currentCurator
+      : hero
+        ? recommendationCurator(hero)
+        : severeInbox
+          ? inboxCurator(severeInbox)
+          : topNews
+            ? newsCurator(topNews)
+            : idleCurator();
+
+  return {
+    ...data,
+    summary: {
+      ...data.summary,
+      curator,
+      counts: summaryCounts,
+    },
+  };
+}
+
 /** Remove an Inbox item and decrement the affected counts (optimistic). */
 function removeInboxItem(
   inbox: HomeInboxPayload,
@@ -241,10 +344,10 @@ export function HomePage(): JSX.Element {
         prev.status === 'ready' && prev.data.inbox
           ? {
               status: 'ready',
-              data: {
+              data: recomputeSummary({
                 ...prev.data,
                 inbox: removeInboxItem(prev.data.inbox, id),
-              },
+              }),
             }
           : prev,
       );
@@ -257,10 +360,10 @@ export function HomePage(): JSX.Element {
             prev.status === 'ready' && prev.data.inbox
               ? {
                   status: 'ready',
-                  data: {
+                  data: recomputeSummary({
                     ...prev.data,
                     inbox: reinsertInboxItem(prev.data.inbox, removed, index),
-                  },
+                  }),
                 }
               : prev,
           );
@@ -294,13 +397,16 @@ export function HomePage(): JSX.Element {
       prev.status === 'ready' && prev.data.recommendations
         ? {
             status: 'ready',
-            data: {
+            data: recomputeSummary(
+              {
               ...prev.data,
               recommendations: removeRecommendation(
                 prev.data.recommendations,
                 id,
               ),
-            },
+              },
+              { recommendationDelta: -1 },
+            ),
           }
         : prev,
     );
@@ -313,14 +419,17 @@ export function HomePage(): JSX.Element {
           prev.status === 'ready' && prev.data.recommendations
             ? {
                 status: 'ready',
-                data: {
+                data: recomputeSummary(
+                  {
                   ...prev.data,
                   recommendations: restoreRecommendation(
                     prev.data.recommendations,
                     rec,
                     wasHero ?? false,
                   ),
-                },
+                  },
+                  { recommendationDelta: 1 },
+                ),
               }
             : prev,
         );
