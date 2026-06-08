@@ -136,35 +136,6 @@ describe('buildToolExecutor runtime tool gates', () => {
     });
   });
 
-  it('denies direct apply_content_edit calls when the runtime tool is disabled', async () => {
-    const executeTool = buildToolExecutor(
-      TALK_ID,
-      USER_ID,
-      RUN_ID,
-      new AbortController().signal,
-      null,
-      [
-        {
-          toolFamily: 'document_edit',
-          runtimeTools: ['apply_content_edit'],
-          enabled: false,
-          requiresApproval: false,
-        },
-      ],
-    );
-
-    await expect(
-      executeTool('apply_content_edit', {
-        kind: 'append',
-        target: 'document',
-        text: 'should not be written',
-      }),
-    ).resolves.toEqual({
-      result: 'Error: apply_content_edit is not enabled for this agent',
-      isError: true,
-    });
-  });
-
   it('fails closed for direct read_attachment calls on the greenfield runtime', async () => {
     const executeTool = buildToolExecutor(
       TALK_ID,

@@ -8,7 +8,6 @@ export * from './tiptap-to-markdown.js';
 export * from './markdown-to-tiptap.js';
 export * from './anchor-ops.js';
 export * from './sanitize.js';
-export * from './content-edits-ops.js';
 export * from './html-sanitize-config.js';
 export * from './html-sanitize-server.js';
 export * from './html-anchors.js';

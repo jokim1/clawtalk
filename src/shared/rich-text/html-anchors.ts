@@ -49,9 +49,8 @@ const ANCHOR_ATTRIBUTE = 'data-anchor-id';
 const OUTLINE_TEXT_LIMIT = 80;
 
 // Shape of the structured error returned by all three functions when
-// linkedom fails to parse the input. The caller (content-apply-handler)
-// turns this into a tool-call error so the AI retries with a clean
-// payload.
+// linkedom fails to parse the input. Callers turn this into a
+// tool-call error so the AI retries with a clean payload.
 export interface HtmlParseError {
   ok: false;
   error: 'html_parse_failed';
