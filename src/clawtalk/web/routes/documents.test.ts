@@ -13,11 +13,15 @@ import {
 } from '../../db/test-helpers.js';
 import type { AuthContext } from '../types.js';
 import {
+  acceptAllDocumentEditsRoute,
   acceptDocumentEditRoute,
+  acceptDocumentEditRunRoute,
   getDocumentRoute,
   listDocumentEditsRoute,
   listDocumentsRoute,
+  rejectAllDocumentEditsRoute,
   rejectDocumentEditRoute,
+  rejectDocumentEditRunRoute,
 } from './documents.js';
 
 const USER_ID = '0c666666-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
@@ -148,6 +152,7 @@ async function insertPendingDocumentEdit(input: {
   documentId: string;
   tabId: string;
   op: 'insert' | 'replace' | 'delete';
+  runId?: string | null;
   blockId?: string | null;
   afterBlockId?: string | null;
   baseBlockVersion?: number | null;
@@ -160,6 +165,7 @@ async function insertPendingDocumentEdit(input: {
       workspace_id,
       document_id,
       tab_id,
+      proposed_by_run_id,
       op,
       block_id,
       after_block_id,
@@ -172,6 +178,7 @@ async function insertPendingDocumentEdit(input: {
       ${input.workspaceId}::uuid,
       ${input.documentId}::uuid,
       ${input.tabId}::uuid,
+      ${input.runId ?? null}::uuid,
       ${input.op},
       ${input.blockId ?? null}::uuid,
       ${input.afterBlockId ?? null}::uuid,
@@ -184,6 +191,80 @@ async function insertPendingDocumentEdit(input: {
   `;
   if (!edit) throw new Error('Expected document edit fixture');
   return edit.id;
+}
+
+// Seed a completed run so edits can be grouped under `proposed_by_run_id` for
+// the per-run bulk tests. Reuses a default workspace agent (provisioned by the
+// workspace bootstrap) to satisfy the run's agent-snapshot FK.
+async function seedRun(input: {
+  workspaceId: string;
+  talkId: string;
+}): Promise<string> {
+  const db = getDbPg();
+  const [run] = await db<Array<{ id: string }>>`
+    with source_agent as (
+      select a.*, lpm.provider_id
+      from public.agents a
+      join public.llm_provider_models lpm
+        on lpm.model_id = a.model_id
+      where a.workspace_id = ${input.workspaceId}::uuid
+      order by a.id asc, lpm.provider_id asc
+      limit 1
+    ),
+    snapshot_group as (
+      select gen_random_uuid() as id
+    ),
+    snapshot as (
+      insert into public.talk_agent_snapshots (
+        workspace_id, talk_id, snapshot_group_id, source_agent_id, role_key,
+        name, handle, initials, accent, accent_dark, provider_id, model_id, temperature,
+        persona, focus, method, sort_order, role_template_version
+      )
+      select
+        ${input.workspaceId}::uuid,
+        ${input.talkId}::uuid,
+        snapshot_group.id,
+        source_agent.id,
+        source_agent.role_key,
+        source_agent.name,
+        source_agent.handle,
+        source_agent.initials,
+        source_agent.accent,
+        source_agent.accent_dark,
+        source_agent.provider_id,
+        source_agent.model_id,
+        source_agent.temperature,
+        source_agent.persona,
+        source_agent.focus,
+        source_agent.method,
+        0,
+        source_agent.created_from_template_version
+      from source_agent, snapshot_group
+      returning id, snapshot_group_id, model_id
+    )
+    insert into public.runs (
+      workspace_id, talk_id, round, snapshot_group_id, agent_snapshot_id,
+      model_id, requested_by, response_group_id, sequence_index, status,
+      started_at, finished_at
+    )
+    select
+      ${input.workspaceId}::uuid,
+      ${input.talkId}::uuid,
+      1,
+      snapshot.snapshot_group_id,
+      snapshot.id,
+      snapshot.model_id,
+      ${USER_ID}::uuid,
+      'response-1',
+      0,
+      'completed',
+      now(),
+      now()
+    from snapshot
+    returning id
+  `;
+  if (!run) throw new Error('Expected run fixture');
+  return run.id;
 }
 
 async function editStatus(editId: string): Promise<string> {
@@ -580,6 +661,522 @@ describe('native document routes', () => {
     expect(missingEdit.body).toMatchObject({
       ok: false,
       error: { code: 'pending_edit_not_found' },
+    });
+  });
+
+  describe('bulk accept/reject gate on the reviewed edit set', () => {
+    it('accept-all aborts and applies nothing when an unseen pending edit slipped in', async () => {
+      const fixture = await createDocumentFixture();
+      const seenEditId = await insertPendingDocumentEdit({
+        workspaceId: fixture.workspaceId,
+        documentId: fixture.documentId,
+        tabId: fixture.mainTabId,
+        op: 'replace',
+        blockId: fixture.mainBlockId,
+        baseBlockVersion: fixture.mainBlockVersion,
+        newText: 'Reviewed replacement.',
+      });
+      // The reviewer loaded the page seeing only [seenEditId]; a job then
+      // appends a brand-new pending edit they never saw.
+      const unseenEditId = await insertPendingDocumentEdit({
+        workspaceId: fixture.workspaceId,
+        documentId: fixture.documentId,
+        tabId: fixture.mainTabId,
+        op: 'insert',
+        baseListVersion: fixture.mainListVersion,
+        newKind: 'p',
+        newText: 'Unseen appended paragraph.',
+      });
+
+      const result = await acceptAllDocumentEditsRoute({
+        auth: auth(),
+        workspaceId: fixture.workspaceId,
+        documentId: fixture.documentId,
+        reviewedEditIds: [seenEditId],
+      });
+
+      expect(result.statusCode).toBe(409);
+      expect(result.body).toMatchObject({
+        ok: false,
+        error: {
+          code: 'edit_set_mismatch',
+          details: {
+            pendingEditIds: expect.arrayContaining([seenEditId, unseenEditId]),
+          },
+        },
+      });
+      // Nothing resolved — not the seen edit, and crucially not the unseen one.
+      expect(await editStatus(seenEditId)).toBe('pending');
+      expect(await editStatus(unseenEditId)).toBe('pending');
+      expect(await blockText(fixture.mainBlockId)).toBe('Original paragraph.');
+    });
+
+    it('accept-all applies every edit when the reviewed set matches the server', async () => {
+      const fixture = await createDocumentFixture();
+      const editA = await insertPendingDocumentEdit({
+        workspaceId: fixture.workspaceId,
+        documentId: fixture.documentId,
+        tabId: fixture.mainTabId,
+        op: 'replace',
+        blockId: fixture.mainBlockId,
+        baseBlockVersion: fixture.mainBlockVersion,
+        newText: 'A applied.',
+      });
+      const editB = await insertPendingDocumentEdit({
+        workspaceId: fixture.workspaceId,
+        documentId: fixture.documentId,
+        tabId: fixture.secondaryTabId,
+        op: 'replace',
+        blockId: fixture.secondaryBlockId,
+        baseBlockVersion: fixture.secondaryBlockVersion,
+        newText: 'B applied.',
+      });
+
+      const result = await acceptAllDocumentEditsRoute({
+        auth: auth(),
+        workspaceId: fixture.workspaceId,
+        documentId: fixture.documentId,
+        reviewedEditIds: [editA, editB],
+      });
+
+      expect(result.statusCode).toBe(200);
+      if (!result.body.ok) throw new Error('Expected accept-all to succeed');
+      expect(result.body.data.editIds).toEqual(
+        expect.arrayContaining([editA, editB]),
+      );
+      expect(result.body.data.document.pendingEditCount).toBe(0);
+      expect(await editStatus(editA)).toBe('accepted');
+      expect(await editStatus(editB)).toBe('accepted');
+    });
+
+    it('reject-all aborts and rejects nothing when an unseen pending edit slipped in', async () => {
+      const fixture = await createDocumentFixture();
+      const seenEditId = await insertPendingDocumentEdit({
+        workspaceId: fixture.workspaceId,
+        documentId: fixture.documentId,
+        tabId: fixture.mainTabId,
+        op: 'replace',
+        blockId: fixture.mainBlockId,
+        baseBlockVersion: fixture.mainBlockVersion,
+        newText: 'Reviewed replacement.',
+      });
+      const unseenEditId = await insertPendingDocumentEdit({
+        workspaceId: fixture.workspaceId,
+        documentId: fixture.documentId,
+        tabId: fixture.mainTabId,
+        op: 'insert',
+        baseListVersion: fixture.mainListVersion,
+        newKind: 'p',
+        newText: 'Unseen appended paragraph.',
+      });
+
+      const result = await rejectAllDocumentEditsRoute({
+        auth: auth(),
+        workspaceId: fixture.workspaceId,
+        documentId: fixture.documentId,
+        reviewedEditIds: [seenEditId],
+      });
+
+      expect(result.statusCode).toBe(409);
+      expect(result.body).toMatchObject({
+        ok: false,
+        error: { code: 'edit_set_mismatch' },
+      });
+      expect(await editStatus(seenEditId)).toBe('pending');
+      expect(await editStatus(unseenEditId)).toBe('pending');
+    });
+
+    it('per-run accept aborts when the run gained an edit the reviewer never saw', async () => {
+      const fixture = await createDocumentFixture();
+      const runId = await seedRun({
+        workspaceId: fixture.workspaceId,
+        talkId: fixture.talkId,
+      });
+      const seenEditId = await insertPendingDocumentEdit({
+        workspaceId: fixture.workspaceId,
+        documentId: fixture.documentId,
+        tabId: fixture.mainTabId,
+        runId,
+        op: 'replace',
+        blockId: fixture.mainBlockId,
+        baseBlockVersion: fixture.mainBlockVersion,
+        newText: 'Run change A.',
+      });
+      const unseenEditId = await insertPendingDocumentEdit({
+        workspaceId: fixture.workspaceId,
+        documentId: fixture.documentId,
+        tabId: fixture.mainTabId,
+        runId,
+        op: 'insert',
+        baseListVersion: fixture.mainListVersion,
+        newKind: 'p',
+        newText: 'Run change B (unseen).',
+      });
+
+      const result = await acceptDocumentEditRunRoute({
+        auth: auth(),
+        workspaceId: fixture.workspaceId,
+        documentId: fixture.documentId,
+        runId,
+        reviewedEditIds: [seenEditId],
+      });
+
+      expect(result.statusCode).toBe(409);
+      expect(result.body).toMatchObject({
+        ok: false,
+        error: {
+          code: 'edit_set_mismatch',
+          details: {
+            pendingEditIds: expect.arrayContaining([seenEditId, unseenEditId]),
+          },
+        },
+      });
+      expect(await editStatus(seenEditId)).toBe('pending');
+      expect(await editStatus(unseenEditId)).toBe('pending');
+    });
+
+    it('per-run accept applies exactly the reviewed run edits', async () => {
+      const fixture = await createDocumentFixture();
+      const runId = await seedRun({
+        workspaceId: fixture.workspaceId,
+        talkId: fixture.talkId,
+      });
+      const editA = await insertPendingDocumentEdit({
+        workspaceId: fixture.workspaceId,
+        documentId: fixture.documentId,
+        tabId: fixture.mainTabId,
+        runId,
+        op: 'replace',
+        blockId: fixture.mainBlockId,
+        baseBlockVersion: fixture.mainBlockVersion,
+        newText: 'Run A applied.',
+      });
+      const editB = await insertPendingDocumentEdit({
+        workspaceId: fixture.workspaceId,
+        documentId: fixture.documentId,
+        tabId: fixture.secondaryTabId,
+        runId,
+        op: 'replace',
+        blockId: fixture.secondaryBlockId,
+        baseBlockVersion: fixture.secondaryBlockVersion,
+        newText: 'Run B applied.',
+      });
+
+      const result = await acceptDocumentEditRunRoute({
+        auth: auth(),
+        workspaceId: fixture.workspaceId,
+        documentId: fixture.documentId,
+        runId,
+        reviewedEditIds: [editA, editB],
+      });
+
+      expect(result.statusCode).toBe(200);
+      if (!result.body.ok) throw new Error('Expected accept-run to succeed');
+      expect(result.body.data.runId).toBe(runId);
+      expect(result.body.data.editIds).toEqual(
+        expect.arrayContaining([editA, editB]),
+      );
+      expect(await editStatus(editA)).toBe('accepted');
+      expect(await editStatus(editB)).toBe('accepted');
+    });
+
+    it('per-run reject aborts when the run gained an edit the reviewer never saw', async () => {
+      const fixture = await createDocumentFixture();
+      const runId = await seedRun({
+        workspaceId: fixture.workspaceId,
+        talkId: fixture.talkId,
+      });
+      const seenEditId = await insertPendingDocumentEdit({
+        workspaceId: fixture.workspaceId,
+        documentId: fixture.documentId,
+        tabId: fixture.mainTabId,
+        runId,
+        op: 'replace',
+        blockId: fixture.mainBlockId,
+        baseBlockVersion: fixture.mainBlockVersion,
+        newText: 'Run change A.',
+      });
+      const unseenEditId = await insertPendingDocumentEdit({
+        workspaceId: fixture.workspaceId,
+        documentId: fixture.documentId,
+        tabId: fixture.mainTabId,
+        runId,
+        op: 'insert',
+        baseListVersion: fixture.mainListVersion,
+        newKind: 'p',
+        newText: 'Run change B (unseen).',
+      });
+
+      const result = await rejectDocumentEditRunRoute({
+        auth: auth(),
+        workspaceId: fixture.workspaceId,
+        documentId: fixture.documentId,
+        runId,
+        reviewedEditIds: [seenEditId],
+      });
+
+      expect(result.statusCode).toBe(409);
+      expect(result.body).toMatchObject({
+        ok: false,
+        error: { code: 'edit_set_mismatch' },
+      });
+      expect(await editStatus(seenEditId)).toBe('pending');
+      expect(await editStatus(unseenEditId)).toBe('pending');
+    });
+
+    it('per-run reject rejects exactly the reviewed run edits and leaves blocks intact', async () => {
+      const fixture = await createDocumentFixture();
+      const runId = await seedRun({
+        workspaceId: fixture.workspaceId,
+        talkId: fixture.talkId,
+      });
+      const editA = await insertPendingDocumentEdit({
+        workspaceId: fixture.workspaceId,
+        documentId: fixture.documentId,
+        tabId: fixture.mainTabId,
+        runId,
+        op: 'delete',
+        blockId: fixture.mainBlockId,
+        baseBlockVersion: fixture.mainBlockVersion,
+      });
+      const editB = await insertPendingDocumentEdit({
+        workspaceId: fixture.workspaceId,
+        documentId: fixture.documentId,
+        tabId: fixture.secondaryTabId,
+        runId,
+        op: 'replace',
+        blockId: fixture.secondaryBlockId,
+        baseBlockVersion: fixture.secondaryBlockVersion,
+        newText: 'Run B rejected.',
+      });
+
+      const result = await rejectDocumentEditRunRoute({
+        auth: auth(),
+        workspaceId: fixture.workspaceId,
+        documentId: fixture.documentId,
+        runId,
+        reviewedEditIds: [editA, editB],
+      });
+
+      expect(result.statusCode).toBe(200);
+      if (!result.body.ok) throw new Error('Expected reject-run to succeed');
+      expect(result.body.data.editIds).toEqual(
+        expect.arrayContaining([editA, editB]),
+      );
+      expect(await editStatus(editA)).toBe('rejected');
+      expect(await editStatus(editB)).toBe('rejected');
+      expect(await blockText(fixture.mainBlockId)).toBe('Original paragraph.');
+    });
+
+    it('rejects a bulk request whose reviewedEditIds is missing or malformed', async () => {
+      const fixture = await createDocumentFixture();
+
+      const missing = await acceptAllDocumentEditsRoute({
+        auth: auth(),
+        workspaceId: fixture.workspaceId,
+        documentId: fixture.documentId,
+      });
+      expect(missing.statusCode).toBe(400);
+      expect(missing.body).toMatchObject({
+        ok: false,
+        error: { code: 'invalid_reviewed_edit_ids' },
+      });
+
+      const malformed = await rejectAllDocumentEditsRoute({
+        auth: auth(),
+        workspaceId: fixture.workspaceId,
+        documentId: fixture.documentId,
+        reviewedEditIds: ['not-a-uuid'],
+      });
+      expect(malformed.statusCode).toBe(400);
+      expect(malformed.body).toMatchObject({
+        ok: false,
+        error: { code: 'invalid_reviewed_edit_ids' },
+      });
+    });
+
+    it('rejects a per-run bulk request whose reviewedEditIds is missing or malformed', async () => {
+      const fixture = await createDocumentFixture();
+      // Validation precedes the workspace/accessor, so a syntactically valid
+      // (unused) run id is enough — no run fixture needed. reject-run is checked
+      // explicitly because its route has a different early-return shape.
+      const acceptMissing = await acceptDocumentEditRunRoute({
+        auth: auth(),
+        workspaceId: fixture.workspaceId,
+        documentId: fixture.documentId,
+        runId: randomUUID(),
+      });
+      expect(acceptMissing.statusCode).toBe(400);
+      expect(acceptMissing.body).toMatchObject({
+        ok: false,
+        error: { code: 'invalid_reviewed_edit_ids' },
+      });
+
+      const rejectMalformed = await rejectDocumentEditRunRoute({
+        auth: auth(),
+        workspaceId: fixture.workspaceId,
+        documentId: fixture.documentId,
+        runId: randomUUID(),
+        reviewedEditIds: ['not-a-uuid'],
+      });
+      expect(rejectMalformed.statusCode).toBe(400);
+      expect(rejectMalformed.body).toMatchObject({
+        ok: false,
+        error: { code: 'invalid_reviewed_edit_ids' },
+      });
+    });
+
+    it('accept-all aborts when the reviewer saw zero edits but a job created the first one', async () => {
+      const fixture = await createDocumentFixture();
+      // The reviewer opened a document with no pending edits (reviewedEditIds:
+      // []), then a job proposed the very first edit. An empty reviewed set must
+      // still gate — this is the unseen-edit bug for a zero-edit reviewer.
+      const unseenEditId = await insertPendingDocumentEdit({
+        workspaceId: fixture.workspaceId,
+        documentId: fixture.documentId,
+        tabId: fixture.mainTabId,
+        op: 'replace',
+        blockId: fixture.mainBlockId,
+        baseBlockVersion: fixture.mainBlockVersion,
+        newText: 'First proposal, never seen.',
+      });
+
+      const result = await acceptAllDocumentEditsRoute({
+        auth: auth(),
+        workspaceId: fixture.workspaceId,
+        documentId: fixture.documentId,
+        reviewedEditIds: [],
+      });
+
+      expect(result.statusCode).toBe(409);
+      expect(result.body).toMatchObject({
+        ok: false,
+        error: {
+          code: 'edit_set_mismatch',
+          details: { pendingEditIds: [unseenEditId] },
+        },
+      });
+      expect(await editStatus(unseenEditId)).toBe('pending');
+    });
+
+    it('accept-all on a document with no pending edits is a no-op when the reviewed set is also empty', async () => {
+      const fixture = await createDocumentFixture();
+
+      const result = await acceptAllDocumentEditsRoute({
+        auth: auth(),
+        workspaceId: fixture.workspaceId,
+        documentId: fixture.documentId,
+        reviewedEditIds: [],
+      });
+
+      expect(result.statusCode).toBe(200);
+      if (!result.body.ok) throw new Error('Expected accept-all to succeed');
+      expect(result.body.data.editIds).toEqual([]);
+      expect(result.body.data.document.pendingEditCount).toBe(0);
+    });
+
+    it('accept-all aborts when a reviewed edit was resolved by someone else (server set shrank)', async () => {
+      const fixture = await createDocumentFixture();
+      const editA = await insertPendingDocumentEdit({
+        workspaceId: fixture.workspaceId,
+        documentId: fixture.documentId,
+        tabId: fixture.mainTabId,
+        op: 'replace',
+        blockId: fixture.mainBlockId,
+        baseBlockVersion: fixture.mainBlockVersion,
+        newText: 'Still-pending change.',
+      });
+      const editB = await insertPendingDocumentEdit({
+        workspaceId: fixture.workspaceId,
+        documentId: fixture.documentId,
+        tabId: fixture.secondaryTabId,
+        op: 'replace',
+        blockId: fixture.secondaryBlockId,
+        baseBlockVersion: fixture.secondaryBlockVersion,
+        newText: 'Concurrently resolved change.',
+      });
+      // The reviewer saw [editA, editB]; editB was rejected by a concurrent
+      // action, so the server's pending set has shrunk to [editA].
+      await getDbPg()`
+        update public.document_edits
+        set status = 'rejected', resolved_at = now()
+        where id = ${editB}::uuid
+      `;
+
+      const result = await acceptAllDocumentEditsRoute({
+        auth: auth(),
+        workspaceId: fixture.workspaceId,
+        documentId: fixture.documentId,
+        reviewedEditIds: [editA, editB],
+      });
+
+      expect(result.statusCode).toBe(409);
+      expect(result.body).toMatchObject({
+        ok: false,
+        error: {
+          code: 'edit_set_mismatch',
+          details: { pendingEditIds: [editA] },
+        },
+      });
+      // The still-pending edit was not applied — the reviewer must re-check.
+      expect(await editStatus(editA)).toBe('pending');
+    });
+
+    it('accept-all matches case-insensitively: upper-case reviewed ids gate against lower-case server ids', async () => {
+      const fixture = await createDocumentFixture();
+      const editId = await insertPendingDocumentEdit({
+        workspaceId: fixture.workspaceId,
+        documentId: fixture.documentId,
+        tabId: fixture.mainTabId,
+        op: 'replace',
+        blockId: fixture.mainBlockId,
+        baseBlockVersion: fixture.mainBlockVersion,
+        newText: 'Case-insensitive accept.',
+      });
+
+      // Postgres returns the edit id lower-cased; the route accepts upper-case
+      // UUIDs, so a client sending the canonical-but-upper-case id must still
+      // match (no spurious edit_set_mismatch).
+      const result = await acceptAllDocumentEditsRoute({
+        auth: auth(),
+        workspaceId: fixture.workspaceId,
+        documentId: fixture.documentId,
+        reviewedEditIds: [editId.toUpperCase()],
+      });
+
+      expect(result.statusCode).toBe(200);
+      expect(await editStatus(editId)).toBe('accepted');
+    });
+
+    it('per-run accept matches case-insensitively on both the run id and reviewed ids', async () => {
+      const fixture = await createDocumentFixture();
+      const runId = await seedRun({
+        workspaceId: fixture.workspaceId,
+        talkId: fixture.talkId,
+      });
+      const editId = await insertPendingDocumentEdit({
+        workspaceId: fixture.workspaceId,
+        documentId: fixture.documentId,
+        tabId: fixture.mainTabId,
+        runId,
+        op: 'replace',
+        blockId: fixture.mainBlockId,
+        baseBlockVersion: fixture.mainBlockVersion,
+        newText: 'Case-insensitive run accept.',
+      });
+
+      const result = await acceptDocumentEditRunRoute({
+        auth: auth(),
+        workspaceId: fixture.workspaceId,
+        documentId: fixture.documentId,
+        runId: runId.toUpperCase(),
+        reviewedEditIds: [editId.toUpperCase()],
+      });
+
+      expect(result.statusCode).toBe(200);
+      if (!result.body.ok) throw new Error('Expected accept-run to succeed');
+      expect(result.body.data.editIds).toEqual([editId]);
+      expect(await editStatus(editId)).toBe('accepted');
     });
   });
 });

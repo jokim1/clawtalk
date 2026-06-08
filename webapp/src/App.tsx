@@ -5,6 +5,7 @@ import {
   Routes,
   useLocation,
   useNavigate,
+  useParams,
 } from 'react-router-dom';
 
 import { CommandPalette, type CommandItem } from './components/CommandPalette';
@@ -46,6 +47,8 @@ import { SettingsPage } from './pages/SettingsPage';
 import { HomePage } from './pages/HomePage';
 import { ArchivePage } from './pages/ArchivePage';
 import { AgentProfilePage } from './pages/AgentProfilePage';
+import { DocumentsPage } from './pages/DocumentsPage';
+import { DocumentDetailPage } from './pages/DocumentDetailPage';
 
 type AuthState =
   | { status: 'loading' }
@@ -375,6 +378,17 @@ function buildOptimisticReorder(
   });
 }
 
+// Remount the document viewer per :documentId. The page holds page-owned
+// document state, a shared load-cancellation token, and in-flight accept/reject
+// promises; without a per-id key React reuses one instance across navigations,
+// so a mutation resolving after the user moved to another document could cancel
+// the new load or clobber its state. Keying by id makes those stale resolves
+// land on an unmounted instance (a no-op) and gives each document fresh state.
+function DocumentDetailRoute(): JSX.Element {
+  const { documentId } = useParams<{ documentId: string }>();
+  return <DocumentDetailPage key={documentId ?? 'none'} />;
+}
+
 function MainTalkRedirect({
   mainTalkId,
   loading,
@@ -699,6 +713,13 @@ export function App() {
         label: 'Talks',
         hint: 'Go to',
         run: () => navigate('/app/talks'),
+      },
+      {
+        id: 'nav-documents',
+        label: 'Documents',
+        hint: 'Go to',
+        keywords: 'docs editor drafts notes',
+        run: () => navigate('/app/documents'),
       },
       {
         id: 'nav-archive',
@@ -1034,6 +1055,11 @@ export function App() {
             <Route
               path="/app/archive"
               element={<ArchivePage onRestored={() => void refreshSidebar()} />}
+            />
+            <Route path="/app/documents" element={<DocumentsPage />} />
+            <Route
+              path="/app/documents/:documentId"
+              element={<DocumentDetailRoute />}
             />
             <Route
               path="/app/talks"

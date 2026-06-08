@@ -45,6 +45,13 @@ const NAV_ITEMS: NavItem[] = [
     isActive: (p) => p.startsWith('/app/talks') || p.startsWith('/app/main'),
   },
   {
+    id: 'documents',
+    label: 'Documents',
+    icon: 'doc',
+    to: '/app/documents',
+    isActive: (p) => p.startsWith('/app/documents'),
+  },
+  {
     id: 'agents',
     label: 'Agents',
     icon: 'sparkle',
