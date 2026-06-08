@@ -150,7 +150,7 @@ export function TalkDetailPage({
   const endRef = useRef<HTMLDivElement | null>(null);
   const pendingComposerFocusRef = useRef(false);
   const pendingRunHistoryScrollRef = useRef<string | null>(null);
-  const threadSnapshotVersionRef = useRef(0);
+  const threadCacheEpochRef = useRef(0);
   const deletedMessageIdsRef = useRef<Set<string>>(new Set());
   // Bumped whenever deleted ids are recorded so memoized message lists
   // re-run the deleted-id filter even if the messages array itself is
@@ -244,7 +244,7 @@ export function TalkDetailPage({
     });
 
   useEffect(() => {
-    threadSnapshotVersionRef.current += 1;
+    threadCacheEpochRef.current += 1;
   }, [activeThreadId]);
 
   // PR C: keep the reducer's selectedThreadId in lockstep with the
@@ -538,7 +538,7 @@ export function TalkDetailPage({
     async (options?: { refreshThreads?: boolean }) => {
       const threadId = activeThreadIdRef.current;
       if (!threadId) return;
-      const snapshotVersion = threadSnapshotVersionRef.current;
+      const threadCacheEpoch = threadCacheEpochRef.current;
       // PR C: messages + active runs come from the snapshot query —
       // invalidate it and let RQ refetch. Historical runs are still
       // separate; re-fetch them in parallel so the Runs tab updates.
@@ -562,7 +562,7 @@ export function TalkDetailPage({
         ]);
         if (
           threadId !== activeThreadIdRef.current ||
-          snapshotVersion !== threadSnapshotVersionRef.current
+          threadCacheEpoch !== threadCacheEpochRef.current
         ) {
           return;
         }
@@ -986,7 +986,7 @@ export function TalkDetailPage({
     activeThreadId,
     hasActiveRound: Boolean(activeRound),
     pageMessages,
-    threadSnapshotVersionRef,
+    threadCacheEpochRef,
     rememberDeletedMessageIds,
     resyncTalkState,
     onUnauthorized: handleUnauthorized,

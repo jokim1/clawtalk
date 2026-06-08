@@ -27,7 +27,7 @@
 //                                     fallback config, main agent,
 //                                     effective tools)
 //   /api/v1/talks[/...]             — greenfield-api.ts for the
-//                                     greenfield shell/detail/chat/policy/tools
+//                                     greenfield shell/detail/chat/tools
 //                                     surface; legacy route modules only for
 //                                     not-yet-cut-over collisions
 //   /api/v1/talk-folders[/...]      — greenfield-api.ts (folder CRUD)

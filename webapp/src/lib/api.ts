@@ -1187,7 +1187,7 @@ export type TalkSnapshot = {
   pendingEdits: ContentEditSummary[];
   runs: TalkSnapshotRun[];
   agents: TalkSnapshotAgent[];
-  snapshotVersion: number;
+  eventHighWater: number;
 };
 
 export async function getTalkSnapshot(input: {

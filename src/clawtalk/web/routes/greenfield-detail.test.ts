@@ -502,12 +502,12 @@ describe('greenfield detail routes', () => {
     });
   });
 
-  it('returns snapshotVersion as the per-talk outbox high-water, not a timestamp', async () => {
+  it('returns eventHighWater as the per-talk outbox high-water, not a timestamp', async () => {
     const { workspaceId, talkId, agentIds } = await createTalkFixture();
     await seedMessages({ workspaceId, talkId, agentId: agentIds[0]! });
 
     // Two outbox events for this talk plus one for a different talk with a
-    // strictly higher id. snapshotVersion must be THIS talk's high-water
+    // strictly higher id. eventHighWater must be THIS talk's high-water
     // (proves per-topic scoping) on the small outbox-id scale (proves the
     // regression away from Date.parse(updated_at) ~= 1.7e12, which made the
     // client drop every streamed reply).
@@ -537,11 +537,11 @@ describe('greenfield detail routes', () => {
     if (!snapshot.body.ok) throw new Error('Expected snapshot to succeed');
     // High-water for this talk's topic (excludes the higher-id other-talk
     // event) and far below any epoch-millis timestamp.
-    expect(snapshot.body.data.snapshotVersion).toBe(talkHighWater);
-    expect(snapshot.body.data.snapshotVersion).toBeLessThan(
+    expect(snapshot.body.data.eventHighWater).toBe(talkHighWater);
+    expect(snapshot.body.data.eventHighWater).toBeLessThan(
       otherTalkEvent!.event_id,
     );
-    expect(snapshot.body.data.snapshotVersion).toBeLessThan(1_000_000_000);
+    expect(snapshot.body.data.eventHighWater).toBeLessThan(1_000_000_000);
   });
 
   it('resolves omitted workspaceId for talk detail routes from the visible talk', async () => {

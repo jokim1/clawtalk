@@ -3,7 +3,7 @@ import {
   getGreenfieldDocumentForTalk,
   getGreenfieldRunContextSnapshotRecord,
   getGreenfieldThreadMetrics,
-  getTalkSnapshotVersion,
+  getTalkEventHighWater,
   listGreenfieldMessages,
   listGreenfieldRuns,
   searchGreenfieldMessages,
@@ -955,7 +955,7 @@ export async function getGreenfieldSnapshotRoute(input: {
     pendingEdits: ReturnType<typeof toPendingEditApi>[];
     runs: ReturnType<typeof toSnapshotRunApi>[];
     agents: ReturnType<typeof toSnapshotAgent>[];
-    snapshotVersion: number;
+    eventHighWater: number;
   }>
 > {
   const threadError = assertSyntheticThread({
@@ -975,11 +975,11 @@ export async function getGreenfieldSnapshotRoute(input: {
       if ('statusCode' in talk) return talk;
       // Outbox cursor for the client's streamed-message dedup. Read BEFORE
       // the message load so it stays a lower bound consistent with the
-      // returned messages (see getTalkSnapshotVersion). MUST be the
+      // returned messages (see getTalkEventHighWater). MUST be the
       // event_outbox high-water (same scale as the streamed eventId), not a
       // wall-clock timestamp — otherwise every streamed reply is dropped and
       // vanishes from the live thread until a reload.
-      const snapshotVersion = await getTalkSnapshotVersion({
+      const eventHighWater = await getTalkEventHighWater({
         talkId: input.talkId,
       });
       const [metrics, rawMessages, document, runs, agents] = await Promise.all([
@@ -1026,7 +1026,7 @@ export async function getGreenfieldSnapshotRoute(input: {
         pendingEdits: documentPayload.pendingEdits,
         runs: runs.map(toSnapshotRunApi),
         agents: agents.map(toSnapshotAgent),
-        snapshotVersion,
+        eventHighWater,
       });
     },
   );

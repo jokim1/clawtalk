@@ -5157,7 +5157,7 @@ function installTalkDetailFetch(input?: {
               isPrimary: a.isPrimary,
               sortOrder: a.displayOrder,
             })),
-            snapshotVersion: 0,
+            eventHighWater: 0,
           },
         });
       }

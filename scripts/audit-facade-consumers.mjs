@@ -57,24 +57,21 @@ const facades = [
   {
     id: 'snapshot-version',
     name: 'snapshotVersion compat',
-    tokens:
-      'snapshotVersion|getTalkSnapshotVersion|snapshotQueryKey|applyMessageAppendedDelta',
+    tokens: 'snapshotVersion|getTalkSnapshotVersion',
     imports: 'snapshotQueryKey|useTalkSnapshot|wsCacheRouter|TalkSnapshot',
-    routes:
-      'snapshotVersion|getTalkSnapshotVersion|/api/v1/talks/:talkId/snapshot',
-    dynamic: 'snapshotVersion|eventId|wsCacheRouter|applyMessageAppendedDelta',
+    routes: 'snapshotVersion|getTalkSnapshotVersion',
+    dynamic: 'snapshotVersion',
   },
   {
     id: 'policy-facade',
     name: 'Policy facade',
     tokens:
-      'talkPolicyPayload|getGreenfieldTalkPolicyRoute|updateGreenfieldTalkPolicyRoute|/policy|policy-panel|TalkAgentsPanel|talk_agents',
+      'talkPolicyPayload|getGreenfieldTalkPolicyRoute|updateGreenfieldTalkPolicyRoute|getTalkPolicy|updateTalkPolicy|/api/v1/talks/:talkId/policy|/talks/.*/policy',
     imports:
-      'getGreenfieldTalkPolicyRoute|updateGreenfieldTalkPolicyRoute|getTalkPolicy|updateTalkPolicy|TalkAgentsPanel',
+      'getGreenfieldTalkPolicyRoute|updateGreenfieldTalkPolicyRoute|getTalkPolicy|updateTalkPolicy',
     routes:
       '/api/v1/talks/:talkId/policy|getGreenfieldTalkPolicyRoute|updateGreenfieldTalkPolicyRoute',
-    dynamic:
-      'talkPolicy|/policy|policy-panel|policy-muted|agents\\s*:|talk_agents|invalid_talk_agents',
+    dynamic: 'talkPolicy|/api/v1/talks/.*/policy|invalid_agents',
   },
   {
     id: 'tool-connectors-facades',

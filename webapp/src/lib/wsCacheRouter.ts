@@ -5,7 +5,7 @@
 // 1. **Surgical `setQueryData`** for events we can patch into the cache
 //    exactly (right now: just `message_appended` on the active thread).
 //    Cheap and avoids a network round-trip; per-event check vs.
-//    snapshot.snapshotVersion drops deltas the snapshot already
+//    snapshot.eventHighWater drops deltas the snapshot already
 //    incorporates so we don't double-append on a fresh load.
 //
 // 2. **Debounced `invalidateQueries`** for events that need a refetch
@@ -43,7 +43,7 @@ function resolveCacheKey(
 
 /**
  * Optimistic append after a local mutation (e.g. send-message), bypassing
- * the eventId/snapshotVersion check that `applyMessageAppendedDelta` runs
+ * the eventId/eventHighWater check that `applyMessageAppendedDelta` runs
  * for WS deltas. The dedup-by-id guard means the WS event that follows
  * the server commit is a no-op.
  */
@@ -136,10 +136,7 @@ export function applyMessageAppendedDelta(input: {
     if (!prev) return prev;
     // Drop deltas the snapshot already includes — they would arrive on
     // a fresh page-load while the WS replay buffer is catching up.
-    if (
-      typeof event.eventId === 'number' &&
-      event.eventId <= prev.snapshotVersion
-    ) {
+    if (typeof event.eventId === 'number' && event.eventId <= prev.eventHighWater) {
       return prev;
     }
     // Drop duplicate IDs — same event arriving twice during a
@@ -163,13 +160,13 @@ export function applyMessageAppendedDelta(input: {
     return {
       ...prev,
       messages: [...prev.messages, appended],
-      // Advance the snapshotVersion in lock-step so subsequent deltas
+      // Advance the event high-water in lock-step so subsequent deltas
       // with eventId<=this don't get re-appended.
-      snapshotVersion:
+      eventHighWater:
         typeof event.eventId === 'number' &&
-        event.eventId > prev.snapshotVersion
+        event.eventId > prev.eventHighWater
           ? event.eventId
-          : prev.snapshotVersion,
+          : prev.eventHighWater,
     };
   });
 }
