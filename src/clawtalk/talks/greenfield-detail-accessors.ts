@@ -4,6 +4,7 @@ import {
   withTrustedDbWrites,
   type Sql,
 } from '../../db.js';
+import { withDocumentEditMutationLock } from '../documents/edit-locks.js';
 
 export interface GreenfieldMessageRecord {
   id: string;
@@ -1194,46 +1195,48 @@ export async function acceptGreenfieldDocumentEdit(input: {
   expectedContentVersion?: number;
   expectedTargetTabListVersion?: number;
 }): Promise<GreenfieldDocumentEditResolveResult> {
-  const document = await getGreenfieldDocumentById(input);
-  if (!document) return { kind: 'not_found' };
-  if (
-    input.expectedContentVersion !== undefined &&
-    document.list_version !== input.expectedContentVersion
-  ) {
-    return {
-      kind: 'version_conflict',
-      currentVersion: document.list_version,
-    };
-  }
-  const refs = await listPendingGreenfieldDocumentEditRefs({
-    workspaceId: input.workspaceId,
-    documentId: input.documentId,
-    editIds: [input.editId],
-  });
-  const ref = refs[0];
-  if (!ref) return { kind: 'not_found' };
-  const versionCheck = await checkGreenfieldDocumentTabVersionsForUpdate({
-    workspaceId: input.workspaceId,
-    documentId: input.documentId,
-    tabIds: [ref.tab_id],
-    expectedContentVersion: input.expectedTargetTabListVersion,
-  });
-  if (versionCheck.kind !== 'ok') return versionCheck;
-  const edit = await loadPendingGreenfieldDocumentEditForUpdate(input);
-  if (!edit) return { kind: 'not_found' };
+  return withDocumentEditMutationLock(input, async () => {
+    const document = await getGreenfieldDocumentById(input);
+    if (!document) return { kind: 'not_found' };
+    if (
+      input.expectedContentVersion !== undefined &&
+      document.list_version !== input.expectedContentVersion
+    ) {
+      return {
+        kind: 'version_conflict',
+        currentVersion: document.list_version,
+      };
+    }
+    const refs = await listPendingGreenfieldDocumentEditRefs({
+      workspaceId: input.workspaceId,
+      documentId: input.documentId,
+      editIds: [input.editId],
+    });
+    const ref = refs[0];
+    if (!ref) return { kind: 'not_found' };
+    const versionCheck = await checkGreenfieldDocumentTabVersionsForUpdate({
+      workspaceId: input.workspaceId,
+      documentId: input.documentId,
+      tabIds: [ref.tab_id],
+      expectedContentVersion: input.expectedTargetTabListVersion,
+    });
+    if (versionCheck.kind !== 'ok') return versionCheck;
+    const edit = await loadPendingGreenfieldDocumentEditForUpdate(input);
+    if (!edit) return { kind: 'not_found' };
 
-  const applied = await withTrustedDbWrites(() =>
-    applyGreenfieldDocumentEdit(edit, input.workspaceId),
-  );
-  if (applied.kind !== 'ok') return applied;
-  const updated = await getGreenfieldDocumentById(input);
-  if (!updated) return { kind: 'not_found' };
-  return {
-    kind: 'ok',
-    document: updated,
-    editIds: [edit.id],
-    runId: edit.proposed_by_run_id,
-  };
+    const applied = await withTrustedDbWrites(() =>
+      applyGreenfieldDocumentEdit(edit, input.workspaceId),
+    );
+    if (applied.kind !== 'ok') return applied;
+    const updated = await getGreenfieldDocumentById(input);
+    if (!updated) return { kind: 'not_found' };
+    return {
+      kind: 'ok',
+      document: updated,
+      editIds: [edit.id],
+      runId: edit.proposed_by_run_id,
+    };
+  });
 }
 
 export async function acceptGreenfieldDocumentEdits(input: {
@@ -1243,62 +1246,82 @@ export async function acceptGreenfieldDocumentEdits(input: {
   expectedContentVersion?: number;
   expectedTargetTabListVersion?: number;
 }): Promise<GreenfieldDocumentEditResolveResult> {
-  const document = await getGreenfieldDocumentById(input);
-  if (!document) return { kind: 'not_found' };
-  if (
-    input.expectedContentVersion !== undefined &&
-    document.list_version !== input.expectedContentVersion
-  ) {
-    return {
-      kind: 'version_conflict',
-      currentVersion: document.list_version,
-    };
-  }
-  const refs = await listPendingGreenfieldDocumentEditRefs({
-    workspaceId: input.workspaceId,
-    documentId: input.documentId,
-    editIds: input.editIds,
-  });
-  const refsById = new Map(refs.map((ref) => [ref.id, ref]));
-  for (const editId of input.editIds) {
-    if (!refsById.has(editId)) return { kind: 'not_found' };
-  }
-  const versionCheck = await checkGreenfieldDocumentTabVersionsForUpdate({
-    workspaceId: input.workspaceId,
-    documentId: input.documentId,
-    tabIds: refs.map((ref) => ref.tab_id),
-    expectedContentVersion: input.expectedTargetTabListVersion,
-  });
-  if (versionCheck.kind !== 'ok') return versionCheck;
-
-  const acceptedEditIds: string[] = [];
-  let runId: string | null = null;
-  const edits: GreenfieldDocumentEditRecord[] = [];
-  for (const editId of input.editIds) {
-    const edit = await loadPendingGreenfieldDocumentEditForUpdate({
+  return withDocumentEditMutationLock(input, async () => {
+    const document = await getGreenfieldDocumentById(input);
+    if (!document) return { kind: 'not_found' };
+    if (
+      input.expectedContentVersion !== undefined &&
+      document.list_version !== input.expectedContentVersion
+    ) {
+      return {
+        kind: 'version_conflict',
+        currentVersion: document.list_version,
+      };
+    }
+    const refs = await listPendingGreenfieldDocumentEditRefs({
       workspaceId: input.workspaceId,
       documentId: input.documentId,
-      editId,
+      editIds: input.editIds,
     });
-    if (!edit) return { kind: 'not_found' };
-    const validation = await withTrustedDbWrites(() =>
-      validateGreenfieldDocumentEdit(edit, input.workspaceId),
-    );
-    if (validation.kind !== 'ok') return validation;
-    edits.push(edit);
-  }
+    const refsById = new Map(refs.map((ref) => [ref.id, ref]));
+    for (const editId of input.editIds) {
+      if (!refsById.has(editId)) return { kind: 'not_found' };
+    }
+    const versionCheck = await checkGreenfieldDocumentTabVersionsForUpdate({
+      workspaceId: input.workspaceId,
+      documentId: input.documentId,
+      tabIds: refs.map((ref) => ref.tab_id),
+      expectedContentVersion: input.expectedTargetTabListVersion,
+    });
+    if (versionCheck.kind !== 'ok') return versionCheck;
 
-  const insertOffsets = new Map<string, number>();
-  for (const edit of edits) {
-    if (edit.op === 'insert') {
-      const offsetKey = `${edit.tab_id}:${edit.after_block_id ?? ''}`;
-      const insertOrderOffset = insertOffsets.get(offsetKey) ?? 0;
-      insertOffsets.set(offsetKey, insertOrderOffset + 1);
+    const acceptedEditIds: string[] = [];
+    let runId: string | null = null;
+    const edits: GreenfieldDocumentEditRecord[] = [];
+    for (const editId of input.editIds) {
+      const edit = await loadPendingGreenfieldDocumentEditForUpdate({
+        workspaceId: input.workspaceId,
+        documentId: input.documentId,
+        editId,
+      });
+      if (!edit) return { kind: 'not_found' };
+      const validation = await withTrustedDbWrites(() =>
+        validateGreenfieldDocumentEdit(edit, input.workspaceId),
+      );
+      if (validation.kind !== 'ok') return validation;
+      edits.push(edit);
+    }
+
+    const insertOffsets = new Map<string, number>();
+    for (const edit of edits) {
+      if (edit.op === 'insert') {
+        const offsetKey = `${edit.tab_id}:${edit.after_block_id ?? ''}`;
+        const insertOrderOffset = insertOffsets.get(offsetKey) ?? 0;
+        insertOffsets.set(offsetKey, insertOrderOffset + 1);
+        const applied = await withTrustedDbWrites(() =>
+          applyGreenfieldDocumentEdit(edit, input.workspaceId, {
+            allowSupersededStatus: true,
+            ignoreInsertListVersionConflict: true,
+            insertOrderOffset,
+            supersedeOnConflict: acceptedEditIds.length > 0,
+          }),
+        );
+        if (applied.kind !== 'ok') {
+          if (acceptedEditIds.length > 0) continue;
+          return applied;
+        }
+        acceptedEditIds.push(edit.id);
+        runId ??= edit.proposed_by_run_id;
+        continue;
+      }
+      const pending = await loadPendingGreenfieldDocumentEditForUpdate({
+        workspaceId: input.workspaceId,
+        documentId: input.documentId,
+        editId: edit.id,
+      });
+      if (!pending) continue;
       const applied = await withTrustedDbWrites(() =>
-        applyGreenfieldDocumentEdit(edit, input.workspaceId, {
-          allowSupersededStatus: true,
-          ignoreInsertListVersionConflict: true,
-          insertOrderOffset,
+        applyGreenfieldDocumentEdit(pending, input.workspaceId, {
           supersedeOnConflict: acceptedEditIds.length > 0,
         }),
       );
@@ -1306,37 +1329,19 @@ export async function acceptGreenfieldDocumentEdits(input: {
         if (acceptedEditIds.length > 0) continue;
         return applied;
       }
-      acceptedEditIds.push(edit.id);
-      runId ??= edit.proposed_by_run_id;
-      continue;
+      acceptedEditIds.push(pending.id);
+      runId ??= pending.proposed_by_run_id;
     }
-    const pending = await loadPendingGreenfieldDocumentEditForUpdate({
-      workspaceId: input.workspaceId,
-      documentId: input.documentId,
-      editId: edit.id,
-    });
-    if (!pending) continue;
-    const applied = await withTrustedDbWrites(() =>
-      applyGreenfieldDocumentEdit(pending, input.workspaceId, {
-        supersedeOnConflict: acceptedEditIds.length > 0,
-      }),
-    );
-    if (applied.kind !== 'ok') {
-      if (acceptedEditIds.length > 0) continue;
-      return applied;
-    }
-    acceptedEditIds.push(pending.id);
-    runId ??= pending.proposed_by_run_id;
-  }
 
-  const updated = await getGreenfieldDocumentById(input);
-  if (!updated) return { kind: 'not_found' };
-  return {
-    kind: 'ok',
-    document: updated,
-    editIds: acceptedEditIds,
-    runId,
-  };
+    const updated = await getGreenfieldDocumentById(input);
+    if (!updated) return { kind: 'not_found' };
+    return {
+      kind: 'ok',
+      document: updated,
+      editIds: acceptedEditIds,
+      runId,
+    };
+  });
 }
 
 export async function acceptGreenfieldDocumentEditRun(input: {
@@ -1346,17 +1351,19 @@ export async function acceptGreenfieldDocumentEditRun(input: {
   expectedContentVersion?: number;
   expectedTargetTabListVersion?: number;
 }): Promise<GreenfieldDocumentEditResolveResult> {
-  const edits = await listPendingGreenfieldDocumentEditsByRun(input);
-  if (edits.length === 0) return { kind: 'not_found' };
-  const result = await acceptGreenfieldDocumentEdits({
-    workspaceId: input.workspaceId,
-    documentId: input.documentId,
-    editIds: edits.map((edit) => edit.id),
-    expectedContentVersion: input.expectedContentVersion,
-    expectedTargetTabListVersion: input.expectedTargetTabListVersion,
+  return withDocumentEditMutationLock(input, async () => {
+    const edits = await listPendingGreenfieldDocumentEditsByRun(input);
+    if (edits.length === 0) return { kind: 'not_found' };
+    const result = await acceptGreenfieldDocumentEdits({
+      workspaceId: input.workspaceId,
+      documentId: input.documentId,
+      editIds: edits.map((edit) => edit.id),
+      expectedContentVersion: input.expectedContentVersion,
+      expectedTargetTabListVersion: input.expectedTargetTabListVersion,
+    });
+    if (result.kind !== 'ok') return result;
+    return { ...result, runId: input.runId };
   });
-  if (result.kind !== 'ok') return result;
-  return { ...result, runId: input.runId };
 }
 
 export async function rejectGreenfieldDocumentEdit(input: {

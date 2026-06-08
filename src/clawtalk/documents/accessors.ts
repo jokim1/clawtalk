@@ -5,6 +5,7 @@ import {
   rejectGreenfieldDocumentEdit,
   type GreenfieldDocumentEditResolveResult,
 } from '../talks/greenfield-detail-accessors.js';
+import { withDocumentEditMutationLock } from './edit-locks.js';
 
 export type NativeDocumentFormat = 'markdown' | 'html';
 export type NativeDocumentBlockKind =
@@ -410,29 +411,30 @@ export async function acceptNativeDocumentEditRun(input: {
   reviewedEditIds: string[];
   expectedContentVersion?: number;
 }): Promise<NativeDocumentResolveResult> {
-  // Preflight gate; same non-atomic supersede residual as acceptAllNativeDocumentEdits.
-  const runPendingEditIds = await listNativeRunPendingEditIds(input);
-  if (!sameEditIdSet(runPendingEditIds, input.reviewedEditIds)) {
-    return { kind: 'edit_set_mismatch', pendingEditIds: runPendingEditIds };
-  }
-  if (runPendingEditIds.length === 0) return { kind: 'not_found' };
-  // Accept exactly the run's gated edits by id rather than re-enumerating the
-  // run, so an edit appended to the run after page load cannot slip in.
-  const result = await acceptGreenfieldDocumentEdits({
-    workspaceId: input.workspaceId,
-    documentId: input.documentId,
-    editIds: runPendingEditIds,
-    expectedTargetTabListVersion: input.expectedContentVersion,
+  return withDocumentEditMutationLock(input, async () => {
+    const runPendingEditIds = await listNativeRunPendingEditIds(input);
+    if (!sameEditIdSet(runPendingEditIds, input.reviewedEditIds)) {
+      return { kind: 'edit_set_mismatch', pendingEditIds: runPendingEditIds };
+    }
+    if (runPendingEditIds.length === 0) return { kind: 'not_found' };
+    // Accept exactly the run's gated edits by id rather than re-enumerating the
+    // run, so an edit appended to the run after page load cannot slip in.
+    const result = await acceptGreenfieldDocumentEdits({
+      workspaceId: input.workspaceId,
+      documentId: input.documentId,
+      editIds: runPendingEditIds,
+      expectedTargetTabListVersion: input.expectedContentVersion,
+    });
+    const document =
+      result.kind === 'ok'
+        ? await getNativeDocument({
+            workspaceId: input.workspaceId,
+            documentId: input.documentId,
+          })
+        : undefined;
+    const native = toNativeResolveResult(result, document);
+    return native.kind === 'ok' ? { ...native, runId: input.runId } : native;
   });
-  const document =
-    result.kind === 'ok'
-      ? await getNativeDocument({
-          workspaceId: input.workspaceId,
-          documentId: input.documentId,
-        })
-      : undefined;
-  const native = toNativeResolveResult(result, document);
-  return native.kind === 'ok' ? { ...native, runId: input.runId } : native;
 }
 
 export async function acceptAllNativeDocumentEdits(input: {
@@ -441,45 +443,38 @@ export async function acceptAllNativeDocumentEdits(input: {
   reviewedEditIds: string[];
   expectedContentVersion?: number;
 }): Promise<NativeDocumentResolveResult> {
-  // This gate is a preflight consistency check, not atomic with the apply below.
-  // It fully closes the primary contract violation — an unseen edit being
-  // *applied* — because we only ever accept the explicit reviewed ids. A
-  // narrower residual remains: an edit inserted on an accepted edit's block in
-  // the preflight→apply window can be *superseded* (discarded, not applied) by
-  // the document_edits_bump_versions_on_accept trigger — the same inherent
-  // same-block supersede a single per-edit accept already triggers. Closing that
-  // fully requires serializing proposal-insertion (executor) against accepts;
-  // tracked as a follow-up, out of scope for this UI surface.
-  const edits = await listNativeDocumentEdits({
-    workspaceId: input.workspaceId,
-    documentId: input.documentId,
-    status: 'pending',
+  return withDocumentEditMutationLock(input, async () => {
+    const edits = await listNativeDocumentEdits({
+      workspaceId: input.workspaceId,
+      documentId: input.documentId,
+      status: 'pending',
+    });
+    const pendingEditIds = edits.map((edit) => edit.id);
+    if (!sameEditIdSet(pendingEditIds, input.reviewedEditIds)) {
+      return { kind: 'edit_set_mismatch', pendingEditIds };
+    }
+    if (pendingEditIds.length === 0) {
+      const document = await getNativeDocument(input);
+      if (!document) return { kind: 'not_found' };
+      return { kind: 'ok', document, editIds: [], runId: null };
+    }
+    // Apply exactly the gated set, in the server's canonical pending order
+    // (created_at asc, id asc) so insert ordering matches the prior behavior.
+    const result = await acceptGreenfieldDocumentEdits({
+      workspaceId: input.workspaceId,
+      documentId: input.documentId,
+      editIds: pendingEditIds,
+      expectedTargetTabListVersion: input.expectedContentVersion,
+    });
+    const document =
+      result.kind === 'ok'
+        ? await getNativeDocument({
+            workspaceId: input.workspaceId,
+            documentId: input.documentId,
+          })
+        : undefined;
+    return toNativeResolveResult(result, document);
   });
-  const pendingEditIds = edits.map((edit) => edit.id);
-  if (!sameEditIdSet(pendingEditIds, input.reviewedEditIds)) {
-    return { kind: 'edit_set_mismatch', pendingEditIds };
-  }
-  if (pendingEditIds.length === 0) {
-    const document = await getNativeDocument(input);
-    if (!document) return { kind: 'not_found' };
-    return { kind: 'ok', document, editIds: [], runId: null };
-  }
-  // Apply exactly the gated set, in the server's canonical pending order
-  // (created_at asc, id asc) so insert ordering matches the prior behavior.
-  const result = await acceptGreenfieldDocumentEdits({
-    workspaceId: input.workspaceId,
-    documentId: input.documentId,
-    editIds: pendingEditIds,
-    expectedTargetTabListVersion: input.expectedContentVersion,
-  });
-  const document =
-    result.kind === 'ok'
-      ? await getNativeDocument({
-          workspaceId: input.workspaceId,
-          documentId: input.documentId,
-        })
-      : undefined;
-  return toNativeResolveResult(result, document);
 }
 
 export async function rejectNativeDocumentEdit(input: {

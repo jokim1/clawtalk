@@ -1,5 +1,6 @@
 import { getDbPg, type Sql, withTrustedDbWrites } from '../../db.js';
 import { logger } from '../../logger.js';
+import { lockDocumentEditMutationsOnSql } from '../documents/edit-locks.js';
 import { emitOutboxEventOnSql, enqueueOutboxNotify } from './outbox-emit.js';
 import type { TalkExecutionUsage } from './executor.js';
 import { fitsProviderReplayBudget } from './provider-replay-budget.js';
@@ -312,6 +313,11 @@ async function insertJobDocumentAppendOnSql(input: {
   if (!target) {
     throw new Error('Job document append target not found');
   }
+
+  await lockDocumentEditMutationsOnSql(input.sql, {
+    workspaceId: input.run.workspace_id,
+    documentId: target.document_id,
+  });
 
   let editId: string;
   try {

@@ -1,6 +1,6 @@
 # ClawTalk Refactor — Full Completion Audit
 
-> **Status:** live audit snapshot updated 2026-06-08 for the Phase 5 native Documents API unblocker, MVP dry-run CI eval gate, first duplicate-route de-facade deletion, and Home P2 hardening.
+> **Status:** live audit snapshot updated 2026-06-08 for the Phase 5 native Documents API unblocker, MVP dry-run CI eval gate, first duplicate-route de-facade deletion, Home P2 hardening, and Documents accept/proposal race hardening.
 > **Purpose:** answer how much of the greenfield refactor is actually complete, what remains, and how to improve the plan so Codex + Claude/Opus can execute with minimal human interruption.
 > **Method:** second-pass audit against current main after PR #541, with later Phase 5 backend/eval evidence folded into the live status rows.
 
@@ -16,7 +16,7 @@ The backend/data cutover is real. The product refactor is not done.
 | Frontend structural decomposition | ~70% ✅ | `TalkDetailPage.tsx` is 1,429 LOC and `SettingsPage.tsx` is 1,066 LOC. Talk shell/render surface and page-owned controllers are extracted alongside Settings Profile/Tools/OAuth panels; remaining frontend work is product surfaces, Salon migration, and native facade consumers, not god-file decomposition. |
 | De-facade | ~5% 🔄 | The dead duplicate `worker-app.ts` Hono mounts for sidebar reorder and run-context were deleted; remaining compat facades still serve live consumers: synthetic threads, runs-with-`threadId`, flat content markdown/html, snapshot compat, policy/tool/connectors facades, run-context synthesis, and the attachments guard. |
 | Visual system (Salon) | Foundation + shell shipped 🔄 | Salon foundation shipped in PR #547: `webapp/src/salon/*` CSS-variable tokens (`--salon-*`), fonts (Newsreader/Geist/Geist Mono), brand mark, and the primitive library (CTMark/CTIcon/Avatar/AgentAvatar/RunPill/Chip/Kbd/Button/Input/Modal/Sheet/Popover) with behavior-preserving proof migrations + a smoke suite. Surfaces re-skinned (PR #550): Home, Archive, Registered Agents + agent profile, the Talks list page, and the sign-in surface — each off its legacy classes with dead `styles.css` rules trimmed + a responsive Playwright spec. App shell shipped (PR #550): the prototype 3-column icon-rail (`webapp/src/components/shell/`: `IconRail` + `SecondaryList` + `RailProfileMenu`) replacing `ClawTalkSidebar`/`WorkspaceSwitcher`/`SidebarProfileMenu` + the `App.tsx` header; talk CRUD/DnD/⌘K preserved, desktop collapse + mobile drawer, ~550 LOC dead CSS removed. Contrast fixed: `--salon-accent-strong` `#b05530` (≈ 5.0:1 on white) backs text-bearing primary buttons. Remaining: `TalkDetailPage`/`SettingsPage`-owned CSS. |
-| Net-new product surfaces | ~25% 🔄 | Live app covers Talk list, Talk detail, Settings, and Salon-native Home (read API + write lifecycle), New Talk sheet, ⌘K command palette, Registered Agents panel + standalone agent profile, and Archive (all PR #550), plus the native Documents UI — `/app/documents` index + `/app/documents/:id` viewer + pending-edit accept/reject console (PR #557). Home P2 hardening routes `open_document_edit` to native Documents, keeps optimistic summary/curator state coherent, and returns 403 for guest lifecycle writes. Native Documents backend routes/client methods exist (PR #552). Forge remains post-MVP. |
+| Net-new product surfaces | ~25% 🔄 | Live app covers Talk list, Talk detail, Settings, and Salon-native Home (read API + write lifecycle), New Talk sheet, ⌘K command palette, Registered Agents panel + standalone agent profile, and Archive (all PR #550), plus the native Documents UI — `/app/documents` index + `/app/documents/:id` viewer + pending-edit accept/reject console (PR #557). Home P2 hardening routes `open_document_edit` to native Documents, keeps optimistic summary/curator state coherent, and returns 403 for guest lifecycle writes. Native Documents backend routes/client methods exist (PR #552), and accept resolution is serialized with executor proposal inserts so a concurrent same-block proposal is not silently superseded during accept. Forge remains post-MVP. |
 | Eval gate | ~40% 🔄 | `eval/` exists with six launch-critical dry-run scenarios, deterministic fixtures, grader prompt contracts, harness tests, and `npm run eval`; PR CI now runs the deterministic dry-run gate, while live backend/provider grading is still unwired. |
 
 The biggest missing work is Talk/Settings Salon completion, in-Talk native Documents, remaining Home lifecycle actions, de-facade, live eval hardening, and final surface completion. Forge remains post-MVP.
@@ -107,7 +107,7 @@ Current branch counts below are matching-line counts for those modalities in tha
 ### 3c. Net-new Backends
 
 - Home native read/write routes and the Salon Home UI are live for summary, inbox, recommendations, news, inbox dismiss/snooze, and recommendation dismiss. Remaining lifecycle gaps are inbox mark-read/resolve and news add-to-context/snooze; Home P2 hardening now returns 403 for guest lifecycle writes instead of RLS-shaped 404s.
-- Native Documents routes/client methods and the standalone Documents UI now expose list/detail tabs, blocks, pending edits, and accept/reject over `documents`/`doc_tabs`/`doc_blocks`/`document_edits`. The in-Talk doc pane still needs to consume that native path before flat compat content can be deleted.
+- Native Documents routes/client methods and the standalone Documents UI now expose list/detail tabs, blocks, pending edits, and accept/reject over `documents`/`doc_tabs`/`doc_blocks`/`document_edits`. Accept resolution is serialized with executor proposal inserts to close the preflight-to-apply supersede race; the in-Talk doc pane still needs to consume that native path before flat compat content can be deleted.
 - Forge tables exist, but runtime and UI are intentionally post-MVP.
 
 ### 3d. Provisioned-but-unused Schema
@@ -172,6 +172,7 @@ Salon should be first-class before Home/Documents/Agents, otherwise those surfac
 
 - Native Documents API/client path exists for list/detail tabs+blocks+pending edits and accept/reject.
 - Standalone Documents page and native viewer/edit-review console are live.
+- Accept resolution now serializes with executor proposal inserts so a competing same-block proposal cannot be silently superseded during the accept window.
 - Remaining: in-Talk doc pane over native tabs/blocks.
 - Pending edit accept/reject UX exists in standalone Documents; full authoring editor remains future work.
 - Delete flat content facade after the final consumer moves.
