@@ -14,7 +14,7 @@ The backend/data cutover is real. The product refactor is not done.
 |---|---|---|
 | Backend / data cutover | ~90% ✅ | Greenfield is the only live runtime. Legacy runtime/accessors were retired, and backend CI is a signal again. Remaining backend work is mainly facade deletion plus Home/Forge backends. |
 | Frontend structural decomposition | ~50% 🔄 | `TalkDetailPage.tsx` is 5,429 LOC and `SettingsPage.tsx` is 2,147 LOC. Talk panels, composer, thread view, reducer, and stream hook are extracted; the page-owned controller bulk remains. |
-| De-facade | ~0% ⛔ | Compat facades still serve the webapp: synthetic threads, runs-with-`threadId`, flat content markdown/html, snapshot compat, policy/tool/connectors facades, and run-context synthesis. |
+| De-facade | ~5% 🔎 | Compat facades still serve the webapp. A Phase 5 readiness scout now has a repeatable consumer audit and deletion ledger; no facade is dry enough to delete in this lane. |
 | Visual system (Salon) | Foundation in review 🔄 | Salon foundation shipped in PR #547: `webapp/src/salon/*` CSS-variable tokens (`--salon-*`), fonts (Newsreader/Geist/Geist Mono), brand mark, and the primitive library (CTMark/CTIcon/Avatar/AgentAvatar/RunPill/Chip/Kbd/Button/Input/Modal/Sheet/Popover) with behavior-preserving proof migrations + a smoke suite. Remaining: broad re-skin of the 7,284 LOC pre-Salon `webapp/src/styles.css`. |
 | Net-new product surfaces | ~5% ⛔ | Live app covers Talk list, Talk detail, and Settings. Home, native Documents, standalone Agents, Archive, command palette, New Talk sheet, and Forge are unbuilt or skeletal. |
 | Eval gate | ~5% ⛔ | `docs/eval-suite.md` exists, but there is no `eval/` directory and no `npm run eval`. |
@@ -84,6 +84,47 @@ Each facade should get a deletion ticket with owner, consumers, native replaceme
 | 9 | Attachments guard | Routes return `attachments_not_available`. | Future R2-backed chat attachments, if v1 needs them. |
 
 Duplicate route registrations also need cleanup: `reorderGreenfieldTalkSidebarRoute` and `getGreenfieldRunContextRoute` are mounted in both `worker-app.ts` and `greenfield-api.ts`; first match wins, leaving dead duplicate mounts.
+
+### 3a.1 Phase 5 De-facade Readiness Ledger
+
+> **Scout status:** 2026-06-07 on `codex/phase5-defacade-readiness`.
+> **Collision check:** open PRs #553 (`codex/phase5-eval-gate`), #552 (`codex/phase5-documents-api-unblocker`), #550 (`lane-o/phase5-ui`), #549 (`codex/talkdetail-shell-controller-extraction`), and #548 (`codex/phase2-structural-cleanup`). This lane stayed docs/audit-tool only to avoid active UI/backend ownership.
+
+Repeatable audit command:
+
+```bash
+node scripts/audit-facade-consumers.mjs
+```
+
+The script runs five modalities for every queued facade and prints the exact `rg` command for each: literal token grep, import/re-export trace, route registration trace, test fixture/assertion trace, and dynamic/string-key/cache-router trace. Baseline counts below are `literal / imports / routes / tests / dynamic`.
+
+| # | Facade | Baseline counts | Status | Current consumers / blocker | Native replacement | Deletion preconditions |
+|---|---:|---|---|---|---|---|
+| 1 | Synthetic `threadId` | 376 / 64 / 90 / 221 / 569 | blocked | Live backend synthesis in `greenfield-detail.ts`; frontend keys Talk detail, sidebar doc links, snapshots, scroll/localStorage, reducers, stream routing, and tests on `threadId`. | Treat Talk as the conversation; use Talk id/run ids plus native document ids, not thread ids. | Frontend URL/cache/reducer/doc-pane model migrates off `threadId`; `/threads` compatibility routes have zero consumers; tests cover Talk-native navigation and hydration. |
+| 2 | Runs/messages with `threadId` DTO fields | 634 / 224 / 100 / 334 / 85 | blocked | `TalkMessage`, `TalkRun`, run reducer, stream hook, event filters, job summaries, and route DTOs still carry or filter by `threadId`. | Native run/message DTOs keyed by `talkId`, `responseGroupId`, `round`, run id, and message id. | Webapp reducer/stream/tests consume native DTOs; backend event filters no longer need per-thread filtering; zero `run.threadId`/`message.threadId` consumers. |
+| 3 | Run-context fabrication | 47 / 28 / 9 / 16 / 24 | blocked | `getGreenfieldRunContextRoute` returns a legacy `TalkRunContextSnapshot` with synthetic `threadId`; Talk detail stores `runContextPanels`; duplicate route mounts still exist. | Native run context snapshot without thread fields, using run id and captured prompts/source/tool manifests. | UI panel and tests consume native run-context shape; route contract removes `threadId`; duplicate mount cleanup lands after backend lane clears. |
+| 4 | Flat content projections `bodyMarkdown`/`bodyHtml` | 118 / 140 / 59 / 106 / 344 | blocked | `Content`, `RichTextEditor`, `CopyExportMenu`, `PendingEditDocSurface`, Talk detail doc pane, content routes, and tests use flattened markdown/html. | Native `documents` / `doc_tabs` / `doc_blocks` / `document_edits` contract and block editor. | Native Documents UI/editor consumes block records; export/edit tests cover native blocks; `/threads/:threadId/content` and flat body fields are dry. |
+| 5 | `snapshotVersion` compat | 30 / 69 / 11 / 6 / 105 | blocked | `getTalkSnapshotVersion`, `useTalkSnapshot`, `wsCacheRouter`, and stream delta replay use an outbox high-water as `snapshotVersion`. | Native per-Talk hydration cursor/version contract. | Webapp cache router uses native cursor semantics; route tests assert new version field; no `snapshotVersion` readers remain. |
+| 6 | Policy facade | 30 / 12 / 24 / 22 / 98 | blocked | `/api/v1/talks/:talkId/policy`, `talkPolicyPayload`, `TalkAgentsPanel`, and tests still map policy payloads onto `talk_agents`. | Native roster/run settings over `talk_agents` and per-run config. | Agents panel and API callers use roster endpoints directly; policy route tests removed/replaced; zero `/policy` consumers. |
+| 7 | Tool/connectors facades | 122 / 211 / 53 / 105 / 533 | blocked | Settings and Talk connector panels consume workspace `channels`, workspace `data-connectors`, Talk connector links, and light-family `toolFamily` shapes over `talk_tools`. | Single native connectors/bindings surface plus per-tool toggles. | Settings/Talk panels consume canonical connector binding DTOs and `talk_tools.tool_id`; tests cover native toggles/bindings; old channel/data-connector route families are dry. |
+| 8 | Duplicate Hono mounts: `reorderGreenfieldTalkSidebarRoute`, `getGreenfieldRunContextRoute` | 16 / 8 / 25 / 11 / 22 | blocked | Both handlers are registered by `mountGreenfieldApiRoutes(app)` and again later in `worker-app.ts`; first match wins, so later direct mounts are dead but in active backend ownership. | One route registration source, preferably `greenfield-api.ts`. | Backend lane clears; remove only duplicate `worker-app.ts` imports/mounts; route tests prove sidebar reorder and run context still pass through `mountGreenfieldApiRoutes`. |
+| 9 | `attachments_not_available` guard | 31 / 23 / 18 / 37 / 68 | blocked | Webapp attachment helpers/components and backend chat/upload/delete routes intentionally return `attachments_not_available`; tests assert fail-closed behavior. | Future R2-backed chat attachment routes, or explicit removal of chat attachment UI/helpers. | Product decision/native replacement for chat attachments; greenfield attachment route tests cover create/read/delete, or UI/API helpers are removed and no callers remain. |
+
+Duplicate mount evidence:
+
+```bash
+rg -n "mountGreenfieldApiRoutes|reorderGreenfieldTalkSidebarRoute|getGreenfieldRunContextRoute|/api/v1/talks/sidebar/reorder|/api/v1/talks/:talkId/runs/:runId/context" src/clawtalk/web/worker-app.ts src/clawtalk/web/routes/greenfield-api.ts
+```
+
+Key evidence:
+
+- `src/clawtalk/web/routes/greenfield-api.ts:199` defines `mountGreenfieldApiRoutes(app)`.
+- `src/clawtalk/web/routes/greenfield-api.ts:413` mounts `/api/v1/talks/sidebar/reorder`; `:426` calls `reorderGreenfieldTalkSidebarRoute`.
+- `src/clawtalk/web/routes/greenfield-api.ts:743` mounts `/api/v1/talks/:talkId/runs/:runId/context`; `:751` calls `getGreenfieldRunContextRoute`.
+- `src/clawtalk/web/worker-app.ts:313` calls `mountGreenfieldApiRoutes(app)`.
+- `src/clawtalk/web/worker-app.ts:1085` and `:1109` mount the same two routes again, calling the same handlers at `:1098` and `:1117`.
+
+Deletion conclusion: no queued facade was deleted. Every item has nonzero live consumers or an active-lane ownership blocker. The safest next deletion candidate is the duplicate Hono mount cleanup after #552 clears backend ownership, because it removes dead duplicate registrations rather than a product-facing compatibility contract.
 
 ### 3b. Net-new Backends
 
