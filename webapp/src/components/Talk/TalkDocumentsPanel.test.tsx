@@ -167,6 +167,7 @@ describe('TalkDocumentsPanel', () => {
     await waitFor(() =>
       expect(mockApi.listDocuments).toHaveBeenCalledWith({
         workspaceId: 'ws-1',
+        includeUnlinked: false,
         limit: 250,
       }),
     );

@@ -54,10 +54,16 @@ export function TalkDocumentsPanel({
     setState({ status: 'loading' });
     try {
       // The list route has no by-talk filter, so we fetch the workspace's
-      // documents and resolve the primary by primaryTalkId. Request the server
-      // max (250) so the Talk's primary can't fall off the default first page;
-      // a by-talk lookup is the proper fix if a workspace ever exceeds that.
-      const documents = await listDocuments({ workspaceId, limit: 250 });
+      // talk-linked documents (includeUnlinked: false → only rows with a
+      // primary_talk_id) and resolve the primary by primaryTalkId. Excluding
+      // unlinked docs keeps the set small, and requesting the server max (250)
+      // means the Talk's primary can't fall off the first page even with many
+      // talks; a by-talk lookup is the proper fix at scale.
+      const documents = await listDocuments({
+        workspaceId,
+        includeUnlinked: false,
+        limit: 250,
+      });
       if (signal.cancelled) return;
       const primary =
         documents.find((doc) => doc.primaryTalkId === talkId) ?? null;
