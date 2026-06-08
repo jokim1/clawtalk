@@ -16,6 +16,7 @@ import { executeGreenfieldApplyContentEdit } from '../../talks/greenfield-docume
 import type { AuthContext } from '../types.js';
 import {
   acceptAllDocumentEditsRoute,
+  createDocumentRoute,
   acceptDocumentEditRoute,
   acceptDocumentEditRunRoute,
   getDocumentRoute,
@@ -384,6 +385,199 @@ describe('native document routes', () => {
           }),
         ]),
       },
+    });
+  });
+
+  it('creates a primary native document for a talk through the native route', async () => {
+    const talkId = await seedTalk({
+      ownerId: USER_ID,
+      topicTitle: 'Native Create Talk',
+    });
+    const workspaceId = await workspaceForTalk(talkId);
+
+    const created = await createDocumentRoute({
+      auth: auth(),
+      threadId: talkId,
+      title: 'Native Create Draft',
+      format: 'html',
+    });
+
+    expect(created.statusCode).toBe(201);
+    expect(created.body).toMatchObject({
+      ok: true,
+      data: {
+        document: {
+          primaryTalkId: talkId,
+          workspaceId,
+          title: 'Native Create Draft',
+          format: 'html',
+          tabCount: 1,
+          blockCount: 0,
+          pendingEditCount: 0,
+          tabs: [
+            {
+              title: 'Main',
+              sortOrder: 0,
+              listVersion: 1,
+              blocks: [],
+            },
+          ],
+          pendingEdits: [],
+        },
+      },
+    });
+  });
+
+  it('creates the primary document idempotently when one already exists', async () => {
+    const talkId = await seedTalk({
+      ownerId: USER_ID,
+      topicTitle: 'Existing Native Create Talk',
+    });
+    const workspaceId = await workspaceForTalk(talkId);
+
+    const first = await createDocumentRoute({
+      auth: auth(),
+      workspaceId,
+      talkId,
+      title: 'First Native Draft',
+    });
+    const second = await createDocumentRoute({
+      auth: auth(),
+      workspaceId,
+      talkId,
+      title: 'Second Native Draft',
+    });
+
+    expect(first.statusCode).toBe(201);
+    expect(second.statusCode).toBe(201);
+    if (!first.body.ok || !second.body.ok) {
+      throw new Error('Expected native create to succeed');
+    }
+    expect(second.body.data.document.id).toBe(first.body.data.document.id);
+    expect(second.body.data.document.title).toBe('First Native Draft');
+
+    const [counts] = await getDbPg()<
+      Array<{ document_count: number; tab_count: number; block_count: number }>
+    >`
+      select
+        count(distinct d.id)::int as document_count,
+        count(distinct dt.id)::int as tab_count,
+        count(distinct db.id)::int as block_count
+      from public.documents d
+      left join public.doc_tabs dt
+        on dt.workspace_id = d.workspace_id
+       and dt.document_id = d.id
+      left join public.doc_blocks db
+        on db.workspace_id = d.workspace_id
+       and db.document_id = d.id
+      where d.workspace_id = ${workspaceId}::uuid
+        and d.primary_talk_id = ${talkId}::uuid
+    `;
+    expect(counts).toEqual({
+      document_count: 1,
+      tab_count: 1,
+      block_count: 0,
+    });
+  });
+
+  it('rejects invalid native create payloads before writing', async () => {
+    const talkId = await seedTalk({
+      ownerId: USER_ID,
+      topicTitle: 'Invalid Native Create Talk',
+    });
+    const workspaceId = await workspaceForTalk(talkId);
+
+    const emptyTitle = await createDocumentRoute({
+      auth: auth(),
+      workspaceId,
+      talkId,
+      title: ' ',
+    });
+    expect(emptyTitle.statusCode).toBe(400);
+    expect(emptyTitle.body).toMatchObject({
+      ok: false,
+      error: { code: 'title_required' },
+    });
+
+    const badFormat = await createDocumentRoute({
+      auth: auth(),
+      workspaceId,
+      talkId,
+      title: 'Bad Format',
+      format: 'plain',
+    });
+    expect(badFormat.statusCode).toBe(400);
+    expect(badFormat.body).toMatchObject({
+      ok: false,
+      error: { code: 'invalid_format' },
+    });
+
+    const missingTalk = await createDocumentRoute({
+      auth: auth(),
+      workspaceId,
+      title: 'Missing Talk',
+    });
+    expect(missingTalk.statusCode).toBe(400);
+    expect(missingTalk.body).toMatchObject({
+      ok: false,
+      error: { code: 'talk_id_required' },
+    });
+
+    const badThread = await createDocumentRoute({
+      auth: auth(),
+      workspaceId,
+      threadId: 'not-a-uuid',
+      title: 'Bad Thread',
+    });
+    expect(badThread.statusCode).toBe(400);
+    expect(badThread.body).toMatchObject({
+      ok: false,
+      error: { code: 'invalid_thread_id' },
+    });
+
+    const mismatch = await createDocumentRoute({
+      auth: auth(),
+      workspaceId,
+      talkId,
+      threadId: OTHER_USER_ID,
+      title: 'Mismatched Thread',
+    });
+    expect(mismatch.statusCode).toBe(400);
+    expect(mismatch.body).toMatchObject({
+      ok: false,
+      error: { code: 'thread_talk_mismatch' },
+    });
+
+    const [count] = await getDbPg()<Array<{ count: number }>>`
+      select count(*)::int as count
+      from public.documents
+      where workspace_id = ${workspaceId}::uuid
+        and primary_talk_id = ${talkId}::uuid
+    `;
+    expect(count).toEqual({ count: 0 });
+  });
+
+  it('allows guest reads but denies native document creation', async () => {
+    const fixture = await createDocumentFixture();
+    await addGuestToWorkspace(fixture.workspaceId);
+
+    const read = await getDocumentRoute({
+      auth: auth(GUEST_USER_ID),
+      workspaceId: fixture.workspaceId,
+      documentId: fixture.documentId,
+    });
+    expect(read.statusCode).toBe(200);
+
+    const denied = await createDocumentRoute({
+      auth: auth(GUEST_USER_ID),
+      workspaceId: fixture.workspaceId,
+      talkId: fixture.talkId,
+      title: 'Guest Native Draft',
+    });
+    expect(denied.statusCode).toBe(403);
+    expect(denied.body).toMatchObject({
+      ok: false,
+      error: { code: 'workspace_writer_required' },
     });
   });
 

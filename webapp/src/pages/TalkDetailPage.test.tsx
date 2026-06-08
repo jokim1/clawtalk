@@ -3432,7 +3432,7 @@ describe('TalkDetailPage', () => {
   // ── PR-A A3: Hybrid MD+HTML doc-pane integration ──────────────────
   it('renders the doc modal with a format radio and POSTs format=html on submit', async () => {
     const user = userEvent.setup();
-    const onCreateContent = vi.fn(({ title, format }) =>
+    const onCreateDocument = vi.fn(({ title, format }) =>
       buildContent({
         id: 'content-new',
         threadId: DEFAULT_THREAD_ID,
@@ -3440,7 +3440,7 @@ describe('TalkDetailPage', () => {
         contentFormat: (format as Content['contentFormat']) ?? 'markdown',
       }),
     );
-    installTalkDetailFetch({ onCreateContent });
+    installTalkDetailFetch({ onCreateDocument });
     renderDetailPage('/app/talks/talk-1/talk', {
       sidebarContents: [],
     });
@@ -3465,8 +3465,12 @@ describe('TalkDetailPage', () => {
     await user.click(screen.getByRole('button', { name: /create document/i }));
 
     await waitFor(() =>
-      expect(onCreateContent).toHaveBeenCalledWith(
-        expect.objectContaining({ title: 'HTML Doc', format: 'html' }),
+      expect(onCreateDocument).toHaveBeenCalledWith(
+        expect.objectContaining({
+          talkId: 'talk-1',
+          title: 'HTML Doc',
+          format: 'html',
+        }),
       ),
     );
   });
@@ -3485,7 +3489,7 @@ describe('TalkDetailPage', () => {
     // fetches the initial load makes — we hold exactly the next one, which is
     // the refetch onReplayGap kicks off below.
     let holdNextSnapshot = false;
-    const onCreateContent = vi.fn(({ title, format }) =>
+    const onCreateDocument = vi.fn(({ title, format }) =>
       buildContent({
         id: 'content-new',
         threadId: DEFAULT_THREAD_ID,
@@ -3495,7 +3499,7 @@ describe('TalkDetailPage', () => {
     );
 
     installTalkDetailFetch({
-      onCreateContent,
+      onCreateDocument,
       // Hold the next snapshot fetch in flight; contentByThreadId stays empty,
       // so when released it resolves content:null (the stale, pre-doc state).
       onListMessages: ({ visibleMessages }) => {
@@ -3527,7 +3531,7 @@ describe('TalkDetailPage', () => {
     // The doc pane appears immediately from the create response — no waiting
     // on a snapshot refetch. (Fails on the old code, which discarded the
     // returned Content.)
-    await waitFor(() => expect(onCreateContent).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(onCreateDocument).toHaveBeenCalledTimes(1));
     expect(
       await screen.findByRole('region', { name: /talk document/i }),
     ).toBeInTheDocument();
@@ -4911,8 +4915,8 @@ function installTalkDetailFetch(input?: {
   // Doc-pane integration: pre-existing content keyed by threadId, plus
   // optional spies so tests can assert on POST and PATCH bodies.
   contentByThreadId?: Record<string, TestContent>;
-  onCreateContent?: (body: {
-    talkId: string | null;
+  onCreateDocument?: (body: {
+    talkId: string;
     threadId: string | null;
     title: string;
     format?: string;
@@ -6002,29 +6006,6 @@ function installTalkDetailFetch(input?: {
           data: { content, pendingEdits: [] },
         });
       }
-      if (path === '/api/v1/talks/talk-1/content' && method === 'POST') {
-        const body = JSON.parse(String(init?.body || '{}')) as {
-          title: string;
-          format?: string;
-        };
-        const content =
-          input?.onCreateContent?.({
-            talkId: 'talk-1',
-            threadId: null,
-            title: body.title,
-            format: body.format,
-          }) ??
-          buildContent({
-            id: 'content-default',
-            talkId: 'talk-1',
-            threadId: DEFAULT_THREAD_ID,
-            title: body.title,
-            contentFormat:
-              (body.format as Content['contentFormat']) ?? 'markdown',
-          });
-        contentByThreadId[content.threadId] = content;
-        return jsonResponse(201, { ok: true, data: { content } });
-      }
       const threadContentMatch = path.match(
         /^\/api\/v1\/threads\/([^/]+)\/content$/,
       );
@@ -6035,30 +6016,6 @@ function installTalkDetailFetch(input?: {
           ok: true,
           data: { content, pendingEdits: [] },
         });
-      }
-      if (threadContentMatch && method === 'POST') {
-        const threadId = decodeURIComponent(threadContentMatch[1]);
-        const body = JSON.parse(String(init?.body || '{}')) as {
-          title: string;
-          format?: string;
-        };
-        const content =
-          input?.onCreateContent?.({
-            talkId: null,
-            threadId,
-            title: body.title,
-            format: body.format,
-          }) ??
-          buildContent({
-            id: `content-${threadId}`,
-            talkId: 'talk-1',
-            threadId,
-            title: body.title,
-            contentFormat:
-              (body.format as Content['contentFormat']) ?? 'markdown',
-          });
-        contentByThreadId[threadId] = content;
-        return jsonResponse(201, { ok: true, data: { content } });
       }
       const patchContentMatch = path.match(/^\/api\/v1\/contents\/([^/]+)$/);
       if (patchContentMatch && method === 'PATCH') {
@@ -6107,6 +6064,36 @@ function installTalkDetailFetch(input?: {
       // The migrated doc pane reads the native document by id; resolve it
       // from the in-memory content store so the pane renders without the
       // legacy bodyMarkdown/bodyHtml facade.
+      if (path === '/api/v1/documents' && method === 'POST') {
+        const body = JSON.parse(String(init?.body || '{}')) as {
+          talkId: string;
+          threadId?: string | null;
+          title: string;
+          format?: string;
+        };
+        const threadId = body.threadId ?? DEFAULT_THREAD_ID;
+        const content =
+          input?.onCreateDocument?.({
+            talkId: body.talkId,
+            threadId,
+            title: body.title,
+            format: body.format,
+          }) ??
+          buildContent({
+            id: `content-${threadId}`,
+            talkId: body.talkId,
+            threadId,
+            title: body.title,
+            contentFormat:
+              (body.format as Content['contentFormat']) ?? 'markdown',
+          });
+        contentByThreadId[content.threadId] = content;
+        return jsonResponse(201, {
+          ok: true,
+          data: { document: buildNativeDoc(content) },
+        });
+      }
+
       const nativeDocMatch = path.match(/^\/api\/v1\/documents\/([^/]+)$/);
       if (nativeDocMatch && method === 'GET') {
         const documentId = decodeURIComponent(nativeDocMatch[1]);

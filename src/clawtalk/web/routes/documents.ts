@@ -5,6 +5,7 @@ import {
   acceptAllNativeDocumentEdits,
   acceptNativeDocumentEdit,
   acceptNativeDocumentEditRun,
+  createNativeDocumentForTalk,
   getNativeDocument,
   listNativeDocumentEdits,
   listNativeDocuments,
@@ -14,6 +15,7 @@ import {
   type NativeDocumentBlockRecord,
   type NativeDocumentEditRecord,
   type NativeDocumentEditStatus,
+  type NativeDocumentFormat,
   type NativeDocumentRecord,
   type NativeDocumentSummaryRecord,
   type NativeDocumentTabRecord,
@@ -45,6 +47,7 @@ type DocumentsWorkspaceContext = {
 
 type DocumentsWorkspaceScope = {
   documentId?: string | null;
+  talkId?: string | null;
 };
 
 const UUID_RE =
@@ -100,6 +103,9 @@ async function withDocumentsWorkspace<T>(
   if (scope?.documentId && !isUuid(scope.documentId)) {
     return error(400, 'invalid_document_id', 'Document id must be a UUID.');
   }
+  if (scope?.talkId && !isUuid(scope.talkId)) {
+    return error(400, 'invalid_talk_id', 'Talk id must be a UUID.');
+  }
 
   return withUserContext(auth.userId, async () => {
     const scopedWorkspaceId =
@@ -109,7 +115,12 @@ async function withDocumentsWorkspace<T>(
             userId: auth.userId,
             documentId: scope.documentId,
           })
-        : undefined);
+        : scope?.talkId
+          ? await findVisibleWorkspaceIdForTalk({
+              userId: auth.userId,
+              talkId: scope.talkId,
+            })
+          : undefined);
     const workspace = await resolveWorkspaceForUser({
       userId: auth.userId,
       requestedWorkspaceId: scopedWorkspaceId,
@@ -144,6 +155,38 @@ async function findVisibleWorkspaceIdForDocument(input: {
   return rows[0]?.workspace_id;
 }
 
+async function findVisibleWorkspaceIdForTalk(input: {
+  userId: string;
+  talkId: string;
+}): Promise<string | undefined> {
+  const db = getDbPg();
+  const rows = await db<Array<{ workspace_id: string }>>`
+    select t.workspace_id
+    from public.talks t
+    join public.workspace_members wm
+      on wm.workspace_id = t.workspace_id
+     and wm.user_id = ${input.userId}::uuid
+    where t.id = ${input.talkId}::uuid
+    limit 1
+  `;
+  return rows[0]?.workspace_id;
+}
+
+async function talkExistsInWorkspace(input: {
+  workspaceId: string;
+  talkId: string;
+}): Promise<boolean> {
+  const db = getDbPg();
+  const rows = await db<Array<{ id: string }>>`
+    select id
+    from public.talks
+    where workspace_id = ${input.workspaceId}::uuid
+      and id = ${input.talkId}::uuid
+    limit 1
+  `;
+  return rows.length > 0;
+}
+
 function parseBoolean(value: unknown, defaultValue = false): boolean {
   if (value === undefined || value === null || value === '')
     return defaultValue;
@@ -159,6 +202,60 @@ function parseLimit(value: unknown): number | undefined {
   if (typeof value !== 'string') return undefined;
   const parsed = Number.parseInt(value, 10);
   return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function parseCreateDocumentFormat(
+  value: unknown,
+): NativeDocumentFormat | RouteResult<never> {
+  if (value === undefined || value === null || value === '') return 'markdown';
+  if (value === 'markdown' || value === 'html') return value;
+  return error(
+    400,
+    'invalid_format',
+    'Document format must be markdown or html.',
+  );
+}
+
+function parseCreateDocumentTalkId(input: {
+  talkId?: unknown;
+  threadId?: unknown;
+}): string | RouteResult<never> {
+  const talkId =
+    input.talkId === undefined || input.talkId === null
+      ? undefined
+      : input.talkId;
+  const threadId =
+    input.threadId === undefined || input.threadId === null
+      ? undefined
+      : input.threadId;
+  if (talkId !== undefined && typeof talkId !== 'string') {
+    return error(400, 'invalid_talk_id', 'Talk id must be a UUID.');
+  }
+  if (threadId !== undefined && typeof threadId !== 'string') {
+    return error(400, 'invalid_thread_id', 'Thread id must be a UUID.');
+  }
+  const resolved = threadId ?? talkId;
+  if (!resolved) {
+    return error(
+      400,
+      'talk_id_required',
+      'Creating a document requires a talkId or threadId.',
+    );
+  }
+  if (talkId !== undefined && !isUuid(talkId)) {
+    return error(400, 'invalid_talk_id', 'Talk id must be a UUID.');
+  }
+  if (threadId !== undefined && !isUuid(threadId)) {
+    return error(400, 'invalid_thread_id', 'Thread id must be a UUID.');
+  }
+  if (talkId && threadId && talkId.toLowerCase() !== threadId.toLowerCase()) {
+    return error(
+      400,
+      'thread_talk_mismatch',
+      'Thread id must match the talk id for native document creation.',
+    );
+  }
+  return resolved;
 }
 
 function parseOptionalExpectedContentVersion(
@@ -404,6 +501,51 @@ export async function listDocumentsRoute(input: {
         limit: parseLimit(input.limit),
       });
       return ok({ documents: documents.map(toDocumentSummaryApi) });
+    },
+  );
+}
+
+export async function createDocumentRoute(input: {
+  auth: AuthContext;
+  workspaceId?: string | null;
+  talkId?: unknown;
+  threadId?: unknown;
+  title?: unknown;
+  format?: unknown;
+}): Promise<RouteResult<{ document: ReturnType<typeof toDocumentApi> }>> {
+  const talkId = parseCreateDocumentTalkId({
+    talkId: input.talkId,
+    threadId: input.threadId,
+  });
+  if (typeof talkId === 'object') return talkId;
+  const title =
+    typeof input.title === 'string' ? input.title.trim() : undefined;
+  if (!title) {
+    return error(400, 'title_required', 'Document title is required.');
+  }
+  const format = parseCreateDocumentFormat(input.format);
+  if (typeof format === 'object') return format;
+  return withDocumentsWorkspace(
+    input.auth,
+    input.workspaceId,
+    { talkId },
+    async (ctx) => {
+      const writerError = requireWorkspaceWriter(ctx.workspace);
+      if (writerError) return writerError;
+      const exists = await talkExistsInWorkspace({
+        workspaceId: ctx.workspace.id,
+        talkId,
+      });
+      if (!exists) {
+        return error(404, 'talk_not_found', 'Talk not found.');
+      }
+      const document = await createNativeDocumentForTalk({
+        workspaceId: ctx.workspace.id,
+        talkId,
+        title,
+        format,
+      });
+      return ok({ document: toDocumentApi(document) }, 201);
     },
   );
 }
@@ -744,6 +886,30 @@ export function mountDocumentRoutes(
       includeUnlinked:
         c.req.query('include_unlinked') ?? c.req.query('includeUnlinked'),
       limit: c.req.query('limit'),
+    });
+    return jsonResponse(result);
+  });
+
+  app.post('/api/v1/documents', async (c) => {
+    const auth = c.get('auth');
+    const rl = checkRateLimit({ principalId: auth.userId, bucket: 'write' });
+    if (!rl.allowed) return rateLimitedResponse(c, rl);
+    const csrfFail = checkCsrf(c, auth);
+    if (csrfFail) return csrfFail;
+    const payload = await readOptionalJsonBody<{
+      talkId?: unknown;
+      threadId?: unknown;
+      title?: unknown;
+      format?: unknown;
+    }>(c);
+    if (!payload.ok) return invalidJsonResponse(payload.error);
+    const result = await createDocumentRoute({
+      auth,
+      workspaceId: requestedWorkspaceId(c),
+      talkId: payload.data.talkId,
+      threadId: payload.data.threadId,
+      title: payload.data.title,
+      format: payload.data.format,
     });
     return jsonResponse(result);
   });
