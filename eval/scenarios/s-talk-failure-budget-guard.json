@@ -1,0 +1,48 @@
+{
+  "id": "s-talk-failure-budget-guard",
+  "title": "Talk failure and budget guard",
+  "description": "A Talk run surfaces partial failure, preserves completed output, and flags an over-budget agent instead of reporting a clean completion.",
+  "category": "talk",
+  "team": "default",
+  "mode": "ordered",
+  "roundsLimit": 1,
+  "userPrompt": "Stress the Talk runner with one agent timeout and one over-budget reply. Show what the user and run ledger should see.",
+  "expectedDynamics": "Completed agent output is preserved, the failed agent is recorded as failed, user-visible state is not silently completed, and budget overflow is flagged.",
+  "threshold": 4,
+  "fixture": "s-talk-failure-budget-guard.fixture.json",
+  "checks": [
+    {
+      "id": "talk-run-failure-surfaced",
+      "area": "talk",
+      "description": "A failed or timed-out agent is persisted and visible instead of being hidden behind a completed run.",
+      "launchCritical": true,
+      "requiredSignals": [
+        "talk.run.partial_failure.persisted",
+        "talk.run.partial_failure.visible",
+        "talk.run.partial_failure.not_silent_complete"
+      ]
+    },
+    {
+      "id": "talk-partial-output-preserved",
+      "area": "talk",
+      "description": "Successful agent output from the same run remains available after a sibling fails.",
+      "launchCritical": true,
+      "requiredSignals": [
+        "talk.run.successful_outputs.preserved",
+        "talk.run.failed_agent.attributed",
+        "talk.run.retry_or_cancel.available"
+      ]
+    },
+    {
+      "id": "talk-budget-guard",
+      "area": "talk",
+      "description": "An over-budget agent reply is detected, flagged, and excluded from a clean pass signal.",
+      "launchCritical": true,
+      "requiredSignals": [
+        "talk.agent_over_budget.detected",
+        "talk.agent_over_budget.flagged",
+        "talk.agent_over_budget.not_clean_pass"
+      ]
+    }
+  ]
+}

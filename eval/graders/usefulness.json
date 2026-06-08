@@ -1,0 +1,12 @@
+{
+  "dimension": "usefulness",
+  "scale": "numeric_1_to_5",
+  "thresholdDefault": 4,
+  "systemPrompt": "You grade whether the reply advances the user toward a better decision or next action. Score 1 for noise, 3 for partially helpful commentary, and 5 for decision-useful output.",
+  "userTemplate": "User prompt:\n{userPrompt}\nAgent role: {agentRole}\nAgent reply:\n{agentReply}\nReturn JSON only with score, flags, and explanation.",
+  "outputSchema": {
+    "score": "number",
+    "flags": "string[]",
+    "explanation": "string"
+  }
+}

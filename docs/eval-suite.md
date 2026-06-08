@@ -1,92 +1,110 @@
-# ClawTalk — Agent Eval Suite
+# ClawTalk MVP Eval Suite
 
-> **Status:** spec (skeleton) · **Generated:** 2026-05-30
-> Structural contract for the Phase 13 offline agent-eval gate (per [`05-build-plan.md`](./05-build-plan.md) Phase 13 + [`06-agent-system-design.md`](./06-agent-system-design.md) §14.6). Scenario content + grader prompts are TODO at impl time — this doc locks in the harness shape so the eval gate is buildable from spec.
+> **Status:** MVP dry-run harness implemented and CI-gated · **Updated:** 2026-06-07
+> Implements the Phase 13 offline eval gate shape from [`05-build-plan.md`](./05-build-plan.md) Phase 13 and [`06-agent-system-design.md`](./06-agent-system-design.md) §14.2.
 
-## 1. What the eval gate checks
+## What Runs
 
-The 5 default agents (Strategist / Critic / Researcher / Editor / Quant per [`03-agents.md`](./03-agents.md)) have never been tested against each other in a multi-agent run. This eval harness runs the default team on representative prompts and grades each agent's response against the **`AgentAuditResult` rubric** in `06-agent-system-design.md` §14.6:
+The eval gate CLI/assets live under [`../eval`](../eval), with typechecked harness code in `src/clawtalk/eval`, and runs with:
 
-- **`roleAdherence`** — did the agent stay in its declared role + use its method?
-- **`nonDuplication`** — did it avoid repeating other agents' points?
-- **`evidenceDiscipline`** — did it cite a source for empirical claims?
-- **`methodAdherence`** — did it follow the role's stated method (e.g., Strategist frames; Researcher cites)?
-- **`usefulness`** — does the response advance the conversation toward a recommendation?
-- **`concision`** — within token / sentence budget per role?
+```bash
+npm run eval
+```
 
-Each dimension scored 0–10 by a grader agent (see §3). Pass thresholds per role TBD at impl time; the harness exposes them as config.
+The default mode is deterministic `dry-run`. It reads scenario contracts from `eval/scenarios/*.json`, derives observed signals from nested fixture events/records/agent replies in `eval/fixtures/*.json`, validates grader prompt contracts from `eval/graders/*.json`, and prints a pretty report. Top-level fixture `signals` are rejected so the gate cannot pass by simply copying required signals into a flat array. Use `--output=<path>` for machine-readable reports, or `npm --silent run eval -- --format=json` when piping JSON stdout.
 
-## 2. Test scenarios (TODO at impl time)
+Live evaluator-model grading is deliberately not claimed yet. `npm run eval -- --mode=live` exits blocked until a provider/backend adapter is wired. This keeps local launch-gate proof separate from future model-scored coverage.
 
-The eval suite runs N representative scenarios. Each scenario is:
+## CI Policy
+
+Pull-request CI runs the deterministic dry-run gate with `npm run eval` after root typecheck and before the Supabase-backed test phase. That makes scenario/fixture/grader drift a required merge signal without needing Joseph secrets, external providers, or local Supabase.
+
+Live eval remains manual and intentionally blocked in CI. Do not make `--mode=live` required until the Worker/workspace fixture adapter and evaluator-model credentials are implemented with stable launch thresholds.
+
+## Launch-Critical Scenarios
+
+| Scenario                            | Coverage                                                                                                                                                     |
+| ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `s-talk-pricing-launch`             | Default 5-agent ordered Talk path, role differentiation, persisted run/messages, and `AgentAuditResult`-shaped per-agent scores.                             |
+| `s-talk-failure-budget-guard`       | Talk partial-failure visibility, preserved successful output, retry/cancel affordance, and over-budget agent flagging.                                       |
+| `s-documents-native-edit-flow`      | Native documents/tabs/blocks reads, pending edits, accept, reject, stale accept conflict, and no markdown/html facade dependency.                            |
+| `s-jobs-document-output-home-inbox` | `emit_document_append`, pending document edit from a job run, `job_output_ready`, Home inbox deep link, idempotency, and blocked no-primary-document output. |
+| `s-home-lifecycle-visibility`       | Home inbox visibility for job/document/recommendation items plus read, resolve, dismiss, snooze, expiry, and module isolation.                               |
+| `s-workspace-permissions-isolation` | Member reads, non-member denial, cross-workspace rejection, and connector/OAuth credential privacy.                                                          |
+
+These are launch-useful MVP scenarios, not replacements for unit or integration tests. The dry-run fixtures prove the gate contract, report shape, thresholds, nested observation derivation, and local execution path without requiring Joseph secrets or external model calls.
+
+All dry-run fixture observations are contract placeholders until live Worker/integration execution lands. A green dry-run proves the invariants are represented in the eval set, that signals are backed by structured fixture observations, and that threshold mechanics work; it does not prove backend enforcement of Talk failure handling, native document conflicts, Jobs output, Home lifecycle actions, non-member denial, cross-workspace rejection, or OAuth credential privacy.
+
+## Scoring And Thresholds
+
+The canonical agent audit scale is 1-5, matching `06-agent-system-design.md`:
+
+- `roleAdherence`
+- `nonDuplication`
+- `evidenceDiscipline`
+- `methodAdherence`
+- `usefulness`
+- `concision`
+
+The earlier skeleton referenced a 0-10 grader scale, but the current canonical
+`AgentAuditResult` contract in `06-agent-system-design.md` §14.2 is 1-5, and
+`05-build-plan.md` Phase 13 uses `>= 4.0` examples for launch thresholds.
+
+Each scenario has a default threshold of `4.0`. A scenario passes when:
+
+1. every launch-critical check meets its threshold;
+2. every per-agent audit dimension, when present, meets the scenario threshold;
+3. the combined scenario mean is at least the scenario threshold.
+
+The suite passes only when every selected scenario passes. Scores are deterministic in dry-run mode: each check scores required fixture signals from 1 to 5, and any missing required signal fails that check even if the numeric score reaches the threshold. The gate also validates all six grader prompt contracts before it can pass.
+
+## CLI
+
+```bash
+npm run eval -- --help
+npm run eval -- --list
+npm run eval -- --scenarios=s-talk-pricing-launch
+npm run eval -- --output=eval-report.json
+npm --silent run eval -- --format=json
+```
+
+Options:
+
+- `--mode=dry-run|live` - dry-run is local and deterministic; live is currently blocked by design.
+- `--scenarios=all|id,id` - run all scenarios or a comma-separated subset.
+- `--format=pretty|json` - print a readable table or JSON report. Use `npm --silent` for parseable JSON stdout.
+- `--output=path` - write the JSON report to disk. This avoids npm's script banner on stdout.
+- `--list` - list scenario ids.
+
+Exit codes:
+
+- `0` - suite passed.
+- `1` - suite ran but failed thresholds.
+- `2` - suite is blocked, currently only for unwired live mode.
+
+## Grader Prompts
+
+`eval/graders/*.json` defines one prompt contract per audit dimension. The prompt files use a strict `numeric_1_to_5` output contract with `score`, `flags`, and `explanation`. The MVP dry-run harness does not call a model; these files are the stable contract for the future live evaluator adapter.
+
+## Reading The Report
+
+The pretty report starts with suite status, evaluator version, generated timestamp, scenario pass count, critical check failures, and agent audit failures. Failed checks list missing deterministic signals. JSON output includes the same data with `AgentAuditResult`-shaped rows:
 
 ```ts
-type EvalScenario = {
-  id: string;                    // 's-pricing-launch', 's-hiring-tradeoff', …
-  description: string;           // one sentence
-  team: 'default' | string;      // 'default' = the 5 canonical roles; or a named TeamComposition
-  mode: 'ordered' | 'parallel';
-  rounds_limit: 1 | 2 | 3 | 5;
-  user_prompt: string;           // the user turn that kicks off the Talk
-  expected_dynamics: string;     // prose: what the harness should see if the team is working
-  pass_criteria: {               // per-role rubric thresholds
-    strategist?: Partial<AgentAuditResult>;
-    critic?: Partial<AgentAuditResult>;
-    researcher?: Partial<AgentAuditResult>;
-    editor?: Partial<AgentAuditResult>;
-    quant?: Partial<AgentAuditResult>;
-  };
+type AgentAuditResult = {
+  runId: string;
+  scenarioId: string;
+  agentRole: 'strategist' | 'critic' | 'researcher' | 'editor' | 'quant';
+  evaluatorVersion: string;
+  scores: Record<ScoreDimension, number>; // 1-5 each
+  flags: string[];
+  explanation: string;
+  createdAt: string;
+  passed: boolean;
 };
 ```
 
-**v1 scenarios** (Joseph to write at Phase 13 impl):
+## Next Up
 
-1. **`s-pricing-launch`** — pricing decision under uncertainty (Strategist frames + Quant numbers + Critic challenges + Researcher cites comp data + Editor synthesizes).
-2. **`s-hiring-tradeoff`** — a senior vs two mid-level engineer hire (forces method differentiation; tests non-duplication when Strategist + Critic + Editor all have related but distinct jobs).
-3. **`s-empirical-claim-required`** — a market-sizing question where every agent should defer to Researcher; tests `evidenceDiscipline` strictly.
-4. **`s-edge-case-pushback`** — a deliberately weak user proposal; tests whether Critic actually pushes back vs. rubber-stamping.
-5. **`s-synthesis-quality`** — a complex multi-thread decision; tests Editor's synthesis discipline (does it land a clear recommendation or hedge?).
-
-Each scenario is a JSON file under `eval/scenarios/<scenario_id>.json` matching the `EvalScenario` shape.
-
-## 3. Grader prompts (TODO at impl time)
-
-A separate **grader agent** runs against each agent reply + the full Talk transcript. One grader prompt per rubric dimension. Grader is a system agent (`is_system=true`, `role_key='eval_grader'`) per §11 §4.
-
-```ts
-type GraderPrompt = {
-  dimension: keyof AgentAuditResult;       // 'roleAdherence' | … | 'concision'
-  system_prompt: string;                   // grader's role + scoring methodology
-  user_template: string;                   // template with {agentRole}, {agentReply}, {talkTranscript} slots
-  output_schema: 'numeric_0_to_10';        // strict numeric output for deterministic aggregation
-};
-```
-
-Graders live at `eval/graders/<dimension>.json`. The harness loops every (scenario, agent_reply, dimension) triple, runs the grader, and aggregates into `AgentAuditResult` rows.
-
-## 4. Harness contract
-
-- Implementation lives in `eval/` (sibling of `src/`). Runs against the worker via `dev:worker`.
-- One CLI: `npm run eval -- --scenarios=all --workspace=<id>`.
-- Output: a JSON report + a pretty-printed table grouped by (scenario, agent, dimension).
-- Pass/fail per scenario: scenario passes if every per-role dimension hits its threshold. Suite passes if every scenario passes.
-- Launch-blocking per `engineering-notes.md` §3 — v1 cannot ship without the suite passing.
-
-## 5. What's in scope here vs. impl time
-
-**In scope here (locked in this doc):**
-- `EvalScenario` TS shape.
-- `GraderPrompt` TS shape.
-- 5 scenario IDs + 1-sentence descriptions.
-- The dimension list (matches §06 §14.6 `AgentAuditResult`).
-- File-layout convention (`eval/scenarios/`, `eval/graders/`).
-- CLI surface (`npm run eval`).
-- Launch-blocking status.
-
-**Deferred to Phase 13 impl:**
-- The actual `user_prompt` + `expected_dynamics` + `pass_criteria` thresholds for each scenario.
-- The actual grader `system_prompt` + `user_template` per dimension.
-- The CLI flags (`--workspace`, `--scenarios`, output format).
-- Wiring into CI (whether `eval` runs on every PR or only pre-launch).
-
-When Phase 13 starts, this doc gets the deferred sections filled in; nothing about the contract above changes.
+The next eval hardening step is live execution: run scenarios against a local Worker/workspace fixture, capture real Talk/Documents/Jobs/Home events, and then call evaluator-model graders. Until that lands, `npm run eval` is a local MVP gate that proves coverage shape and threshold mechanics, not live model quality.

@@ -1,0 +1,12 @@
+{
+  "dimension": "concision",
+  "scale": "numeric_1_to_5",
+  "thresholdDefault": 4,
+  "systemPrompt": "You grade whether the reply is concise for its role while preserving necessary substance. Score 1 for rambling or bloated output, 3 for acceptable but wordy output, and 5 for compact, scannable output.",
+  "userTemplate": "Agent role: {agentRole}\nExpected budget:\n{tokenBudget}\nAgent reply:\n{agentReply}\nReturn JSON only with score, flags, and explanation.",
+  "outputSchema": {
+    "score": "number",
+    "flags": "string[]",
+    "explanation": "string"
+  }
+}

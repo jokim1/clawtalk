@@ -1,0 +1,159 @@
+{
+  "id": "s-talk-pricing-launch",
+  "title": "Talk execution / pricing launch",
+  "description": "Default five-agent team handles a pricing launch decision with differentiated roles and persisted audit output.",
+  "category": "talk",
+  "team": "default",
+  "mode": "ordered",
+  "roundsLimit": 1,
+  "userPrompt": "We are launching ClawTalk to five design partners next month. Recommend whether the first paid tier should be $29, $49, or $99 per seat, and say what evidence would change the decision.",
+  "expectedDynamics": "Strategist frames a thesis, Critic attacks one load-bearing premise, Researcher separates sources from inference, Quant checks seat-price math, and Editor lands a concise recommendation.",
+  "threshold": 4,
+  "fixture": "s-talk-pricing-launch.fixture.json",
+  "checks": [
+    {
+      "id": "talk-default-team-scheduled",
+      "area": "talk",
+      "description": "The run includes all five default roles in an ordered round.",
+      "requiredSignals": [
+        "run.created",
+        "agent.strategist.reply",
+        "agent.critic.reply",
+        "agent.researcher.reply",
+        "agent.editor.reply",
+        "agent.quant.reply"
+      ],
+      "threshold": 4,
+      "launchCritical": true
+    },
+    {
+      "id": "talk-run-persisted",
+      "area": "talk",
+      "description": "Run completion, messages, and audit results are persistable.",
+      "requiredSignals": [
+        "run.status.completed",
+        "messages.persisted",
+        "audit.agent_results.persisted"
+      ],
+      "threshold": 4,
+      "launchCritical": true
+    },
+    {
+      "id": "talk-role-differentiation",
+      "area": "talk",
+      "description": "Agents make distinct moves instead of repeating the same recommendation.",
+      "requiredSignals": [
+        "strategist.thesis.unique",
+        "critic.weakest_premise.references_strategist",
+        "researcher.sources.three",
+        "quant.numerical_claims.not_strategy",
+        "editor.recommendation.synthesizes_disagreement"
+      ],
+      "threshold": 4,
+      "launchCritical": true
+    }
+  ],
+  "agentExpectations": [
+    {
+      "role": "strategist",
+      "dimensions": {
+        "roleAdherence": { "requiredSignals": ["strategist.thesis.unique"] },
+        "nonDuplication": {
+          "requiredSignals": ["strategist.claims.not_editor_summary"]
+        },
+        "evidenceDiscipline": {
+          "requiredSignals": ["strategist.confidence.names_uncertainty"]
+        },
+        "methodAdherence": {
+          "requiredSignals": [
+            "strategist.claims.exactly_three",
+            "strategist.confidence.rated"
+          ]
+        },
+        "usefulness": {
+          "requiredSignals": ["strategist.recommends_price_path"]
+        },
+        "concision": { "requiredSignals": ["strategist.within_budget"] }
+      }
+    },
+    {
+      "role": "critic",
+      "dimensions": {
+        "roleAdherence": {
+          "requiredSignals": ["critic.weakest_premise.references_strategist"]
+        },
+        "nonDuplication": { "requiredSignals": ["critic.single_premise_only"] },
+        "evidenceDiscipline": { "requiredSignals": ["critic.quote.present"] },
+        "methodAdherence": {
+          "requiredSignals": [
+            "critic.failure_mode.present",
+            "critic.repair.present"
+          ]
+        },
+        "usefulness": { "requiredSignals": ["critic.risk_actionable"] },
+        "concision": { "requiredSignals": ["critic.within_budget"] }
+      }
+    },
+    {
+      "role": "researcher",
+      "dimensions": {
+        "roleAdherence": { "requiredSignals": ["researcher.sources.three"] },
+        "nonDuplication": {
+          "requiredSignals": ["researcher.verifies_prior_claims"]
+        },
+        "evidenceDiscipline": {
+          "requiredSignals": [
+            "researcher.inline_citations",
+            "researcher.found_vs_infer"
+          ]
+        },
+        "methodAdherence": {
+          "requiredSignals": ["researcher.contradictions.flagged"]
+        },
+        "usefulness": {
+          "requiredSignals": ["researcher.evidence_changes_decision"]
+        },
+        "concision": { "requiredSignals": ["researcher.within_budget"] }
+      }
+    },
+    {
+      "role": "editor",
+      "dimensions": {
+        "roleAdherence": {
+          "requiredSignals": ["editor.recommendation.synthesizes_disagreement"]
+        },
+        "nonDuplication": { "requiredSignals": ["editor.not_new_argument"] },
+        "evidenceDiscipline": { "requiredSignals": ["editor.cites_agents"] },
+        "methodAdherence": {
+          "requiredSignals": ["editor.agreement_disagreement_open_questions"]
+        },
+        "usefulness": {
+          "requiredSignals": ["editor.recommendation.actionable"]
+        },
+        "concision": { "requiredSignals": ["editor.within_budget"] }
+      }
+    },
+    {
+      "role": "quant",
+      "dimensions": {
+        "roleAdherence": {
+          "requiredSignals": ["quant.numerical_claims.not_strategy"]
+        },
+        "nonDuplication": { "requiredSignals": ["quant.only_math_units"] },
+        "evidenceDiscipline": {
+          "requiredSignals": ["quant.missing_data.flagged"]
+        },
+        "methodAdherence": {
+          "requiredSignals": [
+            "quant.ranges.present",
+            "quant.calculation_steps.present"
+          ]
+        },
+        "usefulness": {
+          "requiredSignals": ["quant.price_sensitivity.present"]
+        },
+        "concision": { "requiredSignals": ["quant.within_budget"] }
+      }
+    }
+  ]
+}

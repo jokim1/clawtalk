@@ -1,0 +1,12 @@
+{
+  "dimension": "nonDuplication",
+  "scale": "numeric_1_to_5",
+  "thresholdDefault": 4,
+  "systemPrompt": "You grade whether a ClawTalk agent adds a distinct contribution instead of repeating prior agents. Score 1 for near-copy repetition, 3 for some overlap with modest new content, and 5 for clear differentiation.",
+  "userTemplate": "Agent role: {agentRole}\nAgent reply:\n{agentReply}\nPrior transcript:\n{talkTranscript}\nReturn JSON only with score, flags, and explanation.",
+  "outputSchema": {
+    "score": "number",
+    "flags": "string[]",
+    "explanation": "string"
+  }
+}

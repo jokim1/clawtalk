@@ -1,0 +1,65 @@
+{
+  "id": "s-documents-native-edit-flow",
+  "title": "Documents native edit flow",
+  "description": "Native document edits can be proposed, viewed, accepted, rejected, and protected by stale-version conflict handling.",
+  "category": "documents",
+  "team": "default",
+  "mode": "ordered",
+  "roundsLimit": 1,
+  "userPrompt": "Use the Talk result to propose a document edit, then accept one edit, reject a second edit, and attempt a stale accept.",
+  "expectedDynamics": "The route surface works on documents, doc_tabs, doc_blocks, and document_edits without relying on markdown/html content facades.",
+  "threshold": 4,
+  "fixture": "s-documents-native-edit-flow.fixture.json",
+  "checks": [
+    {
+      "id": "documents-list-read-tabs-blocks",
+      "area": "documents",
+      "description": "Documents, tabs, and blocks are listed/read from native records.",
+      "requiredSignals": [
+        "documents.route.list.ok",
+        "documents.route.read.ok",
+        "documents.tabs.list.ok",
+        "documents.blocks.list.ok"
+      ],
+      "threshold": 4,
+      "launchCritical": true
+    },
+    {
+      "id": "documents-pending-edit-visible",
+      "area": "documents",
+      "description": "A pending document_edit is visible with base version and target block metadata.",
+      "requiredSignals": [
+        "document_edits.pending.visible",
+        "document_edits.base_version.present",
+        "document_edits.target_block.present"
+      ],
+      "threshold": 4,
+      "launchCritical": true
+    },
+    {
+      "id": "documents-accept-reject-stale",
+      "area": "documents",
+      "description": "Accept applies the edit, reject leaves content unchanged, and stale accept returns conflict.",
+      "requiredSignals": [
+        "document_edits.accept.applies_blocks",
+        "document_edits.reject.no_mutation",
+        "document_edits.accept_stale.conflict_409",
+        "document_edits.version.cas_enforced"
+      ],
+      "threshold": 4,
+      "launchCritical": true
+    },
+    {
+      "id": "documents-no-content-facade",
+      "area": "documents",
+      "description": "The flow does not depend on bodyMarkdown/bodyHtml projections.",
+      "requiredSignals": [
+        "documents.native_ids.used",
+        "documents.body_markdown.not_required",
+        "documents.body_html.not_required"
+      ],
+      "threshold": 4,
+      "launchCritical": true
+    }
+  ]
+}

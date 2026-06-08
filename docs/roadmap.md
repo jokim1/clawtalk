@@ -1,4 +1,4 @@
-> **Status:** live implementation tracker · **Last updated:** 2026-06-07
+> **Status:** live implementation tracker · **Last updated:** 2026-06-08
 > Orientation: [REFACTOR-OVERVIEW.md](./REFACTOR-OVERVIEW.md) · current audit: [REFACTOR-AUDIT.md](./REFACTOR-AUDIT.md) · execution protocol: [PHASE5-AUTONOMOUS-PLAN.md](./PHASE5-AUTONOMOUS-PLAN.md)
 
 # ClawTalk Roadmap
@@ -11,11 +11,11 @@ This file is the short operational tracker for the greenfield refactor. It is no
 |---|---|---|
 | Backend / data cutover | ✅ Done | Greenfield runtime is live. Legacy runtime/accessors were retired, backend CI is a real signal again, and the fresh baseline is `supabase/migrations/0001_clawtalk_greenfield.sql`. |
 | Frontend structure | 🔄 Mid-flight | `TalkDetailPage.tsx` is 5,429 LOC, target roughly 2,500. `SettingsPage.tsx` is 2,147 LOC. Talk panels, composer, thread view, reducer, and stream hook are extracted; the Talk tab shell and page-owned controller state remain. |
-| De-facade | ⛔ Not started | Synthetic threads, runs-with-`threadId`, flat content markdown/html, snapshot compat, policy/tool/connectors facades, and duplicate route mounts still need native consumers and deletion. |
+| De-facade | ⛔ Not started | Synthetic threads, runs-with-`threadId`, flat content markdown/html, snapshot compat, policy/tool/connectors facades, and duplicate route mounts still need native consumers and deletion; readiness ledger: [DE-FACADE-READINESS.md](./DE-FACADE-READINESS.md). |
 | Salon visual system | 🔄 Foundation in review (PR #547) | `webapp/src/salon/*` ships CSS-variable tokens (`--salon-*`), fonts (Newsreader/Geist/Geist Mono), brand mark, and primitives (CTMark, CTIcon, Avatar/AgentAvatar, RunPill, Chip, Kbd, Button, Input/Textarea, Modal, Sheet, Popover) with proof migrations + a `salon.test.tsx` smoke suite. Remaining: broad re-skin of the 7,284 LOC pre-Salon `webapp/src/styles.css`. |
 | Jobs | 🔄 Mostly functional, not complete | Jobs backend and Talk Jobs panel cover CRUD, pause/resume, run-now, archive/delete, and this branch adds `emit_document_append` + `job_output_ready` inbox/outbox production. Remaining gap: Home UI surfacing and DB-backed verification once the local/CI database is available. |
 | Net-new surfaces | ⛔ Mostly unbuilt | Home, native Documents page/editor, standalone Agents page, Archive, command palette, New Talk sheet, and Forge are not production surfaces yet. Native Documents backend routes/client methods now exist for Opus UI consumption. |
-| Eval gate | ⛔ Contract only | `docs/eval-suite.md` specifies the shape, but there is no `eval/` implementation and no `npm run eval`. |
+| Eval gate | 🔄 MVP dry-run CI gate | `eval/` now contains launch-critical scenario contracts, deterministic fixtures, grader prompt contracts, tests, and `npm run eval`; PR CI runs the dry-run gate, while live provider/backend grading remains unwired. |
 
 ## Active Sequence
 
@@ -30,7 +30,7 @@ These are the current work packages after PR #541. Run each as a scoped `/goal` 
 | 4 | Home | Backend routes/accessors over `home_*`; Home page renders inbox, recommendations, news, and action lifecycle. |
 | 5 | Remaining de-facade | Migrate frontend off synthetic threads/run-context/snapshot/tool/policy/connectors facades; delete each backend facade with tests. |
 | 6 | Product surface completion | Standalone Agents page/profile, Archive, New Talk sheet, command palette, settings gaps, workspace-member management. |
-| 7 | Eval gate | Implement `eval/`, scenarios, graders, `npm run eval`, and launch thresholds. |
+| 7 | Eval gate | Harden the CI-gated MVP dry-run gate into live backend/provider grading once native consumers and test fixtures are ready. |
 | 8 | Forge | Post-MVP flag: SSR connection, audiences, improvement runs, gallery, winner to `document_edits`. |
 
 ## Autonomy Gate

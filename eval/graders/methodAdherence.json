@@ -1,0 +1,12 @@
+{
+  "dimension": "methodAdherence",
+  "scale": "numeric_1_to_5",
+  "thresholdDefault": 4,
+  "systemPrompt": "You grade whether the agent followed the exact method specified by its ClawTalk role template. Score 1 for missing the method, 3 for partial structure, and 5 for complete adherence.",
+  "userTemplate": "Agent role: {agentRole}\nRole method:\n{roleMethod}\nAgent reply:\n{agentReply}\nReturn JSON only with score, flags, and explanation.",
+  "outputSchema": {
+    "score": "number",
+    "flags": "string[]",
+    "explanation": "string"
+  }
+}

@@ -1,0 +1,63 @@
+{
+  "id": "s-jobs-document-output-home-inbox",
+  "title": "Jobs document output and Home inbox",
+  "description": "A scheduled job can append document output and emit a Home inbox event for review.",
+  "category": "jobs",
+  "team": "default",
+  "mode": "ordered",
+  "roundsLimit": 1,
+  "userPrompt": "Run a scheduled Talk job that appends to the primary document and produces a Home inbox notification when output is ready.",
+  "expectedDynamics": "The job writes a pending document edit, emits job_output_ready, deduplicates repeat delivery, and fails loud when dependencies are missing.",
+  "threshold": 4,
+  "fixture": "s-jobs-document-output-home-inbox.fixture.json",
+  "checks": [
+    {
+      "id": "jobs-document-append",
+      "area": "jobs",
+      "description": "emit_document_append creates a pending document edit tied to the job run.",
+      "requiredSignals": [
+        "job.emit_document_append.enabled",
+        "job.run.completed",
+        "job.document_edit.created",
+        "job.document_edit.source_run_id"
+      ],
+      "threshold": 4,
+      "launchCritical": true
+    },
+    {
+      "id": "jobs-output-ready-inbox",
+      "area": "jobs",
+      "description": "job_output_ready creates a Home inbox item with a deep link to the run/document edit.",
+      "requiredSignals": [
+        "home_inbox.job_output_ready.created",
+        "home_inbox.item.ref_run_id",
+        "home_inbox.item.ref_document_edit_id",
+        "home_inbox.item.deep_link.present"
+      ],
+      "threshold": 4,
+      "launchCritical": true
+    },
+    {
+      "id": "jobs-output-idempotency",
+      "area": "jobs",
+      "description": "Repeat delivery deduplicates the pending edit and inbox item.",
+      "requiredSignals": [
+        "job.delivery.idempotent",
+        "home_inbox.job_output_ready.deduped"
+      ],
+      "threshold": 4,
+      "launchCritical": true
+    },
+    {
+      "id": "jobs-output-blocked-dependency",
+      "area": "jobs",
+      "description": "A job with no primary document records a blocked dependency instead of silently succeeding.",
+      "requiredSignals": [
+        "job.no_primary_document.blocked",
+        "home_inbox.job_blocked.created"
+      ],
+      "threshold": 4,
+      "launchCritical": true
+    }
+  ]
+}

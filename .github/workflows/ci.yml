@@ -21,6 +21,11 @@ jobs:
       - name: Typecheck
         run: npx tsc --noEmit
 
+      # MVP eval gate: deterministic dry-run scenarios only. Live/provider
+      # grading stays manual until the backend/provider adapter exists.
+      - name: MVP eval dry-run
+        run: npm run eval
+
       # Webapp (Vite/React) is a separate package with its own lockfile,
       # tsconfig, and jsdom vitest config; the root `vitest run` above does
       # not pick up webapp/src tests, so gate them explicitly here. No
