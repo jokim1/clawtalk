@@ -30,6 +30,7 @@ import type {
   Content,
   ContentSidebarItem,
   ContextRule,
+  NativeDocument,
   ContextSource,
   TalkContext,
   Talk,
@@ -3587,80 +3588,6 @@ describe('TalkDetailPage', () => {
     );
   });
 
-  it('renders an HTML doc via SafeHtml in Preview mode', async () => {
-    installTalkDetailFetch({
-      contentByThreadId: {
-        [DEFAULT_THREAD_ID]: buildContent({
-          id: 'content-html',
-          threadId: DEFAULT_THREAD_ID,
-          title: 'My HTML',
-          contentFormat: 'html',
-          bodyHtml:
-            '<p data-testid="html-body">Hello <strong>world</strong></p>',
-        }),
-      },
-    });
-    renderDetailPage('/app/talks/talk-1/talk?doc=1', {
-      sidebarContents: [
-        {
-          id: 'content-html',
-          talkId: 'talk-1',
-          threadId: DEFAULT_THREAD_ID,
-          title: 'My HTML',
-          updatedAt: '2026-03-06T00:00:00.000Z',
-        },
-      ],
-    });
-
-    // SafeHtml renders the sanitized body as actual HTML.
-    const para = await screen.findByTestId('html-body');
-    expect(para.textContent).toContain('Hello');
-    expect(para.querySelector('strong')?.textContent).toBe('world');
-    // The format pill says HTML.
-    expect(screen.getByText('HTML')).toBeInTheDocument();
-  });
-
-  it('toggles between Preview and Source mode for HTML docs', async () => {
-    const user = userEvent.setup();
-    installTalkDetailFetch({
-      contentByThreadId: {
-        [DEFAULT_THREAD_ID]: buildContent({
-          id: 'content-html',
-          threadId: DEFAULT_THREAD_ID,
-          title: 'Mode toggle',
-          contentFormat: 'html',
-          bodyHtml: '<p>preview text</p>',
-        }),
-      },
-    });
-    renderDetailPage('/app/talks/talk-1/talk?doc=1', {
-      sidebarContents: [
-        {
-          id: 'content-html',
-          talkId: 'talk-1',
-          threadId: DEFAULT_THREAD_ID,
-          title: 'Mode toggle',
-          updatedAt: '2026-03-06T00:00:00.000Z',
-        },
-      ],
-    });
-
-    // Doc loaded — both Preview and Source tabs are present.
-    const sourceTab = await screen.findByRole('tab', { name: /source/i });
-    await user.click(sourceTab);
-
-    // Lazy-loaded CodeMirror swap (mocked as textarea) appears.
-    const ta = await screen.findByTestId('cm-textarea');
-    expect((ta as HTMLTextAreaElement).value).toBe('<p>preview text</p>');
-
-    // Switch back to Preview — textarea unmounts, SafeHtml renders.
-    const previewTab = screen.getByRole('tab', { name: /preview/i });
-    await user.click(previewTab);
-    await waitFor(() =>
-      expect(screen.queryByTestId('cm-textarea')).not.toBeInTheDocument(),
-    );
-  });
-
   it('hides the doc pane via the hide button, shows it via the edge tab, and persists state in localStorage', async () => {
     const user = userEvent.setup();
     window.localStorage.clear();
@@ -3700,7 +3627,7 @@ describe('TalkDetailPage', () => {
 
     // Persisted to localStorage.
     const raw = window.localStorage.getItem(
-      `clawtalk_doc_state:${DEFAULT_THREAD_ID}`,
+      `clawtalk_doc_pane:${DEFAULT_THREAD_ID}`,
     );
     expect(raw).not.toBeNull();
     expect(JSON.parse(raw as string)).toMatchObject({ hidden: true });
@@ -3712,100 +3639,6 @@ describe('TalkDetailPage', () => {
         screen.queryByRole('button', { name: /show hide me document/i }),
       ).not.toBeInTheDocument(),
     );
-  });
-
-  it('auto-flips an empty HTML doc from Source to Preview on first content_edit_applied', async () => {
-    installTalkDetailFetch({
-      contentByThreadId: {
-        [DEFAULT_THREAD_ID]: buildContent({
-          id: 'content-empty-html',
-          threadId: DEFAULT_THREAD_ID,
-          title: 'Auto-flip',
-          contentFormat: 'html',
-          bodyHtml: '',
-        }),
-      },
-    });
-    window.localStorage.clear();
-    renderDetailPage('/app/talks/talk-1/talk?doc=1', {
-      sidebarContents: [
-        {
-          id: 'content-empty-html',
-          talkId: 'talk-1',
-          threadId: DEFAULT_THREAD_ID,
-          title: 'Auto-flip',
-          updatedAt: '2026-03-06T00:00:00.000Z',
-        },
-      ],
-    });
-
-    // Wait for the doc pane to render so we know the content has
-    // hydrated; the empty-HTML auto-source effect runs in the same
-    // commit batch.
-    const doc = await screen.findByLabelText('Talk document');
-    expect(doc).toBeInTheDocument();
-    // Wait for loading to clear so the auto-source effect has had a
-    // chance to run.
-    await waitFor(() =>
-      expect(within(doc).queryByText('Loading…')).not.toBeInTheDocument(),
-    );
-    // Empty HTML doc opens in Source — CodeMirror textarea is present.
-    const ta = (await screen.findByTestId(
-      'cm-textarea',
-    )) as HTMLTextAreaElement;
-    expect(ta).toBeInTheDocument();
-
-    // Fire a content_edit_applied event — this is the first AI edit.
-    await act(async () => {
-      streamInput?.onContentEditApplied?.({
-        contentId: 'content-empty-html',
-        runId: 'run-edit-1',
-        editIds: ['edit-1'],
-        agentId: 'agent-1',
-        agentNickname: 'Claude',
-        messageId: null,
-      });
-    });
-
-    // After the refetch completes the mode flipped to Preview, so the
-    // editor mounts off and the SafeHtml div renders.
-    await waitFor(() =>
-      expect(screen.queryByTestId('cm-textarea')).not.toBeInTheDocument(),
-    );
-  });
-
-  it('renders a markdown doc via PendingEditDocSurface (regression — no swap to SafeHtml)', async () => {
-    installTalkDetailFetch({
-      contentByThreadId: {
-        [DEFAULT_THREAD_ID]: buildContent({
-          id: 'content-md',
-          threadId: DEFAULT_THREAD_ID,
-          title: 'Markdown doc',
-          contentFormat: 'markdown',
-          bodyMarkdown: '# Hello',
-        }),
-      },
-    });
-    renderDetailPage('/app/talks/talk-1/talk?doc=1', {
-      sidebarContents: [
-        {
-          id: 'content-md',
-          talkId: 'talk-1',
-          threadId: DEFAULT_THREAD_ID,
-          title: 'Markdown doc',
-          updatedAt: '2026-03-06T00:00:00.000Z',
-        },
-      ],
-    });
-
-    // Format pill says MD; no Preview/Source toggle for markdown docs.
-    expect(await screen.findByText('MD')).toBeInTheDocument();
-    expect(
-      screen.queryByRole('tab', { name: /source/i }),
-    ).not.toBeInTheDocument();
-    expect(
-      screen.queryByRole('tab', { name: /preview/i }),
-    ).not.toBeInTheDocument();
   });
 
   it('resolves to the localStorage-saved thread when the URL has no ?thread= param', async () => {
@@ -4819,6 +4652,59 @@ function buildContent(input: Partial<Content> = {}): Content {
     createdByUserId: input.createdByUserId ?? null,
     updatedByUserId: input.updatedByUserId ?? null,
     updatedByRunId: input.updatedByRunId ?? null,
+  };
+}
+
+// Minimal native-document projection of a Content row, so the migrated in-Talk
+// doc pane (which reads native `documents` blocks, not bodyMarkdown/bodyHtml)
+// can render in these page-level tests. Native block/edit behavior is covered
+// directly by TalkDocPane.test.tsx and TalkDocumentsPanel.test.tsx.
+function buildNativeDoc(content: Content): NativeDocument {
+  const bodyText =
+    content.bodyMarkdown.trim() ||
+    (content.bodyHtml ?? '').replace(/<[^>]*>/g, '').trim() ||
+    'Document body.';
+  const tabId = `${content.id}-tab`;
+  return {
+    id: content.id,
+    workspaceId: 'workspace-1',
+    primaryTalkId: content.talkId,
+    folderId: null,
+    title: content.title,
+    format: content.contentFormat,
+    wordCount: bodyText.split(/\s+/).filter(Boolean).length,
+    lastEditAt: content.updatedAt,
+    createdAt: content.createdAt,
+    updatedAt: content.updatedAt,
+    tabCount: 1,
+    blockCount: 1,
+    pendingEditCount: 0,
+    tabs: [
+      {
+        id: tabId,
+        documentId: content.id,
+        title: 'Main',
+        sortOrder: 0,
+        listVersion: content.bodyVersion,
+        createdAt: content.createdAt,
+        updatedAt: content.updatedAt,
+        blocks: [
+          {
+            id: `${content.id}-block`,
+            documentId: content.id,
+            tabId,
+            sortOrder: 0,
+            version: 1,
+            kind: 'p',
+            text: bodyText,
+            attrs: {},
+            createdAt: content.createdAt,
+            updatedAt: content.updatedAt,
+          },
+        ],
+      },
+    ],
+    pendingEdits: [],
   };
 }
 
@@ -6203,6 +6089,32 @@ function installTalkDetailFetch(input?: {
         return jsonResponse(200, {
           ok: true,
           data: { content: next, acceptedPendingEditIds: [] },
+        });
+      }
+
+      // ── Native document route (in-Talk doc pane) ─────────────────
+      // The migrated doc pane reads the native document by id; resolve it
+      // from the in-memory content store so the pane renders without the
+      // legacy bodyMarkdown/bodyHtml facade.
+      const nativeDocMatch = path.match(/^\/api\/v1\/documents\/([^/]+)$/);
+      if (nativeDocMatch && method === 'GET') {
+        const documentId = decodeURIComponent(nativeDocMatch[1]);
+        const threadId = Object.keys(contentByThreadId).find(
+          (tid) => contentByThreadId[tid].id === documentId,
+        );
+        const content = threadId ? contentByThreadId[threadId] : null;
+        if (!content) {
+          return jsonResponse(404, {
+            ok: false,
+            error: {
+              code: 'document_not_found',
+              message: 'Document not found.',
+            },
+          });
+        }
+        return jsonResponse(200, {
+          ok: true,
+          data: { document: buildNativeDoc(content) },
         });
       }
 

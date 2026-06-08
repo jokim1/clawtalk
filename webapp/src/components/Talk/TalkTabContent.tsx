@@ -1,34 +1,24 @@
 import {
-  Component,
-  lazy,
-  Suspense,
   type ChangeEvent,
   type Dispatch,
   type FormEvent,
   type KeyboardEvent as ReactKeyboardEvent,
   type MouseEvent as ReactMouseEvent,
-  type ReactNode,
   type RefObject,
   type SetStateAction,
 } from 'react';
 
-import { CopyExportMenu } from '../CopyExportMenu';
 import { DocPaneEdgeTab } from '../DocPaneEdgeTab';
-import { DocPaneHeader, type DocPaneMode } from '../DocPaneHeader';
-import { PendingEditDocSurface } from '../PendingEditDocSurface';
-import { SafeHtml } from '../SafeHtml';
 import type { SourceMentionOption } from '../SourceMentionPicker';
 import { TalkComposer } from '../TalkComposer';
+import { TalkDocPane } from './TalkDocPane';
 import { TalkThreadView } from '../TalkThreadView';
 import { ThreadContextMenu } from '../ThreadContextMenu';
 import { ThreadRowTitleEditor } from '../ThreadRowTitleEditor';
 import { ThreadStartButton } from '../ThreadStartButton';
 import { ToolChipsBar } from '../ToolChipsBar';
-import type { RichTextEditorSaveStatus } from '../rich-text/RichTextEditor';
-import { legacyContentExportProjection } from '../../lib/doc-export';
 import type {
-  Content,
-  ContentEditSummary,
+  ContentFormat,
   ContextSource,
   TalkAgent,
   TalkMessage,
@@ -106,41 +96,6 @@ function ThreadPinIcon(): JSX.Element {
   );
 }
 
-const LazyHtmlSourceEditor = lazy(() =>
-  import('../HtmlSourceEditor').then((mod) => ({
-    default: mod.HtmlSourceEditor,
-  })),
-);
-
-class HtmlEditorErrorBoundary extends Component<
-  { children: ReactNode },
-  { hasError: boolean }
-> {
-  state = { hasError: false };
-  static getDerivedStateFromError(): { hasError: boolean } {
-    return { hasError: true };
-  }
-  render(): ReactNode {
-    if (this.state.hasError) {
-      return (
-        <div className="talk-tab-doc-body" role="alert">
-          Editor failed to load.{' '}
-          <button
-            type="button"
-            className="talk-tab-doc-conflict-button"
-            onClick={() => {
-              if (typeof window !== 'undefined') window.location.reload();
-            }}
-          >
-            Reload
-          </button>
-        </div>
-      );
-    }
-    return this.props.children;
-  }
-}
-
 type TalkTabContentProps = {
   talkId: string;
   splitContainerRef: RefObject<HTMLDivElement>;
@@ -155,8 +110,13 @@ type TalkTabContentProps = {
   ) => void;
   fileInputRef: RefObject<HTMLInputElement>;
   textareaRef: RefObject<HTMLTextAreaElement>;
-  talkContent: Content | null;
-  setTalkContent: Dispatch<SetStateAction<Content | null>>;
+  // Native primary-document metadata (no flat content facade). `null` id means
+  // the active thread has no document, so the split layout collapses to chat.
+  primaryDocumentId: string | null;
+  primaryDocumentTitle: string;
+  primaryDocumentFormat: ContentFormat;
+  workspaceId: string | null;
+  docReloadSignal: number;
   isNarrowViewport: boolean;
   mobilePane: 'chat' | 'doc';
   setMobilePane: Dispatch<SetStateAction<'chat' | 'doc'>>;
@@ -254,26 +214,7 @@ type TalkTabContentProps = {
   historyEditState: HistoryEditState;
   handleShowDocPane: () => void;
   handleHideDocPane: () => void;
-  handleDocTitleSave: (nextTitle: string) => Promise<void>;
-  talkContentSaveStatus: RichTextEditorSaveStatus;
-  talkContentLoading: boolean;
-  htmlMode: DocPaneMode;
-  setHtmlMode: Dispatch<SetStateAction<DocPaneMode>>;
-  talkContentConflict: boolean;
-  setTalkContentConflict: Dispatch<SetStateAction<boolean>>;
-  setTalkContentSaveStatus: Dispatch<SetStateAction<RichTextEditorSaveStatus>>;
-  refetchTalkContent: () => Promise<Content | null>;
-  talkContentError: string | null;
-  htmlSourceDraft: string;
-  handleHtmlSourceChange: (next: string) => void;
-  handleHtmlSourceSave: (next: string) => void;
   canEditDoc: boolean;
-  talkContentPendingEdits: ContentEditSummary[];
-  setTalkContentPendingEdits: Dispatch<SetStateAction<ContentEditSummary[]>>;
-  pendingEditStreamingByRunId: Map<string, string | null>;
-  pendingEditInFlight: Set<string>;
-  setPendingEditInFlight: Dispatch<SetStateAction<Set<string>>>;
-  setTalkContentError: Dispatch<SetStateAction<string | null>>;
 };
 
 export function TalkTabContent({
@@ -287,8 +228,11 @@ export function TalkTabContent({
   setMessageElementRef,
   fileInputRef,
   textareaRef,
-  talkContent,
-  setTalkContent,
+  primaryDocumentId,
+  primaryDocumentTitle,
+  primaryDocumentFormat,
+  workspaceId,
+  docReloadSignal,
   isNarrowViewport,
   mobilePane,
   setMobilePane,
@@ -378,39 +322,21 @@ export function TalkTabContent({
   historyEditState,
   handleShowDocPane,
   handleHideDocPane,
-  handleDocTitleSave,
-  talkContentSaveStatus,
-  talkContentLoading,
-  htmlMode,
-  setHtmlMode,
-  talkContentConflict,
-  setTalkContentConflict,
-  setTalkContentSaveStatus,
-  refetchTalkContent,
-  talkContentError,
-  htmlSourceDraft,
-  handleHtmlSourceChange,
-  handleHtmlSourceSave,
   canEditDoc,
-  talkContentPendingEdits,
-  setTalkContentPendingEdits,
-  pendingEditStreamingByRunId,
-  pendingEditInFlight,
-  setPendingEditInFlight,
-  setTalkContentError,
 }: TalkTabContentProps): JSX.Element {
+  const hasDocument = primaryDocumentId !== null;
   return (
     <div
       ref={splitContainerRef}
       className={[
         'talk-tab-content',
-        talkContent ? 'talk-tab-content-split' : '',
-        talkContent && isNarrowViewport ? 'talk-tab-content-split-narrow' : '',
+        hasDocument ? 'talk-tab-content-split' : '',
+        hasDocument && isNarrowViewport ? 'talk-tab-content-split-narrow' : '',
       ]
         .filter(Boolean)
         .join(' ')}
     >
-      {talkContent && isNarrowViewport ? (
+      {hasDocument && isNarrowViewport ? (
         <div
           className="talk-tab-mobile-toggle"
           role="tablist"
@@ -459,14 +385,14 @@ export function TalkTabContent({
       <div
         className={[
           'talk-tab-chat-pane',
-          talkContent && isNarrowViewport && mobilePane !== 'chat'
+          hasDocument && isNarrowViewport && mobilePane !== 'chat'
             ? 'talk-tab-pane-hidden'
             : '',
         ]
           .filter(Boolean)
           .join(' ')}
         style={
-          talkContent && !isNarrowViewport
+          hasDocument && !isNarrowViewport
             ? { flex: `${chatRatio} 1 0` }
             : undefined
         }
@@ -666,7 +592,7 @@ export function TalkTabContent({
               textareaRef={textareaRef}
               handleDraftChange={handleDraftChange}
               handleComposerKeyDown={handleComposerKeyDown}
-              talkContent={talkContent}
+              hasDocument={hasDocument}
               contextSources={contextSources}
               activeRound={activeRound}
               hasUnsavedAgentChanges={hasUnsavedAgentChanges}
@@ -695,7 +621,7 @@ export function TalkTabContent({
           ) : null}
         </div>
       </div>
-      {talkContent && !isNarrowViewport && !docPaneHidden ? (
+      {hasDocument && !isNarrowViewport && !docPaneHidden ? (
         <div
           ref={splitHandleRef}
           className="talk-tab-split-handle"
@@ -709,14 +635,14 @@ export function TalkTabContent({
           onKeyDown={handleResizeHandleKeyDown}
         />
       ) : null}
-      {talkContent && docPaneHidden && !isNarrowViewport ? (
+      {hasDocument && docPaneHidden && !isNarrowViewport ? (
         <DocPaneEdgeTab
-          docTitle={talkContent.title}
-          format={talkContent.contentFormat}
+          docTitle={primaryDocumentTitle}
+          format={primaryDocumentFormat}
           onClick={handleShowDocPane}
         />
       ) : null}
-      {talkContent ? (
+      {primaryDocumentId !== null ? (
         <section
           className={[
             'talk-tab-doc-pane',
@@ -734,120 +660,15 @@ export function TalkTabContent({
           }
           aria-label="Talk document"
         >
-          <DocPaneHeader
-            title={talkContent.title}
-            onTitleSave={handleDocTitleSave}
-            format={talkContent.contentFormat}
-            saveStatus={talkContentSaveStatus}
-            loading={talkContentLoading}
-            mode={talkContent.contentFormat === 'html' ? htmlMode : undefined}
-            onModeChange={
-              talkContent.contentFormat === 'html' ? setHtmlMode : undefined
-            }
-            copyExportSlot={
-              <CopyExportMenu
-                source={legacyContentExportProjection({
-                  format: talkContent.contentFormat,
-                  markdown: talkContent.bodyMarkdown,
-                  html: talkContent.bodyHtml,
-                })}
-                documentTitle={talkContent.title}
-              />
-            }
+          <TalkDocPane
+            documentId={primaryDocumentId}
+            workspaceId={workspaceId}
+            canEditDoc={canEditDoc}
+            onUnauthorized={handleUnauthorized}
+            reloadSignal={docReloadSignal}
             onHidePane={handleHideDocPane}
-            sanitizeWarning={null}
+            docBodyRef={docBodyRef}
           />
-          {talkContentConflict ? (
-            <div
-              className="talk-tab-doc-conflict"
-              role="alert"
-              aria-live="assertive"
-            >
-              <span>
-                This document changed elsewhere. Reload to see the latest
-                version — your unsaved edits will be lost.
-              </span>
-              <button
-                type="button"
-                className="talk-tab-doc-conflict-button"
-                onClick={() => {
-                  setTalkContentConflict(false);
-                  setTalkContentSaveStatus('idle');
-                  void refetchTalkContent();
-                }}
-              >
-                Reload
-              </button>
-            </div>
-          ) : null}
-          {talkContentError ? (
-            <p className="page-state" role="alert">
-              {talkContentError}
-            </p>
-          ) : talkContent.contentFormat === 'html' ? (
-            htmlMode === 'source' ? (
-              <HtmlEditorErrorBoundary>
-                <Suspense
-                  fallback={
-                    <div className="talk-tab-doc-body" aria-busy="true">
-                      Loading editor…
-                    </div>
-                  }
-                >
-                  <div
-                    className="talk-tab-doc-body"
-                    ref={docBodyRef}
-                    tabIndex={-1}
-                  >
-                    <LazyHtmlSourceEditor
-                      value={htmlSourceDraft}
-                      onChange={handleHtmlSourceChange}
-                      onSave={
-                        canEditDoc && !talkContentConflict
-                          ? handleHtmlSourceSave
-                          : undefined
-                      }
-                      readOnly={!canEditDoc || talkContentConflict}
-                      placeholder="Ask an agent to generate, or type HTML"
-                    />
-                  </div>
-                </Suspense>
-              </HtmlEditorErrorBoundary>
-            ) : (
-              <div
-                ref={docBodyRef}
-                tabIndex={-1}
-                className="talk-tab-doc-body-wrap"
-              >
-                <SafeHtml
-                  html={talkContent.bodyHtml ?? ''}
-                  className="talk-tab-doc-body"
-                />
-              </div>
-            )
-          ) : (
-            <div className="talk-tab-doc-body" ref={docBodyRef} tabIndex={-1}>
-              <PendingEditDocSurface
-                content={talkContent}
-                pendingEdits={talkContentPendingEdits}
-                streamingByRunId={pendingEditStreamingByRunId}
-                inFlightEditIds={pendingEditInFlight}
-                canEditDoc={canEditDoc}
-                conflict={talkContentConflict}
-                onSaved={(content) =>
-                  setTalkContent((current) =>
-                    current && current.id === content.id ? content : current,
-                  )
-                }
-                onConflict={() => setTalkContentConflict(true)}
-                onError={(err) => setTalkContentError(err.message)}
-                onStatusChange={setTalkContentSaveStatus}
-                setPendingEdits={setTalkContentPendingEdits}
-                setInFlightEditIds={setPendingEditInFlight}
-                refetchTalkContent={refetchTalkContent}
-              />
-            </div>
-          )}
         </section>
       ) : null}
     </div>

@@ -7,7 +7,7 @@ import type {
   SetStateAction,
 } from 'react';
 
-import type { Content, ContextSource, TalkAgent } from '../lib/api';
+import type { ContextSource, TalkAgent } from '../lib/api';
 import {
   buildAgentLabel,
   type TalkAgentExecutionGuardrail,
@@ -124,7 +124,7 @@ type TalkComposerProps = {
   handleComposerKeyDown: (
     event: ReactKeyboardEvent<HTMLTextAreaElement>,
   ) => void;
-  talkContent: Content | null;
+  hasDocument: boolean;
   contextSources: ContextSource[];
   activeRound: boolean;
   hasUnsavedAgentChanges: boolean;
@@ -170,7 +170,7 @@ export function TalkComposer({
   textareaRef,
   handleDraftChange,
   handleComposerKeyDown,
-  talkContent,
+  hasDocument,
   contextSources,
   activeRound,
   hasUnsavedAgentChanges,
@@ -271,7 +271,7 @@ export function TalkComposer({
           onChange={(event) => handleDraftChange(event.target.value)}
           onKeyDown={handleComposerKeyDown}
           placeholder={
-            talkContent || contextSources.some((s) => s.status === 'ready')
+            hasDocument || contextSources.some((s) => s.status === 'ready')
               ? 'Send a message to this thread. Type @ to reference a saved source or the doc.'
               : 'Send a message to this thread.'
           }

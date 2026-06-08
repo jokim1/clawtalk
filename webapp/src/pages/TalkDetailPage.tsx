@@ -40,7 +40,7 @@ import {
   useTalkDetailRouteState,
   useTalkDetailTabLinks,
 } from '../hooks/useTalkDetailTabs';
-import { useTalkDocumentController } from '../hooks/useTalkDocumentController';
+import { useTalkDocPaneController } from '../hooks/useTalkDocPaneController';
 import { useTalkRunViewModel } from '../hooks/useTalkRunViewModel';
 import { useTalkContextController } from '../hooks/useTalkContextController';
 import { useTalkJobsController } from '../hooks/useTalkJobsController';
@@ -274,30 +274,8 @@ export function TalkDetailPage({
     openDocModal,
     closeDocModal,
     handleCreateDoc,
-    talkContent,
-    setTalkContent,
-    talkContentLoading,
-    talkContentError,
-    setTalkContentError,
-    talkContentPendingEdits,
-    setTalkContentPendingEdits,
-    pendingEditStreamingByRunId,
-    setPendingEditStreamingByRunId,
-    pendingEditStreamingStartedAtRef,
-    pendingEditInFlight,
-    setPendingEditInFlight,
-    talkContentSaveStatus,
-    setTalkContentSaveStatus,
-    talkContentConflict,
-    setTalkContentConflict,
-    talkContentRef,
-    talkContentSaveStatusRef,
     docPaneHidden,
     setDocPaneHidden,
-    htmlMode,
-    setHtmlMode,
-    htmlAutoFlippedRef,
-    htmlSourceDraft,
     docBodyRef,
     docNarrowShowBtnRef,
     chatRatio,
@@ -307,18 +285,12 @@ export function TalkDetailPage({
     splitContainerRef,
     splitHandleRef,
     handleResizeHandleKeyDown,
-    handleHtmlSourceChange,
-    handleHtmlSourceSave,
-    handleDocTitleSave,
     handleHideDocPane,
     handleShowDocPane,
-    refetchTalkContent,
-    hydrateDocumentFromSnapshot,
-  } = useTalkDocumentController({
+  } = useTalkDocPaneController({
     talkId,
     userId,
     activeThreadId,
-    activeThreadIdRef,
     currentTab,
     locationParams,
     currentThreadHasContent,
@@ -327,6 +299,20 @@ export function TalkDetailPage({
     onUnauthorized,
     onSidebarChanged,
   });
+
+  // Native primary-document metadata derived from the snapshot — id/title/
+  // format only, never a flat content body read. `content.id` is the native
+  // document id (the snapshot's `content` is a metadata projection over
+  // `documents`), so the in-Talk doc pane and the `@doc` mention resolve off
+  // this without the legacy flat content body facade.
+  const primaryDocumentId = talkSnapshot?.content?.id ?? null;
+  const primaryDocumentTitle = talkSnapshot?.content?.title ?? '';
+  const primaryDocumentFormat = talkSnapshot?.content?.contentFormat ?? 'markdown';
+
+  // Bumped on each content-edit stream event so the native doc pane reloads
+  // its blocks/pending edits in place (replaces the legacy content refetch).
+  const [docReloadSignal, setDocReloadSignal] = useState(0);
+  const bumpDocReload = useCallback(() => setDocReloadSignal((n) => n + 1), []);
 
   const isNearBottom = useCallback((): boolean => {
     const container = timelineRef.current;
@@ -421,7 +407,7 @@ export function TalkDetailPage({
     sendState: state.sendState,
     dispatch,
     contextSources,
-    talkContent,
+    documentTitle: primaryDocumentId !== null ? primaryDocumentTitle : null,
   });
 
   const {
@@ -660,9 +646,9 @@ export function TalkDetailPage({
     const hydrationKey = `${talkId}::${snapshot.activeThreadId}`;
     const isFirstHydration = hydratedKeyRef.current !== hydrationKey;
     hydrateTalkThreads(snapshot.threads);
-    // Always reconcile doc state — it advances independently of the
-    // message timeline (content_updated/applied/resolved invalidates).
-    hydrateDocumentFromSnapshot(snapshot);
+    // Doc state is derived reactively from `talkSnapshot.content` (native
+    // metadata) and the in-pane native fetch — no imperative content
+    // hydration here anymore.
     rememberActiveThreadForTalk(talkId, snapshot.activeThreadId);
     setOlderMessagesAvailable(snapshot.hasOlderMessages);
     if (!isFirstHydration) return;
@@ -673,7 +659,6 @@ export function TalkDetailPage({
       runs: snapshotRunsToTalkRuns(snapshot.runs),
     });
   }, [
-    hydrateDocumentFromSnapshot,
     hydrateTalkThreads,
     snapshotQuery.data,
     snapshotQuery.error,
@@ -862,21 +847,13 @@ export function TalkDetailPage({
     rememberDeletedMessageIds,
     scheduleThreadListRefresh,
     resyncTalkState,
-    refetchTalkContent,
+    bumpDocReload,
     deletedMessageIdsRef,
     persistedRunMessageIdsRef,
     pendingMessageRefetchTimersRef,
     activeThreadIdRef,
     autoStickToBottomRef,
-    talkContentRef,
-    talkContentSaveStatusRef,
-    pendingEditStreamingStartedAtRef,
-    htmlAutoFlippedRef,
     wsCacheRouterRef,
-    setTalkContentConflict,
-    setPendingEditStreamingByRunId,
-    setHtmlMode,
-    setTalkContentPendingEdits,
     setToolsRefreshKey,
   });
 
@@ -1283,8 +1260,11 @@ export function TalkDetailPage({
               setMessageElementRef={setMessageElementRef}
               fileInputRef={composerInput.fileInputRef}
               textareaRef={composerInput.textareaRef}
-              talkContent={talkContent}
-              setTalkContent={setTalkContent}
+              primaryDocumentId={primaryDocumentId}
+              primaryDocumentTitle={primaryDocumentTitle}
+              primaryDocumentFormat={primaryDocumentFormat}
+              workspaceId={activeTalkWorkspaceId}
+              docReloadSignal={docReloadSignal}
               isNarrowViewport={isNarrowViewport}
               mobilePane={mobilePane}
               setMobilePane={setMobilePane}
@@ -1380,26 +1360,7 @@ export function TalkDetailPage({
               historyEditState={historyEditState}
               handleShowDocPane={handleShowDocPane}
               handleHideDocPane={handleHideDocPane}
-              handleDocTitleSave={handleDocTitleSave}
-              talkContentSaveStatus={talkContentSaveStatus}
-              talkContentLoading={talkContentLoading}
-              htmlMode={htmlMode}
-              setHtmlMode={setHtmlMode}
-              talkContentConflict={talkContentConflict}
-              setTalkContentConflict={setTalkContentConflict}
-              setTalkContentSaveStatus={setTalkContentSaveStatus}
-              refetchTalkContent={refetchTalkContent}
-              talkContentError={talkContentError}
-              htmlSourceDraft={htmlSourceDraft}
-              handleHtmlSourceChange={handleHtmlSourceChange}
-              handleHtmlSourceSave={handleHtmlSourceSave}
               canEditDoc={canEditDoc}
-              talkContentPendingEdits={talkContentPendingEdits}
-              setTalkContentPendingEdits={setTalkContentPendingEdits}
-              pendingEditStreamingByRunId={pendingEditStreamingByRunId}
-              pendingEditInFlight={pendingEditInFlight}
-              setPendingEditInFlight={setPendingEditInFlight}
-              setTalkContentError={setTalkContentError}
             />
           ) : null}
         </div>

@@ -6,11 +6,6 @@ import type {
   MessageAppendedEvent,
   TalkBrowserBlockedEvent,
   TalkBrowserUnblockedEvent,
-  TalkContentEditAppliedEvent,
-  TalkContentEditResolvedEvent,
-  TalkContentEditRunAbortedEvent,
-  TalkContentEditRunStartedEvent,
-  TalkContentUpdatedEvent,
   TalkHistoryEditedEvent,
   TalkProgressUpdateEvent,
   TalkResponseDeltaEvent,
@@ -26,9 +21,6 @@ import type {
 import { applyMessageAppendedDelta } from '../lib/wsCacheRouter';
 import type { WsCacheRouter } from '../lib/wsCacheRouter';
 import type { DetailAction } from '../lib/talkRunReducer';
-import type { Content, ContentEditSummary } from '../lib/api';
-import type { DocPaneMode } from '../components/DocPaneHeader';
-import type { RichTextEditorSaveStatus } from '../components/rich-text/RichTextEditor';
 
 // Grace window before refetching when MESSAGE_APPENDED never lands after
 // RUN_COMPLETED (moved verbatim from TalkDetailPage with the effect).
@@ -66,7 +58,9 @@ export type UseTalkRunStreamParams = {
   rememberDeletedMessageIds: (messageIds: string[]) => void;
   scheduleThreadListRefresh: () => void;
   resyncTalkState: (options?: { refreshThreads?: boolean }) => Promise<void>;
-  refetchTalkContent: () => Promise<Content | null>;
+  // Bump the native doc pane's reload signal when an agent content-edit
+  // stream event lands, so `TalkDocumentView` refetches the native document.
+  bumpDocReload: () => void;
   // Page-owned refs the stream handlers read/write (stable; not deps).
   deletedMessageIdsRef: MutableRefObject<Set<string>>;
   persistedRunMessageIdsRef: MutableRefObject<Set<string>>;
@@ -75,18 +69,8 @@ export type UseTalkRunStreamParams = {
   >;
   activeThreadIdRef: MutableRefObject<string | null>;
   autoStickToBottomRef: MutableRefObject<ScrollBehavior | null>;
-  talkContentRef: MutableRefObject<Content | null>;
-  talkContentSaveStatusRef: MutableRefObject<RichTextEditorSaveStatus>;
-  pendingEditStreamingStartedAtRef: MutableRefObject<Map<string, number>>;
-  htmlAutoFlippedRef: MutableRefObject<Set<string>>;
   wsCacheRouterRef: MutableRefObject<WsCacheRouter>;
   // Page-owned state setters (stable; not deps).
-  setTalkContentConflict: Dispatch<SetStateAction<boolean>>;
-  setPendingEditStreamingByRunId: Dispatch<
-    SetStateAction<Map<string, string | null>>
-  >;
-  setHtmlMode: Dispatch<SetStateAction<DocPaneMode>>;
-  setTalkContentPendingEdits: Dispatch<SetStateAction<ContentEditSummary[]>>;
   setToolsRefreshKey: Dispatch<SetStateAction<number>>;
 };
 
@@ -103,21 +87,13 @@ export function useTalkRunStream({
   rememberDeletedMessageIds,
   scheduleThreadListRefresh,
   resyncTalkState,
-  refetchTalkContent,
+  bumpDocReload,
   deletedMessageIdsRef,
   persistedRunMessageIdsRef,
   pendingMessageRefetchTimersRef,
   activeThreadIdRef,
   autoStickToBottomRef,
-  talkContentRef,
-  talkContentSaveStatusRef,
-  pendingEditStreamingStartedAtRef,
-  htmlAutoFlippedRef,
   wsCacheRouterRef,
-  setTalkContentConflict,
-  setPendingEditStreamingByRunId,
-  setHtmlMode,
-  setTalkContentPendingEdits,
   setToolsRefreshKey,
 }: UseTalkRunStreamParams): void {
   useEffect(() => {
@@ -340,88 +316,32 @@ export function useTalkRunStream({
         }
         scheduleThreadListRefresh();
       },
-      onContentUpdated: (event: TalkContentUpdatedEvent) => {
-        // Mark the snapshot stale across consumers; tab-local refetch
-        // still happens inline so the editor reconciles right away.
+      onContentUpdated: () => {
+        // A document changed (title/blocks). Invalidate the shared cache and
+        // signal the native doc pane to reload — it is the version-of-record
+        // now and refetches the native document on each bump.
         wsCacheRouterRef.current.scheduleInvalidate({ userId, talkId });
-        // The DO scopes events to the current talk-room subscription, so
-        // the contentId here always belongs to this Talk. Bail when the
-        // user hasn't loaded the doc yet — no local version to compare.
-        const current = talkContentRef.current;
-        if (!current || current.id !== event.contentId) return;
-        if (event.version <= current.bodyVersion) return;
-        const status = talkContentSaveStatusRef.current;
-        const hasUnsavedEdits =
-          status === 'pending' || status === 'saving' || status === 'error';
-        if (hasUnsavedEdits) {
-          setTalkContentConflict(true);
-          return;
-        }
-        void refetchTalkContent();
+        bumpDocReload();
       },
-      onContentEditRunStarted: (event: TalkContentEditRunStartedEvent) => {
-        // No guard on talkContentRef — these events fire during the
-        // tx that just created the row, so the local content state may
-        // not have hydrated yet (sidebar-driven load races the
-        // WebSocket arrival). Banner state is keyed on contentId so a
-        // mismatched/stale ref doesn't corrupt anything; refetch fills
-        // in the rest.
-        setPendingEditStreamingByRunId((prev) => {
-          if (prev.has(event.runId)) return prev;
-          const next = new Map(prev);
-          next.set(event.runId, event.agentNickname ?? null);
-          return next;
-        });
-        pendingEditStreamingStartedAtRef.current.set(event.runId, Date.now());
-        void refetchTalkContent();
+      onContentEditRunStarted: () => {
+        // An agent began an edit run against this Talk's document; reload so
+        // the incoming pending edits surface in the native review list.
+        bumpDocReload();
       },
-      onContentEditRunAborted: (event: TalkContentEditRunAbortedEvent) => {
-        setPendingEditStreamingByRunId((prev) => {
-          if (!prev.has(event.runId)) return prev;
-          const next = new Map(prev);
-          next.delete(event.runId);
-          return next;
-        });
-        pendingEditStreamingStartedAtRef.current.delete(event.runId);
+      onContentEditRunAborted: () => {
+        bumpDocReload();
       },
-      onContentEditApplied: (event: TalkContentEditAppliedEvent) => {
+      onContentEditApplied: () => {
+        // The apply created a pending edit row — invalidate the shared cache
+        // and reload the native pane so it appears for review.
         wsCacheRouterRef.current.scheduleInvalidate({ userId, talkId });
-        // Always refetch — the apply just created a pending row that
-        // the UI must surface. The prior `current.id !== event.contentId`
-        // guard caused a missed-update bug when the WebSocket event
-        // arrived before talkContent had hydrated.
-        setPendingEditStreamingByRunId((prev) => {
-          if (!prev.has(event.runId)) return prev;
-          const next = new Map(prev);
-          next.delete(event.runId);
-          return next;
-        });
-        pendingEditStreamingStartedAtRef.current.delete(event.runId);
-        // First AI edit on an empty HTML doc auto-flips Source ➜
-        // Preview so the user immediately sees the rendered result.
-        // Sticky: each doc id only flips once per page mount.
-        const cur = talkContentRef.current;
-        if (
-          cur &&
-          cur.id === event.contentId &&
-          cur.contentFormat === 'html' &&
-          (cur.bodyHtml ?? '').length === 0 &&
-          !htmlAutoFlippedRef.current.has(cur.id)
-        ) {
-          htmlAutoFlippedRef.current.add(cur.id);
-          setHtmlMode('preview');
-        }
-        void refetchTalkContent();
+        bumpDocReload();
       },
-      onContentEditResolved: (event: TalkContentEditResolvedEvent) => {
+      onContentEditResolved: () => {
+        // An edit/run was accepted or rejected (possibly in another tab);
+        // reconcile the native pane against the server-authoritative document.
         wsCacheRouterRef.current.scheduleInvalidate({ userId, talkId });
-        setTalkContentPendingEdits((prev) =>
-          prev.filter((edit) => !event.editIds.includes(edit.id)),
-        );
-        // Refetch in all cases so the banner / body reconcile against
-        // the server-authoritative snapshot — including rejected runs
-        // (the row went away, the cached state should reflect it).
-        void refetchTalkContent();
+        bumpDocReload();
       },
       onTalkToolsChanged: () => {
         wsCacheRouterRef.current.scheduleInvalidate({ userId, talkId });
@@ -482,12 +402,12 @@ export function useTalkRunStream({
       pendingMessageRefetchTimersRef.current.clear();
     };
   }, [
+    bumpDocReload,
     bumpThreadSummaryFromMessage,
     ensureKnownThread,
     handleUnauthorized,
     isNearBottom,
     queryClient,
-    refetchTalkContent,
     rememberDeletedMessageIds,
     resyncTalkState,
     scheduleThreadListRefresh,

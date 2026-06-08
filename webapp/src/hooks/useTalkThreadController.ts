@@ -375,7 +375,7 @@ export function useTalkThreadController({
         });
         if (typeof window !== 'undefined') {
           try {
-            window.localStorage.removeItem(`clawtalk_doc_state:${thread.id}`);
+            window.localStorage.removeItem(`clawtalk_doc_pane:${thread.id}`);
           } catch {
             // Quota / private mode — ignore.
           }
