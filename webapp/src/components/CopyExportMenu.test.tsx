@@ -9,17 +9,62 @@ import {
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { CopyExportMenu } from './CopyExportMenu';
+import {
+  legacyContentExportProjection,
+  nativeDocumentToExportSource,
+} from '../lib/doc-export';
+import type { NativeDocument } from '../lib/api';
 
-const MARKDOWN_SRC = {
+const MARKDOWN_SRC = legacyContentExportProjection({
   format: 'markdown' as const,
-  bodyMarkdown: '# Hi\n\nWorld',
-  bodyHtml: null,
-};
-const HTML_SRC = {
+  markdown: '# Hi\n\nWorld',
+  html: null,
+});
+const HTML_SRC = legacyContentExportProjection({
   format: 'html' as const,
-  bodyMarkdown: null,
-  bodyHtml: '<h1>Hi</h1><p>World</p>',
-};
+  markdown: null,
+  html: '<h1>Hi</h1><p>World</p>',
+});
+const NATIVE_SRC = nativeDocumentToExportSource({
+  format: 'markdown',
+  tabs: [
+    {
+      id: 'tab-1',
+      documentId: 'doc-1',
+      title: 'Main',
+      sortOrder: 0,
+      listVersion: 1,
+      createdAt: '2026-06-01T00:00:00.000Z',
+      updatedAt: '2026-06-01T00:00:00.000Z',
+      blocks: [
+        {
+          id: 'block-1',
+          documentId: 'doc-1',
+          tabId: 'tab-1',
+          sortOrder: 0,
+          version: 1,
+          kind: 'h1',
+          text: 'Native heading',
+          attrs: {},
+          createdAt: '2026-06-01T00:00:00.000Z',
+          updatedAt: '2026-06-01T00:00:00.000Z',
+        },
+        {
+          id: 'block-2',
+          documentId: 'doc-1',
+          tabId: 'tab-1',
+          sortOrder: 1,
+          version: 1,
+          kind: 'li',
+          text: 'Native item',
+          attrs: {},
+          createdAt: '2026-06-01T00:00:00.000Z',
+          updatedAt: '2026-06-01T00:00:00.000Z',
+        },
+      ],
+    },
+  ],
+} satisfies Pick<NativeDocument, 'format' | 'tabs'>);
 
 afterEach(() => {
   cleanup();
@@ -73,9 +118,7 @@ describe('CopyExportMenu', () => {
     it('renders the trigger button by default', () => {
       render(
         <CopyExportMenu
-          format="markdown"
-          bodyMarkdown={MARKDOWN_SRC.bodyMarkdown}
-          bodyHtml={null}
+          source={MARKDOWN_SRC}
           documentTitle="My doc"
         />,
       );
@@ -88,9 +131,7 @@ describe('CopyExportMenu', () => {
     it('opens the menu on click', () => {
       render(
         <CopyExportMenu
-          format="markdown"
-          bodyMarkdown={MARKDOWN_SRC.bodyMarkdown}
-          bodyHtml={null}
+          source={MARKDOWN_SRC}
           documentTitle="My doc"
         />,
       );
@@ -101,9 +142,11 @@ describe('CopyExportMenu', () => {
     it('disables the trigger and shows tooltip when doc is empty', () => {
       render(
         <CopyExportMenu
-          format="markdown"
-          bodyMarkdown=""
-          bodyHtml={null}
+          source={legacyContentExportProjection({
+            format: 'markdown',
+            markdown: '',
+            html: null,
+          })}
           documentTitle="Empty"
         />,
       );
@@ -118,9 +161,7 @@ describe('CopyExportMenu', () => {
       const { writeMock } = setupClipboard();
       render(
         <CopyExportMenu
-          format="markdown"
-          bodyMarkdown={MARKDOWN_SRC.bodyMarkdown}
-          bodyHtml={null}
+          source={NATIVE_SRC}
           documentTitle="My doc"
         />,
       );
@@ -135,13 +176,11 @@ describe('CopyExportMenu', () => {
       expect(mimes).toContain('text/plain');
     });
 
-    it('Copy as Markdown uses writeText with raw markdown', async () => {
+    it('Copy as Markdown uses writeText with legacy markdown projection', async () => {
       const { writeTextMock } = setupClipboard();
       render(
         <CopyExportMenu
-          format="markdown"
-          bodyMarkdown={MARKDOWN_SRC.bodyMarkdown}
-          bodyHtml={null}
+          source={MARKDOWN_SRC}
           documentTitle="My doc"
         />,
       );
@@ -150,17 +189,36 @@ describe('CopyExportMenu', () => {
         screen.getByRole('menuitem', { name: 'Copy as Markdown' }),
       );
       await waitFor(() =>
-        expect(writeTextMock).toHaveBeenCalledWith(MARKDOWN_SRC.bodyMarkdown),
+        expect(writeTextMock).toHaveBeenCalledWith(MARKDOWN_SRC.markdown),
       );
+    });
+
+    it('Copy as Markdown serializes native blocks', async () => {
+      const { writeTextMock } = setupClipboard();
+      render(
+        <CopyExportMenu source={NATIVE_SRC} documentTitle="Native doc" />,
+      );
+      fireEvent.click(screen.getByRole('button', { name: /Copy \/ Export/i }));
+      fireEvent.click(
+        screen.getByRole('menuitem', { name: 'Copy as Markdown' }),
+      );
+      await waitFor(() =>
+        expect(writeTextMock).toHaveBeenCalledWith(
+          expect.stringContaining('# Native heading'),
+        ),
+      );
+      expect(writeTextMock.mock.calls[0]?.[0]).toContain('- Native item');
     });
 
     it('Copy as Plain strips markdown syntax', async () => {
       const { writeTextMock } = setupClipboard();
       render(
         <CopyExportMenu
-          format="markdown"
-          bodyMarkdown="# Heading\n\n**bold**"
-          bodyHtml={null}
+          source={legacyContentExportProjection({
+            format: 'markdown',
+            markdown: '# Heading\n\n**bold**',
+            html: null,
+          })}
           documentTitle="My doc"
         />,
       );
@@ -182,9 +240,7 @@ describe('CopyExportMenu', () => {
       const { createSpy, clickSpy } = setupDownload();
       render(
         <CopyExportMenu
-          format="html"
-          bodyMarkdown={null}
-          bodyHtml={HTML_SRC.bodyHtml}
+          source={HTML_SRC}
           documentTitle="My doc"
         />,
       );
@@ -201,9 +257,7 @@ describe('CopyExportMenu', () => {
       const { createSpy } = setupDownload();
       render(
         <CopyExportMenu
-          format="markdown"
-          bodyMarkdown={MARKDOWN_SRC.bodyMarkdown}
-          bodyHtml={null}
+          source={NATIVE_SRC}
           documentTitle="My doc"
         />,
       );
@@ -218,9 +272,7 @@ describe('CopyExportMenu', () => {
       const { createSpy } = setupDownload();
       render(
         <CopyExportMenu
-          format="markdown"
-          bodyMarkdown={MARKDOWN_SRC.bodyMarkdown}
-          bodyHtml={null}
+          source={MARKDOWN_SRC}
           documentTitle="My doc"
         />,
       );
@@ -242,9 +294,7 @@ describe('CopyExportMenu', () => {
       });
       render(
         <CopyExportMenu
-          format="markdown"
-          bodyMarkdown={MARKDOWN_SRC.bodyMarkdown}
-          bodyHtml={null}
+          source={MARKDOWN_SRC}
           documentTitle="My doc"
         />,
       );

@@ -190,6 +190,7 @@ describe('TalkDocumentsPanel', () => {
     renderPanel();
 
     expect(await screen.findByText('Launch brief')).toBeTruthy();
+    expect(screen.getByRole('button', { name: /Copy \/ Export/i })).toBeTruthy();
     expect(screen.getByText('Original paragraph.')).toBeTruthy();
     expect(mockApi.getDocument).toHaveBeenCalledWith({
       documentId: 'doc-1',

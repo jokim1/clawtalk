@@ -28,7 +28,7 @@ import {
   downloadAsMarkdown,
   downloadAsPlain,
   isDocEmpty,
-  type DocSource,
+  type DocExportSource,
 } from '../lib/doc-export';
 
 const SUCCESS_LABEL_MS = 1500;
@@ -45,7 +45,7 @@ interface MenuAction {
   id: ActionId;
   label: string;
   successLabel: string;
-  run: (src: DocSource, filenameBase: string) => Promise<void> | void;
+  run: (src: DocExportSource, filenameBase: string) => Promise<void> | void;
   section: 'copy' | 'export';
 }
 
@@ -95,24 +95,19 @@ const MENU_ACTIONS: readonly MenuAction[] = [
 ];
 
 export interface CopyExportMenuProps {
-  format: DocSource['format'];
-  bodyMarkdown: string | null;
-  bodyHtml: string | null;
+  source: DocExportSource;
   documentTitle: string;
   disabled?: boolean;
   className?: string;
 }
 
 export function CopyExportMenu({
-  format,
-  bodyMarkdown,
-  bodyHtml,
+  source,
   documentTitle,
   disabled,
   className,
 }: CopyExportMenuProps): JSX.Element {
-  const src: DocSource = { format, bodyMarkdown, bodyHtml };
-  const isEmpty = isDocEmpty(src);
+  const isEmpty = isDocEmpty(source);
   const isDisabled = disabled === true || isEmpty;
 
   const [open, setOpen] = useState(false);
@@ -165,7 +160,7 @@ export function CopyExportMenu({
   const triggerAction = useCallback(
     async (action: MenuAction) => {
       try {
-        await action.run(src, documentTitle);
+        await action.run(source, documentTitle);
         // Show the success label for SUCCESS_LABEL_MS, then revert.
         setSuccessByActionId((prev) => ({ ...prev, [action.id]: true }));
         const existing = successTimersRef.current.get(action.id);
@@ -186,7 +181,7 @@ export function CopyExportMenu({
       }
       setOpen(false);
     },
-    [documentTitle, src],
+    [documentTitle, source],
   );
 
   const handleTriggerKeyDown = (
