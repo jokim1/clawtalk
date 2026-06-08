@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Navigate,
   Route,
@@ -7,8 +7,10 @@ import {
   useNavigate,
 } from 'react-router-dom';
 
-import { ClawTalkMark } from './components/ClawTalkMark';
-import { ClawTalkSidebar } from './components/ClawTalkSidebar';
+import { CommandPalette, type CommandItem } from './components/CommandPalette';
+import { NewTalkSheet } from './components/NewTalkSheet';
+import { IconRail } from './components/shell/IconRail';
+import { SecondaryList } from './components/shell/SecondaryList';
 import { SignInView } from './components/SignInView';
 import {
   ApiError,
@@ -41,6 +43,9 @@ import { clearActiveThreadMemory } from './lib/useTalkSnapshot';
 import { TalkDetailPage } from './pages/TalkDetailPage';
 import { TalkListPage } from './pages/TalkListPage';
 import { SettingsPage } from './pages/SettingsPage';
+import { HomePage } from './pages/HomePage';
+import { ArchivePage } from './pages/ArchivePage';
+import { AgentProfilePage } from './pages/AgentProfilePage';
 
 type AuthState =
   | { status: 'loading' }
@@ -407,7 +412,29 @@ export function App() {
   const [sidebarLoading, setSidebarLoading] = useState(true);
   const [sidebarError, setSidebarError] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState<RenameDraft>(null);
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  // Desktop: the talk-list column can be collapsed (persisted). Mobile: it
+  // rides in as an overlay drawer instead (transient).
+  const [secondaryCollapsed, setSecondaryCollapsed] = useState(false);
+  const [secondaryDrawerOpen, setSecondaryDrawerOpen] = useState(false);
+  const [newTalkOpen, setNewTalkOpen] = useState(false);
+  // Element to restore focus to when the New Talk sheet is dismissed without
+  // creating — captured at open-time, before the sheet's portal steals focus.
+  const newTalkRestoreRef = useRef<Element | null>(null);
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const paletteRestoreRef = useRef<Element | null>(null);
+  // Mirror open-state into a ref so the global ⌘K listener (registered once)
+  // can toggle without re-subscribing on every open/close.
+  const paletteOpenRef = useRef(false);
+  paletteOpenRef.current = paletteOpen;
+  // Mirror the New Talk sheet's open-state so ⌘K won't stack the palette over
+  // it: both are Modals with window-level Escape, and stacking would let one
+  // Escape close both overlays (dropping the sheet's typed draft).
+  const newTalkOpenRef = useRef(false);
+  newTalkOpenRef.current = newTalkOpen;
+  // Mirror auth so the global ⌘K listener ignores keystrokes outside the
+  // authenticated app shell (e.g. the SignIn screen's dev-login fields).
+  const authedRef = useRef(false);
+  authedRef.current = auth.status === 'authenticated';
   const [talkReadMarkers, setTalkReadMarkers] = useState<
     Record<string, TalkReadMarker>
   >({});
@@ -416,7 +443,7 @@ export function App() {
     if (typeof window === 'undefined') return;
     const stored = window.localStorage.getItem(SIDEBAR_COLLAPSED_STORAGE_KEY);
     if (stored === 'true') {
-      setSidebarCollapsed(true);
+      setSecondaryCollapsed(true);
     }
     setTalkReadMarkers(readTalkReadMarkers());
   }, []);
@@ -425,9 +452,9 @@ export function App() {
     if (typeof window === 'undefined') return;
     window.localStorage.setItem(
       SIDEBAR_COLLAPSED_STORAGE_KEY,
-      sidebarCollapsed ? 'true' : 'false',
+      secondaryCollapsed ? 'true' : 'false',
     );
-  }, [sidebarCollapsed]);
+  }, [secondaryCollapsed]);
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
@@ -561,15 +588,179 @@ export function App() {
     [handleUnauthorized],
   );
 
-  const handleCreateTalk = useCallback(async () => {
-    const talk = await createTalk('');
-    setSidebarItems((current) => insertTopLevelTalk(current, talk));
-    setSidebarError(null);
-    setRenameDraft({ talkId: talk.id, draft: talk.title });
-    navigate(`/app/talks/${talk.id}`);
-    void refreshSidebar();
-    return talk;
-  }, [navigate, refreshSidebar]);
+  const handleCreateTalk = useCallback(
+    async (title: string) => {
+      const talk = await createTalk(title);
+      setSidebarItems((current) => insertTopLevelTalk(current, talk));
+      setSidebarError(null);
+      navigate(`/app/talks/${talk.id}`);
+      void refreshSidebar();
+      return talk;
+    },
+    [navigate, refreshSidebar],
+  );
+
+  const openNewTalk = useCallback(() => {
+    newTalkRestoreRef.current = document.activeElement;
+    setNewTalkOpen(true);
+  }, []);
+
+  // New Talk invoked from the command palette: the palette input is unmounting,
+  // so inherit the palette's own restore target (its opener) for the sheet —
+  // otherwise cancelling the sheet would land focus on <body>.
+  const openNewTalkFromCommand = useCallback(() => {
+    newTalkRestoreRef.current = paletteRestoreRef.current;
+    setNewTalkOpen(true);
+  }, []);
+
+  const closeNewTalk = useCallback(() => {
+    setNewTalkOpen(false);
+    const target = newTalkRestoreRef.current;
+    newTalkRestoreRef.current = null;
+    if (target instanceof HTMLElement) {
+      // Defer so focus lands after the portal unmounts; re-check isConnected
+      // at focus time since the trigger could have been removed meanwhile.
+      requestAnimationFrame(() => {
+        if (target.isConnected) target.focus();
+      });
+    }
+  }, []);
+
+  const openPalette = useCallback(() => {
+    paletteRestoreRef.current = document.activeElement;
+    setPaletteOpen(true);
+  }, []);
+
+  const closePalette = useCallback(() => {
+    setPaletteOpen(false);
+    const target = paletteRestoreRef.current;
+    paletteRestoreRef.current = null;
+    if (target instanceof HTMLElement) {
+      requestAnimationFrame(() => {
+        // Only restore if nothing else claimed focus — a command may open
+        // another surface (e.g. the New Talk sheet) that should keep focus.
+        if (target.isConnected && document.activeElement === document.body) {
+          target.focus();
+        }
+      });
+    }
+  }, []);
+
+  // Collapse (desktop) or open-as-drawer (mobile) the secondary talk-list
+  // column. The breakpoint is read at click time so render stays media-agnostic
+  // and unit tests don't need a matchMedia polyfill to mount the shell.
+  const toggleSecondary = useCallback(() => {
+    const isMobile =
+      typeof window !== 'undefined' &&
+      typeof window.matchMedia === 'function' &&
+      window.matchMedia('(max-width: 1023px)').matches;
+    if (isMobile) {
+      setSecondaryDrawerOpen((value) => !value);
+    } else {
+      setSecondaryCollapsed((value) => !value);
+    }
+  }, []);
+
+  // Global ⌘K / Ctrl+K toggles the command palette (authenticated shell only).
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (!authedRef.current) return;
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
+        event.preventDefault();
+        if (paletteOpenRef.current) closePalette();
+        // Don't stack the palette over another open overlay (the New Talk sheet).
+        else if (!newTalkOpenRef.current) openPalette();
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [openPalette, closePalette]);
+
+  // Drop any open overlays when leaving the authenticated shell so they can't
+  // resurface on the next sign-in.
+  useEffect(() => {
+    if (auth.status !== 'authenticated') {
+      setPaletteOpen(false);
+      setNewTalkOpen(false);
+    }
+  }, [auth.status]);
+
+  const paletteItems = useMemo<CommandItem[]>(() => {
+    const nav: CommandItem[] = [
+      {
+        id: 'nav-home',
+        label: 'Home',
+        hint: 'Go to',
+        keywords: 'dashboard',
+        run: () => navigate('/app/home'),
+      },
+      {
+        id: 'nav-talks',
+        label: 'Talks',
+        hint: 'Go to',
+        run: () => navigate('/app/talks'),
+      },
+      {
+        id: 'nav-archive',
+        label: 'Archive',
+        hint: 'Go to',
+        keywords: 'archived restore talks',
+        run: () => navigate('/app/archive'),
+      },
+      {
+        id: 'nav-settings-profile',
+        label: 'Settings · Profile',
+        hint: 'Go to',
+        keywords: 'account',
+        run: () => navigate('/app/settings?tab=profile'),
+      },
+      {
+        id: 'nav-settings-keys',
+        label: 'Settings · API Keys',
+        hint: 'Go to',
+        keywords: 'providers secrets byok',
+        run: () => navigate('/app/settings?tab=api-keys'),
+      },
+      {
+        id: 'nav-settings-agents',
+        label: 'Settings · Agents',
+        hint: 'Go to',
+        keywords: 'ai models personas',
+        run: () => navigate('/app/settings?tab=agents'),
+      },
+      {
+        id: 'nav-settings-tools',
+        label: 'Settings · Tools',
+        hint: 'Go to',
+        run: () => navigate('/app/settings?tab=tools'),
+      },
+      {
+        id: 'nav-settings-connectors',
+        label: 'Settings · Connectors',
+        hint: 'Go to',
+        keywords: 'integrations slack google',
+        run: () => navigate('/app/settings?tab=connectors'),
+      },
+    ];
+    const actions: CommandItem[] = [
+      {
+        id: 'action-new-talk',
+        label: 'New Talk',
+        hint: 'Action',
+        keywords: 'create',
+        run: openNewTalkFromCommand,
+      },
+    ];
+    const talks: CommandItem[] = flattenSidebarTalks(sidebarItems).map(
+      (talk) => ({
+        id: `talk-${talk.id}`,
+        label: talk.title || 'Untitled talk',
+        hint: 'Talk',
+        run: () => navigate(`/app/talks/${talk.id}`),
+      }),
+    );
+    return [...actions, ...nav, ...talks];
+  }, [navigate, openNewTalkFromCommand, sidebarItems]);
 
   const handleCreateFolder = useCallback(async () => {
     const folder = await createTalkFolder('');
@@ -707,8 +898,6 @@ export function App() {
     [sidebarItems],
   );
 
-  const canManageAgents = auth.status === 'authenticated';
-
   const handleUserUpdated = useCallback((user: SessionUser) => {
     setAuth({ status: 'authenticated', user });
   }, []);
@@ -727,6 +916,20 @@ export function App() {
     location.pathname.startsWith('/app/talks/') &&
     location.pathname !== '/app/talks';
   const isMainRoute = location.pathname.startsWith('/app/main');
+  // The talk-list column rides along on talk-centric routes; management
+  // surfaces (Settings, agent profiles) get the full content width.
+  const secondaryAvailable =
+    location.pathname === '/' ||
+    location.pathname.startsWith('/app/home') ||
+    location.pathname.startsWith('/app/talks') ||
+    location.pathname.startsWith('/app/archive') ||
+    location.pathname.startsWith('/app/main');
+
+  // Close the mobile drawer on any navigation — including content/doc links
+  // that change only the query string (?thread=…&doc=1), not the pathname.
+  useEffect(() => {
+    setSecondaryDrawerOpen(false);
+  }, [location.pathname, location.search]);
 
   useEffect(() => {
     if (!sidebarItems.length) return;
@@ -763,77 +966,75 @@ export function App() {
   }
 
   return (
-    <main
-      className={`app-shell${sidebarCollapsed ? ' app-shell-sidebar-collapsed' : ''}`}
+    <div
+      className="ct-shell"
+      data-secondary={secondaryAvailable ? 'on' : 'off'}
+      data-secondary-collapsed={secondaryCollapsed ? 'true' : 'false'}
+      data-secondary-drawer={secondaryDrawerOpen ? 'true' : 'false'}
     >
-      <header className="app-global-header">
-        <div className="app-global-header-left">
-          <button
-            type="button"
-            className="app-sidebar-toggle"
-            aria-label={
-              sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'
-            }
-            onClick={() => setSidebarCollapsed((current) => !current)}
-          >
-            {sidebarCollapsed ? '▸' : '◂'}
-          </button>
-          <div className="app-global-brand">
-            <ClawTalkMark />
-            <span className="app-global-brand-title">ClawTalk</span>
-          </div>
-          <form
-            className="app-global-search"
-            role="search"
-            onSubmit={(event) => event.preventDefault()}
-          >
-            <span className="app-global-search-icon" aria-hidden="true">
-              ⌕
-            </span>
-            <input type="search" aria-label="Search" placeholder="Search..." />
-          </form>
-        </div>
-        <div className="app-global-header-right">
-          <a
-            className="app-global-help-link"
-            href="https://clawtalk.app/help"
-            target="_blank"
-            rel="noreferrer"
-            aria-label="Help"
-            title="Help"
-          >
-            ?
-          </a>
-        </div>
-      </header>
-      {!sidebarCollapsed ? (
-        <ClawTalkSidebar
-          items={sidebarViewItems}
-          contents={sidebarContents}
-          loading={sidebarLoading}
-          error={sidebarError}
-          user={auth.user}
-          mainTalkId={mainTalkId}
-          onSwitchWorkspace={handleSwitchWorkspace}
-          onSignOut={handleSignOut}
-          signOutBusy={signOutBusy}
-          onCreateTalk={handleCreateTalk}
-          onCreateFolder={handleCreateFolder}
-          onRenameTalk={handleRenameTalk}
-          onPatchTalk={handlePatchTalk}
-          onDeleteTalk={handleDeleteTalk}
-          onRenameFolder={handleRenameFolder}
-          onDeleteFolder={handleDeleteFolder}
-          onReorder={handleReorder}
-          renameDraft={renameDraft}
+      <IconRail
+        user={auth.user}
+        workspaces={auth.user.workspaces ?? []}
+        currentWorkspaceId={auth.user.currentWorkspaceId}
+        onSwitchWorkspace={handleSwitchWorkspace}
+        onSignOut={handleSignOut}
+        signOutBusy={signOutBusy}
+        onOpenPalette={openPalette}
+        onToggleSecondary={toggleSecondary}
+        secondaryAvailable={secondaryAvailable}
+      />
+      {secondaryAvailable ? (
+        <>
+          <div
+            className="ct-secondary-backdrop"
+            onClick={() => setSecondaryDrawerOpen(false)}
+            aria-hidden="true"
+          />
+          <SecondaryList
+            items={sidebarViewItems}
+            contents={sidebarContents}
+            loading={sidebarLoading}
+            error={sidebarError}
+            mainTalkId={mainTalkId}
+            onNewTalk={openNewTalk}
+            onCreateFolder={handleCreateFolder}
+            onRenameTalk={handleRenameTalk}
+            onPatchTalk={handlePatchTalk}
+            onDeleteTalk={handleDeleteTalk}
+            onRenameFolder={handleRenameFolder}
+            onDeleteFolder={handleDeleteFolder}
+            onReorder={handleReorder}
+            renameDraft={renameDraft}
+            onOpenPalette={openPalette}
+            onToggleSecondary={toggleSecondary}
+          />
+        </>
+      ) : null}
+      {newTalkOpen ? (
+        <NewTalkSheet
+          onCreate={async (title) => {
+            await handleCreateTalk(title);
+            // Success navigates into the new Talk; close without restoring
+            // focus to the (now off-screen) trigger.
+            setNewTalkOpen(false);
+          }}
+          onClose={closeNewTalk}
         />
+      ) : null}
+      {paletteOpen ? (
+        <CommandPalette items={paletteItems} onClose={closePalette} />
       ) : null}
       <div className="app-main">
         <div
           className={`app-main-content${isTalkRoute || isMainRoute ? ' app-main-content-talk' : ''}`}
         >
           <Routes>
-            <Route path="/" element={<Navigate to="/app/talks" replace />} />
+            <Route path="/" element={<Navigate to="/app/home" replace />} />
+            <Route path="/app/home" element={<HomePage />} />
+            <Route
+              path="/app/archive"
+              element={<ArchivePage onRestored={() => void refreshSidebar()} />}
+            />
             <Route
               path="/app/talks"
               element={
@@ -865,6 +1066,15 @@ export function App() {
             <Route
               path="/app/agents"
               element={<Navigate to="/app/settings?tab=agents" replace />}
+            />
+            <Route
+              path="/app/agents/:agentId"
+              element={
+                <AgentProfilePage
+                  workspaceId={auth.user.currentWorkspaceId}
+                  onUnauthorized={handleUnauthorized}
+                />
+              }
             />
             <Route
               path="/app/settings"
@@ -899,6 +1109,6 @@ export function App() {
           </Routes>
         </div>
       </div>
-    </main>
+    </div>
   );
 }

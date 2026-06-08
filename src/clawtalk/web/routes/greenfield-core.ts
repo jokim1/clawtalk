@@ -13,6 +13,7 @@ import {
 import { resolveModelCapabilities } from '../../llm/capabilities.js';
 import {
   archiveGreenfieldTalk,
+  unarchiveGreenfieldTalk,
   createGreenfieldFolder,
   createGreenfieldTalk,
   deleteGreenfieldFolder,
@@ -916,6 +917,31 @@ export async function archiveGreenfieldTalkRoute(input: {
       });
       if (!archived) return error(404, 'talk_not_found', 'Talk not found.');
       return ok({ deleted: true });
+    },
+  );
+}
+
+export async function unarchiveGreenfieldTalkRoute(input: {
+  auth: AuthContext;
+  workspaceId?: string | null;
+  talkId: string;
+}): Promise<RouteResult<{ restored: true }>> {
+  if (!isUuid(input.talkId)) {
+    return error(400, 'invalid_talk_id', 'Talk id must be a UUID.');
+  }
+  return withResolvedWorkspace(
+    input.auth,
+    input.workspaceId,
+    { talkId: input.talkId },
+    async (ctx) => {
+      const writerError = requireWorkspaceWriter(ctx.workspace);
+      if (writerError) return writerError;
+      const restored = await unarchiveGreenfieldTalk({
+        workspaceId: ctx.workspace.id,
+        talkId: input.talkId,
+      });
+      if (!restored) return error(404, 'talk_not_found', 'Talk not found.');
+      return ok({ restored: true });
     },
   );
 }

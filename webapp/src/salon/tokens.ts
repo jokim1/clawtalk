@@ -16,6 +16,8 @@ export const salon = {
   card: 'var(--salon-card, #ffffff)',
   line: 'var(--salon-line, #e6e0d1)',
   accent: 'var(--salon-accent, #c8643a)',
+  /** AA-contrast accent (~5.0:1 on white) for text-bearing filled buttons. */
+  accentStrong: 'var(--salon-accent-strong, #b05530)',
 } as const;
 
 export const salonFont = {

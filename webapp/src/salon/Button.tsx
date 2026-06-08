@@ -16,7 +16,8 @@ export interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
 
 const VARIANTS: Record<ButtonVariant, CSSProperties> = {
   primary: {
-    background: salon.accent,
+    // accentStrong (not accent) so the white label clears WCAG AA 4.5:1.
+    background: salon.accentStrong,
     color: '#fff',
     border: '1px solid transparent',
   },

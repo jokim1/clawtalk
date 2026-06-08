@@ -72,552 +72,276 @@ a {
   color: #1356b8;
 }
 
-.app-shell {
+/* ── App shell (3-column: icon rail · talk list · content) ───────────── */
+.ct-shell {
   height: 100vh;
   min-height: 100vh;
-  display: grid;
-  grid-template-columns: 285px minmax(0, 1fr);
-  grid-template-rows: auto minmax(0, 1fr);
-  gap: 1rem;
-  padding: 1rem;
+  display: flex;
   overflow: hidden;
+  background: var(--salon-paper, #fbf7ef);
+  color: var(--salon-ink, #1f1b16);
+  font-family: var(--salon-font-sans, system-ui, sans-serif);
 }
 
-.app-shell-sidebar-collapsed {
-  grid-template-columns: minmax(0, 1fr);
-}
-
-.app-global-header {
-  grid-column: 1 / -1;
-  min-width: 0;
+/* Icon rail (left-most, always present). */
+.ct-rail {
+  flex: 0 0 56px;
+  width: 56px;
+  height: 100%;
   display: flex;
+  flex-direction: column;
   align-items: center;
-  justify-content: space-between;
-  gap: 1rem;
-  padding: 0.75rem 1rem;
-  border: 1px solid #d6dfed;
-  border-radius: 18px;
-  background: linear-gradient(180deg, #fbfdff 0%, #f3f6fb 100%);
-  box-shadow: 0 12px 32px rgba(31, 52, 88, 0.08);
+  gap: 0.25rem;
+  padding: 0.75rem 0;
+  background: var(--salon-paper-2, #f4ecdb);
+  border-right: 1px solid var(--salon-line, #e6e0d1);
 }
-
-.app-global-header-left,
-.app-global-header-right {
-  min-width: 0;
-  display: flex;
-  align-items: center;
-  gap: 0.85rem;
+.ct-rail-brand {
+  margin-bottom: 0.5rem;
+  display: grid;
+  place-items: center;
 }
-
-.app-global-header-left {
-  flex: 1;
-}
-
-.app-sidebar-toggle,
-.app-global-help-link {
-  width: 2.35rem;
-  height: 2.35rem;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border: 1px solid #d7dfef;
+.ct-rail-btn {
+  width: 40px;
+  height: 40px;
+  display: grid;
+  place-items: center;
+  border: 0;
   border-radius: 12px;
-  background: #fff;
-  color: #34528c;
-  text-decoration: none;
+  background: transparent;
+  color: var(--salon-ink-2, #6b6660);
   cursor: pointer;
   transition:
-    border-color 140ms ease,
     background 140ms ease,
     color 140ms ease,
     box-shadow 140ms ease;
 }
-
-.app-sidebar-toggle:hover,
-.app-global-help-link:hover {
-  border-color: #b9cbef;
-  background: #f7faff;
-  color: #143f8f;
-  box-shadow: inset 0 0 0 1px #d7e4ff;
+.ct-rail-btn:hover {
+  background: var(--salon-card, #fff);
+  color: var(--salon-ink, #1f1b16);
 }
-
-.app-global-brand {
-  min-width: 0;
-  display: inline-flex;
-  align-items: center;
-  gap: 0.75rem;
+.ct-rail-btn:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(200, 100, 58, 0.35);
 }
-
-.app-global-brand-title {
-  font-size: 1.25rem;
-  font-weight: 700;
-  color: #18263d;
+.ct-rail-spacer {
+  flex: 1 1 auto;
 }
-
-.app-global-search {
-  flex: 1;
-  min-width: 0;
-  max-width: 32rem;
-  display: flex;
-  align-items: center;
-  gap: 0.55rem;
-  padding: 0.1rem 0.9rem;
-  border: 1px solid #d6dfed;
-  border-radius: 14px;
-  background: #fff;
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.65);
+.ct-rail-profile {
+  margin-top: 0.25rem;
+  position: relative;
 }
-
-.app-global-search:focus-within {
-  border-color: #abc2f2;
-  box-shadow:
-    inset 0 0 0 1px #c7d8fb,
-    0 0 0 3px rgba(134, 174, 251, 0.18);
-}
-
-.app-global-search-icon {
-  color: #6d7c99;
-  font-size: 0.95rem;
-}
-
-.app-global-search input {
-  width: 100%;
+.ct-rail-profile-btn {
+  width: 40px;
+  height: 40px;
+  display: grid;
+  place-items: center;
   border: 0;
+  border-radius: 9999px;
   background: transparent;
-  color: #1d2433;
-  font-size: 0.95rem;
-  padding: 0.58rem 0;
+  cursor: pointer;
+  transition: box-shadow 140ms ease;
+}
+.ct-rail-profile-btn:focus-visible {
+  outline: none;
+  box-shadow:
+    0 0 0 2px var(--salon-paper-2, #f4ecdb),
+    0 0 0 4px var(--salon-accent, #c8643a) !important;
 }
 
-.app-global-search input:focus {
+/* Rail profile popover rows (rendered through a portal). */
+.ct-rail-menu-row {
+  transition: background 120ms ease;
+}
+.ct-rail-menu-row:hover:not(:disabled),
+.ct-rail-menu-row:focus-visible {
+  background: var(--salon-paper-2, #f4ecdb);
   outline: none;
 }
-
-.app-global-search input::placeholder {
-  color: #7c89a2;
+.ct-rail-menu-row:disabled {
+  opacity: 0.6;
 }
 
-.clawtalk-sidebar {
-  grid-column: 1;
-  width: 285px;
-  flex: 0 0 285px;
-  align-self: stretch;
+/* Secondary talk-list column. */
+.ct-secondary {
+  flex: 0 0 260px;
+  width: 260px;
+  height: 100%;
   display: flex;
   flex-direction: column;
-  gap: 1rem;
-  padding: 1rem 0.9rem;
   min-height: 0;
-  overflow: hidden;
-  border: 1px solid #d6dfed;
-  border-radius: 18px;
-  background: linear-gradient(180deg, #fbfdff 0%, #f3f6fb 100%);
-  box-shadow: 0 12px 32px rgba(31, 52, 88, 0.08);
+  background: var(--salon-paper, #fbf7ef);
+  border-right: 1px solid var(--salon-line, #e6e0d1);
+}
+.ct-shell[data-secondary-collapsed='true'] .ct-secondary {
+  display: none;
 }
 
-.clawtalk-sidebar-brand {
+.ct-secondary-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 1rem 1rem 0.75rem;
+}
+.ct-secondary-title {
+  font-family: var(--salon-font-serif, Georgia, serif);
+  font-size: 1.15rem;
+  line-height: 1;
+  color: var(--salon-ink, #1f1b16);
+}
+.ct-secondary-sub {
+  margin-top: 0.35rem;
+  font-size: 0.72rem;
+  color: var(--salon-ink-2, #6b6660);
+}
+.ct-secondary-head-actions {
+  display: inline-flex;
+  gap: 0.3rem;
+}
+.ct-secondary-icon-btn {
+  width: 1.75rem;
+  height: 1.75rem;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--salon-line, #e6e0d1);
+  border-radius: 9px;
+  background: var(--salon-card, #fff);
+  color: var(--salon-ink, #1f1b16);
+  cursor: pointer;
+  transition:
+    background 120ms ease,
+    border-color 120ms ease;
+}
+.ct-secondary-icon-btn:hover {
+  background: var(--salon-paper-2, #f4ecdb);
+}
+.ct-secondary-icon-btn:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(200, 100, 58, 0.3);
+}
+/* The collapse control is desktop-only; on mobile the backdrop closes the drawer. */
+.ct-secondary-collapse {
+  display: none;
+}
+
+.ct-secondary-search {
+  padding: 0 0.75rem 0.75rem;
+}
+.ct-secondary-search-btn {
   display: flex;
   align-items: center;
-  gap: 0.8rem;
-  padding: 0.2rem 0.2rem 0.75rem;
-  border-bottom: 1px solid #e3eaf5;
+  gap: 0.5rem;
+  width: 100%;
+  height: 2rem;
+  padding: 0 0.6rem;
+  border: 1px solid var(--salon-line, #e6e0d1);
+  border-radius: 10px;
+  background: var(--salon-card, #fff);
+  color: var(--salon-ink-2, #6b6660);
+  cursor: pointer;
+  text-align: left;
 }
-
-.clawtalk-sidebar-brand strong {
-  display: block;
-  font-size: 1.2rem;
-  color: #18263d;
+.ct-secondary-search-btn:hover {
+  border-color: var(--salon-accent, #c8643a);
 }
-
-.clawtalk-sidebar-brand span {
-  display: block;
-  margin-top: 0.15rem;
-  font-size: 0.82rem;
-  color: #69758e;
+.ct-secondary-search-label {
+  flex: 1;
+  font-size: 0.8rem;
 }
-
-.clawtalk-sidebar-brand-mark {
-  width: 2.35rem;
-  height: 2.35rem;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: 14px;
+.ct-secondary-search-kbd {
+  font-family: var(--salon-font-mono, ui-monospace, monospace);
+  font-size: 0.65rem;
+  padding: 0.1rem 0.3rem;
+  border-radius: 5px;
   background: var(--salon-paper-2, #f4ecdb);
+  color: var(--salon-ink-2, #6b6660);
+}
+
+.ct-secondary-row-link {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0 0.5rem;
+  padding: 0.5rem 0.6rem;
+  border-radius: 10px;
+  text-decoration: none;
+  font-size: 0.85rem;
+  font-weight: 500;
+  color: var(--salon-ink-2, #6b6660);
+  transition:
+    background 120ms ease,
+    color 120ms ease;
+}
+.ct-secondary-row-link:hover {
+  background: var(--salon-paper-2, #f4ecdb);
+  color: var(--salon-ink, #1f1b16);
+}
+.ct-secondary-row-link.active {
+  background: var(--salon-card, #fff);
+  color: var(--salon-ink, #1f1b16);
   box-shadow: inset 0 0 0 1px var(--salon-line, #e6e0d1);
 }
 
-.clawtalk-sidebar-brand-mark svg {
-  width: 1.6rem;
-  height: 1.6rem;
+.ct-secondary-tree {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0.5rem 0.5rem 0.25rem;
 }
-
-.clawtalk-sidebar-workspace {
-  position: relative;
-}
-
-.clawtalk-sidebar-workspace-trigger {
-  display: flex;
-  align-items: center;
-  gap: 0.55rem;
-  width: 100%;
-  padding: 0.5rem 0.6rem;
-  border: 1px solid #d6dfed;
-  border-radius: 12px;
-  background: #ffffff;
-  color: #1a2745;
-  font: inherit;
-  text-align: left;
-  cursor: pointer;
-  transition:
-    background 140ms ease,
-    border-color 140ms ease;
-}
-
-.clawtalk-sidebar-workspace-trigger:hover:not(:disabled),
-.clawtalk-sidebar-workspace-trigger[aria-expanded='true'] {
-  background: #edf3ff;
-  border-color: #a6bce8;
-}
-
-.clawtalk-sidebar-workspace-trigger:disabled {
-  cursor: default;
-}
-
-.clawtalk-sidebar-workspace-initials {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-  width: 1.85rem;
-  height: 1.85rem;
-  border-radius: 9px;
-  background: linear-gradient(135deg, #2759d6 0%, #5d8bff 100%);
-  color: #ffffff;
-  font-weight: 700;
-  font-size: 0.72rem;
-  letter-spacing: 0.03em;
-}
-
-.clawtalk-sidebar-workspace-name {
-  flex: 1;
-  min-width: 0;
-  font-size: 0.88rem;
-  font-weight: 600;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.clawtalk-sidebar-workspace-caret {
-  flex-shrink: 0;
-  font-size: 0.7rem;
-  color: #7a86a0;
-}
-
-.clawtalk-sidebar-workspace-menu {
-  position: absolute;
-  top: calc(100% + 6px);
-  left: 0;
-  right: 0;
-  z-index: 40;
-  background: #ffffff;
-  border: 1px solid #d8e0ee;
-  border-radius: 12px;
-  box-shadow: 0 18px 36px rgba(15, 32, 70, 0.18);
-  padding: 0.4rem;
-  display: flex;
-  flex-direction: column;
-  gap: 0.05rem;
-}
-
-.clawtalk-sidebar-workspace-menu-item {
-  display: flex;
-  align-items: center;
-  gap: 0.55rem;
-  appearance: none;
-  text-align: left;
-  border: 0;
-  background: transparent;
-  font: inherit;
-  color: #2a3858;
-  padding: 0.45rem 0.55rem;
-  border-radius: 9px;
-  cursor: pointer;
-  transition:
-    background 120ms ease,
-    color 120ms ease;
-}
-
-.clawtalk-sidebar-workspace-menu-item:hover,
-.clawtalk-sidebar-workspace-menu-item:focus-visible {
-  background: rgba(67, 104, 184, 0.1);
-  color: #173a79;
-  outline: none;
-}
-
-.clawtalk-sidebar-workspace-menu-item.active {
-  background: rgba(39, 89, 214, 0.12);
-  color: #173a79;
-}
-
-.clawtalk-sidebar-workspace-error {
-  margin: 0.35rem 0.1rem 0;
-  font-size: 0.78rem;
-  line-height: 1.3;
-  color: #b42318;
-}
-
-.clawtalk-sidebar-nav {
-  display: grid;
-  gap: 0.35rem;
-}
-
-.clawtalk-sidebar-footer {
-  margin-top: auto;
-  padding-top: 0.75rem;
-  border-top: 1px solid #e3eaf5;
-  display: grid;
-  gap: 0.35rem;
-}
-
-.clawtalk-sidebar-profile {
-  position: relative;
-}
-
-.clawtalk-sidebar-profile-row {
-  display: flex;
-  align-items: center;
-  gap: 0.65rem;
-  padding: 0.4rem 0.25rem;
-}
-
-.clawtalk-sidebar-profile-avatar {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-  width: 2.1rem;
-  height: 2.1rem;
-  border-radius: 999px;
-  color: #ffffff;
-  font-weight: 700;
-  font-size: 0.78rem;
-  letter-spacing: 0.04em;
-  box-shadow: 0 1px 2px rgba(15, 32, 70, 0.18);
-}
-
-.clawtalk-sidebar-profile-avatar-md {
-  width: 2.5rem;
-  height: 2.5rem;
-  font-size: 0.9rem;
-}
-
-.clawtalk-sidebar-profile-meta {
-  min-width: 0;
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-}
-
-.clawtalk-sidebar-profile-name {
-  font-size: 0.85rem;
-  color: #1a2745;
-  font-weight: 600;
-  line-height: 1.15;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.clawtalk-sidebar-profile-email {
-  font-size: 0.72rem;
-  color: #7a86a0;
-  line-height: 1.2;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.clawtalk-sidebar-profile-trigger {
-  flex-shrink: 0;
-  width: 2rem;
-  height: 2rem;
-  border-radius: 999px;
-  border: 1px solid #cbd5e8;
-  background: #ffffff;
-  color: #46577a;
-  font-size: 1rem;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  cursor: pointer;
-  transition:
-    background 140ms ease,
-    border-color 140ms ease,
-    color 140ms ease;
-}
-
-.clawtalk-sidebar-profile-trigger:hover,
-.clawtalk-sidebar-profile-trigger[aria-expanded='true'] {
-  background: #edf3ff;
-  border-color: #a6bce8;
-  color: #173a79;
-}
-
-.clawtalk-sidebar-profile-menu {
-  position: absolute;
-  bottom: calc(100% + 8px);
-  left: 0;
-  right: 0;
-  z-index: 40;
-  background: #ffffff;
-  border: 1px solid #d8e0ee;
-  border-radius: 14px;
-  box-shadow: 0 18px 36px rgba(15, 32, 70, 0.18);
-  padding: 0.45rem;
-  display: flex;
-  flex-direction: column;
-  gap: 0.05rem;
-}
-
-.clawtalk-sidebar-profile-menu-header {
-  display: flex;
-  align-items: center;
-  gap: 0.65rem;
-  padding: 0.55rem 0.6rem 0.55rem 0.55rem;
-}
-
-.clawtalk-sidebar-profile-menu-divider {
-  height: 1px;
-  background: #e3eaf5;
-  margin: 0.3rem 0.1rem;
-}
-
-.clawtalk-sidebar-profile-menu-item {
-  appearance: none;
-  text-align: left;
-  border: 0;
-  background: transparent;
-  font: inherit;
-  color: #2a3858;
-  padding: 0.55rem 0.7rem;
-  border-radius: 9px;
-  cursor: pointer;
-  transition:
-    background 120ms ease,
-    color 120ms ease;
-}
-
-.clawtalk-sidebar-profile-menu-item:hover,
-.clawtalk-sidebar-profile-menu-item:focus-visible {
-  background: rgba(67, 104, 184, 0.1);
-  color: #173a79;
-  outline: none;
-}
-
-.clawtalk-sidebar-profile-menu-item-danger {
-  color: #b1342b;
-}
-
-.clawtalk-sidebar-profile-menu-item-danger:hover,
-.clawtalk-sidebar-profile-menu-item-danger:focus-visible {
-  background: rgba(177, 52, 43, 0.1);
-  color: #8e1f17;
-}
-
-.clawtalk-sidebar-profile-menu-item:disabled {
-  opacity: 0.6;
-  cursor: not-allowed;
-}
-
-.clawtalk-sidebar-link,
-.clawtalk-talk-link {
-  display: flex;
-  align-items: center;
-  min-height: 2.7rem;
-  padding: 0.72rem 0.85rem;
-  border-radius: 12px;
-  text-decoration: none;
-  color: #31415f;
-  font-weight: 600;
-  transition:
-    background 140ms ease,
-    color 140ms ease,
-    transform 140ms ease;
-}
-
-.clawtalk-sidebar-link:hover,
-.clawtalk-talk-link:hover {
-  background: rgba(67, 104, 184, 0.08);
-  color: #173a79;
-}
-
-.clawtalk-sidebar-link.active,
-.clawtalk-talk-link.active {
-  background: linear-gradient(180deg, #edf3ff 0%, #e3ecff 100%);
-  color: #153c86;
-  box-shadow: inset 0 0 0 1px #cbd9fb;
-}
-
-.clawtalk-sidebar-section {
+.ct-secondary-content {
   flex: 0 1 auto;
   min-height: 0;
   display: flex;
   flex-direction: column;
-  gap: 0.7rem;
-  overflow: hidden;
+  gap: 0.4rem;
+  padding: 0.5rem 0.75rem;
+  border-top: 1px solid var(--salon-line, #e6e0d1);
 }
-
-.clawtalk-sidebar-section-label {
-  padding: 0 0.25rem;
-  font-size: 0.75rem;
-  font-weight: 700;
-  letter-spacing: 0.12em;
+.ct-secondary-content-label {
+  font-size: 0.66rem;
   text-transform: uppercase;
-  color: #7a86a0;
+  letter-spacing: 0.14em;
+  font-weight: 600;
+  color: var(--salon-ink-2, #6b6660);
+}
+.ct-secondary-foot {
+  padding: 0.4rem 0 0.6rem;
+  border-top: 1px solid var(--salon-line, #e6e0d1);
 }
 
-.clawtalk-sidebar-section-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 0.65rem;
-  padding: 0 0.25rem;
-  position: relative;
+/* Mobile drawer (≤1023px): the talk list rides in over the content. */
+.ct-secondary-backdrop {
+  display: none;
 }
-
-.clawtalk-sidebar-section-actions {
-  position: relative;
-  display: inline-flex;
-  align-items: center;
+@media (max-width: 1023px) {
+  .ct-secondary {
+    position: fixed;
+    top: 0;
+    left: 56px;
+    bottom: 0;
+    z-index: 60;
+    transform: translateX(calc(-100% - 56px));
+    transition: transform 200ms ease;
+    box-shadow: 0 24px 60px rgba(31, 27, 22, 0.28);
+    /* Override the desktop collapse so the drawer can always slide. */
+    display: flex !important;
+  }
+  .ct-shell[data-secondary-drawer='true'] .ct-secondary {
+    transform: none;
+  }
+  .ct-shell[data-secondary-drawer='true'] .ct-secondary-backdrop {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 55;
+    background: rgba(31, 27, 22, 0.32);
+  }
 }
-
-.clawtalk-sidebar-add {
-  width: 1.95rem;
-  height: 1.95rem;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border: 0;
-  border-radius: 10px;
-  background: linear-gradient(180deg, #3f7aff 0%, #2459df 100%);
-  color: #fff;
-  font-size: 1.3rem;
-  line-height: 1;
-  cursor: pointer;
-  box-shadow: 0 8px 18px rgba(37, 89, 223, 0.24);
-}
-
-.clawtalk-sidebar-add:hover {
-  filter: brightness(1.04);
-}
-
-.clawtalk-sidebar-talks {
-  flex: 1 1 auto;
-  min-height: 0;
-  max-height: 60vh;
-  overflow-y: auto;
-  padding-right: 0.15rem;
+@media (prefers-reduced-motion: reduce) {
+  .ct-secondary {
+    transition: none;
+  }
 }
 
 .clawtalk-sidebar-tree {
@@ -644,12 +368,13 @@ a {
   min-width: 0;
   display: flex;
   align-items: center;
-  min-height: 2.55rem;
-  padding: 0.66rem 0.8rem;
-  border-radius: 12px;
+  min-height: 2.4rem;
+  padding: 0.5rem 0.7rem;
+  border-radius: 10px;
   text-decoration: none;
-  color: #31415f;
-  font-weight: 600;
+  color: var(--salon-ink-2, #6b6660);
+  font-weight: 500;
+  font-size: 0.85rem;
   transition:
     background 140ms ease,
     color 140ms ease;
@@ -672,14 +397,14 @@ a {
 }
 
 .clawtalk-sidebar-tree-link:hover {
-  background: rgba(67, 104, 184, 0.08);
-  color: #173a79;
+  background: var(--salon-paper-2, #f4ecdb);
+  color: var(--salon-ink, #1f1b16);
 }
 
 .clawtalk-sidebar-tree-link.active {
-  background: linear-gradient(180deg, #edf3ff 0%, #e3ecff 100%);
-  color: #153c86;
-  box-shadow: inset 0 0 0 1px #cbd9fb;
+  background: var(--salon-card, #fff);
+  color: var(--salon-ink, #1f1b16);
+  box-shadow: inset 0 0 0 1px var(--salon-line, #e6e0d1);
 }
 
 .clawtalk-sidebar-tree-title {
@@ -694,7 +419,7 @@ a {
 
 .clawtalk-sidebar-activity-indicator {
   flex: 0 0 auto;
-  color: #2b63d9;
+  color: var(--salon-accent, #c8643a);
   font-weight: 800;
   line-height: 1;
 }
@@ -705,7 +430,7 @@ a {
   height: 1.35rem;
   padding: 0 0.38rem;
   border-radius: 999px;
-  background: #2b63d9;
+  background: var(--salon-accent, #c8643a);
   color: #fff;
   display: inline-flex;
   align-items: center;
@@ -729,7 +454,7 @@ a {
 .clawtalk-sidebar-folder-label {
   border: 0;
   background: transparent;
-  color: #31415f;
+  color: var(--salon-ink, #1f1b16);
   cursor: pointer;
 }
 
@@ -742,7 +467,7 @@ a {
 
 .clawtalk-sidebar-folder-toggle:hover,
 .clawtalk-sidebar-folder-label:hover {
-  background: rgba(67, 104, 184, 0.08);
+  background: var(--salon-paper-2, #f4ecdb);
 }
 
 .clawtalk-sidebar-folder-label {
@@ -759,13 +484,13 @@ a {
   gap: 0.28rem;
   margin-left: 1.2rem;
   padding-left: 0.55rem;
-  border-left: 1px solid #e3eaf5;
+  border-left: 1px solid var(--salon-line, #e6e0d1);
 }
 
 .clawtalk-sidebar-folder-empty {
   margin: 0;
   padding: 0.4rem 0.8rem;
-  color: #66728d;
+  color: var(--salon-ink-2, #6b6660);
   font-size: 0.86rem;
 }
 
@@ -775,7 +500,7 @@ a {
 
 .clawtalk-sidebar-folder-form input {
   width: 100%;
-  border: 1px solid #c8d3e9;
+  border: 1px solid var(--salon-line, #e6e0d1);
   border-radius: 9px;
   padding: 0.48rem 0.6rem;
   font-size: 0.9rem;
@@ -803,8 +528,8 @@ a {
   height: 2rem;
   border: 0;
   border-radius: 10px;
-  background: rgba(67, 104, 184, 0.08);
-  color: #274d96;
+  background: var(--salon-paper-2, #f4ecdb);
+  color: var(--salon-ink-2, #6b6660);
   font-size: 1rem;
   cursor: pointer;
 }
@@ -816,10 +541,10 @@ a {
   display: grid;
   gap: 0.2rem;
   padding: 0.35rem;
-  border: 1px solid #d6dfed;
+  border: 1px solid var(--salon-line, #e6e0d1);
   border-radius: 12px;
-  background: #fff;
-  box-shadow: 0 12px 28px rgba(31, 52, 88, 0.14);
+  background: var(--salon-card, #fff);
+  box-shadow: 0 12px 28px rgba(31, 27, 22, 0.16);
 }
 
 .clawtalk-sidebar-menu {
@@ -855,16 +580,16 @@ a {
   text-align: left;
   border-radius: 8px;
   cursor: pointer;
-  color: #31415f;
+  color: var(--salon-ink, #1f1b16);
 }
 
 .clawtalk-sidebar-menu button:hover,
 .clawtalk-sidebar-submenu button:hover {
-  background: rgba(67, 104, 184, 0.08);
+  background: var(--salon-paper-2, #f4ecdb);
 }
 
 .clawtalk-sidebar-menu button.danger {
-  color: #922626;
+  color: #a8434a;
 }
 
 .clawtalk-sidebar-row-dragging {
@@ -872,38 +597,22 @@ a {
 }
 
 .clawtalk-sidebar-drop-target {
-  outline: 2px solid #86aefb;
+  outline: 2px solid var(--salon-accent, #c8643a);
   outline-offset: 2px;
   border-radius: 14px;
-}
-
-.clawtalk-talk-link-title {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .clawtalk-sidebar-empty {
   margin: 0;
   padding: 0.3rem 0.85rem;
-  color: #66728d;
+  color: var(--salon-ink-2, #6b6660);
   font-size: 0.9rem;
-}
-
-.clawtalk-sidebar-content-section {
-  flex: 0 1 auto;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 0.5rem;
-  padding-top: 0.5rem;
-  border-top: 1px solid #e3eaf5;
 }
 
 .clawtalk-sidebar-content-empty {
   margin: 0;
   padding: 0.1rem 0.25rem 0.25rem;
-  color: #94a3b8;
+  color: var(--salon-ink-2, #6b6660);
   font-size: 0.82rem;
   font-style: italic;
   line-height: 1.4;
@@ -926,7 +635,7 @@ a {
   padding: 0.42rem 0.6rem;
   border-radius: 10px;
   text-decoration: none;
-  color: #31415f;
+  color: var(--salon-ink-2, #6b6660);
   font-size: 0.9rem;
   font-weight: 500;
   transition:
@@ -935,18 +644,19 @@ a {
 }
 
 .clawtalk-sidebar-content-row:hover {
-  background: rgba(67, 104, 184, 0.08);
-  color: #173a79;
+  background: var(--salon-paper-2, #f4ecdb);
+  color: var(--salon-ink, #1f1b16);
 }
 
 .clawtalk-sidebar-content-row.active {
-  background: #f1f5fb;
-  color: #153c86;
+  background: var(--salon-card, #fff);
+  color: var(--salon-ink, #1f1b16);
+  box-shadow: inset 0 0 0 1px var(--salon-line, #e6e0d1);
 }
 
 .clawtalk-sidebar-content-row-icon {
   flex: 0 0 auto;
-  color: #64748b;
+  color: var(--salon-ink-2, #6b6660);
 }
 
 .clawtalk-sidebar-content-row-title {
@@ -959,20 +669,16 @@ a {
   flex: 0 0 auto;
   display: inline-flex;
   align-items: center;
-  color: #64748b;
+  color: var(--salon-ink-2, #6b6660);
 }
 
 .app-main {
-  grid-column: 2;
+  flex: 1 1 auto;
   min-width: 0;
   display: flex;
   flex-direction: column;
   min-height: 0;
   overflow: hidden;
-}
-
-.app-shell-sidebar-collapsed .app-main {
-  grid-column: 1;
 }
 
 .app-main-content {
@@ -1497,26 +1203,6 @@ a {
   text-decoration: underline;
 }
 
-.auth-shell {
-  min-height: 100vh;
-  display: grid;
-  place-items: center;
-  padding: 1rem;
-}
-
-.auth-panel {
-  width: min(460px, 100%);
-  background: #ffffff;
-  border: 1px solid #cdd7e7;
-  border-radius: 16px;
-  padding: 1.25rem;
-  box-shadow: 0 10px 24px rgba(20, 38, 84, 0.08);
-}
-
-.auth-panel h1 {
-  margin-top: 0;
-}
-
 .primary-btn,
 .secondary-btn {
   border: 0;
@@ -1541,41 +1227,6 @@ a {
 .secondary-btn:disabled {
   cursor: not-allowed;
   opacity: 0.7;
-}
-
-.dev-form {
-  margin-top: 1rem;
-  border-top: 1px solid #dde5f0;
-  padding-top: 1rem;
-  display: grid;
-  gap: 0.75rem;
-}
-
-.dev-form h2 {
-  margin: 0;
-  font-size: 1rem;
-}
-
-.dev-form label {
-  display: grid;
-  gap: 0.25rem;
-  font-size: 0.9rem;
-}
-
-.dev-form input {
-  border: 1px solid #c7d2e5;
-  border-radius: 8px;
-  padding: 0.55rem;
-  font-size: 0.95rem;
-}
-
-.dev-form button {
-  width: fit-content;
-  border: 1px solid #8ca1c8;
-  border-radius: 8px;
-  background: #f7f9ff;
-  padding: 0.45rem 0.8rem;
-  cursor: pointer;
 }
 
 .page-shell {
@@ -1698,32 +1349,6 @@ a {
   font-size: 0.95rem;
 }
 
-.talk-list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: grid;
-  gap: 0.75rem;
-}
-
-.talk-list li a {
-  display: flex;
-  justify-content: space-between;
-  gap: 0.75rem;
-  align-items: center;
-  text-decoration: none;
-  color: inherit;
-  border: 1px solid #dde4f2;
-  border-radius: 10px;
-  padding: 0.8rem;
-  background: #fdfefe;
-}
-
-.talk-list-main {
-  display: grid;
-  gap: 0.35rem;
-}
-
 .talk-agent-row {
   display: flex;
   flex-wrap: wrap;
@@ -1791,12 +1416,6 @@ a {
 .channel-diagnosis-headline {
   display: flex;
   align-items: center;
-}
-
-.talk-list li a span {
-  color: #66728d;
-  font-size: 0.85rem;
-  white-space: nowrap;
 }
 
 .policy-panel {
@@ -3828,43 +3447,6 @@ a {
 }
 
 @media (max-width: 960px) {
-  .app-shell {
-    height: auto;
-    grid-template-columns: 1fr;
-    grid-template-rows: auto auto minmax(0, 1fr);
-    overflow: visible;
-  }
-
-  .clawtalk-sidebar {
-    grid-column: 1;
-    width: 100%;
-    position: static;
-    max-height: none;
-  }
-
-  .app-main,
-  .app-shell-sidebar-collapsed .app-main {
-    grid-column: 1;
-  }
-
-  .app-global-header {
-    align-items: stretch;
-    flex-direction: column;
-  }
-
-  .app-global-header-left,
-  .app-global-header-right {
-    width: 100%;
-  }
-
-  .app-global-search {
-    max-width: none;
-  }
-
-  .clawtalk-sidebar-talks {
-    max-height: 240px;
-  }
-
   .app-main-content-talk {
     overflow: visible;
   }
@@ -3889,15 +3471,6 @@ a {
 }
 
 @media (max-width: 720px) {
-  .app-global-header-left {
-    flex-wrap: wrap;
-  }
-
-  .app-global-search {
-    flex-basis: 100%;
-    order: 1;
-  }
-
   .page-header {
     align-items: flex-start;
     flex-direction: column;
@@ -3958,68 +3531,6 @@ a {
   margin: 0;
   font-size: 1.2rem;
   color: #1d2433;
-}
-
-.registered-agents-button {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.4rem;
-  padding: 0.55rem 1rem;
-  border: 1px solid #d6dfed;
-  border-radius: 8px;
-  background: #fff;
-  color: #31415f;
-  font-size: 0.95rem;
-  font-weight: 500;
-  cursor: pointer;
-  transition: all 0.15s ease;
-}
-
-.registered-agents-button:hover:not(:disabled) {
-  border-color: #b0bfd9;
-  background: #f5f8fc;
-}
-
-.registered-agents-button:disabled {
-  opacity: 0.5;
-  cursor: default;
-}
-
-.registered-agents-button-primary {
-  border-color: #2759d6;
-  background: #2759d6;
-  color: #fff;
-}
-
-.registered-agents-button-primary:hover:not(:disabled) {
-  background: #1e44a8;
-  border-color: #1e44a8;
-}
-
-.registered-agents-button-secondary {
-  border-color: #d6dfed;
-  background: #f8fbff;
-  color: #31415f;
-}
-
-.registered-agents-button-secondary:hover:not(:disabled) {
-  border-color: #b0bfd9;
-  background: #f0f5fc;
-}
-
-.registered-agents-button-small {
-  padding: 0.4rem 0.7rem;
-  font-size: 0.88rem;
-}
-
-.registered-agents-button-danger {
-  border-color: #e8a8a8;
-  color: #c41c1c;
-}
-
-.registered-agents-button-danger:hover:not(:disabled) {
-  border-color: #d97a7a;
-  background: #fff5f5;
 }
 
 .registered-agents-error {
@@ -4089,21 +3600,6 @@ a {
   flex-wrap: wrap;
   margin-top: 0.35rem;
   font-size: 0.88rem;
-}
-
-.registered-agent-provider,
-.registered-agent-role,
-.registered-agent-disabled {
-  display: inline-flex;
-  padding: 0.2rem 0.5rem;
-  border-radius: 4px;
-  background: #e8f0ff;
-  color: #1356b8;
-}
-
-.registered-agent-disabled {
-  background: #f5e8e8;
-  color: #c41c1c;
 }
 
 .registered-agent-model-notice {
@@ -4284,11 +3780,6 @@ a {
 /* ═══════════════════════════════════════════════════════════════════════════
    Main Channel (Nanoclaw)
    ═══════════════════════════════════════════════════════════════════════════ */
-
-.clawtalk-sidebar-link-main {
-  font-weight: 600;
-  letter-spacing: 0.01em;
-}
 
 .main-channel-shell {
   display: flex;

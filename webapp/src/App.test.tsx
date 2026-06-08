@@ -112,22 +112,23 @@ describe('App', () => {
 
     renderWithRouter('/app/talks');
     await screen.findByRole('heading', { name: 'Talks' });
-    expect(screen.getByText('ClawTalk')).toBeTruthy();
-    expect(screen.getByRole('searchbox', { name: 'Search' })).toBeTruthy();
-    expect(screen.getByRole('link', { name: 'Help' })).toHaveAttribute(
-      'href',
-      'https://clawtalk.app/help',
-    );
+    expect(screen.getByRole('img', { name: 'ClawTalk' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Search talks' })).toBeTruthy();
     expect(
-      screen.getByRole('button', { name: 'Collapse sidebar' }),
+      screen.getByRole('button', { name: 'Toggle talk list' }),
     ).toBeTruthy();
-    expect(screen.getByRole('link', { name: 'Home' })).toBeTruthy();
-    expect(
-      screen.getAllByRole('link', { name: /Family Planning/i }),
-    ).toHaveLength(2);
+    expect(screen.getByRole('button', { name: 'Home' })).toBeTruthy();
+    // The Salon Talks page renders its header eagerly (across loading/empty/list
+    // states), so wait for the async sidebar fetch to resolve before asserting
+    // the talk appears in both the sidebar tree and the main list.
+    await waitFor(() =>
+      expect(
+        screen.getAllByRole('link', { name: /Family Planning/i }),
+      ).toHaveLength(2),
+    );
   });
 
-  it('collapses and re-expands the sidebar from the top header', async () => {
+  it('collapses and re-expands the talk-list column from the rail', async () => {
     const user = userEvent.setup();
     mockFetchByPath({
       '/api/v1/session/me': [
@@ -154,22 +155,30 @@ describe('App', () => {
     });
 
     renderWithRouter('/app/talks');
-    const collapseButton = await screen.findByRole('button', {
-      name: 'Collapse sidebar',
+    const toggle = await screen.findByRole('button', {
+      name: 'Toggle talk list',
     });
-    expect(screen.getByRole('link', { name: 'Home' })).toBeTruthy();
+    const shell = document.querySelector('.ct-shell');
+    // Starts expanded; the rail (and its Home nav) is always present.
+    expect(shell).toHaveAttribute('data-secondary-collapsed', 'false');
+    expect(screen.getByRole('button', { name: 'Search talks' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Home' })).toBeTruthy();
 
-    await user.click(collapseButton);
+    // jsdom has no matchMedia, so the toggle takes the desktop (collapse) path
+    // and persists the choice.
+    await user.click(toggle);
+    expect(shell).toHaveAttribute('data-secondary-collapsed', 'true');
+    expect(window.localStorage.getItem('clawtalk.sidebarCollapsed')).toBe(
+      'true',
+    );
+    // The rail survives a collapse — Home stays reachable.
+    expect(screen.getByRole('button', { name: 'Home' })).toBeTruthy();
 
-    expect(screen.getByRole('button', { name: 'Expand sidebar' })).toBeTruthy();
-    expect(screen.queryByRole('link', { name: 'Home' })).toBeNull();
-
-    await user.click(screen.getByRole('button', { name: 'Expand sidebar' }));
-
-    expect(
-      await screen.findByRole('button', { name: 'Collapse sidebar' }),
-    ).toBeTruthy();
-    expect(screen.getByRole('link', { name: 'Home' })).toBeTruthy();
+    await user.click(toggle);
+    expect(shell).toHaveAttribute('data-secondary-collapsed', 'false');
+    expect(window.localStorage.getItem('clawtalk.sidebarCollapsed')).toBe(
+      'false',
+    );
   });
 
   it('shows talk activity and unread badges in the sidebar', async () => {
@@ -371,7 +380,7 @@ describe('App', () => {
 
     renderWithRouter('/app/talks');
     const avatarButton = await screen.findByRole('button', {
-      name: 'Open profile menu',
+      name: /account and workspace menu/i,
     });
     avatarButton.click();
     const logOutButton = await screen.findByRole('menuitem', {

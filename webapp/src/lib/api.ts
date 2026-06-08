@@ -1003,6 +1003,23 @@ export async function listTalks(): Promise<Talk[]> {
   return envelope.talks;
 }
 
+/** Archived talks only — the `include_archived` list filtered to `status==='archived'`. */
+export async function listArchivedTalks(): Promise<Talk[]> {
+  const envelope = await apiRequest<{
+    talks: Talk[];
+    page: { limit: number; offset: number; count: number };
+  }>('/api/v1/talks?include_archived=true');
+  return envelope.talks.filter((talk) => talk.status === 'archived');
+}
+
+/** Restore an archived talk (clears `archived_at`). */
+export async function unarchiveTalk(talkId: string): Promise<void> {
+  await apiMutationRequest<{ restored: true }>(
+    `/api/v1/talks/${encodeURIComponent(talkId)}/unarchive`,
+    { method: 'POST' },
+  );
+}
+
 export async function createTalk(title: string): Promise<Talk> {
   const envelope = await apiMutationRequest<{ talk: Talk }>('/api/v1/talks', {
     method: 'POST',
@@ -3842,5 +3859,281 @@ export async function deleteTalkDataConnectorLink(input: {
     {
       method: 'DELETE',
     },
+  );
+}
+
+// ─── Home (read-only attention surface) ─────────────────────────────────
+// Mirrors src/clawtalk/db/home-accessors.ts payload types. Only the read API
+// (GET /api/v1/home/*) exists today; inbox/recommendation/news lifecycle write
+// endpoints are not implemented yet, so this client is read-only.
+
+export type HomeInboxType =
+  | 'agent_replied'
+  | 'round_completed'
+  | 'agent_asks_user'
+  | 'run_failed'
+  | 'doc_edits_ready'
+  | 'connector_needs_auth'
+  | 'news_context_added'
+  | 'long_running_run'
+  | 'system_limit_reached'
+  | 'forge_run_needs_review'
+  | 'job_output_ready'
+  | 'job_blocked';
+
+export type HomeInboxSeverity = 'info' | 'action' | 'blocking';
+export type HomeInboxStatus =
+  | 'unread'
+  | 'read'
+  | 'resolved'
+  | 'dismissed'
+  | 'snoozed'
+  | 'expired';
+
+export type HomeRecommendationKind =
+  | 'setup'
+  | 'failed-run'
+  | 'unresolved'
+  | 'synthesis'
+  | 'pending-edit'
+  | 'doc'
+  | 'cross-link'
+  | 'tool'
+  | 'news-context'
+  | 'agent-change'
+  | 'recap'
+  | 'archive-cleanup'
+  | 'forge-suggestion'
+  | 'job'
+  | 'prompt-suggestion';
+
+export type HomeRecommendationPriority = 'decide' | 'improve' | 'tidy';
+export type HomeRecommendationStatus =
+  | 'active'
+  | 'dismissed'
+  | 'completed'
+  | 'expired'
+  | 'snoozed';
+
+export type HomeNewsImpact =
+  | 'changes_assumption'
+  | 'adds_evidence'
+  | 'updates_competitor'
+  | 'introduces_risk'
+  | 'provides_tactic'
+  | 'topic_update'
+  | 'community_signal'
+  | 'background_only';
+
+export type HomeAction = {
+  type: string;
+  label?: string;
+  payload: Record<string, unknown>;
+};
+
+export type HomeInboxTarget = {
+  kind: string;
+  id?: string;
+  talkId?: string;
+  documentId?: string;
+  runId?: string;
+  tabId?: string;
+  newsItemId?: string;
+  connectorId?: string;
+  jobId?: string;
+};
+
+export type HomeInboxItem = {
+  id: string;
+  type: HomeInboxType;
+  title: string;
+  summary: string | null;
+  reason: string | null;
+  severity: HomeInboxSeverity;
+  status: HomeInboxStatus;
+  target: HomeInboxTarget;
+  primaryAction: HomeAction | null;
+  secondaryActions: HomeAction[];
+  score: number;
+  createdAt: string;
+  algorithmVersion: string;
+};
+
+export type HomeInboxCounts = {
+  unread: number;
+  blocking: number;
+  action: number;
+  info: number;
+};
+
+export type HomeInboxPayload = {
+  items: HomeInboxItem[];
+  counts: HomeInboxCounts;
+  nextCursor: string | null;
+  algorithmVersion: string;
+};
+
+export type HomeRecommendation = {
+  id: string;
+  kind: HomeRecommendationKind;
+  title: string;
+  why: string | null;
+  priority: HomeRecommendationPriority;
+  score: number;
+  confidence: number;
+  provenance: Record<string, unknown>;
+  action: HomeAction;
+  status: HomeRecommendationStatus;
+  stateFingerprint: string | null;
+  rank: number | null;
+  algorithmVersion: string;
+  createdAt: string;
+  expiresAt: string | null;
+};
+
+export type HomeRecommendationsPayload = {
+  items: HomeRecommendation[];
+  hero: HomeRecommendation | null;
+  thenMaybe: HomeRecommendation[];
+  algorithmVersion: string;
+};
+
+export type HomeNewsItem = {
+  id: string;
+  headline: string;
+  source: string | null;
+  favicon: string | null;
+  age: string | null;
+  excerpt: string | null;
+  url: string;
+  talkId: string;
+  talkTitle: string;
+  matchedOn: string[];
+  whyItMatters: string | null;
+  impact: HomeNewsImpact;
+  score: number;
+  publishedAt: string | null;
+  algorithmVersion: string;
+};
+
+export type HomeNewsPayload = {
+  items: HomeNewsItem[];
+  nextCursor: string | null;
+  algorithmVersion: string;
+};
+
+export type HomeCuratorKind =
+  | 'talk'
+  | 'recommendation'
+  | 'inbox'
+  | 'news'
+  | 'idle';
+
+export type HomeSummaryPayload = {
+  workspaceId: string;
+  curator: {
+    kind: HomeCuratorKind;
+    title: string;
+    summary: string | null;
+    itemId: string | null;
+    target: Record<string, unknown> | null;
+  };
+  stats: {
+    talks: number;
+    prompts: number;
+    tokens: number;
+    words: number;
+  };
+  counts: {
+    inbox: HomeInboxCounts;
+    recommendations: number;
+    news: number;
+  };
+  algorithmVersions: {
+    inbox: string;
+    recommendations: string;
+    news: string;
+  };
+};
+
+function homeQueryString(params?: {
+  limit?: number;
+  cursor?: string | null;
+}): string {
+  const search = new URLSearchParams();
+  if (params?.limit != null) search.set('limit', String(params.limit));
+  if (params?.cursor) search.set('cursor', params.cursor);
+  const serialized = search.toString();
+  return serialized ? `?${serialized}` : '';
+}
+
+export async function getHomeSummary(): Promise<HomeSummaryPayload> {
+  return apiRequest<HomeSummaryPayload>('/api/v1/home/summary');
+}
+
+export async function listHomeInbox(params?: {
+  limit?: number;
+  cursor?: string | null;
+}): Promise<HomeInboxPayload> {
+  return apiRequest<HomeInboxPayload>(
+    `/api/v1/home/inbox${homeQueryString(params)}`,
+  );
+}
+
+export async function listHomeRecommendations(params?: {
+  limit?: number;
+}): Promise<HomeRecommendationsPayload> {
+  return apiRequest<HomeRecommendationsPayload>(
+    `/api/v1/home/recommendations${homeQueryString(params)}`,
+  );
+}
+
+export async function listHomeNews(params?: {
+  limit?: number;
+  cursor?: string | null;
+}): Promise<HomeNewsPayload> {
+  return apiRequest<HomeNewsPayload>(
+    `/api/v1/home/news${homeQueryString(params)}`,
+  );
+}
+
+export type HomeInboxMutationResult = {
+  id: string;
+  status: HomeInboxStatus;
+};
+
+export type HomeRecommendationMutationResult = {
+  id: string;
+  status: HomeRecommendationStatus;
+};
+
+/** Dismiss an Inbox item so it leaves the active Home Inbox. */
+export async function dismissHomeInboxItem(
+  itemId: string,
+): Promise<HomeInboxMutationResult> {
+  return apiMutationRequest<HomeInboxMutationResult>(
+    `/api/v1/home/inbox/${encodeURIComponent(itemId)}/dismiss`,
+    { method: 'POST' },
+  );
+}
+
+/** Snooze an Inbox item until `until` (ISO-8601); it re-surfaces when due. */
+export async function snoozeHomeInboxItem(
+  itemId: string,
+  until: string,
+): Promise<HomeInboxMutationResult> {
+  return apiMutationRequest<HomeInboxMutationResult>(
+    `/api/v1/home/inbox/${encodeURIComponent(itemId)}/snooze`,
+    { method: 'POST', includeJson: true, body: JSON.stringify({ until }) },
+  );
+}
+
+/** Dismiss a recommendation so it leaves the Recommendations rail. */
+export async function dismissHomeRecommendation(
+  recommendationId: string,
+): Promise<HomeRecommendationMutationResult> {
+  return apiMutationRequest<HomeRecommendationMutationResult>(
+    `/api/v1/home/recommendations/${encodeURIComponent(recommendationId)}/dismiss`,
+    { method: 'POST' },
   );
 }

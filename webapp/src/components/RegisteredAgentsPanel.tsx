@@ -1,4 +1,5 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, type CSSProperties } from 'react';
+import { Link } from 'react-router-dom';
 
 import {
   ApiError,
@@ -13,6 +14,17 @@ import {
   type AgentProviderCard,
   UnauthorizedError,
 } from '../lib/api';
+import { Button } from '../salon/Button';
+import { Input, Textarea } from '../salon/Input';
+import { Chip } from '../salon/Chip';
+import { salon } from '../salon/tokens';
+
+// Compact Salon button footprint for inline row actions (Edit/Delete/Update).
+const COMPACT_BUTTON: CSSProperties = {
+  height: 30,
+  padding: '0 12px',
+  fontSize: 12,
+};
 
 type Props = {
   providers: AgentProviderCard[];
@@ -507,12 +519,9 @@ export function RegisteredAgentsPanel(props: Props): JSX.Element {
       <div className="registered-agents-header">
         <h3>Registered Agents</h3>
         {canManage && !isCreating && editingAgentId === null && (
-          <button
-            onClick={startCreate}
-            className="registered-agents-button registered-agents-button-primary"
-          >
+          <Button variant="primary" onClick={startCreate}>
             Create Agent
-          </button>
+          </Button>
         )}
       </div>
 
@@ -529,7 +538,15 @@ export function RegisteredAgentsPanel(props: Props): JSX.Element {
       ) : (
         <div className="registered-agents-list">
           {agents.map((agent) => (
-            <div key={agent.id} className="registered-agent-card">
+            <div
+              key={agent.id}
+              className="registered-agent-card"
+              style={{
+                background: salon.card,
+                border: `1px solid ${salon.line}`,
+                borderRadius: 12,
+              }}
+            >
               {editingAgentId === agent.id && editDraft ? (
                 <AgentForm
                   draft={editDraft}
@@ -566,7 +583,14 @@ export function RegisteredAgentsPanel(props: Props): JSX.Element {
       )}
 
       {isCreating && createDraft && (
-        <div className="registered-agent-card registered-agent-card-creating">
+        <div
+          className="registered-agent-card registered-agent-card-creating"
+          style={{
+            background: salon.card,
+            border: `1px solid ${salon.line}`,
+            borderRadius: 12,
+          }}
+        >
           <AgentForm
             draft={createDraft}
             setDraft={setCreateDraft}
@@ -615,8 +639,7 @@ function AgentForm({
     <div className="agent-editor-card">
       <label className="agent-form-field">
         <span>Name</span>
-        <input
-          type="text"
+        <Input
           value={draft.name}
           onChange={(e) => setDraft({ ...draft, name: e.target.value })}
           placeholder="Agent name"
@@ -676,8 +699,7 @@ function AgentForm({
 
       <label className="agent-form-field">
         <span>Persona Role (optional)</span>
-        <input
-          type="text"
+        <Input
           value={draft.personaRole}
           onChange={(e) => setDraft({ ...draft, personaRole: e.target.value })}
           placeholder="e.g., Senior Engineer"
@@ -687,25 +709,25 @@ function AgentForm({
 
       <label className="agent-form-field agent-form-field-full">
         <span>Description (optional)</span>
-        <textarea
+        <Textarea
+          serif={false}
           value={draft.description}
           onChange={(e) => setDraft({ ...draft, description: e.target.value })}
           placeholder="Short summary that shows up in the Talk invite picker"
           disabled={!canManage}
           rows={2}
-          className="agent-form-textarea"
         />
       </label>
 
       <label className="agent-form-field agent-form-field-full">
         <span>System Prompt Template (optional)</span>
-        <textarea
+        <Textarea
+          serif={false}
           value={draft.systemPrompt}
           onChange={(e) => setDraft({ ...draft, systemPrompt: e.target.value })}
           placeholder="Persona instructions sent as the system prompt for every Talk run"
           disabled={!canManage}
           rows={3}
-          className="agent-form-textarea"
         />
       </label>
 
@@ -740,19 +762,12 @@ function AgentForm({
       ) : null}
 
       <div className="agent-editor-actions">
-        <button
-          onClick={onSave}
-          className="registered-agents-button registered-agents-button-primary"
-          disabled={saveDisabled}
-        >
+        <Button variant="primary" onClick={onSave} disabled={saveDisabled}>
           Save
-        </button>
-        <button
-          onClick={onCancel}
-          className="registered-agents-button registered-agents-button-secondary"
-        >
+        </Button>
+        <Button variant="secondary" onClick={onCancel}>
           Cancel
-        </button>
+        </Button>
       </div>
     </div>
   );
@@ -790,23 +805,19 @@ function AgentCardView({
           <div>
             <h4>{agent.name}</h4>
             <div className="registered-agent-card-meta">
-              <span className="registered-agent-provider">{providerName}</span>
+              <Chip tone="ghost">{providerName}</Chip>
               {credentialModeBadge && (
-                <span className="registered-agent-role">
-                  {credentialModeBadge}
-                </span>
+                <Chip tone="ghost">{credentialModeBadge}</Chip>
               )}
               {agent.personaRole && (
-                <span className="registered-agent-role">
-                  {agent.personaRole}
-                </span>
+                <Chip tone="ghost">{agent.personaRole}</Chip>
               )}
               {isMainAgent && (
-                <span className="registered-agent-role">Main Agent</span>
+                <Chip tone="paper" active>
+                  Main Agent
+                </Chip>
               )}
-              {!agent.enabled && (
-                <span className="registered-agent-disabled">Disabled</span>
-              )}
+              {!agent.enabled && <Chip tone="ghost">Disabled</Chip>}
             </div>
             {agent.description ? (
               <p className="registered-agent-description">
@@ -823,24 +834,46 @@ function AgentCardView({
               {agent.executionPreview.message}
             </p>
           </div>
-          {canManage && (
-            <div className="registered-agent-card-actions">
-              <button
-                onClick={onEdit}
-                className="registered-agents-button registered-agents-button-small"
-              >
-                Edit
-              </button>
-              {!isMainAgent ? (
-                <button
-                  onClick={onDelete}
-                  className="registered-agents-button registered-agents-button-small registered-agents-button-danger"
+          <div className="registered-agent-card-actions">
+            <Link
+              to={`/app/agents/${encodeURIComponent(agent.id)}`}
+              className="salon-btn"
+              style={{
+                ...COMPACT_BUTTON,
+                display: 'inline-flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                borderRadius: 9999,
+                background: salon.card,
+                color: salon.ink,
+                border: `1px solid ${salon.line}`,
+                fontWeight: 500,
+                textDecoration: 'none',
+              }}
+            >
+              View
+            </Link>
+            {canManage ? (
+              <>
+                <Button
+                  variant="secondary"
+                  onClick={onEdit}
+                  style={COMPACT_BUTTON}
                 >
-                  Delete
-                </button>
-              ) : null}
-            </div>
-          )}
+                  Edit
+                </Button>
+                {!isMainAgent ? (
+                  <Button
+                    variant="danger"
+                    onClick={onDelete}
+                    style={COMPACT_BUTTON}
+                  >
+                    Delete
+                  </Button>
+                ) : null}
+              </>
+            ) : null}
+          </div>
         </div>
 
         {agent.modelAutoUpgradedFrom && (
@@ -851,12 +884,13 @@ function AgentCardView({
               <code>{agent.modelId}</code>.
             </span>
             {canManage && (
-              <button
+              <Button
+                variant="secondary"
                 onClick={onDismissModelUpgrade}
-                className="registered-agents-button registered-agents-button-small"
+                style={COMPACT_BUTTON}
               >
                 Dismiss
-              </button>
+              </Button>
             )}
           </div>
         )}
@@ -868,12 +902,13 @@ function AgentCardView({
               available.
             </span>
             {canManage && (
-              <button
+              <Button
+                variant="primary"
                 onClick={() => onApplyModelUpdate(updateAvailable.modelId)}
-                className="registered-agents-button registered-agents-button-small registered-agents-button-primary"
+                style={COMPACT_BUTTON}
               >
                 Update
-              </button>
+              </Button>
             )}
           </div>
         )}
