@@ -19,7 +19,7 @@ The backend/data cutover is real. The product refactor is not done.
 | Net-new product surfaces | ~25% 🔄 | Live app covers Talk list, Talk detail, Settings, and Salon-native Home (read API + write lifecycle), New Talk sheet, ⌘K command palette, Registered Agents panel + standalone agent profile, and Archive (all PR #550), plus native Documents UI — `/app/documents` index + `/app/documents/:id` viewer + pending-edit accept/reject console (PR #557) and the in-Talk native Documents pane (PR #560). Home P2 hardening routes `open_document_edit` to native Documents, keeps optimistic summary/curator state coherent, and returns 403 for guest lifecycle writes. Native Documents backend routes/client methods exist (PR #552), and accept resolution is serialized with executor proposal inserts so a concurrent same-block proposal is not silently superseded during accept. Forge remains post-MVP. |
 | Eval gate | ~40% 🔄 | `eval/` exists with six launch-critical dry-run scenarios, deterministic fixtures, grader prompt contracts, harness tests, and `npm run eval`; PR CI now runs the deterministic dry-run gate, while live backend/provider grading is still unwired. |
 
-The biggest missing work is Talk/Settings Salon completion, in-Talk native Documents, remaining Home lifecycle actions, de-facade, live eval hardening, and final surface completion. Forge remains post-MVP.
+The biggest missing work is Talk/Settings Salon completion, remaining Home lifecycle actions, de-facade, live eval hardening, final surface completion, and flat content facade retirement after exports and the legacy split-editor move native. Forge remains post-MVP.
 
 ---
 
@@ -51,7 +51,7 @@ The current refactor plan is a subset of that denominator. It must be explicit a
 | 3    | Execution backend                     | ✅ Done                                                                                                                                                                                                                                                                                                                                           |
 | 4    | API shell cleanup / legacy retirement | ✅ Done                                                                                                                                                                                                                                                                                                                                           |
 | 5    | Frontend shell + Talk rewrite         | ✅ Structural target met. TalkDetailPage shell/render surface and page-owned controllers are extracted below the roadmap LOC target; Salon migration and product-surface work remain separate lanes.                                                                                                                                              |
-| 6    | Documents                             | 🔄 Native backend API/client path exists for list/detail tabs+blocks+pending edits and edit accept/reject; standalone Documents UI (index + viewer + edit-review console) shipped (PR #557). Remaining: in-Talk doc pane (deferred behind TalkDetail refactor #549).                                                                              |
+| 6    | Documents                             | ✅ Native backend API/client path exists for list/detail tabs+blocks+pending edits and edit accept/reject; standalone Documents UI (index + viewer + edit-review console) shipped (PR #557), and the in-Talk doc pane consumes the same native tabs/blocks path (PR #560). Remaining: flat content facade retirement after exports and legacy split-editor migration. |
 | 7    | Agents/tools/connectors/context       | 🔄 Backend mostly greenfield behind facades; frontend still consumes compat shapes; standalone Agents page not built.                                                                                                                                                                                                                             |
 | 8    | Jobs                                  | 🔄 Backend and Talk Jobs panel mostly usable. PR #552 added `emit_document_append` and `job_output_ready` inbox/outbox production; DB-backed verification remains.                                                                                                                                                                                |
 | 9    | Home, Settings, polish, eval gate     | 🔄 Eval dry-run harness + CI gate shipped (PR #553); Salon foundation + shell + Home shipped (PR #547/#550); Home P2 hardening fixed native Documents deep links, optimistic curator sync, and guest-writer 403s; Settings structural extraction complete for Profile, Tools/Google/WebSearch, and provider OAuth (PR #548); product gaps remain. |
@@ -126,12 +126,12 @@ The unused table set is mostly intentional schema waiting for surfaces: Forge, `
 
 ### 4b. De-facade Consumers
 
-`threadId` still appears across `TalkDetailPage.tsx`, `useTalkRunStream.ts`, `talkRunReducer.ts`, `api.ts`, `useTalkSnapshot.ts`, `talkStream.ts`, and `wsCacheRouter.ts`. Native document blocks are not consumed by the frontend. This work is structural and behavioral, so it should be goal-scoped by facade, not attempted as one large rewrite.
+`threadId` still appears across `TalkDetailPage.tsx`, `useTalkRunStream.ts`, `talkRunReducer.ts`, `api.ts`, `useTalkSnapshot.ts`, `talkStream.ts`, and `wsCacheRouter.ts`. Native document blocks are consumed by the standalone Documents UI and in-Talk pane, but flat content projections still have export and legacy split-editor consumers. This work is structural and behavioral, so it should be goal-scoped by facade, not attempted as one large rewrite.
 
 ### 4c. Missing Surfaces
 
 - Home is a Salon-native surface over the native Home API; remaining actions are inbox mark-read/resolve and news add-to-context/snooze.
-- Standalone Documents index/detail/edit-review is live; the in-Talk doc pane still uses the older compatibility path.
+- Standalone Documents index/detail/edit-review and the in-Talk Documents pane are live over native tabs/blocks; exports and the legacy split-editor still block flat content facade deletion.
 - Registered Agents and standalone agent profile are live; remaining agent work is native facade-consumer cleanup and product polish.
 - Archive, New Talk sheet, and command palette are production surfaces; remaining net-new scope is workspace-member management and Forge (post-MVP).
 
