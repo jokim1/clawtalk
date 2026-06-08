@@ -25,12 +25,14 @@ export interface TalkDocumentViewProps {
   documentId: string;
   workspaceId: string | null;
   canEditDoc: boolean;
+  onUnauthorized: () => void;
 }
 
 export function TalkDocumentView({
   documentId,
   workspaceId,
   canEditDoc,
+  onUnauthorized,
 }: TalkDocumentViewProps): JSX.Element {
   const {
     doc,
@@ -53,7 +55,7 @@ export function TalkDocumentView({
     rejectRun,
     acceptAll,
     rejectAll,
-  } = useNativeDocumentReview(documentId, workspaceId);
+  } = useNativeDocumentReview(documentId, { workspaceId, onUnauthorized });
 
   // Tab roving-focus refs for the WAI-ARIA tablist keyboard pattern.
   const tabBaseId = useId();

@@ -53,7 +53,11 @@ export function TalkDocumentsPanel({
     activeLoad.current = signal;
     setState({ status: 'loading' });
     try {
-      const documents = await listDocuments({ workspaceId });
+      // The list route has no by-talk filter, so we fetch the workspace's
+      // documents and resolve the primary by primaryTalkId. Request the server
+      // max (250) so the Talk's primary can't fall off the default first page;
+      // a by-talk lookup is the proper fix if a workspace ever exceeds that.
+      const documents = await listDocuments({ workspaceId, limit: 250 });
       if (signal.cancelled) return;
       const primary =
         documents.find((doc) => doc.primaryTalkId === talkId) ?? null;
@@ -144,19 +148,27 @@ export function TalkDocumentsPanel({
             documentId={state.primary.id}
             workspaceId={workspaceId}
             canEditDoc={canEditDoc}
+            onUnauthorized={onUnauthorized}
           />
         ) : (
           <PanelCard>
             <div
               style={{
-                textAlign: 'center',
+                display: 'flex',
+                flexDirection: 'column',
+                alignItems: 'center',
+                gap: 12,
                 padding: '24px 12px',
-                color: salon.ink2,
-                fontSize: 13.5,
+                textAlign: 'center',
               }}
             >
-              No document is attached to this Talk yet. When an agent drafts one
-              here, it shows up in this pane for you to read and review.
+              <span style={{ color: salon.ink2, fontSize: 13.5 }}>
+                No document is attached to this Talk yet. When an agent drafts
+                one here, it shows up in this pane for you to read and review.
+              </span>
+              <Button variant="secondary" onClick={() => void load()}>
+                Check again
+              </Button>
             </div>
           </PanelCard>
         )

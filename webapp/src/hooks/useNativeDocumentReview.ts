@@ -32,6 +32,7 @@ import {
   rejectAllDocumentEdits,
   rejectDocumentEdit,
   rejectDocumentEditRun,
+  UnauthorizedError,
   type NativeDocument,
   type NativeDocumentEdit,
   type NativeDocumentTab,
@@ -81,8 +82,11 @@ function removeFrom(set: Set<string>, value: string): Set<string> {
 
 export function useNativeDocumentReview(
   documentId: string,
-  workspaceId?: string | null,
+  options?: { workspaceId?: string | null; onUnauthorized?: () => void },
 ): UseNativeDocumentReviewResult {
+  const workspaceId = options?.workspaceId ?? null;
+  const onUnauthorized = options?.onUnauthorized;
+
   const [doc, setDoc] = useState<NativeDocument | null>(null);
   const [phase, setPhase] = useState<NativeDocumentReviewPhase>('loading');
   const [loadError, setLoadError] = useState<string>('');
@@ -130,6 +134,10 @@ export function useNativeDocumentReview(
         setPhase('ready');
       } catch (err) {
         if (signal.cancelled) return;
+        if (err instanceof UnauthorizedError && onUnauthorized) {
+          onUnauthorized();
+          return;
+        }
         if (err instanceof ApiError && err.status === 404) {
           setPhase('not-found');
           return;
@@ -147,7 +155,7 @@ export function useNativeDocumentReview(
         setPhase('error');
       }
     },
-    [applyDocument, documentId, wsArg],
+    [applyDocument, documentId, onUnauthorized, wsArg],
   );
 
   useEffect(() => {
@@ -165,6 +173,10 @@ export function useNativeDocumentReview(
   // resolved elsewhere) syncs by quiet refetch; anything else is retryable.
   const handleMutationError = useCallback(
     async (err: unknown) => {
+      if (err instanceof UnauthorizedError && onUnauthorized) {
+        onUnauthorized();
+        return;
+      }
       if (err instanceof ApiError && err.status === 409) {
         if (err.code === 'edit_set_mismatch') {
           // A bulk accept/reject was gated: new pending edits appeared since the
@@ -192,7 +204,7 @@ export function useNativeDocumentReview(
       }
       setActionError('Couldn’t apply that change. Try again.');
     },
-    [load],
+    [load, onUnauthorized],
   );
 
   const acceptEdit = useCallback(

@@ -167,6 +167,7 @@ describe('TalkDocumentsPanel', () => {
     await waitFor(() =>
       expect(mockApi.listDocuments).toHaveBeenCalledWith({
         workspaceId: 'ws-1',
+        limit: 250,
       }),
     );
   });
@@ -288,5 +289,29 @@ describe('TalkDocumentsPanel', () => {
     expect(
       await screen.findByText(/This document is no longer available/),
     ).toBeTruthy();
+  });
+
+  it('forwards a detail-load 401 to onUnauthorized', async () => {
+    const onUnauthorized = vi.fn();
+    mockApi.listDocuments.mockResolvedValue([summary()]);
+    mockApi.getDocument.mockRejectedValue(new UnauthorizedError());
+    renderPanel({ onUnauthorized });
+
+    await waitFor(() => expect(onUnauthorized).toHaveBeenCalled());
+  });
+
+  it('refetches from the empty state when "Check again" is clicked', async () => {
+    mockApi.listDocuments
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([summary()]);
+    mockApi.getDocument.mockResolvedValue(makeDoc());
+    renderPanel();
+
+    const checkAgain = await screen.findByRole('button', {
+      name: 'Check again',
+    });
+    fireEvent.click(checkAgain);
+
+    expect(await screen.findByText('Launch brief')).toBeTruthy();
   });
 });
