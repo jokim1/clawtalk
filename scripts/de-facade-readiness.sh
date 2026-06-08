@@ -99,4 +99,4 @@ scan_live 'policy-facade-route' '/api/v1/talks/.*/policy|talks/:talkId/policy' 4
 scan_duplicate_mounts 'reorderGreenfieldTalkSidebarRoute'
 scan_duplicate_mounts 'getGreenfieldRunContextRoute'
 
-printf '\nDE_FACADE_READINESS: BLOCKED while any live_consumer_count is nonzero or duplicate routes are mounted in both worker-app.ts and greenfield-api.ts.\n'
+printf '\nDE_FACADE_READINESS: BLOCKED while any live_consumer_count is nonzero or duplicate-route counts exceed the expected import + canonical call + implementation definition.\n'

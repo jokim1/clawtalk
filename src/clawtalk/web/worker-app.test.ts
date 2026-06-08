@@ -1116,6 +1116,29 @@ describe('worker-app — greenfield sidebar reorder mount', () => {
   );
 });
 
+describe('worker-app — greenfield run context mount', () => {
+  it('GET /api/v1/talks/:talkId/runs/:runId/context keeps malformed talkId at structured 400', async () => {
+    const app = getWorkerApp();
+    const jwt = await mintJwt();
+    const res = await app.request(
+      new Request(
+        'https://app.test/api/v1/talks/%E0%A4%A/runs/10000000-0000-4000-8000-000000000bbb/context',
+        {
+          headers: {
+            cookie: `${ACCESS_TOKEN_COOKIE}=${jwt}`,
+          },
+        },
+      ),
+      undefined,
+      envForWorker(),
+    );
+
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error?: { code?: string } };
+    expect(body.error?.code).toBe('invalid_talk_id');
+  });
+});
+
 describe('worker-app — greenfield content edit compatibility mount', () => {
   it('POST /api/v1/contents/:contentId/edits/:editId/accept is mounted', async () => {
     const app = getWorkerApp();

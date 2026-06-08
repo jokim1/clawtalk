@@ -20,7 +20,7 @@ evidence. Current local scout output:
 | Tool-family compatibility | 5 | `src/clawtalk/db/agent-accessors.ts` still reads `active_tool_families_json`; UI imports `webapp/src/lib/tool-families.ts`. | Per-tool rows in `talk_tools(workspace_id, talk_id, tool_id, enabled)`. | All read/write paths use `talk_tools`; `active_tool_families_json` fallback removed; ToolChipsBar and settings surfaces show tool ids or native grouped labels without family DTO compatibility. |
 | Channels/data-connectors compatibility | 34 | `webapp/src/lib/api.ts`, `SettingsPage.tsx`, `TalkDetailPage.tsx`, `src/clawtalk/web/worker-app.ts`, `src/clawtalk/web/routes/connectors.ts` | Single connectors and connector bindings surface. | Settings/Talk connector UI consumes native connectors/bindings; `/workspace/channels`, `/workspace/data-connectors`, and per-talk connector API client methods are unused; backend compatibility routes have zero import/route evidence before deletion. |
 | Policy facade | 2 | `src/clawtalk/web/routes/greenfield-api.ts` mounts `/api/v1/talks/:talkId/policy`. | Native roster and run settings over `talk_agents`, `talk_agent_snapshots`, and talk settings. | UI no longer calls policy route; native roster/update tests cover the same behavior; route grep proves no frontend/API client consumers. |
-| Duplicate Hono mounts | 5 each | `reorderGreenfieldTalkSidebarRoute` and `getGreenfieldRunContextRoute` are mounted from both `worker-app.ts` and `greenfield-api.ts`. | One canonical mount per route family. | Decide owner module, remove duplicate mount, prove route tests still pass, and grep exactly one mount plus one implementation definition. |
+| Duplicate Hono mounts | 3 each | `reorderGreenfieldTalkSidebarRoute` and `getGreenfieldRunContextRoute` now appear only as the canonical import/call in `greenfield-api.ts` plus their implementation definitions. | One canonical mount per route family. | Done when route tests pass, `worker-app.ts` has zero direct route registrations/imports for these handlers, and grep remains at the expected import + canonical call + implementation definition. |
 
 ## Safe Order
 
@@ -28,7 +28,7 @@ evidence. Current local scout output:
 2. Talk native DTOs next: drop synthetic thread identity from API client, stream reducer, and TalkDetail state before backend removal.
 3. Snapshot/run-context native naming after Talk DTO migration, because both currently ride on the thread-shaped snapshot contract.
 4. Connector/tool/policy facades after Settings/Talk connector consumers move to native connectors/bindings and per-tool ids.
-5. Duplicate route mounts can be removed when their owning route module is unambiguous and route tests cover the surviving mount.
+5. Duplicate route mounts are cleanup-only once their owning route module is unambiguous and route tests cover the surviving mount.
 
 ## Required Proof Per Deletion
 

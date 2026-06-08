@@ -203,7 +203,7 @@ These defaults are chosen to reduce Joseph interrupts. Override only when code r
 ### G5. De-facade
 
 - Maintain a deletion ledger: facade, current consumers, native replacement, deletion test.
-- Remove synthetic `threadId`, native run context fabrication, policy/tool/connectors facades, duplicate Hono mounts, and flat content projections as consumers leave.
+- Remove synthetic `threadId`, native run context fabrication, policy/tool/connectors facades, and flat content projections as consumers leave. Duplicate Hono mounts are now a regression check only.
 - Gate: grep proves no consumers, route tests removed or rewritten, full relevant test suites green.
 
 ### G6. Product Surface Completion
@@ -409,7 +409,7 @@ Codex:
 ```text
 /goal
 Objective: Delete remaining compatibility facades after native consumers have moved.
-Scope: synthetic threadId consumers, native run-context fabrication, flat content markdown/html projections, snapshot compat, policy/tool/connectors facades, duplicate Hono mounts, tests, and deletion ledger.
+Scope: synthetic threadId consumers, native run-context fabrication, flat content markdown/html projections, snapshot compat, policy/tool/connectors facades, tests, and deletion ledger. Duplicate Hono mounts are already cleaned up and should only be re-grepped as a regression check.
 Non-goals: New product surfaces, broad visual work, schema churn without a deletion need, or deleting a facade with live consumers.
 Acceptance: Each deleted facade has a native replacement, consumer grep, removed/rewritten tests, and no runtime fallback path still depending on the old shape.
 Verify: targeted rg checks for each facade token; backend/API tests for replaced routes/accessors; npm run typecheck; npm run test where shared runtime changed; webapp gates if frontend consumers changed.
@@ -424,19 +424,19 @@ Claude/Opus:
 Objective: Adversarially prove the de-facade branch deleted no facade that still has a live consumer, then post a severity-ordered findings note with an explicit PASS or FAIL. This is the load-bearing safety review for facade deletion: a single sequential read misses consumers reached by dynamic key, route registration, or test-only path, so run it as an orchestrated multi-modality hunt, not a manual pass.
 Scope: Read/grep across the whole webapp/src and src trees plus the de-facade diff and the deletion ledger; run backend (`npm run typecheck`, `npm run test`) and webapp (`npm --prefix webapp run typecheck`, `npm --prefix webapp run test`, `npm --prefix webapp run build`) gates; make fixes ONLY if a deletion is proven unsafe and the fix is a one-line restore/migrate inside the Codex branch's scope. Do not author new product surfaces or re-skin anything.
 Non-goals: Re-adding compatibility layers unless deletion is proven unsafe; rewriting the deletion strategy; visual/Salon work; expanding scope beyond the facade tokens in the ledger.
-Facade tokens to clear (from §3a / G5): synthetic threadId, runs/messages-with-threadId DTO fields, native run-context fabrication, flat content markdown/html projections (bodyMarkdown/bodyHtml), snapshotVersion compat, policy/tool/connectors facades, and the duplicate Hono mounts reorderGreenfieldTalkSidebarRoute + getGreenfieldRunContextRoute.
+Facade tokens to clear (from §3a / G5): synthetic threadId, runs/messages-with-threadId DTO fields, native run-context fabrication, flat content markdown/html projections (bodyMarkdown/bodyHtml), snapshotVersion compat, and policy/tool/connectors facades. Regression-check the already-cleaned duplicate Hono mounts reorderGreenfieldTalkSidebarRoute + getGreenfieldRunContextRoute.
 
 Orchestration (run this slice with the keyword "ultracode" so Claude auto-orchestrates a dynamic workflow; do NOT run it as one sequential pass — the bare word "workflow" triggers nothing): fan out independent hidden-consumer FINDER subagents, one per detection MODALITY, over every facade token still referenced in the diff or ledger:
   1. literal token grep (rg the exact identifiers across webapp/src and src),
   2. import-trace (who imports the moved/deleted module or its re-exports),
-  3. route-registration trace (every Hono mount of the affected handler — dump the route table, do NOT trust grep, because first-match-wins duplicate mounts hide live ones; threadId-adjacent example: reorderGreenfieldTalkSidebarRoute and getGreenfieldRunContextRoute are mounted in BOTH worker-app.ts and greenfield-api.ts (defined in greenfield-core.ts / greenfield-detail.ts)),
+  3. route-registration trace (every Hono mount of the affected handler — dump the route table, do NOT trust grep, because first-match-wins duplicate mounts hide live ones; regression-check the historical duplicate handlers reorderGreenfieldTalkSidebarRoute and getGreenfieldRunContextRoute stay canonical-only in greenfield-api.ts plus their definitions in greenfield-core.ts / greenfield-detail.ts),
   4. test-reference trace (test fixtures/asserts that read the old shape — e.g. ClawTalkSidebar.test.tsx, LiveResponsePanel.test.tsx, api.test.ts, threadScroll.test.ts on the webapp side),
   5. dynamic/string-key trace (string-built field access, DTO key reads, cache routers — wsCacheRouter.ts is a known INDIRECT threadId consumer that a grep on the "moved" files alone will miss).
 Dedup the union of candidate consumers across modalities. Then ADVERSARIAL-VERIFY: spawn N=2 skeptic subagents ONLY for AMBIGUOUS candidates (dynamic-key, route-registration, or test-only hits) to confirm/refute each is a live runtime consumer — a single rg already proves the literal-grep hits, so do not burn skeptics on those. Loop the finders UNTIL DRY: re-run a modality if a skeptic surfaces a new reference, and clear a facade only when every modality reports zero live consumers and skeptics agree. A completeness critic confirms every ledger facade has been run through all five modalities before you stop.
 ECHO REQUIREMENT: the /goal evaluator reads ONLY this main transcript and never sees inside subagents, so the orchestrator MUST paste back into THIS conversation, per facade token: the exact rg command(s) and their hit counts, the route-table dump for any mounted handler, and each skeptic's verdict. Workflow-internal evidence that is not echoed does not count.
 
 Done-when (transcript-checkable; the evaluator runs nothing and judges only what is pasted here):
-  - For every facade token above, the echoed grep/route-table/skeptic evidence in this transcript shows zero non-test consumers (any remaining hit is inside a deletion-ledger comment or a test that was rewritten/removed in this branch), AND for the duplicate mounts a route-table dump confirms exactly one live mount each; AND
+  - For every facade token above, the echoed grep/route-table/skeptic evidence in this transcript shows zero non-test consumers (any remaining hit is inside a deletion-ledger comment or a test that was rewritten/removed in this branch), AND the duplicate-mount regression check confirms reorderGreenfieldTalkSidebarRoute and getGreenfieldRunContextRoute remain canonical-only; AND
   - The pasted output of `npm run typecheck`, `npm run test`, `npm --prefix webapp run typecheck`, `npm --prefix webapp run test`, and `npm --prefix webapp run build` all show exit 0 / no failures (no test deleted or skipped to make them pass); AND
   - The review gate is surfaced PASS in this transcript: gstack `/review` (bundles a Codex adversarial pass) and `/karpathy-audit diff` — and because the de-facade branch was Codex-built, this Claude/Opus pass IS the cross-model adversarial review (the mirror of `/claude review` on the Codex side) — with any blocking finding either fixed (diff shown) or marked false-positive with reason; AND
   - A severity-ordered findings note has been posted in THIS conversation listing each facade, its modality evidence, any missed consumer found, and an explicit overall PASS or FAIL recommendation.

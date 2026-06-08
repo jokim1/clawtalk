@@ -84,7 +84,7 @@ The current readiness ledger and grep script live in [DE-FACADE-READINESS.md](DE
 | 8 | Run-context synthesis | Fabricates legacy manifest with `threadId`. | Native run context without thread fields. |
 | 9 | Attachments guard | Routes return `attachments_not_available`. | Future R2-backed chat attachments, if v1 needs them. |
 
-Duplicate route registrations also need cleanup: `reorderGreenfieldTalkSidebarRoute` and `getGreenfieldRunContextRoute` are mounted in both `worker-app.ts` and `greenfield-api.ts`; first match wins, leaving dead duplicate mounts.
+Duplicate route registrations for `reorderGreenfieldTalkSidebarRoute` and `getGreenfieldRunContextRoute` have been cleaned up: `greenfield-api.ts` is now the canonical mount owner, and `worker-app.ts` no longer registers direct copies.
 
 ### 3b. Net-new Backends
 
