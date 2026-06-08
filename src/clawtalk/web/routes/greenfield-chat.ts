@@ -139,17 +139,11 @@ async function resolveWorkspaceForTalk(input: {
   return rows[0];
 }
 
-function assertTalkAndThread(input: {
-  talkId: string;
-  threadId?: string | null;
-}): RouteResult<never> | null {
-  if (!isUuid(input.talkId)) {
+function assertTalkId(talkId: string): RouteResult<never> | null {
+  if (!isUuid(talkId)) {
     return error(400, 'invalid_talk_id', 'Talk id must be a UUID.');
   }
-  if (!input.threadId || input.threadId === input.talkId) {
-    return null;
-  }
-  return error(404, 'thread_not_found', 'Thread not found.');
+  return null;
 }
 
 function normalizeOptionalStringArray(
@@ -264,7 +258,6 @@ export async function enqueueGreenfieldChatRoute(input: {
   auth: AuthContext;
   workspaceId?: string | null;
   talkId: string;
-  threadId?: string | null;
   content: unknown;
   targetAgentIds?: unknown;
   attachmentIds?: unknown;
@@ -276,10 +269,7 @@ export async function enqueueGreenfieldChatRoute(input: {
     forcedSerialReason: null;
   }>
 > {
-  const talkError = assertTalkAndThread({
-    talkId: input.talkId,
-    threadId: input.threadId,
-  });
+  const talkError = assertTalkId(input.talkId);
   if (talkError) return talkError;
 
   if (typeof input.content !== 'string') {
@@ -392,18 +382,13 @@ export async function cancelGreenfieldChatRoute(input: {
   auth: AuthContext;
   workspaceId?: string | null;
   talkId: string;
-  threadId?: string | null;
 }): Promise<
   RouteResult<{
     talkId: string;
-    threadId: string | null;
     cancelledRuns: number;
   }>
 > {
-  const talkError = assertTalkAndThread({
-    talkId: input.talkId,
-    threadId: input.threadId,
-  });
+  const talkError = assertTalkId(input.talkId);
   if (talkError) return talkError;
 
   return withResolvedWorkspace(
@@ -437,7 +422,6 @@ export async function cancelGreenfieldChatRoute(input: {
       }
       return ok({
         talkId: input.talkId,
-        threadId: input.threadId ?? null,
         cancelledRuns: cancelled.cancelledRuns,
       });
     },

@@ -104,7 +104,6 @@ export function useTalkHistoryController({
         const result = await deleteTalkMessages({
           talkId: pageTalk.id,
           messageIds,
-          threadId,
         });
         threadCacheEpochRef.current += 1;
         rememberDeletedMessageIds(result.deletedMessageIds);

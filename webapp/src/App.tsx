@@ -946,8 +946,8 @@ export function App() {
     location.pathname.startsWith('/app/archive') ||
     location.pathname.startsWith('/app/main');
 
-  // Close the mobile drawer on any navigation — including content/doc links
-  // that change only the query string (?thread=…&doc=1), not the pathname.
+  // Close the mobile drawer on any navigation, including document-pane links
+  // that change only the query string (?doc=1), not the pathname.
   useEffect(() => {
     setSecondaryDrawerOpen(false);
   }, [location.pathname, location.search]);

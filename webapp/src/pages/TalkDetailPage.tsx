@@ -31,11 +31,10 @@ import { TalkDetailShell } from '../components/Talk/TalkDetailShell';
 import { TalkDocumentCreateModal } from '../components/Talk/TalkDocumentCreateModal';
 import { TalkDocumentsPanel } from '../components/Talk/TalkDocumentsPanel';
 import { TalkTabContent } from '../components/Talk/TalkTabContent';
-import { getLastThreadForTalk } from '../lib/lastThreadForTalk';
 import { loadThreadScroll, saveThreadScroll } from '../lib/threadScroll';
 import { useTalkRunStream } from '../hooks/useTalkRunStream';
 import {
-  buildThreadHref,
+  buildTalkDetailHref,
   useTalkDetailRouteState,
   useTalkDetailTabLinks,
 } from '../hooks/useTalkDetailTabs';
@@ -55,10 +54,7 @@ import { useTalkRunContextController } from '../hooks/useTalkRunContextControlle
 import { useTalkSnapshotPageState } from '../hooks/useTalkSnapshotPageState';
 import { createInitialDetailState, detailReducer } from '../lib/talkRunReducer';
 import { useQueryClient } from '@tanstack/react-query';
-import {
-  rememberActiveThreadForTalk,
-  snapshotQueryKey,
-} from '../lib/useTalkSnapshot';
+import { snapshotQueryKey } from '../lib/useTalkSnapshot';
 import {
   createWsCacheRouter,
   prependOlderTalkMessagesToSnapshot,
@@ -113,12 +109,6 @@ export function TalkDetailPage({
   const { talkId = '' } = useParams<{ talkId: string }>();
   const navigate = useNavigate();
   const { currentTab, locationParams } = useTalkDetailRouteState(talkId);
-  const requestedThreadId = locationParams.get('thread')?.trim() || null;
-  // If the URL hasn't pinned a thread yet, ride the saved last-viewed
-  // thread for this Talk so the snapshot warms straight to the UX the
-  // user expects (avoids the bootstrap → refetch-on-resolve double-hop).
-  const initialResolvedThreadId =
-    requestedThreadId ?? getLastThreadForTalk(talkId);
   const queryClient = useQueryClient();
   const {
     snapshotQuery,
@@ -135,7 +125,6 @@ export function TalkDetailPage({
   } = useTalkSnapshotPageState({
     userId,
     talkId,
-    threadId: initialResolvedThreadId,
     onUnauthorized,
   });
   const wsCacheRouterRef = useRef(createWsCacheRouter(queryClient));
@@ -225,7 +214,6 @@ export function TalkDetailPage({
     handleDeleteMenuThread,
   } = useTalkThreadController({
     talkId,
-    requestedThreadId,
     currentTab,
     canEditThreads: canEditAgents,
     navigate,
@@ -490,7 +478,6 @@ export function TalkDetailPage({
     const pageSize = 200;
     try {
       const older = await listTalkMessages(talkId, {
-        threadId,
         before: oldest.createdAt,
         limit: pageSize,
       });
@@ -505,7 +492,6 @@ export function TalkDetailPage({
         queryClient,
         userId,
         talkId,
-        threadId,
         messages: filtered,
         hasOlderMessages: isFinalPage ? false : undefined,
       });
@@ -540,7 +526,7 @@ export function TalkDetailPage({
       // separate; re-fetch them in parallel so the Runs tab updates.
       // The threads list stays on its component-local state.
       void queryClient.invalidateQueries({
-        queryKey: snapshotQueryKey(userId, talkId, threadId),
+        queryKey: snapshotQueryKey(userId, talkId),
       });
       // A resync runs when we may have missed live frames (replay gap,
       // reconnect, content-less message). The snapshot refetch only updates
@@ -648,7 +634,6 @@ export function TalkDetailPage({
     // Doc state is derived reactively from `talkSnapshot.content` (native
     // metadata) and the in-pane native fetch — no imperative content
     // hydration here anymore.
-    rememberActiveThreadForTalk(talkId, snapshot.activeThreadId);
     setOlderMessagesAvailable(snapshot.hasOlderMessages);
     if (!isFirstHydration) return;
     hydratedKeyRef.current = hydrationKey;
@@ -952,7 +937,7 @@ export function TalkDetailPage({
     jobsTabHref,
     runsTabHref,
     manageAgentsHref,
-  } = useTalkDetailTabLinks({ talkId, activeThreadId });
+  } = useTalkDetailTabLinks({ talkId });
   const handleOpenRunHistory = useCallback(
     (runId: string) => {
       pendingRunHistoryScrollRef.current = runId;
@@ -1022,7 +1007,7 @@ export function TalkDetailPage({
     (run: TalkRun) => {
       if (!run.threadId) return;
       if (run.threadId !== activeThreadId) {
-        navigate(buildThreadHref(talkId, run.threadId));
+        navigate(buildTalkDetailHref(talkId));
         return;
       }
       if (run.triggerMessageId) {

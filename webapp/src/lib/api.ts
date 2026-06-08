@@ -1135,16 +1135,9 @@ export type TalkSnapshot = {
 
 export async function getTalkSnapshot(input: {
   talkId: string;
-  threadId?: string | null;
 }): Promise<TalkSnapshot> {
-  const params = new URLSearchParams();
-  if (input.threadId) {
-    params.set('threadId', input.threadId);
-  }
   return apiRequest<TalkSnapshot>(
-    `/api/v1/talks/${encodeURIComponent(input.talkId)}/snapshot${
-      params.size > 0 ? `?${params.toString()}` : ''
-    }`,
+    `/api/v1/talks/${encodeURIComponent(input.talkId)}/snapshot`,
   );
 }
 
@@ -1165,7 +1158,6 @@ export type ContentEditSummary = {
 
 export async function createDocument(input: {
   talkId: string;
-  threadId?: string | null;
   title: string;
   format?: NativeDocumentFormat;
   workspaceId?: string | null;
@@ -1174,7 +1166,6 @@ export async function createDocument(input: {
     talkId: input.talkId,
     title: input.title,
   };
-  if (input.threadId) body.threadId = input.threadId;
   if (input.format) body.format = input.format;
   const envelope = await apiMutationRequest<{ document: NativeDocument }>(
     withWorkspaceQuery('/api/v1/documents', input.workspaceId),
@@ -1382,15 +1373,11 @@ export async function rejectAllDocumentEdits(input: {
 export async function listTalkMessages(
   talkId: string,
   options?: {
-    threadId?: string | null;
     before?: string | null;
     limit?: number;
   },
 ): Promise<TalkMessage[]> {
   const params = new URLSearchParams();
-  if (options?.threadId) {
-    params.set('threadId', options.threadId);
-  }
   if (options?.before) {
     params.set('before', options.before);
   }
@@ -1431,7 +1418,6 @@ export async function searchTalkMessages(input: {
 export async function deleteTalkMessages(input: {
   talkId: string;
   messageIds: string[];
-  threadId: string;
 }): Promise<{
   talkId: string;
   deletedCount: number;
@@ -1446,7 +1432,6 @@ export async function deleteTalkMessages(input: {
     includeJson: true,
     body: JSON.stringify({
       messageIds: input.messageIds,
-      threadId: input.threadId,
     }),
   });
 }
@@ -2606,7 +2591,6 @@ export async function sendTalkMessage(input: {
   content: string;
   targetAgentIds?: string[];
   attachmentIds?: string[];
-  threadId?: string | null;
 }): Promise<{ talkId: string; message: TalkMessage; runs: TalkRun[] }> {
   return apiMutationRequest<{
     talkId: string;
@@ -2624,7 +2608,6 @@ export async function sendTalkMessage(input: {
         content: input.content,
         targetAgentIds: input.targetAgentIds ?? [],
         attachmentIds: input.attachmentIds ?? [],
-        threadId: input.threadId ?? null,
       }),
     },
   );
@@ -2686,7 +2669,6 @@ export async function uploadContentImage(
 
 export async function cancelTalkRuns(
   talkId: string,
-  threadId?: string | null,
   input?: WorkspaceScopedRequest,
 ): Promise<{ talkId: string; cancelledRuns: number }> {
   return apiMutationRequest<{ talkId: string; cancelledRuns: number }>(
@@ -2697,7 +2679,7 @@ export async function cancelTalkRuns(
     {
       method: 'POST',
       includeJson: true,
-      body: JSON.stringify(threadId ? { threadId } : {}),
+      body: '{}',
     },
   );
 }

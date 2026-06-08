@@ -606,11 +606,8 @@ describe('api auth retry behavior', () => {
       talkId: 'talk-1',
       content: 'Hello',
       targetAgentIds: ['agent-1'],
-      threadId: 'talk-1',
     });
-    await api.cancelTalkRuns('talk-1', 'talk-1', {
-      workspaceId: 'workspace-b',
-    });
+    await api.cancelTalkRuns('talk-1', { workspaceId: 'workspace-b' });
 
     expect(paths).toEqual([
       '/api/v1/talks/talk-1/chat?workspaceId=workspace-b',
@@ -621,9 +618,8 @@ describe('api auth retry behavior', () => {
         content: 'Hello',
         targetAgentIds: ['agent-1'],
         attachmentIds: [],
-        threadId: 'talk-1',
       },
-      { threadId: 'talk-1' },
+      {},
     ]);
   });
 

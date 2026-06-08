@@ -3,7 +3,7 @@
 // Two strategies:
 //
 // 1. **Surgical `setQueryData`** for events we can patch into the cache
-//    exactly (right now: just `message_appended` on the active thread).
+//    exactly (right now: just `message_appended` on the Talk timeline).
 //    Cheap and avoids a network round-trip; per-event check vs.
 //    snapshot.eventHighWater drops deltas the snapshot already
 //    incorporates so we don't double-append on a fresh load.
@@ -21,24 +21,15 @@
 import type { QueryClient } from '@tanstack/react-query';
 
 import { MessageAppendedEvent } from './talkStream';
-import { getActiveThreadIdForTalk, snapshotQueryKey } from './useTalkSnapshot';
+import { snapshotQueryKey } from './useTalkSnapshot';
 import type { TalkSnapshot, TalkMessage } from './api';
 
 const INVALIDATE_DEBOUNCE_MS = 50;
 
-type TalkSnapshotCacheKey = readonly ['talk-snapshot', string, string, string];
+type TalkSnapshotCacheKey = readonly ['talk-snapshot', string, string];
 
-function resolveCacheKey(
-  userId: string,
-  talkId: string,
-  threadId?: string | null,
-): TalkSnapshotCacheKey | null {
-  const resolved = threadId || getActiveThreadIdForTalk(talkId);
-  if (!resolved) return null;
-  const key = snapshotQueryKey(userId, talkId, resolved);
-  // Hook always returns the canonical thread-keyed shape when the
-  // resolved threadId is non-null — narrowing for the type system.
-  return key as TalkSnapshotCacheKey;
+function resolveCacheKey(userId: string, talkId: string): TalkSnapshotCacheKey {
+  return snapshotQueryKey(userId, talkId) as TalkSnapshotCacheKey;
 }
 
 /**
@@ -54,8 +45,7 @@ export function appendTalkMessageToSnapshot(input: {
   message: TalkMessage;
 }): void {
   const { queryClient, userId, talkId, message } = input;
-  const key = resolveCacheKey(userId, talkId, message.threadId);
-  if (!key) return;
+  const key = resolveCacheKey(userId, talkId);
   queryClient.setQueryData<TalkSnapshot | undefined>(key, (prev) => {
     if (!prev) return prev;
     if (prev.messages.some((m) => m.id === message.id)) return prev;
@@ -75,15 +65,12 @@ export function prependOlderTalkMessagesToSnapshot(input: {
   queryClient: QueryClient;
   userId: string;
   talkId: string;
-  threadId: string;
   messages: TalkMessage[];
   hasOlderMessages?: boolean;
 }): void {
-  const { queryClient, userId, talkId, threadId, messages, hasOlderMessages } =
-    input;
+  const { queryClient, userId, talkId, messages, hasOlderMessages } = input;
   if (messages.length === 0 && hasOlderMessages === undefined) return;
-  const key = resolveCacheKey(userId, talkId, threadId);
-  if (!key) return;
+  const key = resolveCacheKey(userId, talkId);
   queryClient.setQueryData<TalkSnapshot | undefined>(key, (prev) => {
     if (!prev) return prev;
     const existing = new Set(prev.messages.map((m) => m.id));
@@ -111,12 +98,10 @@ export function patchTalkInSnapshot(input: {
   queryClient: QueryClient;
   userId: string;
   talkId: string;
-  threadId: string | null;
   patch: Partial<TalkSnapshot['talk']>;
 }): void {
-  const { queryClient, userId, talkId, threadId, patch } = input;
-  const key = resolveCacheKey(userId, talkId, threadId);
-  if (!key) return;
+  const { queryClient, userId, talkId, patch } = input;
+  const key = resolveCacheKey(userId, talkId);
   queryClient.setQueryData<TalkSnapshot | undefined>(key, (prev) => {
     if (!prev) return prev;
     return { ...prev, talk: { ...prev.talk, ...patch } };
@@ -129,8 +114,7 @@ export function applyMessageAppendedDelta(input: {
   event: MessageAppendedEvent;
 }): void {
   const { queryClient, userId, event } = input;
-  const key = resolveCacheKey(userId, event.talkId, event.threadId);
-  if (!key) return;
+  const key = resolveCacheKey(userId, event.talkId);
 
   queryClient.setQueryData<TalkSnapshot | undefined>(key, (prev) => {
     if (!prev) return prev;
@@ -175,7 +159,6 @@ export function createWsCacheRouter(queryClient: QueryClient): {
   scheduleInvalidate: (input: {
     userId: string;
     talkId: string;
-    threadId?: string | null;
   }) => void;
   invalidateAllSnapshots: () => void;
   scheduleInvalidateAllSnapshots: () => void;
@@ -208,12 +191,8 @@ export function createWsCacheRouter(queryClient: QueryClient): {
 
   return {
     scheduleInvalidate: (input) => {
-      const key = resolveCacheKey(input.userId, input.talkId, input.threadId);
-      if (!key) {
-        pendingKeys.add(JSON.stringify(['talk-snapshot']));
-      } else {
-        pendingKeys.add(JSON.stringify(key));
-      }
+      const key = resolveCacheKey(input.userId, input.talkId);
+      pendingKeys.add(JSON.stringify(key));
       ensureTimer();
     },
     invalidateAllSnapshots: () => {

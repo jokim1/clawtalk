@@ -213,7 +213,7 @@ describe('SecondaryList', () => {
     const links = docList.querySelectorAll('a');
     expect(links).toHaveLength(1);
     expect(links[0].getAttribute('href')).toBe(
-      '/app/talks/talk-with-doc?thread=thread-with-doc&doc=1',
+      '/app/talks/talk-with-doc?doc=1',
     );
     expect(screen.getByLabelText('Has document')).toBeTruthy();
   });

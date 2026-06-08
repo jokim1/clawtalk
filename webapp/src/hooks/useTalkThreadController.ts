@@ -15,15 +15,8 @@ import {
   type TalkMessageSearchResult,
   type TalkThread,
 } from '../lib/api';
-import {
-  getLastThreadForTalk,
-  setLastThreadForTalk,
-} from '../lib/lastThreadForTalk';
 import { formatThreadLabel } from '../lib/threadTitles';
-import {
-  buildThreadHref,
-  type TalkDetailTabKey,
-} from './useTalkDetailTabs';
+import { buildTalkDetailHref, type TalkDetailTabKey } from './useTalkDetailTabs';
 
 export type ThreadListState = {
   threads: TalkThread[];
@@ -33,7 +26,6 @@ export type ThreadListState = {
 
 type UseTalkThreadControllerInput = {
   talkId: string;
-  requestedThreadId: string | null;
   currentTab: TalkDetailTabKey;
   canEditThreads: boolean;
   navigate: NavigateFunction;
@@ -56,7 +48,6 @@ export function sortThreads(threads: TalkThread[]): TalkThread[] {
 
 export function useTalkThreadController({
   talkId,
-  requestedThreadId,
   currentTab,
   canEditThreads,
   navigate,
@@ -183,42 +174,13 @@ export function useTalkThreadController({
       return;
     }
 
-    // Resolution order: URL ?thread= → saved-last-thread for this Talk
-    // (localStorage) → most-recent-by-activity (threads[0]). Saved id is
-    // dropped if the thread no longer exists.
-    let validThreadId: string | null = null;
-    if (
-      requestedThreadId &&
-      threadState.threads.some((thread) => thread.id === requestedThreadId)
-    ) {
-      validThreadId = requestedThreadId;
-    } else {
-      const saved = getLastThreadForTalk(talkId);
-      if (saved && threadState.threads.some((thread) => thread.id === saved)) {
-        validThreadId = saved;
-      } else {
-        validThreadId = threadState.threads[0]?.id || null;
-      }
-    }
+    const validThreadId = threadState.threads[0]?.id || null;
     if (!validThreadId) return;
-    if (requestedThreadId !== validThreadId) {
-      navigate(buildThreadHref(talkId, validThreadId, currentTab), {
-        replace: true,
-      });
-    }
     if (activeThreadId !== validThreadId) {
       setActiveThreadId(validThreadId);
     }
-    // Persist the (talkId, threadId) pairing here — this is the only
-    // place we know threadState has been loaded for the CURRENT talkId,
-    // so a sidebar click to another Talk can't race a stale activeThreadId
-    // into the wrong key.
-    setLastThreadForTalk(talkId, validThreadId);
   }, [
     activeThreadId,
-    currentTab,
-    navigate,
-    requestedThreadId,
     talkId,
     threadState.loading,
     threadState.threads,
@@ -262,8 +224,8 @@ export function useTalkThreadController({
   );
 
   const handleSelectThread = useCallback(
-    (threadId: string) => {
-      navigate(buildThreadHref(talkId, threadId, currentTab));
+    (_threadId: string) => {
+      navigate(buildTalkDetailHref(talkId, currentTab));
     },
     [currentTab, navigate, talkId],
   );
@@ -331,8 +293,9 @@ export function useTalkThreadController({
 
   const handleSearchResultSelect = useCallback(
     (result: TalkMessageSearchResult) => {
+      void result;
       setSearchResults([]);
-      navigate(buildThreadHref(talkId, result.threadId));
+      navigate(buildTalkDetailHref(talkId));
     },
     [navigate, talkId],
   );
