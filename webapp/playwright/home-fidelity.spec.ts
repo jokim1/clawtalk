@@ -1,4 +1,4 @@
-import { test, type Page, type Route } from '@playwright/test';
+import { test, expect, type Page, type Route } from '@playwright/test';
 
 /**
  * Visual-fidelity capture harness for the Salon Home surface.
@@ -20,7 +20,10 @@ import { test, type Page, type Route } from '@playwright/test';
  */
 
 const SCREENS_DIR = 'playwright/__screens__';
-const VIEWPORT = { width: 1440, height: 1400 } as const;
+// Wide viewport on purpose: the empty-state width regression only screams at
+// large widths (auto-margin shrink-to-fit leaves big gutters), which a 1440
+// capture under-exposed.
+const VIEWPORT = { width: 1920, height: 1400 } as const;
 const USER_ID = '33333333-3333-3333-3333-333333333333';
 
 function buildSession() {
@@ -292,5 +295,24 @@ for (const state of ['populated', 'empty'] as const) {
       path: `${SCREENS_DIR}/home-${state}.png`,
       fullPage: true,
     });
+
+    // Hard guard for the regression a visual-only judge missed: the Home
+    // container must fill toward the 1240px editorial cap, not shrink-to-fit to
+    // its content (which the empty state did via auto margins). Measuring the
+    // real rendered width is the precise check a screenshot eyeball can't do —
+    // and it fails loudest in the empty state, exactly where prod lives.
+    const containerWidth = await page.evaluate(() => {
+      const h1 = Array.from(document.querySelectorAll('h1')).find(
+        (el) => el.textContent?.trim() === 'Home',
+      );
+      const container = h1?.closest('div');
+      return container ? container.getBoundingClientRect().width : 0;
+    });
+    expect(
+      containerWidth,
+      `Home container should fill toward 1240px (got ${Math.round(
+        containerWidth,
+      )}px) in the ${state} state`,
+    ).toBeGreaterThan(1100);
   });
 }

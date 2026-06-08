@@ -441,6 +441,10 @@ export function HomePage(): JSX.Element {
     <div
       className="ct-screen-enter ct-thin-scroll"
       style={{
+        // width:100% is load-bearing: in the .app-main-content grid cell, the
+        // auto horizontal margins would otherwise trigger shrink-to-fit and the
+        // column collapses to content width (narrow when the page is empty).
+        width: '100%',
         maxWidth: 1240,
         margin: '0 auto',
         padding: '28px 36px 48px',
