@@ -231,7 +231,8 @@ describe('HomePage', () => {
 
     renderHome();
 
-    expect(await screen.findByText('2 decisions need you.')).toBeTruthy();
+    // The curator pick renders as the "Do this next" hero (no separate bar).
+    expect(await screen.findByText('Do this next')).toBeTruthy();
     expect(screen.getByText('Synthesize Pricing v2')).toBeTruthy();
     expect(screen.getByText('Draft a decision doc')).toBeTruthy();
     expect(screen.getByText('Critic replied in Pricing v2')).toBeTruthy();
@@ -251,7 +252,10 @@ describe('HomePage', () => {
 
     renderHome();
 
-    expect(await screen.findByText('No recommendations yet')).toBeTruthy();
+    // With no hero, "Do this next" falls back to the curator summary rather
+    // than a "No recommendations yet" box; inbox + news show their empty states.
+    expect(await screen.findByText('Do this next')).toBeTruthy();
+    expect(screen.getByText('2 decisions need you.')).toBeTruthy();
     expect(screen.getByText('Inbox zero')).toBeTruthy();
     expect(screen.getByText('No news matched')).toBeTruthy();
   });
@@ -368,9 +372,9 @@ describe('HomePage', () => {
     await waitFor(() =>
       expect(screen.queryByText('Critic replied in Pricing v2')).toBeNull(),
     );
-    expect(screen.getAllByText('Notion raises Business pricing 10%')).toHaveLength(
-      2,
-    );
+    expect(
+      screen.getAllByText('Notion raises Business pricing 10%'),
+    ).toHaveLength(2);
   });
 
   it('dismisses the hero recommendation and promotes the next one', async () => {
@@ -386,9 +390,10 @@ describe('HomePage', () => {
     await waitFor(() =>
       expect(screen.queryByText('Synthesize Pricing v2')).toBeNull(),
     );
-    // The then-maybe card survives (promoted into the hero slot).
+    // The then-maybe card survives, promoted into the hero slot. It renders
+    // once now — the design shows the pick only in the hero, not a curator bar.
     expect(screen.queryByText('2 decisions need you.')).toBeNull();
-    expect(screen.getAllByText('Draft a decision doc')).toHaveLength(2);
+    expect(screen.getAllByText('Draft a decision doc')).toHaveLength(1);
     expect(mockApi.dismissHomeRecommendation).toHaveBeenCalledWith('r1');
   });
 
@@ -419,9 +424,9 @@ describe('HomePage', () => {
     await waitFor(() =>
       expect(screen.queryByText('Critic replied in Pricing v2')).toBeNull(),
     );
-    expect(screen.getAllByText('Notion raises Business pricing 10%')).toHaveLength(
-      2,
-    );
+    expect(
+      screen.getAllByText('Notion raises Business pricing 10%'),
+    ).toHaveLength(2);
     expect(mockApi.dismissHomeInboxItem).toHaveBeenCalledWith('i1');
   });
 });
