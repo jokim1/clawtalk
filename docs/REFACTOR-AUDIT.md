@@ -13,7 +13,7 @@ The backend/data cutover is real. The product refactor is not done.
 | Layer | Done | Evidence |
 |---|---|---|
 | Backend / data cutover | ~90% ✅ | Greenfield is the only live runtime. Legacy runtime/accessors were retired, and backend CI is a signal again. Remaining backend work is mainly facade deletion plus Home/Forge backends. |
-| Frontend structural decomposition | ~50% 🔄 | `TalkDetailPage.tsx` is 5,429 LOC and `SettingsPage.tsx` is 2,147 LOC. Talk panels, composer, thread view, reducer, and stream hook are extracted; the page-owned controller bulk remains. |
+| Frontend structural decomposition | ~60% 🔄 | `TalkDetailPage.tsx` is 5,429 LOC and `SettingsPage.tsx` is 1,066 LOC. Talk panels, composer, thread view, reducer, stream hook, and Settings Profile/Tools/OAuth panels are extracted; the page-owned Talk controller bulk remains. |
 | De-facade | ~5% 🔄 | The dead duplicate `worker-app.ts` Hono mounts for sidebar reorder and run-context were deleted; remaining compat facades still serve live consumers: synthetic threads, runs-with-`threadId`, flat content markdown/html, snapshot compat, policy/tool/connectors facades, run-context synthesis, and the attachments guard. |
 | Visual system (Salon) | Foundation in review 🔄 | Salon foundation shipped in PR #547: `webapp/src/salon/*` CSS-variable tokens (`--salon-*`), fonts (Newsreader/Geist/Geist Mono), brand mark, and the primitive library (CTMark/CTIcon/Avatar/AgentAvatar/RunPill/Chip/Kbd/Button/Input/Modal/Sheet/Popover) with behavior-preserving proof migrations + a smoke suite. Remaining: broad re-skin of the 7,284 LOC pre-Salon `webapp/src/styles.css`. |
 | Net-new product surfaces | ~5% ⛔ | Live app covers Talk list, Talk detail, and Settings. Home, native Documents UI/editor, standalone Agents, Archive, command palette, New Talk sheet, and Forge are unbuilt or skeletal. Native Documents backend routes/client methods now exist for the UI lane. |
@@ -54,7 +54,7 @@ The current refactor plan is a subset of that denominator. It must be explicit a
 | 6 | Documents | 🔄 Native backend API/client path exists for list/detail tabs+blocks+pending edits and edit accept/reject; native Documents UI/editor not built. |
 | 7 | Agents/tools/connectors/context | 🔄 Backend mostly greenfield behind facades; frontend still consumes compat shapes; standalone Agents page not built. |
 | 8 | Jobs | 🔄 Backend and Talk Jobs panel mostly usable. This branch adds `emit_document_append` and `job_output_ready` inbox/outbox production; Home UI surfacing and DB-backed verification remain. |
-| 9 | Home, Settings, polish, eval gate | 🔄 Eval dry-run harness exists; Home/Salon are still not built, and Settings still has inline Profile/Tools/OAuth state. |
+| 9 | Home, Settings, polish, eval gate | 🔄 Home/eval/Salon not built; Settings structural extraction is complete for Profile, Tools/Google/WebSearch, and provider OAuth state, but product gaps remain. |
 | 10 | Forge | ⛔ Schema/docs only, intentionally post-MVP. |
 
 ---
@@ -121,8 +121,8 @@ The unused table set is mostly intentional schema waiting for surfaces: Home, Fo
 ### 4a. God Files
 
 - `TalkDetailPage.tsx`: 5,429 LOC. Panels, composer, thread view, reducer, and stream hook are extracted. Remaining work is the Talk tab shell and page-owned controller state, which is the harder part because async mutations must stay page-owned across tab unmounts.
-- `SettingsPage.tsx`: 2,147 LOC. Provider config, connectors, and AI agents panels are extracted. Profile, Tools/Google/WebSearch, and OAuth state are still inline.
-- `TalkLlmSettingsCard.tsx`: 1,290 LOC and zero importers. This is a deletion candidate after one final grep.
+- `SettingsPage.tsx`: 1,066 LOC. Provider config, connectors, AI agents, Profile, Tools/Google/WebSearch, and provider OAuth state are extracted.
+- `TalkLlmSettingsCard.tsx`: deleted after a repo-wide importer grep proved it had zero live consumers.
 
 ### 4b. De-facade Consumers
 
@@ -160,8 +160,7 @@ Salon should be first-class before Home/Documents/Agents, otherwise those surfac
 ### W1. Structural Cleanup
 
 - Extract Talk tab shell and controller hooks from `TalkDetailPage.tsx`.
-- Extract Settings Profile, Tools/Google/WebSearch, and OAuth state.
-- Delete orphaned `TalkLlmSettingsCard.tsx`.
+- Settings Profile, Tools/Google/WebSearch, and provider OAuth extraction is complete; only future product settings gaps remain.
 - Keep async mutation state page-owned when panels unmount.
 
 ### W2. Salon Foundation
