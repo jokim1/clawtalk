@@ -21,7 +21,6 @@ import {
   sendTalkMessage,
   uploadTalkAttachment,
   UnauthorizedError,
-  type Content,
   type ContextSource,
   type Talk,
   type TalkMessage,
@@ -115,7 +114,9 @@ type ComposerInputControllerInput = {
   sendState: DetailState['sendState'];
   dispatch: Dispatch<DetailAction>;
   contextSources: ContextSource[];
-  talkContent: Content | null;
+  // The Talk's primary native document title for the `@doc` mention, or null
+  // when no document is attached. No content body facade is read here.
+  documentTitle: string | null;
 };
 
 type SendControllerInput = {
@@ -191,7 +192,7 @@ export function useTalkComposerInputController({
   sendState,
   dispatch,
   contextSources,
-  talkContent,
+  documentTitle,
 }: ComposerInputControllerInput) {
   const [draft, setDraft] = useState('');
   const [pendingAttachments, setPendingAttachments] = useState<
@@ -225,9 +226,9 @@ export function useTalkComposerInputController({
       buildSourceMentionOptions({
         sources: contextSources,
         filter: mentionFilter,
-        contentTitle: talkContent ? talkContent.title : null,
+        contentTitle: documentTitle,
       }),
-    [contextSources, mentionFilter, talkContent],
+    [contextSources, mentionFilter, documentTitle],
   );
 
   // Keep the highlighted index inside the valid range as the filter
@@ -282,7 +283,7 @@ export function useTalkComposerInputController({
       // one ready saved source. The literal `@` stays in the textarea;
       // selection replaces the `@filter` slice with the canonical token.
       const hasMentionable =
-        !!talkContent ||
+        !!documentTitle ||
         contextSources.some((source) => source.status === 'ready');
       if (hasMentionable) {
         const ta = textareaRef.current;
@@ -310,7 +311,7 @@ export function useTalkComposerInputController({
         }
       }
     },
-    [contextSources, dispatch, mentionState, pageKind, sendState, talkContent],
+    [contextSources, dispatch, mentionState, pageKind, sendState, documentTitle],
   );
 
   const resizeComposerTextarea = useCallback(() => {

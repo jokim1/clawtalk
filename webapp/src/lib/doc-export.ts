@@ -1,7 +1,7 @@
 // Conversion + clipboard + file-download helpers used by the Copy / Export
-// menu. The canonical source is native document blocks; the old Talk
-// split-editor still passes an explicitly named legacy projection until that
-// editor migrates off the content facade.
+// menu. The canonical source is native document blocks; the explicitly named
+// legacy projection remains only for compatibility coverage while the final
+// flat-content facade cleanup retires the shared content DTO.
 //
 // Clipboard writes for "Copy as HTML" set BOTH text/html and
 // text/plain MIMEs so rich-text destinations (Google Docs, Substack)

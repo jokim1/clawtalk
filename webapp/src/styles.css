@@ -6464,6 +6464,17 @@ a {
 }
 
 /* Hide-pane chevron */
+/* Thin chrome above the native in-Talk document pane: holds the hide-pane
+   chevron at the top-right, mirroring the old doc-pane header's collapse
+   control without the legacy title/format/export bar (TalkDocumentView owns
+   its own title + meta header below). */
+.talk-doc-pane-chrome {
+  display: flex;
+  justify-content: flex-end;
+  padding: 6px 10px 0;
+  flex: 0 0 auto;
+}
+
 .doc-pane-hide-btn {
   width: 28px;
   height: 28px;

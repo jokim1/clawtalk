@@ -10,7 +10,7 @@
  * accept/reject console; read-only members still see the document and a pending
  * count, with per-block pending markers from `DocumentBlocks`.
  */
-import { useId, useRef } from 'react';
+import { useEffect, useId, useRef } from 'react';
 
 import { Button, salon, salonFont } from '../../salon';
 import { CopyExportMenu } from '../CopyExportMenu';
@@ -28,6 +28,14 @@ export interface TalkDocumentViewProps {
   workspaceId: string | null;
   canEditDoc: boolean;
   onUnauthorized: () => void;
+  /**
+   * Monotonic counter bumped by the live Talk run stream whenever an agent
+   * edit run starts/applies/resolves against this Talk's document. Each bump
+   * triggers a quiet native reload so the blocks + pending-edit list stay live
+   * without the legacy flat-content snapshot refetch. Omitted by
+   * non-streaming callers (e.g. the standalone Documents tab).
+   */
+  reloadSignal?: number;
 }
 
 export function TalkDocumentView({
@@ -35,6 +43,7 @@ export function TalkDocumentView({
   workspaceId,
   canEditDoc,
   onUnauthorized,
+  reloadSignal = 0,
 }: TalkDocumentViewProps): JSX.Element {
   const {
     doc,
@@ -58,6 +67,17 @@ export function TalkDocumentView({
     acceptAll,
     rejectAll,
   } = useNativeDocumentReview(documentId, { workspaceId, onUnauthorized });
+
+  // Live agent-edit bridge: when the Talk run stream signals a content-edit
+  // event for this document, reload quietly so new pending edits / applied
+  // blocks surface without a full loading flash. Skips the initial render
+  // (reloadSignal starts at 0); the hook's own mount load covers that.
+  const lastReloadSignalRef = useRef(reloadSignal);
+  useEffect(() => {
+    if (reloadSignal === lastReloadSignalRef.current) return;
+    lastReloadSignalRef.current = reloadSignal;
+    void reload({ quiet: true });
+  }, [reloadSignal, reload]);
 
   // Tab roving-focus refs for the WAI-ARIA tablist keyboard pattern.
   const tabBaseId = useId();

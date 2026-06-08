@@ -1228,26 +1228,6 @@ export type ContentEditSummary = {
   createdAt: string;
 };
 
-export async function getTalkContent(talkId: string): Promise<{
-  content: Content | null;
-  pendingEdits: ContentEditSummary[];
-}> {
-  return apiRequest<{
-    content: Content | null;
-    pendingEdits: ContentEditSummary[];
-  }>(`/api/v1/talks/${encodeURIComponent(talkId)}/content`);
-}
-
-export async function getThreadContent(threadId: string): Promise<{
-  content: Content | null;
-  pendingEdits: ContentEditSummary[];
-}> {
-  return apiRequest<{
-    content: Content | null;
-    pendingEdits: ContentEditSummary[];
-  }>(`/api/v1/threads/${encodeURIComponent(threadId)}/content`);
-}
-
 export async function createTalkContent(input: {
   talkId: string;
   title: string;
@@ -1282,109 +1262,6 @@ export async function createThreadContent(input: {
     },
   );
   return envelope.content;
-}
-
-export async function patchContent(input: {
-  contentId: string;
-  expectedVersion: number;
-  bodyMarkdown?: string;
-  bodyHtml?: string;
-  title?: string;
-  acceptPendingEditIds?: string[];
-}): Promise<{ content: Content; acceptedPendingEditIds?: string[] }> {
-  const body: Record<string, unknown> = {
-    expectedVersion: input.expectedVersion,
-  };
-  if (typeof input.bodyMarkdown === 'string') {
-    body.bodyMarkdown = input.bodyMarkdown;
-  }
-  if (typeof input.bodyHtml === 'string') {
-    body.bodyHtml = input.bodyHtml;
-  }
-  if (typeof input.title === 'string') {
-    body.title = input.title;
-  }
-  if (Array.isArray(input.acceptPendingEditIds)) {
-    body.acceptPendingEditIds = input.acceptPendingEditIds;
-  }
-  return apiMutationRequest<{
-    content: Content;
-    acceptedPendingEditIds?: string[];
-  }>(`/api/v1/contents/${encodeURIComponent(input.contentId)}`, {
-    method: 'PATCH',
-    includeJson: true,
-    body: JSON.stringify(body),
-  });
-}
-
-export async function acceptContentEdit(input: {
-  contentId: string;
-  editId: string;
-  expectedContentVersion: number;
-}): Promise<{ content: Content; editId: string; runId: string }> {
-  return apiMutationRequest<{
-    content: Content;
-    editId: string;
-    runId: string;
-  }>(
-    `/api/v1/contents/${encodeURIComponent(input.contentId)}/edits/${encodeURIComponent(input.editId)}/accept`,
-    {
-      method: 'POST',
-      includeJson: true,
-      body: JSON.stringify({
-        expectedContentVersion: input.expectedContentVersion,
-      }),
-    },
-  );
-}
-
-export async function rejectContentEdit(input: {
-  contentId: string;
-  editId: string;
-}): Promise<{ editId: string; runId: string }> {
-  return apiMutationRequest<{ editId: string; runId: string }>(
-    `/api/v1/contents/${encodeURIComponent(input.contentId)}/edits/${encodeURIComponent(input.editId)}/reject`,
-    {
-      method: 'POST',
-      includeJson: true,
-      body: '{}',
-    },
-  );
-}
-
-export async function acceptContentEditRun(input: {
-  contentId: string;
-  runId: string;
-  expectedContentVersion: number;
-}): Promise<{ content: Content; runId: string; editIds: string[] }> {
-  return apiMutationRequest<{
-    content: Content;
-    runId: string;
-    editIds: string[];
-  }>(
-    `/api/v1/contents/${encodeURIComponent(input.contentId)}/runs/${encodeURIComponent(input.runId)}/accept`,
-    {
-      method: 'POST',
-      includeJson: true,
-      body: JSON.stringify({
-        expectedContentVersion: input.expectedContentVersion,
-      }),
-    },
-  );
-}
-
-export async function rejectContentEditRun(input: {
-  contentId: string;
-  runId: string;
-}): Promise<{ runId: string; editIds: string[] }> {
-  return apiMutationRequest<{ runId: string; editIds: string[] }>(
-    `/api/v1/contents/${encodeURIComponent(input.contentId)}/runs/${encodeURIComponent(input.runId)}/reject`,
-    {
-      method: 'POST',
-      includeJson: true,
-      body: '{}',
-    },
-  );
 }
 
 export async function listDocuments(input?: {
@@ -2974,13 +2851,13 @@ export type ContentImageUploadResult = {
 };
 
 // Upload an inline content image to the CONTENT_IMAGES R2 bucket via
-// POST /api/v1/content-images. Backs the rich-text editor's
-// ContentImageUploaderPlugin: dataUrl for clipboard pastes, sourceUrl
-// for rehosting an external image the editor saw during a paste.
+// POST /api/v1/content-images. Retained for future native authoring and
+// legacy compatibility: dataUrl for clipboard pastes, sourceUrl for
+// rehosting an external image observed during a paste.
 //
 // The optional AbortSignal is forwarded straight to fetch, so the
-// caller can cancel an in-flight upload (plugin destroy / route
-// navigation) and the request will throw an AbortError.
+// caller can cancel an in-flight upload and the request will throw an
+// AbortError.
 export async function uploadContentImage(
   payload: ContentImageUploadPayload,
   options?: { signal?: AbortSignal },
