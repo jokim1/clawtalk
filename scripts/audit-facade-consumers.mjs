@@ -35,12 +35,13 @@ const facades = [
     id: 'run-context-fabrication',
     name: 'Run-context fabrication',
     tokens:
-      'getGreenfieldRunContextRoute|TalkRunContextSnapshot|contextSnapshot|runContext|context_manifest_json|/runs/.*/context',
+      'TalkRunContextSnapshot|TalkRunContextSourceManifestItem|TalkRunContextInlineSourceSnapshot|TalkRunContextRetrievedSourceSnapshot|goalIncluded|summaryIncluded|activeRules|stateSnapshot|forcedInjection|context_manifest_json',
     imports:
-      'getGreenfieldRunContextRoute|TalkRunContextSnapshot|RunContextPanelState|getTalkRunContext',
+      'TalkRunContextSnapshot|TalkRunContextSourceManifestItem|TalkRunContextInlineSourceSnapshot|TalkRunContextRetrievedSourceSnapshot',
     routes:
-      '/api/v1/talks/:talkId/runs/:runId/context|getGreenfieldRunContextRoute',
-    dynamic: 'runContextPanels|contextSnapshot|context_manifest_json|runContextSnapshots',
+      'contextSnapshot|context_manifest_json|threadId: syntheticThreadId\\(record\\.talk_id\\)',
+    dynamic:
+      'contextSnapshot|runContextSnapshots|goalIncluded|summaryIncluded|activeRules|stateSnapshot|forcedInjection',
   },
   {
     id: 'flat-content-projections',

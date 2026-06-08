@@ -498,36 +498,8 @@ export type TalkRun = {
   incompleteReason?: 'truncated' | 'empty' | 'unknown' | null;
 };
 
-export type TalkRunContextStateEntrySnapshot = {
-  key: string;
-  value: unknown;
-  version: number;
-  updatedAt: string;
-  reason: 'state_snapshot' | 'retrieved';
-};
-
-export type TalkRunContextSourceManifestItem = {
-  ref: string;
-  title: string;
-  sourceType: string;
-  sourceUrl: string | null;
-  fileName: string | null;
-};
-
-export type TalkRunContextInlineSourceSnapshot = {
-  ref: string;
-  text: string;
-};
-
-export type TalkRunContextRetrievedSourceSnapshot = {
-  ref: string;
-  title: string;
-  excerpt: string;
-};
-
-export type TalkRunContextSnapshot = {
+export type TalkRunContextDetails = {
   version: 1;
-  threadId: string | null;
   personaRole:
     | 'assistant'
     | 'analyst'
@@ -537,36 +509,17 @@ export type TalkRunContextSnapshot = {
     | 'synthesizer'
     | 'editor'
     | null;
-  roleHint: string | null;
-  goalIncluded: boolean;
-  summaryIncluded: boolean;
-  activeRules: string[];
-  stateSnapshot: {
-    totalCount: number;
-    omittedCount: number;
-    included: TalkRunContextStateEntrySnapshot[];
-  };
-  sources: {
-    totalCount: number;
-    manifest: TalkRunContextSourceManifestItem[];
-    inline: TalkRunContextInlineSourceSnapshot[];
-  };
-  retrieval: {
-    query: string | null;
-    queryTerms: string[];
-    roleTerms: string[];
-    state: TalkRunContextStateEntrySnapshot[];
-    sources: TalkRunContextRetrievedSourceSnapshot[];
+  prompt: {
+    hasRedactedPrompt: boolean;
+    estimatedTokens: number;
   };
   tools: {
     contextToolNames: string[];
-    connectorToolNames: string[];
   };
   history: {
-    messageIds: string[];
+    triggerMessageId: string | null;
     turnCount: number;
   };
-  estimatedTokens: number;
 };
 
 export type TalkResourceBinding = {
@@ -1639,15 +1592,15 @@ export async function getTalkRuns(talkId: string): Promise<TalkRun[]> {
 export async function getTalkRunContext(input: {
   talkId: string;
   runId: string;
-}): Promise<TalkRunContextSnapshot | null> {
+}): Promise<TalkRunContextDetails | null> {
   const envelope = await apiRequest<{
     talkId: string;
     runId: string;
-    contextSnapshot: TalkRunContextSnapshot | null;
+    context: TalkRunContextDetails | null;
   }>(
     `/api/v1/talks/${encodeURIComponent(input.talkId)}/runs/${encodeURIComponent(input.runId)}/context`,
   );
-  return envelope.contextSnapshot;
+  return envelope.context;
 }
 
 export async function getTalkResources(input: {

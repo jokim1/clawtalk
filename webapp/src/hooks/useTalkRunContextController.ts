@@ -33,7 +33,7 @@ export function useTalkRunContextController({
             ...(existing[runId] || {
               open: false,
               status: 'idle',
-              snapshot: null,
+              context: null,
             }),
             open: false,
           },
@@ -48,7 +48,7 @@ export function useTalkRunContextController({
             ...(existing[runId] || {
               open: false,
               status: 'idle',
-              snapshot: null,
+              context: null,
             }),
             open: true,
           },
@@ -61,18 +61,18 @@ export function useTalkRunContextController({
         [runId]: {
           open: true,
           status: 'loading',
-          snapshot: existing[runId]?.snapshot ?? null,
+          context: existing[runId]?.context ?? null,
         },
       }));
 
       try {
-        const snapshot = await getTalkRunContext({ talkId, runId });
+        const context = await getTalkRunContext({ talkId, runId });
         setRunContextPanels((existing) => ({
           ...existing,
           [runId]: {
             open: true,
             status: 'loaded',
-            snapshot,
+            context,
           },
         }));
       } catch (err) {
@@ -85,7 +85,7 @@ export function useTalkRunContextController({
           [runId]: {
             open: true,
             status: 'error',
-            snapshot: null,
+            context: null,
             message:
               err instanceof Error
                 ? err.message

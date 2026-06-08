@@ -53,14 +53,13 @@ export interface GreenfieldRunRecord {
   error_json: unknown;
 }
 
-export interface GreenfieldRunContextSnapshotRecord {
+export interface GreenfieldRunContextRecord {
   id: string;
   talk_id: string;
   round: number;
   trigger_message_id: string | null;
   role_key: string | null;
   tool_manifest_json: unknown | null;
-  context_manifest_json: unknown | null;
   prompt_text_redacted: string | null;
 }
 
@@ -346,13 +345,13 @@ export async function listGreenfieldRuns(input: {
   `;
 }
 
-export async function getGreenfieldRunContextSnapshotRecord(input: {
+export async function getGreenfieldRunContextRecord(input: {
   workspaceId: string;
   talkId: string;
   runId: string;
-}): Promise<GreenfieldRunContextSnapshotRecord | undefined> {
+}): Promise<GreenfieldRunContextRecord | undefined> {
   const db = getDbPg();
-  const rows = await db<GreenfieldRunContextSnapshotRecord[]>`
+  const rows = await db<GreenfieldRunContextRecord[]>`
     select
       r.id,
       r.talk_id,
@@ -360,7 +359,6 @@ export async function getGreenfieldRunContextSnapshotRecord(input: {
       r.trigger_message_id,
       tas.role_key,
       rps.tool_manifest_json,
-      rps.context_manifest_json,
       rps.prompt_text_redacted
     from public.runs r
     join public.talk_agent_snapshots tas

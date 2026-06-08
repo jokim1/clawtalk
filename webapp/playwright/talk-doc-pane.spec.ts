@@ -60,27 +60,20 @@ function buildSnapshot() {
     activeThreadId: THREAD_ID,
     messages: [],
     hasOlderMessages: false,
-    content: {
+    primaryDocument: {
       id: 'doc-1',
       talkId: TALK_ID,
       threadId: THREAD_ID,
       title: 'Launch brief',
-      contentKind: 'document',
-      contentFormat: 'markdown',
-      bodyMarkdown: '',
-      bodyHtml: null,
-      bodyVersion: 1,
-      anchorMap: {},
+      format: 'markdown',
+      listVersion: 1,
       createdAt: NOW,
       updatedAt: NOW,
-      createdByUserId: null,
-      updatedByUserId: null,
-      updatedByRunId: null,
     },
     pendingEdits: [],
     runs: [],
     agents: [],
-    snapshotVersion: 1,
+    eventHighWater: 1,
   };
 }
 
