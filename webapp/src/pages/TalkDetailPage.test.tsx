@@ -3777,9 +3777,12 @@ describe('TalkDetailPage', () => {
       },
     );
 
-    // Doc loads on the default thread.
+    // Doc loads on the default thread, and the native block body renders
+    // through the page -> snapshot.content.id -> getDocument route, proving
+    // the in-Talk pane reads native blocks (not the flat content facade).
     const doc = await screen.findByLabelText('Talk document');
     expect(doc).toBeInTheDocument();
+    expect(await within(doc).findByText('# Default doc body')).toBeInTheDocument();
 
     // Click the sibling thread (no doc).
     const siblingButton = await screen.findByRole('button', {

@@ -54,12 +54,9 @@ export function TalkDocPane({
           </span>
         </button>
       </div>
-      <div
-        className="talk-tab-doc-body talk-tab-doc-body-native"
-        ref={docBodyRef}
-        tabIndex={-1}
-      >
+      <div className="talk-tab-doc-body" ref={docBodyRef} tabIndex={-1}>
         <TalkDocumentView
+          key={documentId}
           documentId={documentId}
           workspaceId={workspaceId}
           canEditDoc={canEditDoc}
