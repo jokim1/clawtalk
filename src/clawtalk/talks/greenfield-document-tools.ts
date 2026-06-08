@@ -1,5 +1,6 @@
 import { getDbPg, withTrustedDbWrites } from '../../db.js';
 import type { LlmToolDefinition } from '../agents/llm-client.js';
+import { withDocumentEditMutationLock } from '../documents/edit-locks.js';
 import type { EffectiveToolAccess } from '../db/agent-accessors.js';
 import {
   getGreenfieldDocumentForTalk,
@@ -233,9 +234,11 @@ async function insertGreenfieldDocumentEdit(input: {
   runId: string;
   source?: 'agent' | 'forge' | 'job';
 }): Promise<string> {
-  const db = getDbPg();
-  const rows = await withTrustedDbWrites(
-    () => db<{ id: string }[]>`
+  const rows = await withDocumentEditMutationLock(
+    { workspaceId: input.workspaceId, documentId: input.document.id },
+    (sql) =>
+      withTrustedDbWrites(
+        () => sql<{ id: string }[]>`
       insert into public.document_edits (
         workspace_id,
         document_id,
@@ -265,11 +268,12 @@ async function insertGreenfieldDocumentEdit(input: {
         ${input.op},
         ${input.newKind ?? null},
         ${input.newText ?? null},
-        ${db.json({} as never)},
+        ${sql.json({} as never)},
         ${input.source ?? 'agent'}
       )
       returning id
     `,
+      ),
   );
   return rows[0]!.id;
 }

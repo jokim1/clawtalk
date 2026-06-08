@@ -11,6 +11,8 @@ import {
   seedAuthUser,
   seedTalk,
 } from '../../db/test-helpers.js';
+import { documentEditMutationLockKey } from '../../documents/edit-locks.js';
+import { executeGreenfieldApplyContentEdit } from '../../talks/greenfield-document-tools.js';
 import type { AuthContext } from '../types.js';
 import {
   acceptAllDocumentEditsRoute,
@@ -27,6 +29,10 @@ import {
 const USER_ID = '0c666666-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
 const GUEST_USER_ID = '0c666666-bbbb-bbbb-bbbb-bbbbbbbbbbbb';
 const OTHER_USER_ID = '0c666666-cccc-cccc-cccc-cccccccccccc';
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 function auth(userId = USER_ID): AuthContext {
   return {
@@ -285,6 +291,27 @@ async function blockText(blockId: string): Promise<string> {
   `;
   if (!row) throw new Error('Expected document block row');
   return row.text;
+}
+
+async function waitForDocumentEditMutationLockHeld(input: {
+  workspaceId: string;
+  documentId: string;
+  timeoutMs?: number;
+}): Promise<void> {
+  const db = getDbPg();
+  const key = documentEditMutationLockKey(input);
+  const deadline = Date.now() + (input.timeoutMs ?? 2_000);
+  while (Date.now() < deadline) {
+    const [row] = await db<Array<{ acquired: boolean }>>`
+      select pg_try_advisory_lock(hashtextextended(${key}, 0)) as acquired
+    `;
+    if (row?.acquired === false) return;
+    if (row?.acquired === true) {
+      await db`select pg_advisory_unlock(hashtextextended(${key}, 0))`;
+    }
+    await delay(10);
+  }
+  throw new Error('Timed out waiting for document edit mutation lock');
 }
 
 describe('native document routes', () => {
@@ -747,6 +774,92 @@ describe('native document routes', () => {
       expect(result.body.data.document.pendingEditCount).toBe(0);
       expect(await editStatus(editA)).toBe('accepted');
       expect(await editStatus(editB)).toBe('accepted');
+    });
+
+    it('keeps a concurrent same-block proposal pending instead of superseding it during accept', async () => {
+      const fixture = await createDocumentFixture();
+      const acceptedEditId = await insertPendingDocumentEdit({
+        workspaceId: fixture.workspaceId,
+        documentId: fixture.documentId,
+        tabId: fixture.mainTabId,
+        op: 'replace',
+        blockId: fixture.mainBlockId,
+        baseBlockVersion: fixture.mainBlockVersion,
+        newText: 'Accepted replacement.',
+      });
+      const runId = await seedRun({
+        workspaceId: fixture.workspaceId,
+        talkId: fixture.talkId,
+      });
+      const db = getDbPg();
+
+      let acceptPromise:
+        | ReturnType<typeof acceptAllDocumentEditsRoute>
+        | undefined;
+      let proposalPromise:
+        | ReturnType<typeof executeGreenfieldApplyContentEdit>
+        | undefined;
+
+      await db.begin(async (tx) => {
+        await tx`
+          select id
+          from public.doc_blocks
+          where id = ${fixture.mainBlockId}::uuid
+          for update
+        `;
+
+        acceptPromise = acceptAllDocumentEditsRoute({
+          auth: auth(),
+          workspaceId: fixture.workspaceId,
+          documentId: fixture.documentId,
+          reviewedEditIds: [acceptedEditId],
+        });
+        await waitForDocumentEditMutationLockHeld({
+          workspaceId: fixture.workspaceId,
+          documentId: fixture.documentId,
+        });
+
+        proposalPromise = executeGreenfieldApplyContentEdit({
+          workspaceId: fixture.workspaceId,
+          talkId: fixture.talkId,
+          runId,
+          agentId: null,
+          agentNickname: null,
+          args: {
+            kind: 'replace',
+            anchor: fixture.mainBlockId,
+            markdown: 'Concurrent proposal.',
+            rationale: 'Race regression coverage.',
+          },
+        });
+
+        const proposalState = await Promise.race([
+          proposalPromise.then(() => 'completed' as const),
+          delay(75).then(() => 'blocked' as const),
+        ]);
+        expect(proposalState).toBe('blocked');
+      });
+
+      if (!acceptPromise || !proposalPromise) {
+        throw new Error('Expected accept and proposal promises to be started');
+      }
+      const accepted = await acceptPromise;
+      expect(accepted.statusCode).toBe(200);
+      expect(accepted.body).toMatchObject({
+        ok: true,
+        data: { editIds: [acceptedEditId] },
+      });
+
+      const proposal = await proposalPromise;
+      expect(proposal.isError).not.toBe(true);
+      const proposalBody = JSON.parse(proposal.result) as { editIds: string[] };
+      const proposalEditId = proposalBody.editIds[0];
+      expect(proposalEditId).toBeTruthy();
+      expect(await editStatus(acceptedEditId)).toBe('accepted');
+      expect(await editStatus(proposalEditId!)).toBe('pending');
+      expect(await blockText(fixture.mainBlockId)).toBe(
+        'Accepted replacement.',
+      );
     });
 
     it('reject-all aborts and rejects nothing when an unseen pending edit slipped in', async () => {
