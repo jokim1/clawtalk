@@ -27,10 +27,10 @@ function buildTestQueryClient(): QueryClient {
 import { openTalkStream } from '../lib/talkStream';
 import type {
   AiAgentsPageData,
-  Content,
   ContentSidebarItem,
   ContextRule,
   NativeDocument,
+  NativeDocumentFormat,
   ContextSource,
   TalkContext,
   Talk,
@@ -46,6 +46,7 @@ import type {
   TalkThread,
   TalkToolsState,
   RegisteredAgent,
+  TalkSnapshotDocument,
 } from '../lib/api';
 
 const ORCHESTRATION_MODE_TOOLTIP =
@@ -56,9 +57,8 @@ vi.mock('../lib/talkStream', () => ({
 }));
 
 type StreamCallbacks = Parameters<typeof openTalkStream>[0];
-type TestContent = Content & {
-  bodyMarkdown: string;
-  bodyHtml: string | null;
+type TestSnapshotDocument = TalkSnapshotDocument & {
+  nativeBlockText: string;
 };
 type SavedTalkAgentRequest = {
   agents: TalkAgent[];
@@ -3433,11 +3433,11 @@ describe('TalkDetailPage', () => {
   it('renders the doc modal with a format radio and POSTs format=html on submit', async () => {
     const user = userEvent.setup();
     const onCreateDocument = vi.fn(({ title, format }) =>
-      buildContent({
+      buildSnapshotDocument({
         id: 'content-new',
         threadId: DEFAULT_THREAD_ID,
         title,
-        contentFormat: (format as Content['contentFormat']) ?? 'markdown',
+        format: (format as NativeDocumentFormat) ?? 'markdown',
       }),
     );
     installTalkDetailFetch({ onCreateDocument });
@@ -3478,11 +3478,11 @@ describe('TalkDetailPage', () => {
   // Regression (Codex P1): creating a doc must render it immediately from the
   // create response, and must survive a stale snapshot that was already in
   // flight when the doc was created (it read the pre-doc server state, so it
-  // resolves content:null). Without the optimistic setTalkContent + the
+  // resolves primaryDocument:null). Without the optimistic cache update and
   // cancelQueries/setQueryData guard, the doc either never appears until a
   // later refetch (the "+ Doc did nothing / took forever" report) or gets
   // clobbered back to null by the stale snapshot (the #462 race).
-  it('renders a freshly created doc immediately and keeps it when a stale in-flight snapshot resolves with content:null', async () => {
+  it('renders a freshly created doc immediately and keeps it when a stale in-flight snapshot resolves with primaryDocument:null', async () => {
     const user = userEvent.setup();
     const staleSnapshot = createDeferred<TalkMessage[]>();
     // Flag-based (not call-index) so it doesn't matter how many snapshot
@@ -3490,18 +3490,19 @@ describe('TalkDetailPage', () => {
     // the refetch onReplayGap kicks off below.
     let holdNextSnapshot = false;
     const onCreateDocument = vi.fn(({ title, format }) =>
-      buildContent({
+      buildSnapshotDocument({
         id: 'content-new',
         threadId: DEFAULT_THREAD_ID,
         title,
-        contentFormat: (format as Content['contentFormat']) ?? 'markdown',
+        format: (format as NativeDocumentFormat) ?? 'markdown',
       }),
     );
 
     installTalkDetailFetch({
       onCreateDocument,
-      // Hold the next snapshot fetch in flight; contentByThreadId stays empty,
-      // so when released it resolves content:null (the stale, pre-doc state).
+      // Hold the next snapshot fetch in flight; documentByThreadId stays empty,
+      // so when released it resolves primaryDocument:null (the stale,
+      // pre-doc state).
       onListMessages: ({ visibleMessages }) => {
         if (holdNextSnapshot) {
           holdNextSnapshot = false;
@@ -3530,13 +3531,13 @@ describe('TalkDetailPage', () => {
 
     // The doc pane appears immediately from the create response — no waiting
     // on a snapshot refetch. (Fails on the old code, which discarded the
-    // returned Content.)
+    // returned native document metadata.)
     await waitFor(() => expect(onCreateDocument).toHaveBeenCalledTimes(1));
     expect(
       await screen.findByRole('region', { name: /talk document/i }),
     ).toBeInTheDocument();
 
-    // Let the stale, in-flight snapshot resolve with content:null. The create
+    // Let the stale, in-flight snapshot resolve with primaryDocument:null. The create
     // cancelled it, so it must NOT wipe the doc pane back out.
     staleSnapshot.resolve([]);
     await act(async () => {
@@ -3553,13 +3554,12 @@ describe('TalkDetailPage', () => {
     const user = userEvent.setup();
     window.localStorage.clear();
     installTalkDetailFetch({
-      contentByThreadId: {
-        [DEFAULT_THREAD_ID]: buildContent({
+      documentByThreadId: {
+        [DEFAULT_THREAD_ID]: buildSnapshotDocument({
           id: 'content-hide',
           threadId: DEFAULT_THREAD_ID,
           title: 'Hide me',
-          contentFormat: 'markdown',
-          bodyMarkdown: '',
+          format: 'markdown',
         }),
       },
     });
@@ -3713,13 +3713,13 @@ describe('TalkDetailPage', () => {
           lastMessageAt: '2026-03-06T01:00:00.000Z',
         }),
       ],
-      contentByThreadId: {
-        [DEFAULT_THREAD_ID]: buildContent({
+      documentByThreadId: {
+        [DEFAULT_THREAD_ID]: buildSnapshotDocument({
           id: 'content-md',
           threadId: DEFAULT_THREAD_ID,
           title: 'Default doc',
-          contentFormat: 'markdown',
-          bodyMarkdown: '# Default doc body',
+          format: 'markdown',
+          nativeBlockText: '# Default doc body',
         }),
       },
     });
@@ -3739,7 +3739,7 @@ describe('TalkDetailPage', () => {
     );
 
     // Doc loads on the default thread, and the native block body renders
-    // through the page -> snapshot.content.id -> getDocument route, proving
+    // through the page -> snapshot.primaryDocument.id -> getDocument route, proving
     // the in-Talk pane reads native blocks (not the flat content facade).
     const doc = await screen.findByLabelText('Talk document');
     expect(doc).toBeInTheDocument();
@@ -3760,13 +3760,13 @@ describe('TalkDetailPage', () => {
 
   it('reloads the native doc pane after a stream replay-gap resync', async () => {
     installTalkDetailFetch({
-      contentByThreadId: {
-        [DEFAULT_THREAD_ID]: buildContent({
+      documentByThreadId: {
+        [DEFAULT_THREAD_ID]: buildSnapshotDocument({
           id: 'content-resync',
           threadId: DEFAULT_THREAD_ID,
           title: 'Resync doc',
-          contentFormat: 'markdown',
-          bodyMarkdown: '# Resync body',
+          format: 'markdown',
+          nativeBlockText: '# Resync body',
         }),
       },
     });
@@ -4099,8 +4099,8 @@ describe('TalkDetailPage', () => {
   it('@-mention: offers @doc when the talk has an attached document', async () => {
     const user = userEvent.setup();
     installTalkDetailFetch({
-      contentByThreadId: {
-        [DEFAULT_THREAD_ID]: buildContent({
+      documentByThreadId: {
+        [DEFAULT_THREAD_ID]: buildSnapshotDocument({
           id: 'content-1',
           title: 'Strategy Doc',
         }),
@@ -4645,76 +4645,63 @@ function buildTalkConnectorChannelRow(
   };
 }
 
-function buildContent(input: Partial<TestContent> = {}): TestContent {
+function buildSnapshotDocument(
+  input: Partial<TestSnapshotDocument> = {},
+): TestSnapshotDocument {
   return {
     id: input.id ?? 'content-default',
     talkId: input.talkId ?? 'talk-1',
     threadId: input.threadId ?? DEFAULT_THREAD_ID,
     title: input.title ?? 'Untitled doc',
-    contentKind: input.contentKind ?? 'document',
-    contentFormat: input.contentFormat ?? 'markdown',
-    bodyMarkdown: input.bodyMarkdown ?? '',
-    bodyHtml:
-      input.bodyHtml === undefined
-        ? input.contentFormat === 'html'
-          ? ''
-          : null
-        : input.bodyHtml,
-    bodyVersion: input.bodyVersion ?? 1,
-    anchorMap: input.anchorMap ?? {},
+    format: input.format ?? 'markdown',
+    listVersion: input.listVersion ?? 1,
     createdAt: input.createdAt ?? '2026-03-06T00:00:00.000Z',
     updatedAt: input.updatedAt ?? '2026-03-06T00:00:00.000Z',
-    createdByUserId: input.createdByUserId ?? null,
-    updatedByUserId: input.updatedByUserId ?? null,
-    updatedByRunId: input.updatedByRunId ?? null,
+    nativeBlockText: input.nativeBlockText ?? 'Document body.',
   };
 }
 
-// Minimal native-document projection of a Content row, so the migrated in-Talk
-// doc pane (which reads native `documents` blocks, not bodyMarkdown/bodyHtml)
-// can render in these page-level tests. Native block/edit behavior is covered
+// Minimal native-document projection so the migrated in-Talk doc pane can
+// render in these page-level tests. Native block/edit behavior is covered
 // directly by TalkDocPane.test.tsx and TalkDocumentsPanel.test.tsx.
-function buildNativeDoc(content: TestContent): NativeDocument {
-  const bodyText =
-    content.bodyMarkdown.trim() ||
-    (content.bodyHtml ?? '').replace(/<[^>]*>/g, '').trim() ||
-    'Document body.';
-  const tabId = `${content.id}-tab`;
+function buildNativeDoc(document: TestSnapshotDocument): NativeDocument {
+  const bodyText = document.nativeBlockText.trim() || 'Document body.';
+  const tabId = `${document.id}-tab`;
   return {
-    id: content.id,
+    id: document.id,
     workspaceId: 'workspace-1',
-    primaryTalkId: content.talkId,
+    primaryTalkId: document.talkId,
     folderId: null,
-    title: content.title,
-    format: content.contentFormat,
+    title: document.title,
+    format: document.format,
     wordCount: bodyText.split(/\s+/).filter(Boolean).length,
-    lastEditAt: content.updatedAt,
-    createdAt: content.createdAt,
-    updatedAt: content.updatedAt,
+    lastEditAt: document.updatedAt,
+    createdAt: document.createdAt,
+    updatedAt: document.updatedAt,
     tabCount: 1,
     blockCount: 1,
     pendingEditCount: 0,
     tabs: [
       {
         id: tabId,
-        documentId: content.id,
+        documentId: document.id,
         title: 'Main',
         sortOrder: 0,
-        listVersion: content.bodyVersion,
-        createdAt: content.createdAt,
-        updatedAt: content.updatedAt,
+        listVersion: document.listVersion,
+        createdAt: document.createdAt,
+        updatedAt: document.updatedAt,
         blocks: [
           {
-            id: `${content.id}-block`,
-            documentId: content.id,
+            id: `${document.id}-block`,
+            documentId: document.id,
             tabId,
             sortOrder: 0,
             version: 1,
             kind: 'p',
             text: bodyText,
             attrs: {},
-            createdAt: content.createdAt,
-            updatedAt: content.updatedAt,
+            createdAt: document.createdAt,
+            updatedAt: document.updatedAt,
           },
         ],
       },
@@ -4914,13 +4901,13 @@ function installTalkDetailFetch(input?: {
   aiAgents?: AiAgentsPageData;
   // Doc-pane integration: pre-existing content keyed by threadId, plus an
   // optional spy so tests can assert on native document creation.
-  contentByThreadId?: Record<string, TestContent>;
+  documentByThreadId?: Record<string, TestSnapshotDocument>;
   onCreateDocument?: (body: {
     talkId: string;
     threadId: string | null;
     title: string;
     format?: string;
-  }) => TestContent;
+  }) => TestSnapshotDocument;
   onPutAgents?: (body: SavedTalkAgentRequest) => Promise<TalkAgent[]> | TalkAgent[];
   onGetContext?: () => TalkContext;
   onCreateContextSource?: (body: {
@@ -5073,8 +5060,8 @@ function installTalkDetailFetch(input?: {
     buildTalkConnectorChannelRow(),
   ];
   const aiAgents = input?.aiAgents ?? buildAiAgentsData();
-  const contentByThreadId: Record<string, TestContent> = {
-    ...(input?.contentByThreadId ?? {}),
+  const documentByThreadId: Record<string, TestSnapshotDocument> = {
+    ...(input?.documentByThreadId ?? {}),
   };
 
   vi.stubGlobal(
@@ -5145,7 +5132,7 @@ function installTalkDetailFetch(input?: {
             activeThreadId,
             messages: activeThreadMessages,
             hasOlderMessages: false,
-            content: contentByThreadId[activeThreadId] ?? null,
+            primaryDocument: documentByThreadId[activeThreadId] ?? null,
             pendingEdits: [],
             runs: activeRuns.map((run) => ({
               id: run.id,
@@ -5992,8 +5979,7 @@ function installTalkDetailFetch(input?: {
 
       // ── Native document route (in-Talk doc pane) ─────────────────
       // The migrated doc pane reads the native document by id; resolve it
-      // from the in-memory content store so the pane renders without the
-      // legacy bodyMarkdown/bodyHtml facade.
+      // from the in-memory document metadata store.
       if (path === '/api/v1/documents' && method === 'POST') {
         const body = JSON.parse(String(init?.body || '{}')) as {
           talkId: string;
@@ -6002,36 +5988,36 @@ function installTalkDetailFetch(input?: {
           format?: string;
         };
         const threadId = body.threadId ?? DEFAULT_THREAD_ID;
-        const content =
+        const document =
           input?.onCreateDocument?.({
             talkId: body.talkId,
             threadId,
             title: body.title,
             format: body.format,
           }) ??
-          buildContent({
+          buildSnapshotDocument({
             id: `content-${threadId}`,
             talkId: body.talkId,
             threadId,
             title: body.title,
-            contentFormat:
-              (body.format as Content['contentFormat']) ?? 'markdown',
+            format:
+              (body.format as NativeDocumentFormat) ?? 'markdown',
           });
-        contentByThreadId[content.threadId] = content;
+        documentByThreadId[document.threadId] = document;
         return jsonResponse(201, {
           ok: true,
-          data: { document: buildNativeDoc(content) },
+          data: { document: buildNativeDoc(document) },
         });
       }
 
       const nativeDocMatch = path.match(/^\/api\/v1\/documents\/([^/]+)$/);
       if (nativeDocMatch && method === 'GET') {
         const documentId = decodeURIComponent(nativeDocMatch[1]);
-        const threadId = Object.keys(contentByThreadId).find(
-          (tid) => contentByThreadId[tid].id === documentId,
+        const threadId = Object.keys(documentByThreadId).find(
+          (tid) => documentByThreadId[tid].id === documentId,
         );
-        const content = threadId ? contentByThreadId[threadId] : null;
-        if (!content) {
+        const document = threadId ? documentByThreadId[threadId] : null;
+        if (!document) {
           return jsonResponse(404, {
             ok: false,
             error: {
@@ -6042,7 +6028,7 @@ function installTalkDetailFetch(input?: {
         }
         return jsonResponse(200, {
           ok: true,
-          data: { document: buildNativeDoc(content) },
+          data: { document: buildNativeDoc(document) },
         });
       }
 

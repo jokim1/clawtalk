@@ -88,25 +88,19 @@ export type TalkSidebarTree = {
   contents: ContentSidebarItem[];
 };
 
-export type ContentFormat = 'markdown' | 'html';
+export type NativeDocumentFormat = 'markdown' | 'html';
 
-export type Content = {
+export type TalkSnapshotDocument = {
   id: string;
   talkId: string;
   threadId: string;
   title: string;
-  contentKind: string;
-  contentFormat: ContentFormat;
-  bodyVersion: number;
-  anchorMap: Record<string, unknown>;
+  format: NativeDocumentFormat;
+  listVersion: number;
   createdAt: string;
   updatedAt: string;
-  createdByUserId: string | null;
-  updatedByUserId: string | null;
-  updatedByRunId: string | null;
 };
 
-export type NativeDocumentFormat = ContentFormat;
 export type NativeDocumentBlockKind =
   | 'h1'
   | 'h2'
@@ -1189,7 +1183,7 @@ export type TalkSnapshot = {
   activeThreadId: string;
   messages: TalkMessage[];
   hasOlderMessages: boolean;
-  content: Content | null;
+  primaryDocument: TalkSnapshotDocument | null;
   pendingEdits: ContentEditSummary[];
   runs: TalkSnapshotRun[];
   agents: TalkSnapshotAgent[];

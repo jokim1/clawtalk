@@ -9,7 +9,6 @@ import {
   searchGreenfieldMessages,
   deleteGreenfieldMessages,
   listPendingGreenfieldDocumentEdits,
-  type GreenfieldDocumentBlockRecord,
   type GreenfieldDocumentEditRecord,
   type GreenfieldDocumentRecord,
   type GreenfieldMessageRecord,
@@ -42,7 +41,6 @@ type WorkspaceContext = {
 
 type WorkspaceResolutionScope = {
   talkId?: string | null;
-  contentId?: string | null;
 };
 
 const UUID_RE =
@@ -100,10 +98,6 @@ async function withResolvedWorkspace<T>(
   if (scope?.talkId && !isUuid(scope.talkId)) {
     return error(400, 'invalid_talk_id', 'Talk id must be a UUID.');
   }
-  if (scope?.contentId && !isUuid(scope.contentId)) {
-    return error(400, 'invalid_content_id', 'Content id must be a UUID.');
-  }
-
   try {
     await ensureWorkspaceBootstrapForUser(auth.userId);
   } catch {
@@ -148,18 +142,6 @@ async function findVisibleWorkspaceIdForScope(input: {
         on wm.workspace_id = t.workspace_id
        and wm.user_id = ${input.userId}::uuid
       where t.id = ${input.scope.talkId}::uuid
-      limit 1
-    `;
-    return rows[0]?.workspace_id;
-  }
-  if (input.scope.contentId) {
-    const rows = await db<{ workspace_id: string }[]>`
-      select d.workspace_id
-      from public.documents d
-      join public.workspace_members wm
-        on wm.workspace_id = d.workspace_id
-       and wm.user_id = ${input.userId}::uuid
-      where d.id = ${input.scope.contentId}::uuid
       limit 1
     `;
     return rows[0]?.workspace_id;
@@ -493,66 +475,27 @@ function toRunContextSnapshot(
   };
 }
 
-function blockToMarkdown(block: GreenfieldDocumentBlockRecord): string {
-  if (block.kind === 'h1') return `# ${block.text}`;
-  if (block.kind === 'h2') return `## ${block.text}`;
-  if (block.kind === 'li') return `- ${block.text}`;
-  if (block.kind === 'code') return `\`\`\`\n${block.text}\n\`\`\``;
-  return block.text;
-}
-
-function renderDocumentMarkdown(document: GreenfieldDocumentRecord): string {
-  return document.blocks.map(blockToMarkdown).join('\n\n');
-}
-
-function toContentApi(document: GreenfieldDocumentRecord): {
+function toPrimaryDocumentApi(document: GreenfieldDocumentRecord): {
   id: string;
-  ownerId: string;
   talkId: string;
   threadId: string;
   title: string;
-  contentKind: string;
-  contentFormat: 'markdown' | 'html';
-  bodyMarkdown: string;
-  bodyHtml: string | null;
-  bodyVersion: number;
-  anchorMap: Record<string, unknown>;
+  format: 'markdown' | 'html';
+  listVersion: number;
   createdAt: string;
   updatedAt: string;
-  createdByUserId: string | null;
-  updatedByUserId: string | null;
-  updatedByRunId: string | null;
 } {
-  const bodyMarkdown = renderDocumentMarkdown(document);
   return {
     id: document.id,
-    ownerId: document.owner_id ?? '',
     talkId: document.primary_talk_id ?? '',
     threadId: document.primary_talk_id
       ? syntheticThreadId(document.primary_talk_id)
       : document.tab_id,
     title: document.title,
-    contentKind: 'document',
-    contentFormat: document.format,
-    bodyMarkdown,
-    bodyHtml: document.format === 'html' ? bodyMarkdown : null,
-    bodyVersion: document.list_version,
-    anchorMap: Object.fromEntries(
-      document.blocks.map((block) => [
-        block.id,
-        {
-          kind: block.kind,
-          sortOrder: block.sort_order,
-          preview: block.text.slice(0, 140),
-          version: block.version,
-        },
-      ]),
-    ),
+    format: document.format,
+    listVersion: document.list_version,
     createdAt: document.created_at,
     updatedAt: document.updated_at,
-    createdByUserId: document.created_by_user_id ?? document.owner_id,
-    updatedByUserId: document.updated_by_user_id,
-    updatedByRunId: document.updated_by_run_id,
   };
 }
 
@@ -907,20 +850,20 @@ export async function deleteGreenfieldThreadRoute(input: {
   );
 }
 
-async function contentPayload(input: {
+async function primaryDocumentPayload(input: {
   workspaceId: string;
   document: GreenfieldDocumentRecord | undefined;
 }): Promise<{
-  content: ReturnType<typeof toContentApi> | null;
+  primaryDocument: ReturnType<typeof toPrimaryDocumentApi> | null;
   pendingEdits: ReturnType<typeof toPendingEditApi>[];
 }> {
-  if (!input.document) return { content: null, pendingEdits: [] };
+  if (!input.document) return { primaryDocument: null, pendingEdits: [] };
   const edits = await listPendingGreenfieldDocumentEdits({
     workspaceId: input.workspaceId,
     documentId: input.document.id,
   });
   return {
-    content: toContentApi(input.document),
+    primaryDocument: toPrimaryDocumentApi(input.document),
     pendingEdits: edits.map(toPendingEditApi),
   };
 }
@@ -1008,7 +951,7 @@ export async function getGreenfieldSnapshotRoute(input: {
     activeThreadId: string;
     messages: ReturnType<typeof toMessageApi>[];
     hasOlderMessages: boolean;
-    content: ReturnType<typeof toContentApi> | null;
+    primaryDocument: ReturnType<typeof toPrimaryDocumentApi> | null;
     pendingEdits: ReturnType<typeof toPendingEditApi>[];
     runs: ReturnType<typeof toSnapshotRunApi>[];
     agents: ReturnType<typeof toSnapshotAgent>[];
@@ -1065,7 +1008,7 @@ export async function getGreenfieldSnapshotRoute(input: {
       if (!metrics) return error(404, 'talk_not_found', 'Talk not found.');
       const messages =
         rawMessages.length > 200 ? rawMessages.slice(1) : rawMessages;
-      const content = await contentPayload({
+      const documentPayload = await primaryDocumentPayload({
         workspaceId: ctx.workspace.id,
         document,
       });
@@ -1079,8 +1022,8 @@ export async function getGreenfieldSnapshotRoute(input: {
         activeThreadId: syntheticThreadId(talk.id),
         messages: messages.map(toMessageApi),
         hasOlderMessages: rawMessages.length > 200,
-        content: content.content,
-        pendingEdits: content.pendingEdits,
+        primaryDocument: documentPayload.primaryDocument,
+        pendingEdits: documentPayload.pendingEdits,
         runs: runs.map(toSnapshotRunApi),
         agents: agents.map(toSnapshotAgent),
         snapshotVersion,

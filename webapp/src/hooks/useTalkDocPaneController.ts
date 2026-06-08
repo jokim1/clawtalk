@@ -10,7 +10,7 @@
  * hydration lives here anymore.
  *
  * The page derives the primary document id from the snapshot's native document
- * metadata (`snapshot.content?.id`) and drives the pane with it; this hook never
+ * metadata (`snapshot.primaryDocument?.id`) and drives the pane with it; this hook never
  * reads a document body.
  */
 import type { QueryClient } from '@tanstack/react-query';
@@ -21,10 +21,10 @@ import type { NavigateFunction } from 'react-router-dom';
 import {
   createDocument,
   UnauthorizedError,
-  type Content,
-  type ContentFormat,
   type NativeDocument,
+  type NativeDocumentFormat,
   type TalkSnapshot,
+  type TalkSnapshotDocument,
 } from '../lib/api';
 import {
   getContentSplitRatio,
@@ -46,36 +46,19 @@ type UseTalkDocPaneControllerInput = {
   onSidebarChanged: () => Promise<void> | void;
 };
 
-function contentMetadataFromNativeDocument(
+function snapshotDocumentFromNativeDocument(
   document: NativeDocument,
   input: { talkId: string; threadId: string },
-): Content {
+): TalkSnapshotDocument {
   return {
     id: document.id,
     talkId: document.primaryTalkId ?? input.talkId,
     threadId: input.threadId,
     title: document.title,
-    contentKind: 'document',
-    contentFormat: document.format,
-    bodyVersion: document.tabs[0]?.listVersion ?? 1,
-    anchorMap: Object.fromEntries(
-      document.tabs.flatMap((tab) =>
-        tab.blocks.map((block) => [
-          block.id,
-          {
-            kind: block.kind,
-            sortOrder: block.sortOrder,
-            preview: block.text.slice(0, 140),
-            version: block.version,
-          },
-        ]),
-      ),
-    ),
+    format: document.format,
+    listVersion: document.tabs[0]?.listVersion ?? 1,
     createdAt: document.createdAt,
     updatedAt: document.updatedAt,
-    createdByUserId: null,
-    updatedByUserId: null,
-    updatedByRunId: null,
   };
 }
 
@@ -95,7 +78,7 @@ export function useTalkDocPaneController({
   const [docModalOpen, setDocModalOpen] = useState(false);
   const [docModalTitle, setDocModalTitle] = useState('');
   const [docModalFormat, setDocModalFormat] =
-    useState<ContentFormat>('markdown');
+    useState<NativeDocumentFormat>('markdown');
   const [docModalSubmitting, setDocModalSubmitting] = useState(false);
   const [docModalError, setDocModalError] = useState<string | null>(null);
   const docModalInputRef = useRef<HTMLInputElement | null>(null);
@@ -156,7 +139,7 @@ export function useTalkDocPaneController({
           title: trimmed,
           format: docModalFormat,
         });
-        const created = contentMetadataFromNativeDocument(document, {
+        const created = snapshotDocumentFromNativeDocument(document, {
           talkId,
           threadId: activeThreadId ?? document.primaryTalkId ?? talkId,
         });
@@ -164,7 +147,7 @@ export function useTalkDocPaneController({
         const threadKey = snapshotQueryKey(userId, talkId, created.threadId);
         await queryClient.cancelQueries({ queryKey: threadKey });
         queryClient.setQueryData<TalkSnapshot>(threadKey, (old) =>
-          old ? { ...old, content: created, pendingEdits: [] } : old,
+          old ? { ...old, primaryDocument: created, pendingEdits: [] } : old,
         );
 
         setDocPaneHidden(false);
