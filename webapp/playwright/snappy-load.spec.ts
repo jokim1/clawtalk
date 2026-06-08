@@ -119,6 +119,9 @@ async function installApiMocks(page: Page, counters: Counters): Promise<void> {
   await page.route(`**/api/v1/talks/${TALK_ID}/agents`, (route) =>
     fulfillJson(route, { agents: [] }),
   );
+  await page.route(`**/api/v1/talks/${TALK_ID}/context`, (route) =>
+    fulfillJson(route, { goal: null, rules: [], sources: [] }),
+  );
   await page.route('**/api/v1/agents', (route) =>
     fulfillJson(route, {
       defaultClaudeModelId: '',
