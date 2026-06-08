@@ -13,7 +13,7 @@ The backend/data cutover is real. The product refactor is not done.
 | Layer | Done | Evidence |
 |---|---|---|
 | Backend / data cutover | ~90% ✅ | Greenfield is the only live runtime. Legacy runtime/accessors were retired, and backend CI is a signal again. Remaining backend work is mainly facade deletion plus Home/Forge backends. |
-| Frontend structural decomposition | ~60% 🔄 | `TalkDetailPage.tsx` is 5,429 LOC and `SettingsPage.tsx` is 1,066 LOC. Talk panels, composer, thread view, reducer, stream hook, and Settings Profile/Tools/OAuth panels are extracted; the page-owned Talk controller bulk remains. |
+| Frontend structural decomposition | ~70% ✅ | `TalkDetailPage.tsx` is 1,429 LOC and `SettingsPage.tsx` is 1,066 LOC. Talk shell/render surface and page-owned controllers are extracted alongside Settings Profile/Tools/OAuth panels; remaining frontend work is product surfaces, Salon migration, and native facade consumers, not god-file decomposition. |
 | De-facade | ~5% 🔄 | The dead duplicate `worker-app.ts` Hono mounts for sidebar reorder and run-context were deleted; remaining compat facades still serve live consumers: synthetic threads, runs-with-`threadId`, flat content markdown/html, snapshot compat, policy/tool/connectors facades, run-context synthesis, and the attachments guard. |
 | Visual system (Salon) | Foundation + shell shipped 🔄 | Salon foundation shipped in PR #547: `webapp/src/salon/*` CSS-variable tokens (`--salon-*`), fonts (Newsreader/Geist/Geist Mono), brand mark, and the primitive library (CTMark/CTIcon/Avatar/AgentAvatar/RunPill/Chip/Kbd/Button/Input/Modal/Sheet/Popover) with behavior-preserving proof migrations + a smoke suite. Surfaces re-skinned (PR #550): Home, Archive, Registered Agents + agent profile, the Talks list page, and the sign-in surface — each off its legacy classes with dead `styles.css` rules trimmed + a responsive Playwright spec. App shell shipped (PR #550): the prototype 3-column icon-rail (`webapp/src/components/shell/`: `IconRail` + `SecondaryList` + `RailProfileMenu`) replacing `ClawTalkSidebar`/`WorkspaceSwitcher`/`SidebarProfileMenu` + the `App.tsx` header; talk CRUD/DnD/⌘K preserved, desktop collapse + mobile drawer, ~550 LOC dead CSS removed. Contrast fixed: `--salon-accent-strong` `#b05530` (≈ 5.0:1 on white) backs text-bearing primary buttons. Remaining: `TalkDetailPage`/`SettingsPage`-owned CSS. |
 | Net-new product surfaces | ~20% 🔄 | Live app covers Talk list, Talk detail, Settings, and Salon-native Home (read API + write lifecycle), New Talk sheet, ⌘K command palette, Registered Agents panel + standalone agent profile, and Archive (all PR #550). Native Documents backend routes/client methods now exist (PR #552; native UI in PR #557). Forge remains post-MVP. |
@@ -50,7 +50,7 @@ The current refactor plan is a subset of that denominator. It must be explicit a
 | 2 | Greenfield route/accessor spine | ✅ Done |
 | 3 | Execution backend | ✅ Done |
 | 4 | API shell cleanup / legacy retirement | ✅ Done |
-| 5 | Frontend shell + Talk rewrite | 🔄 Mid-flight. Structure improved, but Talk controller bulk and Salon remain. |
+| 5 | Frontend shell + Talk rewrite | ✅ Structural target met. TalkDetailPage shell/render surface and page-owned controllers are extracted below the roadmap LOC target; Salon migration and product-surface work remain separate lanes. |
 | 6 | Documents | 🔄 Native backend API/client path exists for list/detail tabs+blocks+pending edits and edit accept/reject; native Documents UI/editor not built. |
 | 7 | Agents/tools/connectors/context | 🔄 Backend mostly greenfield behind facades; frontend still consumes compat shapes; standalone Agents page not built. |
 | 8 | Jobs | 🔄 Backend and Talk Jobs panel mostly usable. PR #552 added `emit_document_append` and `job_output_ready` inbox/outbox production; Home UI surfacing and DB-backed verification remain. |
@@ -120,7 +120,7 @@ The unused table set is mostly intentional schema waiting for surfaces: Home, Fo
 
 ### 4a. God Files
 
-- `TalkDetailPage.tsx`: 5,429 LOC. Panels, composer, thread view, reducer, and stream hook are extracted. Remaining work is the Talk tab shell and page-owned controller state, which is the harder part because async mutations must stay page-owned across tab unmounts.
+- `TalkDetailPage.tsx`: 1,429 LOC. Panels, composer, thread view, reducer, stream hook, Talk tab shell/render surface, and page-owned controllers are extracted into focused components/hooks. Async mutation and stream state stay page-owned while controller/view-model bulk lives outside the page.
 - `SettingsPage.tsx`: 1,066 LOC. Provider config, connectors, AI agents, Profile, Tools/Google/WebSearch, and provider OAuth state are extracted.
 - `TalkLlmSettingsCard.tsx`: deleted after a repo-wide importer grep proved it had zero live consumers.
 
