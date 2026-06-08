@@ -1,6 +1,5 @@
 import { getDbPg } from '../../db.js';
 import type { EffectiveToolAccess } from '../db/agent-accessors.js';
-import { executeApplyContentEdit } from './content-apply-handler.js';
 import { CONTEXT_SOURCE_STATUS_SQL } from './context-source-status-sql.js';
 import { executeGoogleDriveTalkTool } from './google-drive-tools.js';
 import {
@@ -321,24 +320,11 @@ export function buildToolExecutor(
     }
 
     if (toolName === 'apply_content_edit') {
-      const runtimeDisabled = runtimeToolDisabled(toolName);
-      if (runtimeDisabled) return runtimeDisabled;
-      if (jobPolicy) {
-        return {
-          result:
-            'Error: apply_content_edit is not available for scheduled job runs',
-          isError: true,
-        };
-      }
-      return executeApplyContentEdit({
-        talkId,
-        userId,
-        runId,
-        agentId: agentId ?? null,
-        agentNickname: agentNickname ?? null,
-        messageId: triggerMessageId ?? null,
-        args,
-      });
+      return {
+        result:
+          'Error: apply_content_edit is handled by the native greenfield document executor.',
+        isError: true,
+      };
     }
 
     return {

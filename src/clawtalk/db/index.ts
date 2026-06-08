@@ -2,7 +2,6 @@
 
 export * from './core-accessors.js';
 export * from './agent-accessors.js';
-export * from './content-accessors.js';
 export * from './talk-tools-accessors.js';
 
 export {
