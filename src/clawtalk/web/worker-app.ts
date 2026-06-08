@@ -137,8 +137,6 @@ import {
 import { mountGreenfieldApiRoutes } from './routes/greenfield-api.js';
 import { mountHomeRoutes } from './routes/home.js';
 import { mountDocumentRoutes } from './routes/documents.js';
-import { reorderGreenfieldTalkSidebarRoute } from './routes/greenfield-core.js';
-import { getGreenfieldRunContextRoute } from './routes/greenfield-detail.js';
 import {
   deleteWebSearchCredentialRoute,
   listWebSearchProvidersRoute,
@@ -1082,48 +1080,6 @@ function buildApp(): Hono<{ Variables: Variables }> {
       auth,
       payload.data as any,
     );
-    return jsonResponse(result);
-  });
-
-  // ── greenfield-core.ts: sidebar reorder ──────────────────────
-  app.post('/api/v1/talks/sidebar/reorder', async (c) => {
-    const auth = c.get('auth');
-    const rl = checkRateLimit({ userId: auth.userId, bucket: 'write' });
-    if (!rl.allowed) return rateLimitedResponse(c, rl);
-    const csrfFail = checkCsrf(c, auth);
-    if (csrfFail) return csrfFail;
-    const payload = await readJsonBody<{
-      itemType?: 'talk' | 'folder';
-      itemId?: string;
-      destinationFolderId?: string | null;
-      destinationIndex?: number;
-    }>(c);
-    if (!payload.ok) return invalidJsonResponse(c, payload.error);
-    const result = await reorderGreenfieldTalkSidebarRoute({
-      auth,
-      workspaceId: requestedWorkspaceId(c),
-      itemType: payload.data.itemType,
-      itemId: payload.data.itemId,
-      destinationFolderId: payload.data.destinationFolderId,
-      destinationIndex: payload.data.destinationIndex,
-    });
-    return jsonResponse(result);
-  });
-
-  app.get('/api/v1/talks/:talkId/runs/:runId/context', async (c) => {
-    const auth = c.get('auth');
-    const rl = checkRateLimit({ userId: auth.userId, bucket: 'read' });
-    if (!rl.allowed) return rateLimitedResponse(c, rl);
-    const talkId = decodeIdParam(c, 'talkId');
-    if (!talkId.ok) return talkId.response;
-    const runId = decodeIdParam(c, 'runId');
-    if (!runId.ok) return runId.response;
-    const result = await getGreenfieldRunContextRoute({
-      auth,
-      workspaceId: requestedWorkspaceId(c),
-      talkId: talkId.value,
-      runId: runId.value,
-    });
     return jsonResponse(result);
   });
 

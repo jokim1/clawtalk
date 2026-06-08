@@ -1,6 +1,6 @@
 # ClawTalk Refactor — Full Completion Audit
 
-> **Status:** live audit snapshot updated 2026-06-08 for the Phase 5 native Documents API unblocker and MVP dry-run CI eval gate.
+> **Status:** live audit snapshot updated 2026-06-08 for the Phase 5 native Documents API unblocker, MVP dry-run CI eval gate, and first duplicate-route de-facade deletion.
 > **Purpose:** answer how much of the greenfield refactor is actually complete, what remains, and how to improve the plan so Codex + Claude/Opus can execute with minimal human interruption.
 > **Method:** second-pass audit against current main after PR #541, with later Phase 5 backend/eval evidence folded into the live status rows.
 
@@ -14,7 +14,7 @@ The backend/data cutover is real. The product refactor is not done.
 |---|---|---|
 | Backend / data cutover | ~90% ✅ | Greenfield is the only live runtime. Legacy runtime/accessors were retired, and backend CI is a signal again. Remaining backend work is mainly facade deletion plus Home/Forge backends. |
 | Frontend structural decomposition | ~50% 🔄 | `TalkDetailPage.tsx` is 5,429 LOC and `SettingsPage.tsx` is 2,147 LOC. Talk panels, composer, thread view, reducer, and stream hook are extracted; the page-owned controller bulk remains. |
-| De-facade | ~0% ⛔ | Compat facades still serve the webapp: synthetic threads, runs-with-`threadId`, flat content markdown/html, snapshot compat, policy/tool/connectors facades, and run-context synthesis. |
+| De-facade | ~5% 🔄 | The dead duplicate `worker-app.ts` Hono mounts for sidebar reorder and run-context were deleted; remaining compat facades still serve live consumers: synthetic threads, runs-with-`threadId`, flat content markdown/html, snapshot compat, policy/tool/connectors facades, run-context synthesis, and the attachments guard. |
 | Visual system (Salon) | Foundation in review 🔄 | Salon foundation shipped in PR #547: `webapp/src/salon/*` CSS-variable tokens (`--salon-*`), fonts (Newsreader/Geist/Geist Mono), brand mark, and the primitive library (CTMark/CTIcon/Avatar/AgentAvatar/RunPill/Chip/Kbd/Button/Input/Modal/Sheet/Popover) with behavior-preserving proof migrations + a smoke suite. Remaining: broad re-skin of the 7,284 LOC pre-Salon `webapp/src/styles.css`. |
 | Net-new product surfaces | ~5% ⛔ | Live app covers Talk list, Talk detail, and Settings. Home, native Documents UI/editor, standalone Agents, Archive, command palette, New Talk sheet, and Forge are unbuilt or skeletal. Native Documents backend routes/client methods now exist for the UI lane. |
 | Eval gate | ~40% 🔄 | `eval/` exists with six launch-critical dry-run scenarios, deterministic fixtures, grader prompt contracts, harness tests, and `npm run eval`; PR CI now runs the deterministic dry-run gate, while live backend/provider grading is still unwired. |
@@ -84,15 +84,33 @@ The current readiness ledger and grep script live in [DE-FACADE-READINESS.md](DE
 | 8 | Run-context synthesis | Fabricates legacy manifest with `threadId`. | Native run context without thread fields. |
 | 9 | Attachments guard | Routes return `attachments_not_available`. | Future R2-backed chat attachments, if v1 needs them. |
 
-Duplicate route registrations also need cleanup: `reorderGreenfieldTalkSidebarRoute` and `getGreenfieldRunContextRoute` are mounted in both `worker-app.ts` and `greenfield-api.ts`; first match wins, leaving dead duplicate mounts.
+The first duplicate route cleanup is complete: `reorderGreenfieldTalkSidebarRoute` and `getGreenfieldRunContextRoute` now mount only through `mountGreenfieldApiRoutes(app)` in `greenfield-api.ts`. The dead direct `worker-app.ts` registrations were removed in the Phase 5 duplicate Hono deletion lane.
 
-### 3b. Net-new Backends
+### 3b. Phase 5 De-facade Deletion Ledger
+
+Repeatable audit command: `node scripts/audit-facade-consumers.mjs`. The command prints the exact `rg` commands for five modalities: literal token grep, import/re-export trace, route registration trace, test fixture/assertion trace, and dynamic/string-key/cache-router trace.
+
+Current branch counts below are matching-line counts for those modalities in that order.
+
+| Facade | Counts | Current consumers | Native replacement | Deletion preconditions | Status |
+|---|---:|---|---|---|---|
+| Synthetic `threadId` | 376 / 64 / 90 / 221 / 569 | Backend snapshot/content compatibility plus frontend Talk snapshot, stream, reducer, URL/cache keys, sidebar/thread surfaces. | Treat Talk as the conversation boundary; native hydration/messages/runs drop thread identity. | Frontend URL/cache/reducer/stream contracts no longer read or emit `threadId`; route tests cover native Talk-only hydration. | Blocked |
+| Runs/messages `threadId` DTO fields | 642 / 232 / 100 / 343 / 85 | `TalkMessage`/`TalkRun` DTOs, reducers, stream hook, snapshot and tests still carry `threadId` and response-group compatibility. | Native run/message DTOs keyed by run id, response group, round, and message id. | Client DTO types, stream reducer, snapshot tests, and backend serializers stop exposing `threadId`. | Blocked |
+| Run-context fabrication | 44 / 26 / 7 / 18 / 24 | Run context route and UI panel still consume fabricated context snapshots and manifest fields. | Native run-context contract without synthetic thread fields. | UI consumes native context shape; tests assert native fields and no synthetic thread manifest. | Blocked |
+| Flat content projections `bodyMarkdown`/`bodyHtml` | 119 / 141 / 59 / 106 / 344 | Content routes, exports, editor surfaces, pending edits, and tests still use flattened markdown/html projections. | Native Documents tabs/blocks/pending edits over `documents`, `doc_tabs`, `doc_blocks`, and `document_edits`. | Documents UI/editor and in-Talk doc pane consume block APIs; export/editor tests cover native blocks. | Blocked |
+| `snapshotVersion` compat | 30 / 69 / 11 / 6 / 107 | Snapshot accessor, cache router, outbox delta handling, and frontend snapshot keys still use version compatibility. | Native per-talk hydration and event high-water contract. | Cache/router/hydration tests cover native high-water semantics without `snapshotVersion`. | Blocked |
+| Policy facade | 30 / 12 / 24 / 22 / 98 | Talk policy route/payload, settings panels, and tests still map policy onto `talk_agents`. | Native roster/run settings API. | UI uses roster/run settings directly; policy route tests are replaced by native roster tests. | Blocked |
+| Tool/connectors facades | 122 / 211 / 53 / 105 / 533 | Settings connectors, workspace channels/data connectors, talk tool-family APIs, cache events, and tests still consume split compatibility surfaces. | Single canonical connectors/bindings/tool toggles surface. | Settings and Talk tools consume canonical connectors/tool ids; cache events and tests stop referencing compatibility families. | Blocked |
+| Duplicate Hono mounts | 10 / 7 / 22 / 14 / 21 | Remaining references are native `greenfield-api.ts` route registrations, route handlers, imports, focused mount tests, and expected greenfield module imports. | Single mount path through `mountGreenfieldApiRoutes(app)`. | Direct `worker-app.ts` imports and route registrations are absent; sidebar reorder and run-context still resolve through the native mount. | Deleted |
+| `attachments_not_available` guard | 31 / 23 / 18 / 37 / 68 | Attachment routes, storage caps, guards, UI pending attachment state, and tests still reference the unavailable guard. | R2-backed chat attachments, or explicit v1 no-attachments product decision with dead UI removed. | Native attachment implementation exists, or product decision removes attachment affordances and guard tests. | Blocked |
+
+### 3c. Net-new Backends
 
 - Home has schema and `job_blocked` writes, but no real read surface.
 - Native Documents routes/client methods now expose list/detail tabs, blocks, pending edits, and accept/reject over `documents`/`doc_tabs`/`doc_blocks`/`document_edits`. The frontend Documents UI still needs to consume that native path instead of flat compat content.
 - Forge tables exist, but runtime and UI are intentionally post-MVP.
 
-### 3c. Provisioned-but-unused Schema
+### 3d. Provisioned-but-unused Schema
 
 The unused table set is mostly intentional schema waiting for surfaces: Home, Forge, `activity_events`, `audit_events`, `agent_feedback_events`, `talk_reads`, and `doc_tab_coeditors`. Treat this as pending product work, not dead schema, until the MVP line is reset.
 
