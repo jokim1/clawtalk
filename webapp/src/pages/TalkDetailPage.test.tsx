@@ -40,7 +40,7 @@ import type {
   TalkMessage,
   TalkMessageAttachment,
   TalkRun,
-  TalkRunContextSnapshot,
+  TalkRunContextDetails,
   TalkJob,
   TalkJobRunSummary,
   TalkThread,
@@ -626,7 +626,7 @@ describe('TalkDetailPage', () => {
     });
   });
 
-  it('lazily loads and shows the saved context snapshot for an assistant run', async () => {
+  it('lazily loads and shows the saved run context for an assistant run', async () => {
     const user = userEvent.setup();
     installTalkDetailFetch({
       messages: [
@@ -646,64 +646,21 @@ describe('TalkDetailPage', () => {
           agentNickname: 'GPT-5 Mini',
         }),
       ],
-      runContextSnapshots: {
+      runContexts: {
         'run-1': {
           version: 1,
-          threadId: DEFAULT_THREAD_ID,
           personaRole: 'critic',
-          roleHint:
-            'Focus on weaknesses, failure modes, and overconfidence in the current plan.',
-          goalIncluded: true,
-          summaryIncluded: true,
-          activeRules: ['Lead with concrete recommendations'],
-          stateSnapshot: {
-            totalCount: 1,
-            omittedCount: 0,
-            included: [
-              {
-                key: 'schedule_strength',
-                value: { tier: 'medium' },
-                version: 2,
-                updatedAt: '2026-03-06T00:00:02.000Z',
-                reason: 'state_snapshot',
-              },
-            ],
-          },
-          sources: {
-            totalCount: 1,
-            manifest: [
-              {
-                ref: 'S1',
-                title: '2026 Schedule Notes',
-                sourceType: 'text',
-                sourceUrl: null,
-                fileName: null,
-              },
-            ],
-            inline: [{ ref: 'S1', text: 'Cal returns most of its secondary.' }],
-          },
-          retrieval: {
-            query: 'How will Cal do next season?',
-            queryTerms: ['cal', 'season'],
-            roleTerms: ['risk', 'weakness'],
-            state: [],
-            sources: [
-              {
-                ref: 'S1',
-                title: '2026 Schedule Notes',
-                excerpt: 'Cal returns most of its secondary.',
-              },
-            ],
+          prompt: {
+            hasRedactedPrompt: true,
+            estimatedTokens: 812,
           },
           tools: {
             contextToolNames: ['read_context_source'],
-            connectorToolNames: ['google_sheets_query'],
           },
           history: {
-            messageIds: ['msg-user-1'],
+            triggerMessageId: 'msg-user-1',
             turnCount: 1,
           },
-          estimatedTokens: 812,
         },
       },
     });
@@ -735,25 +692,19 @@ describe('TalkDetailPage', () => {
       'Context used for run run-1',
     );
     expect(within(contextPanel).getByText(/Estimated context:/)).toBeTruthy();
-    expect(within(contextPanel).getByText(/History messages:/)).toBeTruthy();
+    expect(within(contextPanel).getByText(/History turns:/)).toBeTruthy();
     expect(
-      screen.getByText(
-        /Focus on weaknesses, failure modes, and overconfidence/i,
-      ),
+      within(contextPanel).getByText('read_context_source'),
     ).toBeTruthy();
-    expect(screen.getByText('Lead with concrete recommendations')).toBeTruthy();
-    expect(screen.getByText(/schedule_strength/i)).toBeTruthy();
     expect(
-      within(contextPanel).getAllByText(/2026 Schedule Notes/).length,
-    ).toBeGreaterThan(0);
+      within(contextPanel).getByText('msg-user-1'),
+    ).toBeTruthy();
     expect(contextRequestCount).toBe(1);
 
     await user.click(screen.getByRole('button', { name: 'Hide context' }));
     await waitFor(() => {
       expect(
-        screen.queryByText(
-          /Focus on weaknesses, failure modes, and overconfidence/i,
-        ),
+        screen.queryByText('read_context_source'),
       ).toBeNull();
     });
 
@@ -792,7 +743,7 @@ describe('TalkDetailPage', () => {
     expect(screen.queryByRole('button', { name: 'View context' })).toBeNull();
   });
 
-  it('shows an empty state when a run has no saved context snapshot', async () => {
+  it('shows an empty state when a run has no saved run context', async () => {
     const user = userEvent.setup();
     installTalkDetailFetch();
 
@@ -806,7 +757,7 @@ describe('TalkDetailPage', () => {
     );
     expect(
       within(contextPanel).getByText(
-        'No saved context snapshot is available for this run.',
+        'No saved run context is available for this run.',
       ),
     ).toBeTruthy();
   });
@@ -830,7 +781,7 @@ describe('TalkDetailPage', () => {
           ok: false,
           error: {
             code: 'context_fetch_failed',
-            message: 'Failed to load context snapshot.',
+            message: 'Failed to load run context.',
           },
         });
       }
@@ -847,7 +798,7 @@ describe('TalkDetailPage', () => {
       'Context used for run run-1',
     );
     expect(
-      within(contextPanel).getByText('Failed to load context snapshot.'),
+      within(contextPanel).getByText('Failed to load run context.'),
     ).toBeTruthy();
 
     globalThis.fetch = originalFetch;
@@ -4879,7 +4830,7 @@ function installTalkDetailFetch(input?: {
   threads?: TalkThread[];
   messages?: TalkMessage[];
   runs?: TalkRun[];
-  runContextSnapshots?: Record<string, TalkRunContextSnapshot | null>;
+  runContexts?: Record<string, TalkRunContextDetails | null>;
   talkAgents?: TalkAgent[];
   registeredAgents?: RegisteredAgent[];
   context?: TalkContext;
@@ -4966,7 +4917,7 @@ function installTalkDetailFetch(input?: {
       targetAgentNickname: 'GPT-5 Mini',
     }),
   ];
-  const runContextSnapshots = input?.runContextSnapshots ?? {};
+  const runContexts = input?.runContexts ?? {};
   const talkAgents = input?.talkAgents ?? [
     buildTalkAgent({
       id: 'agent-claude',
@@ -5547,11 +5498,8 @@ function installTalkDetailFetch(input?: {
           data: {
             talkId: 'talk-1',
             runId,
-            contextSnapshot: Object.prototype.hasOwnProperty.call(
-              runContextSnapshots,
-              runId,
-            )
-              ? (runContextSnapshots[runId] ?? null)
+            context: Object.prototype.hasOwnProperty.call(runContexts, runId)
+              ? (runContexts[runId] ?? null)
               : null,
           },
         });

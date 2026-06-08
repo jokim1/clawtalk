@@ -1,4 +1,4 @@
-import type { TalkMessage, TalkRun, TalkRunContextSnapshot } from '../lib/api';
+import type { TalkMessage, TalkRun, TalkRunContextDetails } from '../lib/api';
 import { RunPill, type RunStatus } from '../salon';
 import { BrowserBlockedRunCard } from './BrowserBlockedRunCard';
 import { ExecutionDecisionSummary } from './ExecutionDecisionSummary';
@@ -17,12 +17,12 @@ const SALON_RUN_STATUS: Record<TalkRun['status'], RunStatus> = {
 export type RunContextPanelState = {
   open: boolean;
   status: 'idle' | 'loading' | 'loaded' | 'error';
-  snapshot: TalkRunContextSnapshot | null;
+  context: TalkRunContextDetails | null;
   message?: string;
 };
 
 function formatPersonaRoleLabel(
-  role: TalkRunContextSnapshot['personaRole'],
+  role: TalkRunContextDetails['personaRole'],
 ): string {
   if (!role) return 'Unspecified';
   return role
@@ -31,79 +31,21 @@ function formatPersonaRoleLabel(
     .join(' ');
 }
 
-function renderRunContextSnapshot(
-  snapshot: TalkRunContextSnapshot,
-): JSX.Element {
+function renderRunContext(context: TalkRunContextDetails): JSX.Element {
   return (
     <div className="run-context-panel">
       <p className="run-context-meta">
-        Role: <strong>{formatPersonaRoleLabel(snapshot.personaRole)}</strong>
+        Role: <strong>{formatPersonaRoleLabel(context.personaRole)}</strong>
         {' · '}
-        Estimated context: <code>{snapshot.estimatedTokens}</code> tokens
+        Estimated context: <code>{context.prompt.estimatedTokens}</code> tokens
         {' · '}
-        History messages: <code>{snapshot.history.turnCount}</code>
+        History turns: <code>{context.history.turnCount}</code>
       </p>
-      {snapshot.roleHint ? (
-        <p className="run-context-note">{snapshot.roleHint}</p>
-      ) : null}
-      {snapshot.activeRules.length > 0 ? (
+      {context.history.triggerMessageId ? (
         <div className="run-context-section">
-          <strong>Rules</strong>
-          <ul>
-            {snapshot.activeRules.map((rule, index) => (
-              <li key={`${index}-${rule}`}>{rule}</li>
-            ))}
-          </ul>
-        </div>
-      ) : null}
-      {snapshot.stateSnapshot.included.length > 0 ? (
-        <div className="run-context-section">
-          <strong>State Snapshot</strong>
-          <ul>
-            {snapshot.stateSnapshot.included.map((entry) => (
-              <li key={`${entry.key}-${entry.version}`}>
-                <code>{entry.key}</code> v{entry.version}:{' '}
-                <code>{JSON.stringify(entry.value)}</code>
-              </li>
-            ))}
-          </ul>
-        </div>
-      ) : null}
-      {snapshot.retrieval.state.length > 0 ? (
-        <div className="run-context-section">
-          <strong>Retrieved State</strong>
-          <ul>
-            {snapshot.retrieval.state.map((entry) => (
-              <li key={`${entry.key}-${entry.version}`}>
-                <code>{entry.key}</code> v{entry.version}:{' '}
-                <code>{JSON.stringify(entry.value)}</code>
-              </li>
-            ))}
-          </ul>
-        </div>
-      ) : null}
-      {snapshot.retrieval.sources.length > 0 ? (
-        <div className="run-context-section">
-          <strong>Retrieved Sources</strong>
-          <ul>
-            {snapshot.retrieval.sources.map((source) => (
-              <li key={source.ref}>
-                <span>
-                  [{source.ref}] {source.title}
-                </span>
-                <p>{source.excerpt}</p>
-              </li>
-            ))}
-          </ul>
-        </div>
-      ) : null}
-      {snapshot.sources.manifest.length > 0 ? (
-        <div className="run-context-section">
-          <strong>Source Manifest</strong>
+          <strong>Trigger message</strong>
           <p className="run-context-meta">
-            {snapshot.sources.manifest
-              .map((source) => `[${source.ref}] ${source.title}`)
-              .join(', ')}
+            <code>{context.history.triggerMessageId}</code>
           </p>
         </div>
       ) : null}
@@ -111,11 +53,7 @@ function renderRunContextSnapshot(
         <strong>Available Tools</strong>
         <p className="run-context-meta">
           Context:{' '}
-          <code>{snapshot.tools.contextToolNames.join(', ') || 'none'}</code>
-        </p>
-        <p className="run-context-meta">
-          Connectors:{' '}
-          <code>{snapshot.tools.connectorToolNames.join(', ') || 'none'}</code>
+          <code>{context.tools.contextToolNames.join(', ') || 'none'}</code>
         </p>
       </div>
     </div>
@@ -147,7 +85,7 @@ type TalkRunsPanelProps = {
  * Presentational Run History tab. Read-only render over page-derived
  * `runHistory` + `messageLookup`; the per-run "View context" disclosure state
  * (`runContextPanels`) is page-owned and mutated only via the threaded
- * `handleToggleRunContext` callback (the snapshot fetch can resolve after this
+ * `handleToggleRunContext` callback (the context fetch can resolve after this
  * tab unmounts, so the state must not live here — cf. TalkJobsPanel).
  */
 export function TalkRunsPanel({
@@ -245,7 +183,7 @@ export function TalkRunsPanel({
                     {runContextPanel.status === 'loading' ? (
                       <div className="run-context-panel">
                         <p className="run-context-note">
-                          Loading context snapshot…
+                          Loading run context…
                         </p>
                       </div>
                     ) : runContextPanel.status === 'error' ? (
@@ -255,12 +193,12 @@ export function TalkRunsPanel({
                             'Failed to load run context.'}
                         </p>
                       </div>
-                    ) : runContextPanel.snapshot ? (
-                      renderRunContextSnapshot(runContextPanel.snapshot)
+                    ) : runContextPanel.context ? (
+                      renderRunContext(runContextPanel.context)
                     ) : (
                       <div className="run-context-panel">
                         <p className="run-context-note">
-                          No saved context snapshot is available for this run.
+                          No saved run context is available for this run.
                         </p>
                       </div>
                     )}

@@ -404,6 +404,21 @@ describe('greenfield detail routes', () => {
       },
     });
 
+    const missingRunContext = await getGreenfieldRunContextRoute({
+      auth: auth(),
+      workspaceId,
+      talkId,
+      runId: seeded.runId,
+    });
+    expect(missingRunContext.body).toMatchObject({
+      ok: true,
+      data: {
+        talkId,
+        runId: seeded.runId,
+        context: null,
+      },
+    });
+
     const db = getDbPg();
     const promptSnapshotId = '10000000-0000-4000-8000-00000000c0de';
     const [runSnapshotSource] = await db<
@@ -475,10 +490,18 @@ describe('greenfield detail routes', () => {
       data: {
         talkId,
         runId: seeded.runId,
-        contextSnapshot: {
+        context: {
           version: 1,
-          threadId: talkId,
+          personaRole: 'strategist',
+          prompt: {
+            hasRedactedPrompt: true,
+            estimatedTokens: 9,
+          },
           tools: { contextToolNames: ['web-fetch', 'web-search'] },
+          history: {
+            triggerMessageId: seeded.userMessageId,
+            turnCount: 1,
+          },
         },
       },
     });

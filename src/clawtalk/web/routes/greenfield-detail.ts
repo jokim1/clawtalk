@@ -1,7 +1,7 @@
 import { getDbPg, withUserContext } from '../../../db.js';
 import {
   getGreenfieldDocumentForTalk,
-  getGreenfieldRunContextSnapshotRecord,
+  getGreenfieldRunContextRecord,
   getGreenfieldThreadMetrics,
   getTalkEventHighWater,
   listGreenfieldMessages,
@@ -12,11 +12,11 @@ import {
   type GreenfieldDocumentEditRecord,
   type GreenfieldDocumentRecord,
   type GreenfieldMessageRecord,
-  type GreenfieldRunContextSnapshotRecord,
+  type GreenfieldRunContextRecord,
   type GreenfieldRunRecord,
   type GreenfieldThreadMetrics,
 } from '../../talks/greenfield-detail-accessors.js';
-import type { TalkRunContextSnapshot } from '../../talks/talk-run-context-snapshot.js';
+import type { TalkRunContextDetails } from '../../talks/talk-run-context.js';
 import {
   getGreenfieldTalk,
   listGreenfieldTalkAgents,
@@ -382,7 +382,7 @@ function recordOf(value: unknown): Record<string, unknown> | null {
 
 function toPersonaRole(
   roleKey: string | null,
-): TalkRunContextSnapshot['personaRole'] {
+): TalkRunContextDetails['personaRole'] {
   switch (roleKey) {
     case 'assistant':
     case 'analyst':
@@ -400,15 +400,6 @@ function toPersonaRole(
   }
 }
 
-function parsePersistedRunContextSnapshot(
-  value: unknown,
-): TalkRunContextSnapshot | null {
-  const record = recordOf(value);
-  const candidate = recordOf(record?.contextSnapshot) ?? record;
-  if (candidate?.version !== 1) return null;
-  return candidate as unknown as TalkRunContextSnapshot;
-}
-
 function enabledRuntimeToolNames(value: unknown): string[] {
   const manifest = recordOf(value);
   const effectiveTools = manifest?.effectiveTools;
@@ -424,54 +415,25 @@ function enabledRuntimeToolNames(value: unknown): string[] {
   return Array.from(names).sort();
 }
 
-function toRunContextSnapshot(
-  record: GreenfieldRunContextSnapshotRecord,
-): TalkRunContextSnapshot {
-  const persisted = parsePersistedRunContextSnapshot(
-    record.context_manifest_json,
-  );
-  if (persisted) return persisted;
-
+function toRunContextDetails(
+  record: GreenfieldRunContextRecord,
+): TalkRunContextDetails | null {
+  if (!record.tool_manifest_json && !record.prompt_text_redacted) return null;
   const promptChars = record.prompt_text_redacted?.length ?? 0;
   return {
     version: 1,
-    threadId: syntheticThreadId(record.talk_id),
     personaRole: toPersonaRole(record.role_key),
-    roleHint: null,
-    goalIncluded: false,
-    summaryIncluded: false,
-    activeRules: [],
-    stateSnapshot: {
-      totalCount: 0,
-      omittedCount: 0,
-      included: [],
-    },
-    sources: {
-      totalCount: 0,
-      manifest: [],
-      inline: [],
-      forcedInjection: {
-        refs: [],
-        slugs: [],
-        bytes: 0,
-      },
-    },
-    retrieval: {
-      query: null,
-      queryTerms: [],
-      roleTerms: [],
-      state: [],
-      sources: [],
+    prompt: {
+      hasRedactedPrompt: Boolean(record.prompt_text_redacted),
+      estimatedTokens: Math.ceil(promptChars / 4),
     },
     tools: {
       contextToolNames: enabledRuntimeToolNames(record.tool_manifest_json),
-      connectorToolNames: [],
     },
     history: {
-      messageIds: record.trigger_message_id ? [record.trigger_message_id] : [],
+      triggerMessageId: record.trigger_message_id,
       turnCount: Math.max(0, record.round),
     },
-    estimatedTokens: Math.ceil(promptChars / 4),
   };
 }
 
@@ -903,7 +865,7 @@ export async function getGreenfieldRunContextRoute(input: {
   RouteResult<{
     talkId: string;
     runId: string;
-    contextSnapshot: TalkRunContextSnapshot | null;
+    context: TalkRunContextDetails | null;
   }>
 > {
   if (!isUuid(input.talkId)) {
@@ -922,18 +884,18 @@ export async function getGreenfieldRunContextRoute(input: {
         talkId: input.talkId,
       });
       if ('statusCode' in talk) return talk;
-      const snapshotRecord = await getGreenfieldRunContextSnapshotRecord({
+      const contextRecord = await getGreenfieldRunContextRecord({
         workspaceId: ctx.workspace.id,
         talkId: input.talkId,
         runId: input.runId,
       });
-      if (!snapshotRecord) {
+      if (!contextRecord) {
         return error(404, 'run_not_found', 'Run not found.');
       }
       return ok({
         talkId: input.talkId,
         runId: input.runId,
-        contextSnapshot: toRunContextSnapshot(snapshotRecord),
+        context: toRunContextDetails(contextRecord),
       });
     },
   );
