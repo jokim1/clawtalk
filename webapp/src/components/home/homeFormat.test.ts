@@ -56,6 +56,32 @@ describe('classifyAction', () => {
     });
   });
 
+  it('routes document edit actions to the native Documents surface', () => {
+    expect(
+      classifyAction({
+        type: 'open_document_edit',
+        label: 'Review edit',
+        payload: { documentId: 'doc/42', editId: 'edit-1' },
+      }),
+    ).toMatchObject({
+      kind: 'nav',
+      to: '/app/documents/doc%2F42',
+      label: 'Review edit',
+    });
+
+    expect(
+      classifyAction({
+        type: 'open_document_edit',
+        label: 'Review edits',
+        payload: {},
+      }),
+    ).toMatchObject({
+      kind: 'nav',
+      to: '/app/documents',
+      label: 'Review edits',
+    });
+  });
+
   it('uses the fallback nav target when the action has no own target', () => {
     expect(classifyAction(null, { to: '/app/talks/t2' })).toMatchObject({
       kind: 'nav',
@@ -115,6 +141,10 @@ describe('targetToPath', () => {
   it('maps talk / connector / system targets, else null', () => {
     expect(targetToPath({ talkId: 't1' })).toBe('/app/talks/t1');
     expect(targetToPath({ talkId: 'x/y' })).toBe('/app/talks/x%2Fy');
+    expect(targetToPath({ kind: 'document', documentId: 'doc/42' })).toBe(
+      '/app/documents/doc%2F42',
+    );
+    expect(targetToPath({ kind: 'document' })).toBe('/app/documents');
     expect(targetToPath({ kind: 'connector' })).toBe(
       '/app/settings?tab=connectors',
     );

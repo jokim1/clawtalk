@@ -1,6 +1,6 @@
 # ClawTalk Refactor — Full Completion Audit
 
-> **Status:** live audit snapshot updated 2026-06-08 for the Phase 5 native Documents API unblocker, MVP dry-run CI eval gate, and first duplicate-route de-facade deletion.
+> **Status:** live audit snapshot updated 2026-06-08 for the Phase 5 native Documents API unblocker, MVP dry-run CI eval gate, first duplicate-route de-facade deletion, and Home P2 hardening.
 > **Purpose:** answer how much of the greenfield refactor is actually complete, what remains, and how to improve the plan so Codex + Claude/Opus can execute with minimal human interruption.
 > **Method:** second-pass audit against current main after PR #541, with later Phase 5 backend/eval evidence folded into the live status rows.
 
@@ -12,14 +12,14 @@ The backend/data cutover is real. The product refactor is not done.
 
 | Layer | Done | Evidence |
 |---|---|---|
-| Backend / data cutover | ~90% ✅ | Greenfield is the only live runtime. Legacy runtime/accessors were retired, and backend CI is a signal again. Remaining backend work is mainly facade deletion plus Home/Forge backends. |
+| Backend / data cutover | ~90% ✅ | Greenfield is the only live runtime. Legacy runtime/accessors were retired, and backend CI is a signal again. Remaining backend work is mainly facade deletion, Home lifecycle gaps, and Forge. |
 | Frontend structural decomposition | ~70% ✅ | `TalkDetailPage.tsx` is 1,429 LOC and `SettingsPage.tsx` is 1,066 LOC. Talk shell/render surface and page-owned controllers are extracted alongside Settings Profile/Tools/OAuth panels; remaining frontend work is product surfaces, Salon migration, and native facade consumers, not god-file decomposition. |
 | De-facade | ~5% 🔄 | The dead duplicate `worker-app.ts` Hono mounts for sidebar reorder and run-context were deleted; remaining compat facades still serve live consumers: synthetic threads, runs-with-`threadId`, flat content markdown/html, snapshot compat, policy/tool/connectors facades, run-context synthesis, and the attachments guard. |
 | Visual system (Salon) | Foundation + shell shipped 🔄 | Salon foundation shipped in PR #547: `webapp/src/salon/*` CSS-variable tokens (`--salon-*`), fonts (Newsreader/Geist/Geist Mono), brand mark, and the primitive library (CTMark/CTIcon/Avatar/AgentAvatar/RunPill/Chip/Kbd/Button/Input/Modal/Sheet/Popover) with behavior-preserving proof migrations + a smoke suite. Surfaces re-skinned (PR #550): Home, Archive, Registered Agents + agent profile, the Talks list page, and the sign-in surface — each off its legacy classes with dead `styles.css` rules trimmed + a responsive Playwright spec. App shell shipped (PR #550): the prototype 3-column icon-rail (`webapp/src/components/shell/`: `IconRail` + `SecondaryList` + `RailProfileMenu`) replacing `ClawTalkSidebar`/`WorkspaceSwitcher`/`SidebarProfileMenu` + the `App.tsx` header; talk CRUD/DnD/⌘K preserved, desktop collapse + mobile drawer, ~550 LOC dead CSS removed. Contrast fixed: `--salon-accent-strong` `#b05530` (≈ 5.0:1 on white) backs text-bearing primary buttons. Remaining: `TalkDetailPage`/`SettingsPage`-owned CSS. |
-| Net-new product surfaces | ~25% 🔄 | Live app covers Talk list, Talk detail, Settings, and Salon-native Home (read API + write lifecycle), New Talk sheet, ⌘K command palette, Registered Agents panel + standalone agent profile, and Archive (all PR #550), plus the native Documents UI — `/app/documents` index + `/app/documents/:id` viewer + pending-edit accept/reject console (PR #557). Native Documents backend routes/client methods exist (PR #552). Forge remains post-MVP. |
+| Net-new product surfaces | ~25% 🔄 | Live app covers Talk list, Talk detail, Settings, and Salon-native Home (read API + write lifecycle), New Talk sheet, ⌘K command palette, Registered Agents panel + standalone agent profile, and Archive (all PR #550), plus the native Documents UI — `/app/documents` index + `/app/documents/:id` viewer + pending-edit accept/reject console (PR #557). Home P2 hardening routes `open_document_edit` to native Documents, keeps optimistic summary/curator state coherent, and returns 403 for guest lifecycle writes. Native Documents backend routes/client methods exist (PR #552). Forge remains post-MVP. |
 | Eval gate | ~40% 🔄 | `eval/` exists with six launch-critical dry-run scenarios, deterministic fixtures, grader prompt contracts, harness tests, and `npm run eval`; PR CI now runs the deterministic dry-run gate, while live backend/provider grading is still unwired. |
 
-The biggest missing work is Salon, native Documents, Home, de-facade, live eval hardening, and final surface completion. Forge remains post-MVP.
+The biggest missing work is Talk/Settings Salon completion, in-Talk native Documents, remaining Home lifecycle actions, de-facade, live eval hardening, and final surface completion. Forge remains post-MVP.
 
 ---
 
@@ -53,8 +53,8 @@ The current refactor plan is a subset of that denominator. It must be explicit a
 | 5 | Frontend shell + Talk rewrite | ✅ Structural target met. TalkDetailPage shell/render surface and page-owned controllers are extracted below the roadmap LOC target; Salon migration and product-surface work remain separate lanes. |
 | 6 | Documents | 🔄 Native backend API/client path exists for list/detail tabs+blocks+pending edits and edit accept/reject; standalone Documents UI (index + viewer + edit-review console) shipped (PR #557). Remaining: in-Talk doc pane (deferred behind TalkDetail refactor #549). |
 | 7 | Agents/tools/connectors/context | 🔄 Backend mostly greenfield behind facades; frontend still consumes compat shapes; standalone Agents page not built. |
-| 8 | Jobs | 🔄 Backend and Talk Jobs panel mostly usable. PR #552 added `emit_document_append` and `job_output_ready` inbox/outbox production; Home UI surfacing and DB-backed verification remain. |
-| 9 | Home, Settings, polish, eval gate | 🔄 Eval dry-run harness + CI gate shipped (PR #553); Salon foundation + shell + Home shipped (PR #547/#550); Settings structural extraction complete for Profile, Tools/Google/WebSearch, and provider OAuth (PR #548); product gaps remain. |
+| 8 | Jobs | 🔄 Backend and Talk Jobs panel mostly usable. PR #552 added `emit_document_append` and `job_output_ready` inbox/outbox production; DB-backed verification remains. |
+| 9 | Home, Settings, polish, eval gate | 🔄 Eval dry-run harness + CI gate shipped (PR #553); Salon foundation + shell + Home shipped (PR #547/#550); Home P2 hardening fixed native Documents deep links, optimistic curator sync, and guest-writer 403s; Settings structural extraction complete for Profile, Tools/Google/WebSearch, and provider OAuth (PR #548); product gaps remain. |
 | 10 | Forge | ⛔ Schema/docs only, intentionally post-MVP. |
 
 ---
@@ -106,13 +106,13 @@ Current branch counts below are matching-line counts for those modalities in tha
 
 ### 3c. Net-new Backends
 
-- Home has schema and `job_blocked` writes, but no real read surface.
-- Native Documents routes/client methods now expose list/detail tabs, blocks, pending edits, and accept/reject over `documents`/`doc_tabs`/`doc_blocks`/`document_edits`. The frontend Documents UI still needs to consume that native path instead of flat compat content.
+- Home native read/write routes and the Salon Home UI are live for summary, inbox, recommendations, news, inbox dismiss/snooze, and recommendation dismiss. Remaining lifecycle gaps are inbox mark-read/resolve and news add-to-context/snooze; Home P2 hardening now returns 403 for guest lifecycle writes instead of RLS-shaped 404s.
+- Native Documents routes/client methods and the standalone Documents UI now expose list/detail tabs, blocks, pending edits, and accept/reject over `documents`/`doc_tabs`/`doc_blocks`/`document_edits`. The in-Talk doc pane still needs to consume that native path before flat compat content can be deleted.
 - Forge tables exist, but runtime and UI are intentionally post-MVP.
 
 ### 3d. Provisioned-but-unused Schema
 
-The unused table set is mostly intentional schema waiting for surfaces: Home, Forge, `activity_events`, `audit_events`, `agent_feedback_events`, `talk_reads`, and `doc_tab_coeditors`. Treat this as pending product work, not dead schema, until the MVP line is reset.
+The unused table set is mostly intentional schema waiting for surfaces: Forge, `activity_events`, `audit_events`, `agent_feedback_events`, `talk_reads`, and `doc_tab_coeditors`. Treat this as pending product work, not dead schema, until the MVP line is reset.
 
 ---
 
@@ -130,10 +130,10 @@ The unused table set is mostly intentional schema waiting for surfaces: Home, Fo
 
 ### 4c. Missing Surfaces
 
-- Home currently routes to Talk list, not a Home page.
-- Documents sidebar entry links into the in-Talk doc pane, not a standalone Documents surface.
-- Agents are folded into Settings; standalone Agents and Agent profile are unbuilt.
-- Archive, New Talk sheet, and command palette are not production-complete.
+- Home is a Salon-native surface over the native Home API; remaining actions are inbox mark-read/resolve and news add-to-context/snooze.
+- Standalone Documents index/detail/edit-review is live; the in-Talk doc pane still uses the older compatibility path.
+- Registered Agents and standalone agent profile are live; remaining agent work is native facade-consumer cleanup and product polish.
+- Archive, New Talk sheet, and command palette are production surfaces; remaining net-new scope is workspace-member management and Forge (post-MVP).
 
 ---
 
@@ -171,16 +171,17 @@ Salon should be first-class before Home/Documents/Agents, otherwise those surfac
 ### W3. Native Documents
 
 - Native Documents API/client path exists for list/detail tabs+blocks+pending edits and accept/reject.
-- Documents page and full editor.
-- In-Talk doc pane over native tabs/blocks.
-- Pending edit accept/reject UX.
+- Standalone Documents page and native viewer/edit-review console are live.
+- Remaining: in-Talk doc pane over native tabs/blocks.
+- Pending edit accept/reject UX exists in standalone Documents; full authoring editor remains future work.
 - Delete flat content facade after the final consumer moves.
 
 ### W4. Home
 
-- Accessors/routes for inbox, recommendations, news, lifecycle actions.
-- Home page built in Salon.
-- Read and resolve `job_blocked`/`job_output_ready` items.
+- Accessors/routes for summary, inbox, recommendations, news, and current lifecycle actions are live.
+- Home page is built in Salon.
+- Home P2 hardening complete: `open_document_edit` routes to native Documents, optimistic dismiss/snooze keeps summary/curator/hero state coherent, and guest lifecycle writes return 403.
+- Remaining: inbox mark-read/resolve, news add-to-context/snooze, and any deeper `job_blocked`/`job_output_ready` product workflows.
 
 ### W5. De-facade
 
@@ -198,7 +199,7 @@ Salon should be first-class before Home/Documents/Agents, otherwise those surfac
 ### W7. Capability Gaps
 
 - Attachments are a known regression. Default is defer for v1 unless chat-upload multimodal becomes launch-critical.
-- Jobs `emit_document_append` and `job_output_ready` producer paths are implemented on the current Phase 5 backend branch; Home UI surfacing and DB-backed verification remain.
+- Jobs `emit_document_append` and `job_output_ready` producer paths are implemented; DB-backed verification and deeper Home product workflows remain.
 - Non-Google connector OAuth UI remains incomplete.
 - Dark mode and full WCAG pass need explicit goals after light Salon exists.
 

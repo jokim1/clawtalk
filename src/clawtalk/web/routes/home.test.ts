@@ -33,6 +33,7 @@ import {
 const USER_ID = '0c888888-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
 const OTHER_USER_ID = '0c888888-bbbb-bbbb-bbbb-bbbbbbbbbbbb';
 const EMPTY_USER_ID = '0c888888-cccc-cccc-cccc-cccccccccccc';
+const GUEST_USER_ID = '0c888888-dddd-dddd-dddd-dddddddddddd';
 
 function auth(userId = USER_ID): AuthContext {
   return {
@@ -64,6 +65,14 @@ async function createWorkspaceFixture(userId = USER_ID): Promise<{
     where id = ${talkId}::uuid
   `;
   return { workspaceId: rows[0].workspace_id, talkId };
+}
+
+async function addGuestToWorkspace(workspaceId: string): Promise<void> {
+  await getDbPg()`
+    insert into public.workspace_members (workspace_id, user_id, role)
+    values (${workspaceId}::uuid, ${GUEST_USER_ID}::uuid, 'guest')
+    on conflict (workspace_id, user_id) do update set role = excluded.role
+  `;
 }
 
 async function seedInboxItem(input: {
@@ -285,19 +294,38 @@ beforeAll(async () => {
   await seedAuthUser({ id: USER_ID, email: 'home-a@clawtalk.local' });
   await seedAuthUser({ id: OTHER_USER_ID, email: 'home-b@clawtalk.local' });
   await seedAuthUser({ id: EMPTY_USER_ID, email: 'home-empty@clawtalk.local' });
+  await seedAuthUser({ id: GUEST_USER_ID, email: 'home-guest@clawtalk.local' });
   await seedAuthUser({ id: DEV_USER_ID, email: 'dev-home@clawtalk.local' });
 });
 
 afterAll(async () => {
-  await purgeUserData([USER_ID, OTHER_USER_ID, EMPTY_USER_ID, DEV_USER_ID]);
+  await purgeUserData([
+    USER_ID,
+    OTHER_USER_ID,
+    EMPTY_USER_ID,
+    GUEST_USER_ID,
+    DEV_USER_ID,
+  ]);
   await deleteHomeNewsFixtureItems();
-  await deleteAuthUsers([USER_ID, OTHER_USER_ID, EMPTY_USER_ID, DEV_USER_ID]);
+  await deleteAuthUsers([
+    USER_ID,
+    OTHER_USER_ID,
+    EMPTY_USER_ID,
+    GUEST_USER_ID,
+    DEV_USER_ID,
+  ]);
   await closePgDatabase();
   _resetWorkerAppForTests();
 });
 
 beforeEach(async () => {
-  await purgeUserData([USER_ID, OTHER_USER_ID, EMPTY_USER_ID, DEV_USER_ID]);
+  await purgeUserData([
+    USER_ID,
+    OTHER_USER_ID,
+    EMPTY_USER_ID,
+    GUEST_USER_ID,
+    DEV_USER_ID,
+  ]);
   await deleteHomeNewsFixtureItems();
   vi.unstubAllEnvs();
   _resetWorkerAppForTests();
@@ -1677,5 +1705,53 @@ describe('Home write routes', () => {
       ok: false,
       error: { code: 'invalid_recommendation_id' },
     });
+  });
+
+  it('returns 403 for guest lifecycle writes instead of RLS-shaped 404s', async () => {
+    const { workspaceId, talkId } = await createWorkspaceFixture();
+    await addGuestToWorkspace(workspaceId);
+    const itemId = await seedInboxItem({
+      workspaceId,
+      talkId,
+      type: 'agent_replied',
+      title: 'Guest-visible item',
+      severity: 'action',
+    });
+    const recommendationId = await seedRecommendation({
+      workspaceId,
+      talkId,
+      kind: 'unresolved',
+      title: 'Guest-visible recommendation',
+      priority: 'decide',
+      score: 90,
+    });
+    const until = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+
+    const dismissInbox = await dismissHomeInboxRoute({
+      auth: auth(GUEST_USER_ID),
+      workspaceId,
+      itemId,
+    });
+    const snoozeInbox = await snoozeHomeInboxRoute({
+      auth: auth(GUEST_USER_ID),
+      workspaceId,
+      itemId,
+      until,
+    });
+    const dismissRecommendation = await dismissHomeRecommendationRoute({
+      auth: auth(GUEST_USER_ID),
+      workspaceId,
+      recommendationId,
+    });
+
+    for (const result of [dismissInbox, snoozeInbox, dismissRecommendation]) {
+      expect(result.statusCode).toBe(403);
+      expect(result.body).toMatchObject({
+        ok: false,
+        error: { code: 'workspace_writer_required' },
+      });
+    }
+    expect(await inboxIds(workspaceId)).toContain(itemId);
+    expect(await recommendationIds(workspaceId)).toContain(recommendationId);
   });
 });
