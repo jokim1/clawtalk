@@ -46,6 +46,8 @@ import { SettingsPage } from './pages/SettingsPage';
 import { HomePage } from './pages/HomePage';
 import { ArchivePage } from './pages/ArchivePage';
 import { AgentProfilePage } from './pages/AgentProfilePage';
+import { DocumentsPage } from './pages/DocumentsPage';
+import { DocumentDetailPage } from './pages/DocumentDetailPage';
 
 type AuthState =
   | { status: 'loading' }
@@ -701,6 +703,13 @@ export function App() {
         run: () => navigate('/app/talks'),
       },
       {
+        id: 'nav-documents',
+        label: 'Documents',
+        hint: 'Go to',
+        keywords: 'docs editor drafts notes',
+        run: () => navigate('/app/documents'),
+      },
+      {
         id: 'nav-archive',
         label: 'Archive',
         hint: 'Go to',
@@ -1034,6 +1043,11 @@ export function App() {
             <Route
               path="/app/archive"
               element={<ArchivePage onRestored={() => void refreshSidebar()} />}
+            />
+            <Route path="/app/documents" element={<DocumentsPage />} />
+            <Route
+              path="/app/documents/:documentId"
+              element={<DocumentDetailPage />}
             />
             <Route
               path="/app/talks"
