@@ -186,7 +186,7 @@ These defaults are chosen to reduce Joseph interrupts. Override only when code r
 
 ### G2. Structural Cleanup
 
-- `TalkDetailPage.tsx`: extract the Talk tab shell and page-owned controller hooks until the file is near the 2.5k LOC target.
+- `TalkDetailPage.tsx`: shell/render surface and page-owned controller extraction is complete; keep future TalkDetail work scoped to behavior, native consumers, or product gaps rather than structural churn.
 - `SettingsPage.tsx`: Profile, Tools/Google/WebSearch, and provider OAuth extraction is complete; keep future Settings work scoped to product gaps, not structural cleanup.
 - `TalkLlmSettingsCard.tsx` orphan deletion is complete; keep running repo-wide importer greps for any future deletion candidates.
 - Gate: targeted component tests, webapp typecheck/test/build.
