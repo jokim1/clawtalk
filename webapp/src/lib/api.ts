@@ -2851,13 +2851,13 @@ export type ContentImageUploadResult = {
 };
 
 // Upload an inline content image to the CONTENT_IMAGES R2 bucket via
-// POST /api/v1/content-images. Backs the rich-text editor's
-// ContentImageUploaderPlugin: dataUrl for clipboard pastes, sourceUrl
-// for rehosting an external image the editor saw during a paste.
+// POST /api/v1/content-images. Retained for future native authoring and
+// legacy compatibility: dataUrl for clipboard pastes, sourceUrl for
+// rehosting an external image observed during a paste.
 //
 // The optional AbortSignal is forwarded straight to fetch, so the
-// caller can cancel an in-flight upload (plugin destroy / route
-// navigation) and the request will throw an AbortError.
+// caller can cancel an in-flight upload and the request will throw an
+// AbortError.
 export async function uploadContentImage(
   payload: ContentImageUploadPayload,
   options?: { signal?: AbortSignal },

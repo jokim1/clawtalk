@@ -55,51 +55,6 @@ vi.mock('../lib/talkStream', () => ({
   openTalkStream: vi.fn(),
 }));
 
-// CodeMirror's contentEditable can't drive in jsdom — swap it for a
-// textarea so the lazy-loaded HtmlSourceEditor renders synchronously
-// in tests and we can drive its onChange via fireEvent.change.
-vi.mock('@uiw/react-codemirror', async () => {
-  const { forwardRef } = await import('react');
-  const FakeCodeMirror = forwardRef<
-    HTMLTextAreaElement,
-    {
-      value?: string;
-      onChange?: (next: string) => void;
-      placeholder?: string;
-      editable?: boolean;
-      readOnly?: boolean;
-    }
-  >(function FakeCodeMirror(props, ref) {
-    return (
-      <textarea
-        ref={ref}
-        data-testid="cm-textarea"
-        value={props.value ?? ''}
-        placeholder={props.placeholder}
-        readOnly={props.readOnly}
-        disabled={props.editable === false}
-        onChange={(e) => props.onChange?.(e.target.value)}
-      />
-    );
-  });
-  return {
-    default: FakeCodeMirror,
-    EditorView: {
-      lineWrapping: { extension: 'mock-lineWrapping' },
-    },
-  };
-});
-
-vi.mock('@codemirror/lang-html', () => ({
-  html: () => ({ extension: 'mock-lang-html' }),
-}));
-
-vi.mock('@codemirror/view', () => ({
-  EditorView: {
-    lineWrapping: { extension: 'mock-lineWrapping' },
-  },
-}));
-
 type StreamCallbacks = Parameters<typeof openTalkStream>[0];
 type SavedTalkAgentRequest = {
   agents: TalkAgent[];
@@ -179,10 +134,8 @@ describe('TalkDetailPage', () => {
   let streamInput: StreamCallbacks | null = null;
 
   beforeEach(() => {
-    // Isolation: doc-pane mode/hidden, split ratio, and last-thread are
-    // persisted to localStorage keyed by talk; without this, state leaks
-    // between tests (e.g. a prior test's source-mode doc pane hides the
-    // SafeHtml body the HTML-doc test expects).
+    // Isolation: doc-pane hidden state and last-thread are persisted to
+    // localStorage keyed by talk; without this, state leaks between tests.
     window.localStorage.clear();
     document.cookie = 'cr_csrf_token=test-csrf-token';
     streamInput = null;
