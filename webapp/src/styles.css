@@ -686,6 +686,7 @@ a {
   min-height: 0;
   flex: 1;
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   align-content: start;
   overflow: auto;
 }

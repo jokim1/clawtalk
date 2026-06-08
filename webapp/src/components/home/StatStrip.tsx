@@ -12,11 +12,11 @@ export function StatStrip({
 }: {
   stats: HomeSummaryPayload['stats'];
 }): JSX.Element {
-  const cells: Array<{ label: string; value: string }> = [
-    { label: 'Talks', value: formatStatValue(stats.talks) },
-    { label: 'Prompts', value: formatStatValue(stats.prompts) },
-    { label: 'Tokens', value: formatStatValue(stats.tokens) },
-    { label: 'Words', value: formatStatValue(stats.words) },
+  const cells: Array<{ label: string; value: string; sub: string }> = [
+    { label: 'Talks', value: formatStatValue(stats.talks), sub: 'active' },
+    { label: 'Prompts', value: formatStatValue(stats.prompts), sub: 'today' },
+    { label: 'Tokens', value: formatStatValue(stats.tokens), sub: 'today' },
+    { label: 'Words', value: formatStatValue(stats.words), sub: 'today' },
   ];
   return (
     <div
@@ -33,8 +33,8 @@ export function StatStrip({
             display: 'flex',
             flexDirection: 'column',
             gap: 2,
-            padding: 14,
-            borderRadius: 14,
+            padding: 16,
+            borderRadius: 16,
             background: 'var(--salon-card, #ffffff)',
             border: '1px solid var(--salon-line, #e6e0d1)',
           }}
@@ -53,13 +53,22 @@ export function StatStrip({
           <span
             style={{
               fontFamily: salonFont.serif,
-              fontSize: 24,
+              fontSize: 34,
               lineHeight: 1,
               color: salon.ink,
             }}
           >
             {cell.value}
           </span>
+          <span
+            aria-hidden="true"
+            style={{
+              height: 1,
+              margin: '12px 0 8px',
+              background: 'var(--salon-line, #e6e0d1)',
+            }}
+          />
+          <span style={{ fontSize: 11.5, color: salon.ink2 }}>{cell.sub}</span>
         </div>
       ))}
     </div>
