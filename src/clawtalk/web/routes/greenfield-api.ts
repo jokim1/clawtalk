@@ -52,24 +52,15 @@ import {
   runGreenfieldTalkJobNowRoute,
 } from './greenfield-jobs.js';
 import {
-  acceptGreenfieldContentEditRoute,
-  acceptGreenfieldContentEditRunRoute,
-  createGreenfieldTalkContentRoute,
-  createGreenfieldThreadContentRoute,
   createGreenfieldThreadRoute,
   deleteGreenfieldMessagesRoute,
   deleteGreenfieldThreadRoute,
   getGreenfieldRunContextRoute,
   getGreenfieldSnapshotRoute,
-  getGreenfieldTalkContentRoute,
-  getGreenfieldThreadContentRoute,
   listGreenfieldMessagesRoute,
   listGreenfieldRunsRoute,
   listGreenfieldThreadsRoute,
-  patchGreenfieldContentRoute,
   patchGreenfieldThreadRoute,
-  rejectGreenfieldContentEditRoute,
-  rejectGreenfieldContentEditRunRoute,
   searchGreenfieldMessagesRoute,
 } from './greenfield-detail.js';
 import {
@@ -784,164 +775,6 @@ export function mountGreenfieldApiRoutes(app: GreenfieldApp): void {
       auth,
       workspaceId: requestedWorkspaceId(c),
       talkId: talkId.value,
-    });
-    return jsonResponse(result);
-  });
-
-  // ── Greenfield document compatibility routes ─────────────────
-  app.get('/api/v1/talks/:talkId/content', async (c) => {
-    const auth = c.get('auth');
-    const rl = checkRateLimit({ principalId: auth.userId, bucket: 'read' });
-    if (!rl.allowed) return rateLimitedResponse(c, rl);
-    const result = await getGreenfieldTalkContentRoute({
-      auth,
-      workspaceId: requestedWorkspaceId(c),
-      talkId: c.req.param('talkId'),
-    });
-    return jsonResponse(result);
-  });
-
-  app.post('/api/v1/talks/:talkId/content', async (c) => {
-    const auth = c.get('auth');
-    const rl = checkRateLimit({ principalId: auth.userId, bucket: 'write' });
-    if (!rl.allowed) return rateLimitedResponse(c, rl);
-    const csrfFail = checkCsrf(c, auth);
-    if (csrfFail) return csrfFail;
-    const payload = await readJsonBody<{ title?: unknown; format?: unknown }>(
-      c,
-    );
-    if (!payload.ok) return invalidJsonResponse(c, payload.error);
-    const result = await createGreenfieldTalkContentRoute({
-      auth,
-      workspaceId: requestedWorkspaceId(c),
-      talkId: c.req.param('talkId'),
-      title: payload.data.title,
-      format: payload.data.format,
-    });
-    return jsonResponse(result);
-  });
-
-  app.get('/api/v1/threads/:threadId/content', async (c) => {
-    const auth = c.get('auth');
-    const rl = checkRateLimit({ principalId: auth.userId, bucket: 'read' });
-    if (!rl.allowed) return rateLimitedResponse(c, rl);
-    const result = await getGreenfieldThreadContentRoute({
-      auth,
-      workspaceId: requestedWorkspaceId(c),
-      threadId: c.req.param('threadId'),
-    });
-    return jsonResponse(result);
-  });
-
-  app.post('/api/v1/threads/:threadId/content', async (c) => {
-    const auth = c.get('auth');
-    const rl = checkRateLimit({ principalId: auth.userId, bucket: 'write' });
-    if (!rl.allowed) return rateLimitedResponse(c, rl);
-    const csrfFail = checkCsrf(c, auth);
-    if (csrfFail) return csrfFail;
-    const payload = await readJsonBody<{ title?: unknown; format?: unknown }>(
-      c,
-    );
-    if (!payload.ok) return invalidJsonResponse(c, payload.error);
-    const result = await createGreenfieldThreadContentRoute({
-      auth,
-      workspaceId: requestedWorkspaceId(c),
-      threadId: c.req.param('threadId'),
-      title: payload.data.title,
-      format: payload.data.format,
-    });
-    return jsonResponse(result);
-  });
-
-  app.patch('/api/v1/contents/:contentId', async (c) => {
-    const auth = c.get('auth');
-    const rl = checkRateLimit({ principalId: auth.userId, bucket: 'write' });
-    if (!rl.allowed) return rateLimitedResponse(c, rl);
-    const csrfFail = checkCsrf(c, auth);
-    if (csrfFail) return csrfFail;
-    const payload = await readJsonBody<{
-      expectedVersion?: unknown;
-      bodyMarkdown?: unknown;
-      bodyHtml?: unknown;
-      title?: unknown;
-      acceptPendingEditIds?: unknown;
-    }>(c);
-    if (!payload.ok) return invalidJsonResponse(c, payload.error);
-    const result = await patchGreenfieldContentRoute({
-      auth,
-      workspaceId: requestedWorkspaceId(c),
-      contentId: c.req.param('contentId'),
-      expectedVersion: payload.data.expectedVersion,
-      bodyMarkdown: payload.data.bodyMarkdown,
-      bodyHtml: payload.data.bodyHtml,
-      title: payload.data.title,
-      acceptPendingEditIds: payload.data.acceptPendingEditIds,
-    });
-    return jsonResponse(result);
-  });
-
-  app.post('/api/v1/contents/:contentId/edits/:editId/accept', async (c) => {
-    const auth = c.get('auth');
-    const rl = checkRateLimit({ principalId: auth.userId, bucket: 'write' });
-    if (!rl.allowed) return rateLimitedResponse(c, rl);
-    const csrfFail = checkCsrf(c, auth);
-    if (csrfFail) return csrfFail;
-    const payload = await readJsonBody<{ expectedContentVersion?: unknown }>(c);
-    if (!payload.ok) return invalidJsonResponse(c, payload.error);
-    const result = await acceptGreenfieldContentEditRoute({
-      auth,
-      workspaceId: requestedWorkspaceId(c),
-      contentId: c.req.param('contentId'),
-      editId: c.req.param('editId'),
-      expectedContentVersion: payload.data.expectedContentVersion,
-    });
-    return jsonResponse(result);
-  });
-
-  app.post('/api/v1/contents/:contentId/edits/:editId/reject', async (c) => {
-    const auth = c.get('auth');
-    const rl = checkRateLimit({ principalId: auth.userId, bucket: 'write' });
-    if (!rl.allowed) return rateLimitedResponse(c, rl);
-    const csrfFail = checkCsrf(c, auth);
-    if (csrfFail) return csrfFail;
-    const result = await rejectGreenfieldContentEditRoute({
-      auth,
-      workspaceId: requestedWorkspaceId(c),
-      contentId: c.req.param('contentId'),
-      editId: c.req.param('editId'),
-    });
-    return jsonResponse(result);
-  });
-
-  app.post('/api/v1/contents/:contentId/runs/:runId/accept', async (c) => {
-    const auth = c.get('auth');
-    const rl = checkRateLimit({ principalId: auth.userId, bucket: 'write' });
-    if (!rl.allowed) return rateLimitedResponse(c, rl);
-    const csrfFail = checkCsrf(c, auth);
-    if (csrfFail) return csrfFail;
-    const payload = await readJsonBody<{ expectedContentVersion?: unknown }>(c);
-    if (!payload.ok) return invalidJsonResponse(c, payload.error);
-    const result = await acceptGreenfieldContentEditRunRoute({
-      auth,
-      workspaceId: requestedWorkspaceId(c),
-      contentId: c.req.param('contentId'),
-      runId: c.req.param('runId'),
-      expectedContentVersion: payload.data.expectedContentVersion,
-    });
-    return jsonResponse(result);
-  });
-
-  app.post('/api/v1/contents/:contentId/runs/:runId/reject', async (c) => {
-    const auth = c.get('auth');
-    const rl = checkRateLimit({ principalId: auth.userId, bucket: 'write' });
-    if (!rl.allowed) return rateLimitedResponse(c, rl);
-    const csrfFail = checkCsrf(c, auth);
-    if (csrfFail) return csrfFail;
-    const result = await rejectGreenfieldContentEditRunRoute({
-      auth,
-      workspaceId: requestedWorkspaceId(c),
-      contentId: c.req.param('contentId'),
-      runId: c.req.param('runId'),
     });
     return jsonResponse(result);
   });
