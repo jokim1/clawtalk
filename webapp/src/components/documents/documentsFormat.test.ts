@@ -13,7 +13,6 @@ import {
   findBlockById,
   groupPendingEditsByRun,
   insertAnchorLabel,
-  pendingEditCountForBlock,
   previewEdit,
   tabTitleForEdit,
 } from './documentsFormat';
@@ -193,20 +192,6 @@ describe('insertAnchorLabel', () => {
     expect(
       insertAnchorLabel(doc(), edit({ op: 'insert', afterBlockId: 'ghost' })),
     ).toBe('Insert after a removed block');
-  });
-});
-
-describe('pendingEditCountForBlock', () => {
-  it('counts pending edits targeting a block', () => {
-    const d = doc({
-      pendingEdits: [
-        edit({ id: 'a', blockId: 'block-1' }),
-        edit({ id: 'b', blockId: 'block-1' }),
-        edit({ id: 'c', blockId: 'block-2' }),
-      ],
-    });
-    expect(pendingEditCountForBlock(d, 'block-1')).toBe(2);
-    expect(pendingEditCountForBlock(d, 'block-9')).toBe(0);
   });
 });
 

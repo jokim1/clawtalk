@@ -53,6 +53,12 @@ export const EDIT_OP_LABEL: Record<NativeDocumentEdit['op'], string> = {
   delete: 'Delete',
 };
 
+export const EDIT_SOURCE_LABEL: Record<NativeDocumentEdit['source'], string> = {
+  agent: 'Agent',
+  forge: 'Forge',
+  job: 'Job',
+};
+
 /** The block an edit targets (replace/delete), or null for an insert. */
 export function findBlockById(
   doc: NativeDocument,
@@ -161,12 +167,4 @@ export function insertAnchorLabel(
   const text = anchor.text.trim();
   const truncated = text.length > 60 ? `${text.slice(0, 60)}…` : text;
   return `Insert after: ${truncated || BLOCK_KIND_LABEL[anchor.kind]}`;
-}
-
-/** Count of pending edits whose target is the given block. */
-export function pendingEditCountForBlock(
-  doc: NativeDocument,
-  blockId: string,
-): number {
-  return doc.pendingEdits.filter((edit) => edit.blockId === blockId).length;
 }

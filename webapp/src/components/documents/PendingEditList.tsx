@@ -10,7 +10,7 @@
 import { Button, Chip, salon, salonFont } from '../../salon';
 import type { NativeDocument, NativeDocumentEdit } from '../../lib/api';
 import {
-  EDIT_OP_LABEL,
+  EDIT_SOURCE_LABEL,
   groupPendingEditsByRun,
   insertAnchorLabel,
   previewEdit,
@@ -227,7 +227,7 @@ export function PendingEditList({
               <span style={{ fontSize: 13, fontWeight: 600, color: salon.ink }}>
                 {group.agentName}
               </span>
-              <Chip>{group.source}</Chip>
+              <Chip>{EDIT_SOURCE_LABEL[group.source]}</Chip>
               <span style={{ fontSize: 12, color: salon.ink2 }}>
                 {group.edits.length} change
                 {group.edits.length === 1 ? '' : 's'}
@@ -278,5 +278,3 @@ export function PendingEditList({
     </section>
   );
 }
-
-export { EDIT_OP_LABEL };
