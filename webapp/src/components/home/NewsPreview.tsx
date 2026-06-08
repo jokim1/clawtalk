@@ -168,9 +168,9 @@ export function NewsPreview({
 }): JSX.Element {
   const items = payload.items.slice(0, 6);
   return (
-    <section aria-label="News">
+    <section aria-label="News for your Talks">
       <SectionHeader
-        title="News"
+        title="News for your Talks"
         count={items.length ? `${items.length} matched` : undefined}
       />
       {items.length === 0 ? (

@@ -2,8 +2,9 @@
  * Home — the workspace attention router (docs/07-homepage-system-design.md).
  *
  * Built on the GET /api/v1/home/* read API plus the lifecycle write endpoints.
- * Renders the curator summary, stat strip, recommendations (hero + then-maybe),
- * and an inbox/news split. Inbox dismiss/snooze and recommendation dismiss are
+ * Renders the stat strip, a "Do this next" curator pick (hero), a "Then maybe"
+ * list, and full-width inbox + "News for your Talks" sections. Inbox
+ * dismiss/snooze and recommendation dismiss are
  * wired to the write API with page-owned optimistic state (entity-scoped revert
  * on failure; a 404 is treated as already-gone). News add-to-context and inbox
  * resolve/mark-read are still navigation/disabled pending their own surfaces.
@@ -534,48 +535,27 @@ function HomeContent({
   const recs = data.recommendations;
   const hero = recs?.hero ?? null;
   const thenMaybe = recs?.thenMaybe ?? [];
-  const hasRecs = Boolean(hero) || thenMaybe.length > 0;
 
   return (
     <>
-      {data.summary ? <CuratorCard curator={data.summary.curator} /> : null}
       {data.summary ? <StatStrip stats={data.summary.stats} /> : null}
 
-      <section aria-label="Recommendations">
+      {/* Do this next — the single curator pick (hero), per the design. When
+          there's no recommendation, the curator summary doubles as the idle
+          "start a Talk" prompt instead of a separate top card. */}
+      <section aria-label="Do this next">
         <SectionHeader
-          title="Recommendations"
-          count={
-            recs ? `${(hero ? 1 : 0) + thenMaybe.length} for you` : undefined
-          }
+          title="Do this next"
+          count={hero ? 'curator pick' : undefined}
         />
-        {hasRecs ? (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-            {hero ? (
-              <RecommendationCard
-                rec={hero}
-                variant="hero"
-                onDismiss={onDismissRecommendation}
-              />
-            ) : null}
-            {thenMaybe.length > 0 ? (
-              <div
-                style={{
-                  display: 'grid',
-                  gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))',
-                  gap: 12,
-                }}
-              >
-                {thenMaybe.map((rec) => (
-                  <RecommendationCard
-                    key={rec.id}
-                    rec={rec}
-                    variant="compact"
-                    onDismiss={onDismissRecommendation}
-                  />
-                ))}
-              </div>
-            ) : null}
-          </div>
+        {hero ? (
+          <RecommendationCard
+            rec={hero}
+            variant="hero"
+            onDismiss={onDismissRecommendation}
+          />
+        ) : data.summary ? (
+          <CuratorCard curator={data.summary.curator} />
         ) : (
           <HomeEmpty
             icon="sparkle"
@@ -585,21 +565,33 @@ function HomeContent({
         )}
       </section>
 
-      <div
-        style={{
-          display: 'grid',
-          gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))',
-          gap: 20,
-          alignItems: 'start',
-        }}
-      >
-        <InboxPreview
-          payload={data.inbox ?? EMPTY_INBOX}
-          onDismiss={onDismissInbox}
-          onSnooze={onSnoozeInbox}
-        />
-        <NewsPreview payload={data.news ?? EMPTY_NEWS} />
-      </div>
+      {/* Then maybe — the secondary recommendations, stacked full-width. */}
+      {thenMaybe.length > 0 ? (
+        <section aria-label="Then maybe">
+          <SectionHeader
+            title="Then maybe"
+            count={`${thenMaybe.length} more`}
+          />
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+            {thenMaybe.map((rec) => (
+              <RecommendationCard
+                key={rec.id}
+                rec={rec}
+                variant="compact"
+                onDismiss={onDismissRecommendation}
+              />
+            ))}
+          </div>
+        </section>
+      ) : null}
+
+      {/* Inbox + News stack full-width (design has no side-by-side split). */}
+      <InboxPreview
+        payload={data.inbox ?? EMPTY_INBOX}
+        onDismiss={onDismissInbox}
+        onSnooze={onSnoozeInbox}
+      />
+      <NewsPreview payload={data.news ?? EMPTY_NEWS} />
     </>
   );
 }
