@@ -168,6 +168,7 @@ describe('DocumentDetailPage', () => {
     renderDetail();
 
     expect(await screen.findByText('Pending edits')).toBeTruthy();
+    expect(screen.getByRole('button', { name: /Copy \/ Export/i })).toBeTruthy();
     expect(screen.getByText('Replace paragraph')).toBeTruthy();
     expect(screen.getByText('Proposed replacement.')).toBeTruthy();
     expect(screen.getByText('Strategist')).toBeTruthy();

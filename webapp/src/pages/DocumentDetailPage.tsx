@@ -12,6 +12,7 @@ import { useId, useRef } from 'react';
 import { Link, useParams } from 'react-router-dom';
 
 import { Button, salon, salonFont } from '../salon';
+import { CopyExportMenu } from '../components/CopyExportMenu';
 import { DocumentBlocks } from '../components/documents/DocumentBlocks';
 import { PendingEditList } from '../components/documents/PendingEditList';
 import {
@@ -19,6 +20,7 @@ import {
   formatDocDate,
 } from '../components/documents/documentsFormat';
 import { useNativeDocumentReview } from '../hooks/useNativeDocumentReview';
+import { nativeDocumentToExportSource } from '../lib/doc-export';
 
 export function DocumentDetailPage(): JSX.Element {
   const params = useParams<{ documentId: string }>();
@@ -179,24 +181,37 @@ export function DocumentDetailPage(): JSX.Element {
 
       {phase === 'ready' && doc ? (
         <>
-          <header style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-            <h1
-              style={{
-                margin: 0,
-                fontFamily: salonFont.serif,
-                fontSize: 26,
-                fontWeight: 500,
-                color: salon.ink,
-              }}
-            >
-              {doc.title || 'Untitled document'}
-            </h1>
-            <p style={{ margin: 0, fontSize: 12.5, color: salon.ink2 }}>
-              {documentSummaryMeta(doc)}
-              {doc.lastEditAt
-                ? ` · edited ${formatDocDate(doc.lastEditAt)}`
-                : ''}
-            </p>
+          <header
+            style={{
+              display: 'flex',
+              justifyContent: 'space-between',
+              alignItems: 'flex-start',
+              gap: 12,
+            }}
+          >
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+              <h1
+                style={{
+                  margin: 0,
+                  fontFamily: salonFont.serif,
+                  fontSize: 26,
+                  fontWeight: 500,
+                  color: salon.ink,
+                }}
+              >
+                {doc.title || 'Untitled document'}
+              </h1>
+              <p style={{ margin: 0, fontSize: 12.5, color: salon.ink2 }}>
+                {documentSummaryMeta(doc)}
+                {doc.lastEditAt
+                  ? ` · edited ${formatDocDate(doc.lastEditAt)}`
+                  : ''}
+              </p>
+            </div>
+            <CopyExportMenu
+              source={nativeDocumentToExportSource(doc)}
+              documentTitle={doc.title || 'Untitled document'}
+            />
           </header>
 
           {conflictNotice ? (

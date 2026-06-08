@@ -1,15 +1,7 @@
-// Conversion + clipboard + file-download helpers used by the
-// Copy / Export menu. The doc may be authored as markdown or HTML;
-// users want to copy/export it AS any of the three formats
-// (HTML / Markdown / Plain text).
-//
-// Conversion matrix (see plan):
-//   md  → html: marked.parse()
-//   md  → md  : raw body_markdown
-//   md  → txt : strip-md
-//   html→ html: raw body_html (already server-sanitized)
-//   html→ md  : turndown(body_html)
-//   html→ txt : strip-tags
+// Conversion + clipboard + file-download helpers used by the Copy / Export
+// menu. The canonical source is native document blocks; the old Talk
+// split-editor still passes an explicitly named legacy projection until that
+// editor migrates off the content facade.
 //
 // Clipboard writes for "Copy as HTML" set BOTH text/html and
 // text/plain MIMEs so rich-text destinations (Google Docs, Substack)
@@ -19,12 +11,64 @@
 import { marked } from 'marked';
 import TurndownService from 'turndown';
 
+import type { NativeDocument, NativeDocumentBlock } from './api';
+
 export type DocFormat = 'markdown' | 'html';
 
-export interface DocSource {
+export type NativeDocumentExportBlock = Pick<
+  NativeDocumentBlock,
+  'kind' | 'text'
+>;
+
+export interface NativeDocumentExportTab {
+  title: string;
+  blocks: NativeDocumentExportBlock[];
+}
+
+export interface NativeDocumentExportSource {
+  kind: 'native-document-blocks';
   format: DocFormat;
-  bodyMarkdown: string | null;
-  bodyHtml: string | null;
+  tabs: NativeDocumentExportTab[];
+}
+
+export interface LegacyContentExportProjection {
+  kind: 'legacy-content-projection';
+  format: DocFormat;
+  markdown: string | null;
+  html: string | null;
+}
+
+export type DocExportSource =
+  | NativeDocumentExportSource
+  | LegacyContentExportProjection;
+
+export function nativeDocumentToExportSource(
+  document: Pick<NativeDocument, 'format' | 'tabs'>,
+): NativeDocumentExportSource {
+  return {
+    kind: 'native-document-blocks',
+    format: document.format,
+    tabs: document.tabs.map((tab) => ({
+      title: tab.title,
+      blocks: tab.blocks.map((block) => ({
+        kind: block.kind,
+        text: block.text,
+      })),
+    })),
+  };
+}
+
+export function legacyContentExportProjection(input: {
+  format: DocFormat;
+  markdown: string | null;
+  html: string | null;
+}): LegacyContentExportProjection {
+  return {
+    kind: 'legacy-content-projection',
+    format: input.format,
+    markdown: input.markdown,
+    html: input.html,
+  };
 }
 
 // Configure turndown once. ATX headings (`# h1`) match the rest of
@@ -41,25 +85,164 @@ const turndown = new TurndownService({
 // surface most users (and clawtalk's parser) treat as default.
 marked.setOptions({ gfm: true, breaks: false });
 
-export function renderHtml(src: DocSource): string {
-  if (src.format === 'html') return src.bodyHtml ?? '';
-  const md = src.bodyMarkdown ?? '';
+export function renderHtml(src: DocExportSource): string {
+  if (src.kind === 'native-document-blocks') return renderNativeHtml(src);
+  if (src.format === 'html') return src.html ?? '';
+  const md = src.markdown ?? '';
   if (md.trim() === '') return '';
   // marked.parse is synchronous when no async extensions are
   // registered; cast to string for the caller.
   return marked.parse(md, { async: false }) as string;
 }
 
-export function renderMarkdown(src: DocSource): string {
-  if (src.format === 'markdown') return src.bodyMarkdown ?? '';
-  const html = src.bodyHtml ?? '';
+export function renderMarkdown(src: DocExportSource): string {
+  if (src.kind === 'native-document-blocks') return renderNativeMarkdown(src);
+  if (src.format === 'markdown') return src.markdown ?? '';
+  const html = src.html ?? '';
   if (html.trim() === '') return '';
   return turndown.turndown(html);
 }
 
-export function renderPlainText(src: DocSource): string {
-  if (src.format === 'markdown') return stripMarkdown(src.bodyMarkdown ?? '');
-  return stripHtmlTags(src.bodyHtml ?? '');
+export function renderPlainText(src: DocExportSource): string {
+  if (src.kind === 'native-document-blocks') {
+    return renderNativePlainText(src);
+  }
+  if (src.format === 'markdown') return stripMarkdown(src.markdown ?? '');
+  return stripHtmlTags(src.html ?? '');
+}
+
+function renderNativeMarkdown(src: NativeDocumentExportSource): string {
+  const includeTabHeadings = src.tabs.length > 1;
+  return src.tabs
+    .map((tab) => {
+      const parts = tab.blocks
+        .map(nativeBlockToMarkdown)
+        .filter((part) => part.trim() !== '');
+      if (includeTabHeadings) {
+        parts.unshift(
+          `## ${escapeMarkdownText(tab.title.trim() || 'Untitled tab')}`,
+        );
+      }
+      return parts.join('\n\n');
+    })
+    .filter((section) => section.trim() !== '')
+    .join('\n\n');
+}
+
+function nativeBlockToMarkdown(block: NativeDocumentExportBlock): string {
+  switch (block.kind) {
+    case 'h1':
+      return `# ${escapeMarkdownText(block.text)}`;
+    case 'h2':
+      return `## ${escapeMarkdownText(block.text)}`;
+    case 'li':
+      return `- ${escapeMarkdownText(block.text)}`;
+    case 'code':
+      return fencedCodeBlock(block.text);
+    case 'meta':
+    case 'p':
+      return escapeMarkdownText(block.text);
+  }
+  const exhaustive: never = block.kind;
+  return exhaustive;
+}
+
+function fencedCodeBlock(text: string): string {
+  const longestBacktickRun = Math.max(
+    0,
+    ...Array.from(text.matchAll(/`+/g), (match) => match[0].length),
+  );
+  const fence = '`'.repeat(Math.max(3, longestBacktickRun + 1));
+  return `${fence}\n${text}\n${fence}`;
+}
+
+function escapeMarkdownText(input: string): string {
+  return input
+    .replace(/\\/g, '\\\\')
+    .replace(/([`*_[\]()])/g, '\\$1')
+    .replace(/^(#{1,6})(\s+)/gm, '\\$1$2')
+    .replace(/^([>+-])(\s+)/gm, '\\$1$2')
+    .replace(/^(\d+)([.)]\s+)/gm, '$1\\$2');
+}
+
+function renderNativePlainText(src: NativeDocumentExportSource): string {
+  const includeTabHeadings = src.tabs.length > 1;
+  return src.tabs
+    .map((tab) => {
+      const parts = tab.blocks
+        .map((block) => block.text.trim())
+        .filter((text) => text !== '');
+      if (includeTabHeadings) {
+        parts.unshift(tab.title.trim() || 'Untitled tab');
+      }
+      return parts.join('\n\n');
+    })
+    .filter((section) => section.trim() !== '')
+    .join('\n\n');
+}
+
+function renderNativeHtml(src: NativeDocumentExportSource): string {
+  const includeTabHeadings = src.tabs.length > 1;
+  return src.tabs
+    .map((tab) => {
+      const parts: string[] = [];
+      if (includeTabHeadings) {
+        parts.push(`<h2>${escapeHtml(tab.title.trim() || 'Untitled tab')}</h2>`);
+      }
+      parts.push(nativeBlocksToHtml(tab.blocks));
+      return parts.filter(Boolean).join('\n');
+    })
+    .filter((section) => section.trim() !== '')
+    .join('\n\n');
+}
+
+function nativeBlocksToHtml(blocks: NativeDocumentExportBlock[]): string {
+  const parts: string[] = [];
+  let listItems: string[] = [];
+  const flushList = () => {
+    if (listItems.length === 0) return;
+    parts.push(`<ul>\n${listItems.join('\n')}\n</ul>`);
+    listItems = [];
+  };
+  for (const block of blocks) {
+    if (block.kind === 'li') {
+      listItems.push(`<li>${escapeHtml(block.text)}</li>`);
+      continue;
+    }
+    flushList();
+    parts.push(nativeBlockToHtml(block));
+  }
+  flushList();
+  return parts.filter((part) => part.trim() !== '').join('\n');
+}
+
+function nativeBlockToHtml(block: NativeDocumentExportBlock): string {
+  const text = escapeHtml(block.text);
+  switch (block.kind) {
+    case 'h1':
+      return `<h1>${text}</h1>`;
+    case 'h2':
+      return `<h2>${text}</h2>`;
+    case 'li':
+      return `<li>${text}</li>`;
+    case 'code':
+      return `<pre><code>${text}</code></pre>`;
+    case 'meta':
+      return `<p data-block-kind="meta"><small>${text}</small></p>`;
+    case 'p':
+      return `<p>${text}</p>`;
+  }
+  const exhaustive: never = block.kind;
+  return exhaustive;
+}
+
+function escapeHtml(input: string): string {
+  return input
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
 }
 
 // Tiny markdown→plain pass: strip leading bullets/heading marks,
@@ -127,7 +310,7 @@ export function stripHtmlTags(input: string): string {
 
 // ---- Clipboard ---------------------------------------------------
 
-export async function clipboardCopyHtml(src: DocSource): Promise<void> {
+export async function clipboardCopyHtml(src: DocExportSource): Promise<void> {
   const html = renderHtml(src);
   const plain = renderPlainText(src);
   // Older browsers / test envs may not have ClipboardItem. Fall back
@@ -145,11 +328,13 @@ export async function clipboardCopyHtml(src: DocSource): Promise<void> {
   await navigator.clipboard.writeText(plain);
 }
 
-export async function clipboardCopyMarkdown(src: DocSource): Promise<void> {
+export async function clipboardCopyMarkdown(
+  src: DocExportSource,
+): Promise<void> {
   await navigator.clipboard.writeText(renderMarkdown(src));
 }
 
-export async function clipboardCopyPlain(src: DocSource): Promise<void> {
+export async function clipboardCopyPlain(src: DocExportSource): Promise<void> {
   await navigator.clipboard.writeText(renderPlainText(src));
 }
 
@@ -192,19 +377,25 @@ function triggerDownload(blob: Blob, filename: string): void {
   }
 }
 
-export function downloadAsHtml(src: DocSource, opts: DownloadOpts): void {
+export function downloadAsHtml(src: DocExportSource, opts: DownloadOpts): void {
   const body = renderHtml(src);
   const blob = new Blob([body], { type: 'text/html;charset=utf-8' });
   triggerDownload(blob, `${sanitizeFilename(opts.filenameBase)}.html`);
 }
 
-export function downloadAsMarkdown(src: DocSource, opts: DownloadOpts): void {
+export function downloadAsMarkdown(
+  src: DocExportSource,
+  opts: DownloadOpts,
+): void {
   const body = renderMarkdown(src);
   const blob = new Blob([body], { type: 'text/markdown;charset=utf-8' });
   triggerDownload(blob, `${sanitizeFilename(opts.filenameBase)}.md`);
 }
 
-export function downloadAsPlain(src: DocSource, opts: DownloadOpts): void {
+export function downloadAsPlain(
+  src: DocExportSource,
+  opts: DownloadOpts,
+): void {
   const body = renderPlainText(src);
   const blob = new Blob([body], { type: 'text/plain;charset=utf-8' });
   triggerDownload(blob, `${sanitizeFilename(opts.filenameBase)}.txt`);
@@ -212,9 +403,14 @@ export function downloadAsPlain(src: DocSource, opts: DownloadOpts): void {
 
 // True when both bodies are empty/whitespace; the menu uses this to
 // disable copy/export.
-export function isDocEmpty(src: DocSource): boolean {
-  if (src.format === 'markdown') {
-    return (src.bodyMarkdown ?? '').trim() === '';
+export function isDocEmpty(src: DocExportSource): boolean {
+  if (src.kind === 'native-document-blocks') {
+    return src.tabs.every((tab) =>
+      tab.blocks.every((block) => block.text.trim() === ''),
+    );
   }
-  return (src.bodyHtml ?? '').trim() === '';
+  if (src.format === 'markdown') {
+    return (src.markdown ?? '').trim() === '';
+  }
+  return (src.html ?? '').trim() === '';
 }

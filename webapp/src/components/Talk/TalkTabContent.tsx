@@ -25,6 +25,7 @@ import { ThreadRowTitleEditor } from '../ThreadRowTitleEditor';
 import { ThreadStartButton } from '../ThreadStartButton';
 import { ToolChipsBar } from '../ToolChipsBar';
 import type { RichTextEditorSaveStatus } from '../rich-text/RichTextEditor';
+import { legacyContentExportProjection } from '../../lib/doc-export';
 import type {
   Content,
   ContentEditSummary,
@@ -745,9 +746,11 @@ export function TalkTabContent({
             }
             copyExportSlot={
               <CopyExportMenu
-                format={talkContent.contentFormat}
-                bodyMarkdown={talkContent.bodyMarkdown}
-                bodyHtml={talkContent.bodyHtml}
+                source={legacyContentExportProjection({
+                  format: talkContent.contentFormat,
+                  markdown: talkContent.bodyMarkdown,
+                  html: talkContent.bodyHtml,
+                })}
                 documentTitle={talkContent.title}
               />
             }
