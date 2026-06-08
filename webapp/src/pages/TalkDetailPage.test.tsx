@@ -1668,7 +1668,6 @@ describe('TalkDetailPage', () => {
     await user.click(sendButton);
     await waitFor(() => expect(sendBodies).toHaveLength(1));
     expect(sendBodies[0]).toEqual({
-      threadId: DEFAULT_THREAD_ID,
       content: 'Which team has the edge?',
       targetAgentIds: ['agent-claude', 'agent-openai'],
       attachmentIds: [],
@@ -3411,7 +3410,7 @@ describe('TalkDetailPage', () => {
     );
   });
 
-  it('resolves to the localStorage-saved thread when the URL has no ?thread= param', async () => {
+  it('ignores retired localStorage thread selection when routing a Talk', async () => {
     window.localStorage.setItem('clawtalk.lastThread:talk-1', 'thread-saved');
     installTalkDetailFetch({
       threads: [
@@ -3430,21 +3429,19 @@ describe('TalkDetailPage', () => {
     });
     renderDetailPage('/app/talks/talk-1');
 
-    // Even though the default thread is most-recent-by-activity, the
-    // routing effect prefers the localStorage-saved thread.
-    const savedButton = await screen.findByRole('button', {
-      name: /saved thread/i,
-    });
-    await waitFor(() =>
-      expect(savedButton.className).toContain('talk-thread-item-active'),
-    );
-    const defaultButton = screen.getByRole('button', {
+    // Thread selection is now snapshot-owned and Talk-level; a retired
+    // localStorage value cannot override the first snapshot conversation.
+    const defaultButton = await screen.findByRole('button', {
       name: /default thread/i,
     });
-    expect(defaultButton.className).not.toContain('talk-thread-item-active');
+    await waitFor(() =>
+      expect(defaultButton.className).toContain('talk-thread-item-active'),
+    );
+    const savedButton = screen.getByRole('button', { name: /saved thread/i });
+    expect(savedButton.className).not.toContain('talk-thread-item-active');
   });
 
-  it('persists the resolved thread for the current talk on initial render', async () => {
+  it('ignores retired thread query params on initial render', async () => {
     installTalkDetailFetch({
       threads: [
         buildThread({
@@ -3462,22 +3459,20 @@ describe('TalkDetailPage', () => {
     });
     renderDetailPage('/app/talks/talk-1/talk?thread=thread-explicit');
 
-    // Wait until the URL-resolved thread is the active one.
-    const explicitButton = await screen.findByRole('button', {
-      name: /explicit thread/i,
+    const defaultButton = await screen.findByRole('button', {
+      name: /default thread/i,
     });
     await waitFor(() =>
-      expect(explicitButton.className).toContain('talk-thread-item-active'),
+      expect(defaultButton.className).toContain('talk-thread-item-active'),
     );
-
-    // The routing-resolution effect must have keyed the save under
-    // talk-1 — the current talk — never under some other talkId.
-    expect(window.localStorage.getItem('clawtalk.lastThread:talk-1')).toBe(
-      'thread-explicit',
-    );
+    const explicitButton = screen.getByRole('button', {
+      name: /explicit thread/i,
+    });
+    expect(explicitButton.className).not.toContain('talk-thread-item-active');
+    expect(window.localStorage.getItem('clawtalk.lastThread:talk-1')).toBeNull();
   });
 
-  it('falls back to threads[0] when the localStorage-saved thread no longer exists', async () => {
+  it('ignores localStorage-saved thread ids and selects the first snapshot thread', async () => {
     window.localStorage.setItem('clawtalk.lastThread:talk-1', 'thread-deleted');
     installTalkDetailFetch({
       threads: [
@@ -3496,74 +3491,12 @@ describe('TalkDetailPage', () => {
     });
     renderDetailPage('/app/talks/talk-1');
 
-    // Saved thread is gone — falls through to the most-recent fallback.
+    // Saved thread ids are no longer part of Talk routing.
     const defaultButton = await screen.findByRole('button', {
       name: /default thread/i,
     });
     await waitFor(() =>
       expect(defaultButton.className).toContain('talk-thread-item-active'),
-    );
-  });
-
-  it('clears the doc pane when switching from a thread that has a doc to a sibling that does not', async () => {
-    const user = userEvent.setup();
-    const NO_DOC_THREAD_ID = 'thread-no-doc';
-    installTalkDetailFetch({
-      threads: [
-        buildThread({
-          id: DEFAULT_THREAD_ID,
-          title: 'Default thread',
-          isDefault: true,
-          lastMessageAt: '2026-03-06T00:00:00.000Z',
-        }),
-        buildThread({
-          id: NO_DOC_THREAD_ID,
-          title: 'Sibling thread',
-          lastMessageAt: '2026-03-06T01:00:00.000Z',
-        }),
-      ],
-      documentByThreadId: {
-        [DEFAULT_THREAD_ID]: buildSnapshotDocument({
-          id: 'content-md',
-          threadId: DEFAULT_THREAD_ID,
-          title: 'Default doc',
-          format: 'markdown',
-          nativeBlockText: '# Default doc body',
-        }),
-      },
-    });
-    renderDetailPage(
-      `/app/talks/talk-1/talk?thread=${DEFAULT_THREAD_ID}&doc=1`,
-      {
-        sidebarContents: [
-          {
-            id: 'content-md',
-            talkId: 'talk-1',
-            threadId: DEFAULT_THREAD_ID,
-            title: 'Default doc',
-            updatedAt: '2026-03-06T00:00:00.000Z',
-          },
-        ],
-      },
-    );
-
-    // Doc loads on the default thread, and the native block body renders
-    // through the page -> snapshot.primaryDocument.id -> getDocument route, proving
-    // the in-Talk pane reads native blocks (not the flat content facade).
-    const doc = await screen.findByLabelText('Talk document');
-    expect(doc).toBeInTheDocument();
-    expect(await within(doc).findByText('# Default doc body')).toBeInTheDocument();
-
-    // Click the sibling thread (no doc).
-    const siblingButton = await screen.findByRole('button', {
-      name: /sibling thread/i,
-    });
-    await user.click(siblingButton);
-
-    // The doc pane should unmount because the new thread has no doc row
-    // in the sidebar.
-    await waitFor(() =>
-      expect(screen.queryByLabelText('Talk document')).not.toBeInTheDocument(),
     );
   });
 
@@ -5031,20 +4964,20 @@ function installTalkDetailFetch(input?: {
       ) {
         const body = JSON.parse(String(init?.body || '{}')) as {
           messageIds?: string[];
-          threadId?: string | null;
         };
         const deletedMessageIds = Array.isArray(body.messageIds)
           ? body.messageIds
           : [];
+        const affectedThreadIds = new Set(
+          messages
+            .filter((message) => deletedMessageIds.includes(message.id))
+            .map((message) => message.threadId),
+        );
         messages = messages.filter(
-          (message) =>
-            !(
-              deletedMessageIds.includes(message.id) &&
-              message.threadId === body.threadId
-            ),
+          (message) => !deletedMessageIds.includes(message.id),
         );
         threads = threads.map((thread) => {
-          if (thread.id !== body.threadId) return thread;
+          if (!affectedThreadIds.has(thread.id)) return thread;
           const threadMessages = messages.filter(
             (message) => message.threadId === thread.id,
           );

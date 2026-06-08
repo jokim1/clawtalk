@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { buildThreadHref, getTabFromPath } from './useTalkDetailTabs';
+import { buildTalkDetailHref, getTabFromPath } from './useTalkDetailTabs';
 
 describe('getTabFromPath', () => {
   it('maps the documents path to the documents tab', () => {
@@ -17,15 +17,15 @@ describe('getTabFromPath', () => {
   });
 });
 
-describe('buildThreadHref', () => {
-  it('builds a thread-aware documents href', () => {
-    expect(buildThreadHref('t1', 'th1', 'documents')).toBe(
-      '/app/talks/t1/documents?thread=th1',
+describe('buildTalkDetailHref', () => {
+  it('builds a talk-level documents href', () => {
+    expect(buildTalkDetailHref('t1', 'documents')).toBe(
+      '/app/talks/t1/documents',
     );
   });
 
   it('round-trips back to the documents tab (ignoring the query string)', () => {
-    const href = buildThreadHref('t1', 'th1', 'documents');
+    const href = `${buildTalkDetailHref('t1', 'documents')}?doc=1`;
     const pathname = href.split('?')[0];
     expect(getTabFromPath(pathname, 't1')).toBe('documents');
   });

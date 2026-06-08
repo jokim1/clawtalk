@@ -317,7 +317,6 @@ describe('greenfield detail routes', () => {
       auth: auth(),
       workspaceId,
       talkId,
-      threadId: talkId,
     });
     expect(messages.body).toMatchObject({
       ok: true,
@@ -329,7 +328,6 @@ describe('greenfield detail routes', () => {
             id: seeded.agentMessageId,
             role: 'assistant',
             runId: seeded.runId,
-            threadId: talkId,
           },
         ],
       },
@@ -360,7 +358,6 @@ describe('greenfield detail routes', () => {
           {
             id: seeded.runId,
             status: 'completed',
-            threadId: talkId,
             targetAgentId: agentIds[0],
             providerId: expect.any(String),
           },
@@ -474,7 +471,6 @@ describe('greenfield detail routes', () => {
       auth: auth(),
       workspaceId,
       talkId,
-      threadId: talkId,
     });
     expect(snapshot.body).toMatchObject({
       ok: true,
@@ -519,7 +515,6 @@ describe('greenfield detail routes', () => {
       auth: auth(),
       workspaceId,
       talkId,
-      threadId: talkId,
     });
     if (!snapshot.body.ok) throw new Error('Expected snapshot to succeed');
     // High-water for this talk's topic (excludes the higher-id other-talk
@@ -550,7 +545,6 @@ describe('greenfield detail routes', () => {
     const snapshot = await getGreenfieldSnapshotRoute({
       auth: auth(),
       talkId,
-      threadId: talkId,
     });
     expect(snapshot.statusCode).toBe(200);
     expect(snapshot.body).toMatchObject({
@@ -574,7 +568,6 @@ describe('greenfield detail routes', () => {
         runs: [
           {
             id: seeded.runId,
-            threadId: talkId,
             providerId: expect.any(String),
           },
         ],
@@ -582,24 +575,12 @@ describe('greenfield detail routes', () => {
     });
   });
 
-  it('deletes selected messages and rejects non-default thread ids', async () => {
+  it('deletes selected messages from the Talk timeline', async () => {
     const { workspaceId, talkId, agentIds } = await createTalkFixture();
     const seeded = await seedMessages({
       workspaceId,
       talkId,
       agentId: agentIds[0]!,
-    });
-
-    const wrongThread = await listGreenfieldMessagesRoute({
-      auth: auth(),
-      workspaceId,
-      talkId,
-      threadId: '00000000-0000-4000-8000-000000000001',
-    });
-    expect(wrongThread.statusCode).toBe(404);
-    expect(wrongThread.body).toMatchObject({
-      ok: false,
-      error: { code: 'thread_not_found' },
     });
 
     const deleted = await deleteGreenfieldMessagesRoute({

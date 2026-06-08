@@ -31,7 +31,7 @@ import {
   setContentSplitRatio,
 } from '../lib/contentSplitRatio';
 import { snapshotQueryKey } from '../lib/useTalkSnapshot';
-import { buildThreadHref, type TalkDetailTabKey } from './useTalkDetailTabs';
+import { buildTalkDetailHref, type TalkDetailTabKey } from './useTalkDetailTabs';
 
 type UseTalkDocPaneControllerInput = {
   talkId: string;
@@ -144,9 +144,9 @@ export function useTalkDocPaneController({
           threadId: activeThreadId ?? document.primaryTalkId ?? talkId,
         });
 
-        const threadKey = snapshotQueryKey(userId, talkId, created.threadId);
-        await queryClient.cancelQueries({ queryKey: threadKey });
-        queryClient.setQueryData<TalkSnapshot>(threadKey, (old) =>
+        const talkKey = snapshotQueryKey(userId, talkId);
+        await queryClient.cancelQueries({ queryKey: talkKey });
+        queryClient.setQueryData<TalkSnapshot>(talkKey, (old) =>
           old ? { ...old, primaryDocument: created, pendingEdits: [] } : old,
         );
 
@@ -154,9 +154,7 @@ export function useTalkDocPaneController({
         setDocModalOpen(false);
         setDocModalTitle('');
         void onSidebarChanged();
-        navigate(
-          `${buildThreadHref(talkId, created.threadId, currentTab)}&doc=1`,
-        );
+        navigate(`${buildTalkDetailHref(talkId, currentTab)}?doc=1`);
       } catch (err) {
         if (err instanceof UnauthorizedError) {
           onUnauthorized();

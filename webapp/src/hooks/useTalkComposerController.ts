@@ -657,7 +657,6 @@ export function useTalkSendController({
         content: input.content,
         targetAgentIds: input.targetAgentIds,
         attachmentIds: input.attachmentIds,
-        threadId: activeThreadId,
       });
       // The user just submitted — show them where their message landed, even
       // if they were scrolled up reading earlier history. Mark them following
@@ -953,7 +952,7 @@ export function useTalkSendController({
     if (pageKind !== 'ready' || !pageTalk || !activeThreadId) return;
     dispatch({ type: 'CANCEL_STARTED' });
     try {
-      const result = await cancelTalkRuns(pageTalk.id, activeThreadId, {
+      const result = await cancelTalkRuns(pageTalk.id, {
         workspaceId: activeTalkWorkspaceId,
       });
       dispatch({

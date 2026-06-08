@@ -239,14 +239,12 @@ describe('greenfield chat routes', () => {
       talkId,
       content: 'What should we do this week?',
       targetAgentIds: agentIds,
-      threadId: talkId,
     });
 
     expect(result.statusCode).toBe(202);
     if (!result.body.ok) throw new Error('Expected chat enqueue to succeed');
     expect(result.body.data.message).toMatchObject({
       role: 'user',
-      threadId: talkId,
       content: 'What should we do this week?',
     });
     expect(result.body.data.runs).toHaveLength(2);
@@ -304,7 +302,6 @@ describe('greenfield chat routes', () => {
       talkId,
       content: 'Should not enqueue against a disabled model.',
       targetAgentIds: [agentIds[0]!],
-      threadId: talkId,
     });
 
     expect(result.statusCode).toBe(409);
@@ -346,7 +343,6 @@ describe('greenfield chat routes', () => {
       talkId,
       content: 'Should not enqueue against a disabled provider.',
       targetAgentIds: [agentIds[0]!],
-      threadId: talkId,
     });
 
     expect(result.statusCode).toBe(409);
@@ -384,7 +380,6 @@ describe('greenfield chat routes', () => {
       talkId,
       content: 'Target the still-enabled agent only.',
       targetAgentIds: [agentIds[1]!],
-      threadId: talkId,
     });
 
     expect(result.statusCode).toBe(202);
@@ -437,7 +432,6 @@ describe('greenfield chat routes', () => {
       const result = await enqueueGreenfieldChatRoute({
         auth: auth(),
         talkId,
-        threadId: talkId,
         ...testCase.body,
       });
 
@@ -466,7 +460,6 @@ describe('greenfield chat routes', () => {
       talkId,
       content: 'Send without an explicit workspace id.',
       targetAgentIds: agentIds,
-      threadId: talkId,
     });
 
     expect(result.statusCode).toBe(202);
@@ -480,7 +473,7 @@ describe('greenfield chat routes', () => {
     expect(cancelled.statusCode).toBe(200);
     expect(cancelled.body).toEqual({
       ok: true,
-      data: { talkId, threadId: null, cancelledRuns: 2 },
+      data: { talkId, cancelledRuns: 2 },
     });
   });
 
@@ -518,7 +511,6 @@ describe('greenfield chat routes', () => {
         talkId,
         content: 'Notify everyone watching this talk.',
         targetAgentIds: agentIds.slice(0, 1),
-        threadId: talkId,
       });
       expect(result.statusCode).toBe(202);
     });
@@ -622,7 +614,7 @@ describe('greenfield chat routes', () => {
     });
     expect(cancelled.body).toEqual({
       ok: true,
-      data: { talkId, threadId: null, cancelledRuns: 2 },
+      data: { talkId, cancelledRuns: 2 },
     });
 
     const retried = await enqueueGreenfieldChatRoute({

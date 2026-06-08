@@ -97,7 +97,6 @@ export function useTalkOrchestrationController({
           queryClient,
           userId,
           talkId,
-          threadId: activeThreadIdRef.current,
           patch: {
             orchestrationMode: updatedTalk.orchestrationMode,
             title: updatedTalk.title,

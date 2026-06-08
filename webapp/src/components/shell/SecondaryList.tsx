@@ -909,7 +909,7 @@ export function SecondaryList({
             {contents.map((doc) => (
               <NavLink
                 key={doc.id}
-                to={`/app/talks/${encodeURIComponent(doc.talkId)}?thread=${encodeURIComponent(doc.threadId)}&doc=1`}
+                to={`/app/talks/${encodeURIComponent(doc.talkId)}?doc=1`}
                 className={({ isActive }) =>
                   `clawtalk-sidebar-content-row${isActive ? ' active' : ''}`
                 }

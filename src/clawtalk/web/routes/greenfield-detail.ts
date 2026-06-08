@@ -141,16 +141,6 @@ function syntheticThreadId(talkId: string): string {
   return talkId;
 }
 
-function assertSyntheticThread(input: {
-  talkId: string;
-  threadId?: string | null;
-}): RouteResult<never> | null {
-  if (!input.threadId || input.threadId === syntheticThreadId(input.talkId)) {
-    return null;
-  }
-  return error(404, 'thread_not_found', 'Thread not found.');
-}
-
 function toSnapshotThreadApi(
   talk: GreenfieldTalkRecord,
   metrics: GreenfieldThreadMetrics,
@@ -537,7 +527,6 @@ export async function listGreenfieldMessagesRoute(input: {
   auth: AuthContext;
   workspaceId?: string | null;
   talkId: string;
-  threadId?: string | null;
   beforeCreatedAt?: string;
   limit?: number;
 }): Promise<
@@ -547,11 +536,6 @@ export async function listGreenfieldMessagesRoute(input: {
     page: { limit: number; count: number; beforeCreatedAt: string | null };
   }>
 > {
-  const threadError = assertSyntheticThread({
-    talkId: input.talkId,
-    threadId: input.threadId,
-  });
-  if (threadError) return threadError;
   return withResolvedWorkspace(
     input.auth,
     input.workspaceId,
@@ -767,7 +751,6 @@ export async function getGreenfieldSnapshotRoute(input: {
   auth: AuthContext;
   workspaceId?: string | null;
   talkId: string;
-  threadId?: string | null;
 }): Promise<
   RouteResult<{
     talk: ReturnType<typeof toSnapshotTalk>;
@@ -782,11 +765,6 @@ export async function getGreenfieldSnapshotRoute(input: {
     eventHighWater: number;
   }>
 > {
-  const threadError = assertSyntheticThread({
-    talkId: input.talkId,
-    threadId: input.threadId,
-  });
-  if (threadError) return threadError;
   return withResolvedWorkspace(
     input.auth,
     input.workspaceId,

@@ -575,12 +575,10 @@ export function mountGreenfieldApiRoutes(app: GreenfieldApp): void {
     if (!talkId.ok) return talkId.response;
     const limit = parsePositiveInt(c.req.query('limit'));
     const beforeCreatedAt = c.req.query('before') || undefined;
-    const threadId = (c.req.query('threadId') || '').trim() || undefined;
     const result = await listGreenfieldMessagesRoute({
       auth,
       workspaceId: requestedWorkspaceId(c),
       talkId: talkId.value,
-      threadId,
       limit: limit ?? undefined,
       beforeCreatedAt,
     });
@@ -593,12 +591,10 @@ export function mountGreenfieldApiRoutes(app: GreenfieldApp): void {
     if (!rl.allowed) return rateLimitedResponse(c, rl);
     const talkId = decodeIdParam(c, 'talkId');
     if (!talkId.ok) return talkId.response;
-    const threadId = (c.req.query('threadId') || '').trim() || undefined;
     const result = await getGreenfieldSnapshotRoute({
       auth,
       workspaceId: requestedWorkspaceId(c),
       talkId: talkId.value,
-      threadId,
     });
     return jsonResponse(result);
   });
@@ -611,10 +607,7 @@ export function mountGreenfieldApiRoutes(app: GreenfieldApp): void {
     if (csrfFail) return csrfFail;
     const talkId = decodeIdParam(c, 'talkId');
     if (!talkId.ok) return talkId.response;
-    const payload = await readJsonBody<{
-      messageIds?: unknown;
-      threadId?: unknown;
-    }>(c);
+    const payload = await readJsonBody<{ messageIds?: unknown }>(c);
     if (!payload.ok) return invalidJsonResponse(c, payload.error);
     const result = await deleteGreenfieldMessagesRoute({
       auth,
@@ -1268,7 +1261,6 @@ export function mountGreenfieldApiRoutes(app: GreenfieldApp): void {
     if (csrfFail) return csrfFail;
     const parsed = await readJsonBody<{
       content?: unknown;
-      threadId?: unknown;
       targetAgentIds?: unknown;
       attachmentIds?: unknown;
     }>(c);
@@ -1281,10 +1273,6 @@ export function mountGreenfieldApiRoutes(app: GreenfieldApp): void {
     const result = await enqueueGreenfieldChatRoute({
       talkId: c.req.param('talkId'),
       workspaceId: requestedWorkspaceId(c),
-      threadId:
-        typeof parsed.data.threadId === 'string'
-          ? parsed.data.threadId.trim() || null
-          : null,
       auth,
       content: parsed.data.content,
       targetAgentIds: parsed.data.targetAgentIds,
@@ -1316,7 +1304,7 @@ export function mountGreenfieldApiRoutes(app: GreenfieldApp): void {
     if (!rl.allowed) return rateLimitedResponse(c, rl);
     const csrfFail = checkCsrf(c, auth);
     if (csrfFail) return csrfFail;
-    const parsed = await readJsonBody<{ threadId?: unknown }>(c);
+    const parsed = await readJsonBody<Record<string, unknown>>(c);
     if (!parsed.ok) {
       return c.json(
         { ok: false, error: { code: 'invalid_json', message: parsed.error } },
@@ -1330,10 +1318,6 @@ export function mountGreenfieldApiRoutes(app: GreenfieldApp): void {
     const result = await cancelGreenfieldChatRoute({
       talkId: c.req.param('talkId'),
       workspaceId: requestedWorkspaceId(c),
-      threadId:
-        typeof parsed.data.threadId === 'string'
-          ? parsed.data.threadId.trim() || null
-          : null,
       auth,
     });
     return jsonResponse(result);

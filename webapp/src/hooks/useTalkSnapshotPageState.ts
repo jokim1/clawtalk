@@ -8,7 +8,6 @@ type TalkSnapshotPageKind = 'loading' | 'ready' | 'unavailable' | 'error';
 type UseTalkSnapshotPageStateInput = {
   userId: string;
   talkId: string;
-  threadId: string | null;
   onUnauthorized: () => void;
 };
 
@@ -35,13 +34,11 @@ function snapshotTalkToTalk(snapshotTalk: TalkSnapshot['talk']): Talk {
 export function useTalkSnapshotPageState({
   userId,
   talkId,
-  threadId,
   onUnauthorized,
 }: UseTalkSnapshotPageStateInput) {
   const snapshotQuery = useTalkSnapshot({
     userId,
     talkId,
-    threadId,
     onUnauthorized,
   });
 

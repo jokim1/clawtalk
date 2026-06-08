@@ -42,14 +42,11 @@ export function getTabFromPath(
   return 'talk';
 }
 
-export function buildThreadHref(
+export function buildTalkDetailHref(
   talkId: string,
-  threadId: string,
   tab: TalkDetailTabKey = 'talk',
 ): string {
-  const path =
-    tab === 'talk' ? `/app/talks/${talkId}` : `/app/talks/${talkId}/${tab}`;
-  return `${path}?thread=${encodeURIComponent(threadId)}`;
+  return tab === 'talk' ? `/app/talks/${talkId}` : `/app/talks/${talkId}/${tab}`;
 }
 
 export function useTalkDetailRouteState(talkId: string): {
@@ -68,33 +65,21 @@ export function useTalkDetailRouteState(talkId: string): {
 
 export function useTalkDetailTabLinks(input: {
   talkId: string;
-  activeThreadId: string | null;
 }): TalkDetailTabLinks {
-  const { talkId, activeThreadId } = input;
+  const { talkId } = input;
 
   return useMemo(() => {
     const talkTabHref = `/app/talks/${talkId}`;
-    const threadAwareTalkTabHref = activeThreadId
-      ? buildThreadHref(talkId, activeThreadId)
-      : talkTabHref;
-    const documentsTabHref = activeThreadId
-      ? buildThreadHref(talkId, activeThreadId, 'documents')
-      : `/app/talks/${talkId}/documents`;
-    const agentsTabHref = activeThreadId
-      ? buildThreadHref(talkId, activeThreadId, 'agents')
-      : `/app/talks/${talkId}/agents`;
-    const contextTabHref = activeThreadId
-      ? buildThreadHref(talkId, activeThreadId, 'context')
-      : `/app/talks/${talkId}/context`;
-    const workspaceConnectorsTabHref = activeThreadId
-      ? buildThreadHref(talkId, activeThreadId, 'connectors')
-      : `/app/talks/${talkId}/connectors`;
-    const jobsTabHref = activeThreadId
-      ? buildThreadHref(talkId, activeThreadId, 'jobs')
-      : `/app/talks/${talkId}/jobs`;
-    const runsTabHref = activeThreadId
-      ? buildThreadHref(talkId, activeThreadId, 'runs')
-      : `/app/talks/${talkId}/runs`;
+    const threadAwareTalkTabHref = talkTabHref;
+    const documentsTabHref = buildTalkDetailHref(talkId, 'documents');
+    const agentsTabHref = buildTalkDetailHref(talkId, 'agents');
+    const contextTabHref = buildTalkDetailHref(talkId, 'context');
+    const workspaceConnectorsTabHref = buildTalkDetailHref(
+      talkId,
+      'connectors',
+    );
+    const jobsTabHref = buildTalkDetailHref(talkId, 'jobs');
+    const runsTabHref = buildTalkDetailHref(talkId, 'runs');
     const manageAgentsHref = `/app/settings?tab=agents&returnTo=${encodeURIComponent(
       threadAwareTalkTabHref,
     )}`;
@@ -109,5 +94,5 @@ export function useTalkDetailTabLinks(input: {
       runsTabHref,
       manageAgentsHref,
     };
-  }, [activeThreadId, talkId]);
+  }, [talkId]);
 }
