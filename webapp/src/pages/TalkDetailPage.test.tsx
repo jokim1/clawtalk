@@ -428,7 +428,7 @@ describe('TalkDetailPage', () => {
     expect(screen.queryByRole('button', { name: /Response mode/i })).toBeNull();
   });
 
-  it('uses the shared new-thread button and supports inline thread renaming', async () => {
+  it('uses snapshot-owned single conversation state without thread endpoints', async () => {
     const user = userEvent.setup();
     installTalkDetailFetch({
       threads: [
@@ -447,156 +447,14 @@ describe('TalkDetailPage', () => {
     expect(
       within(threadRail).getByRole('button', { name: 'Start new thread' }),
     ).toBeTruthy();
-
-    await user.click(screen.getByRole('button', { name: 'Rename thread' }));
-    const input = screen.getByRole('textbox', { name: 'Rename thread' });
-    await user.clear(input);
-    await user.type(input, 'Daily Cal news{Enter}');
-
-    await waitFor(() => {
-      expect(screen.getAllByText('Daily Cal news')).toHaveLength(2);
-    });
-  });
-
-  it('opens a thread context menu, pins a thread, and reorders it to the top', async () => {
-    const user = userEvent.setup();
-    installTalkDetailFetch({
-      threads: [
-        buildThread({
-          id: DEFAULT_THREAD_ID,
-          title: 'Default thread',
-          isDefault: true,
-          lastMessageAt: '2026-03-06T00:00:00.000Z',
-        }),
-        buildThread({
-          id: 'thread-older',
-          title: 'Older thread',
-          lastMessageAt: '2026-03-06T01:00:00.000Z',
-        }),
-        buildThread({
-          id: 'thread-newer',
-          title: 'Newer thread',
-          lastMessageAt: '2026-03-06T02:00:00.000Z',
-        }),
-      ],
-    });
-
-    renderDetailPage('/app/talks/talk-1');
-
-    const threadRail = await screen.findByLabelText('Talk threads');
-    await within(threadRail).findByText('Older thread');
-    const olderThread = within(threadRail)
-      .getAllByRole('button')
-      .find(
-        (button) =>
-          button.className.includes('talk-thread-item') &&
-          within(button).queryByText('Older thread'),
-      );
-    expect(olderThread).toBeTruthy();
-    fireEvent.mouseDown(olderThread!, { button: 2, clientX: 24, clientY: 36 });
-    fireEvent.contextMenu(olderThread!, { clientX: 24, clientY: 36 });
-    await user.click(screen.getByRole('menuitem', { name: 'Pin' }));
-
-    await waitFor(() => {
-      const items = screen
-        .getAllByRole('button')
-        .filter((button) => button.className.includes('talk-thread-item'));
-      expect(within(items[0]!).getByText('Older thread')).toBeTruthy();
-    });
-  });
-
-  it('deletes the active thread and falls back to the remaining thread', async () => {
-    const user = userEvent.setup();
-    vi.stubGlobal(
-      'confirm',
-      vi.fn(() => true),
+    await user.click(
+      within(threadRail).getByRole('button', { name: 'Start new thread' }),
     );
-    installTalkDetailFetch({
-      threads: [
-        buildThread({
-          id: DEFAULT_THREAD_ID,
-          title: 'Default thread',
-          isDefault: true,
-          lastMessageAt: '2026-03-06T00:00:00.000Z',
-        }),
-        buildThread({
-          id: 'thread-delete',
-          title: 'Delete me',
-          lastMessageAt: '2026-03-06T02:00:00.000Z',
-        }),
-      ],
-    });
-
-    renderDetailPage('/app/talks/talk-1?thread=thread-delete');
-
-    const threadRail = await screen.findByLabelText('Talk threads');
-    await within(threadRail).findByText('Delete me');
-    const deleteThreadButton = within(threadRail)
-      .getAllByRole('button')
-      .find(
-        (button) =>
-          button.className.includes('talk-thread-item') &&
-          within(button).queryByText('Delete me'),
-      );
-    expect(deleteThreadButton).toBeTruthy();
-    fireEvent.mouseDown(deleteThreadButton!, {
-      button: 2,
-      clientX: 24,
-      clientY: 36,
-    });
-    fireEvent.contextMenu(deleteThreadButton!, { clientX: 24, clientY: 36 });
-    await user.click(screen.getByRole('menuitem', { name: 'Delete thread' }));
-
-    await waitFor(() => {
-      expect(within(threadRail).queryByText('Delete me')).toBeNull();
-    });
-    await waitFor(() => {
-      expect(within(threadRail).getByText('Default thread')).toBeTruthy();
-    });
-  });
-
-  it('keeps a thread when delete confirmation is cancelled', async () => {
-    const user = userEvent.setup();
-    vi.stubGlobal(
-      'confirm',
-      vi.fn(() => false),
-    );
-    installTalkDetailFetch({
-      threads: [
-        buildThread({
-          id: DEFAULT_THREAD_ID,
-          title: 'Default thread',
-          isDefault: true,
-        }),
-        buildThread({
-          id: 'thread-keep',
-          title: 'Keep me',
-          lastMessageAt: '2026-03-06T02:00:00.000Z',
-        }),
-      ],
-    });
-
-    renderDetailPage('/app/talks/talk-1?thread=thread-keep');
-
-    const threadRail = await screen.findByLabelText('Talk threads');
-    await within(threadRail).findByText('Keep me');
-    const keepThreadButton = within(threadRail)
-      .getAllByRole('button')
-      .find(
-        (button) =>
-          button.className.includes('talk-thread-item') &&
-          within(button).queryByText('Keep me'),
-      );
-    expect(keepThreadButton).toBeTruthy();
-    fireEvent.mouseDown(keepThreadButton!, {
-      button: 2,
-      clientX: 24,
-      clientY: 36,
-    });
-    fireEvent.contextMenu(keepThreadButton!, { clientX: 24, clientY: 36 });
-    await user.click(screen.getByRole('menuitem', { name: 'Delete thread' }));
-
-    expect(within(threadRail).getByText('Keep me')).toBeTruthy();
+    expect(
+      await within(threadRail).findByText(
+        'This Talk already has one conversation. Continue in the timeline below.',
+      ),
+    ).toBeTruthy();
   });
 
   it('lets users rename the talk from the header and removes legacy header chrome', async () => {
@@ -4569,20 +4427,6 @@ function buildTalkConnectorDataConnectorRow(
   };
 }
 
-function toThreadApiRecord(thread: TalkThread) {
-  return {
-    id: thread.id,
-    talk_id: thread.talkId,
-    title: thread.title,
-    is_default: thread.isDefault ? 1 : 0,
-    is_pinned: thread.isPinned ? 1 : 0,
-    created_at: thread.createdAt,
-    updated_at: thread.updatedAt,
-    message_count: thread.messageCount,
-    last_message_at: thread.lastMessageAt,
-  };
-}
-
 function buildTalkConnectorChannelRow(
   input: Partial<TalkConnectorChannelRow> = {},
 ): TalkConnectorChannelRow {
@@ -5125,88 +4969,6 @@ function installTalkDetailFetch(input?: {
           talk.orchestrationMode = body.orchestrationMode;
         }
         return jsonResponse(200, { ok: true, data: { talk } });
-      }
-
-      if (path === '/api/v1/talks/talk-1/threads' && method === 'GET') {
-        return jsonResponse(200, {
-          ok: true,
-          data: {
-            threads: threads.map(toThreadApiRecord),
-          },
-        });
-      }
-
-      if (path === '/api/v1/talks/talk-1/threads' && method === 'POST') {
-        const body = JSON.parse(String(init?.body || '{}')) as {
-          title?: string | null;
-        };
-        const created = buildThread({
-          id: `thread-${threads.length + 1}`,
-          talkId: 'talk-1',
-          title: body.title?.trim() || null,
-          isDefault: false,
-          createdAt: '2026-03-06T00:00:12.000Z',
-          updatedAt: '2026-03-06T00:00:12.000Z',
-          messageCount: 0,
-          lastMessageAt: null,
-        });
-        threads = [created, ...threads];
-        return jsonResponse(201, {
-          ok: true,
-          data: {
-            thread: toThreadApiRecord(created),
-          },
-        });
-      }
-
-      if (
-        path.startsWith('/api/v1/talks/talk-1/threads/') &&
-        method === 'PATCH'
-      ) {
-        const threadId = decodeURIComponent(path.split('/').pop() || '');
-        const body = JSON.parse(String(init?.body || '{}')) as {
-          title?: string | null;
-          pinned?: boolean;
-        };
-        threads = threads.map((thread) =>
-          thread.id === threadId
-            ? {
-                ...thread,
-                title: body.title?.trim() || thread.title,
-                isPinned:
-                  typeof body.pinned === 'boolean'
-                    ? body.pinned
-                    : thread.isPinned,
-                updatedAt: '2026-03-06T00:00:13.000Z',
-              }
-            : thread,
-        );
-        const updated =
-          threads.find((thread) => thread.id === threadId) || threads[0];
-        return jsonResponse(200, {
-          ok: true,
-          data: {
-            id: updated.id,
-            talk_id: updated.talkId,
-            title: updated.title,
-            is_default: updated.isDefault ? 1 : 0,
-            is_pinned: updated.isPinned ? 1 : 0,
-            created_at: updated.createdAt,
-            updated_at: updated.updatedAt,
-          },
-        });
-      }
-
-      if (
-        path.startsWith('/api/v1/talks/talk-1/threads/') &&
-        method === 'DELETE'
-      ) {
-        const threadId = decodeURIComponent(path.split('/').pop() || '');
-        threads = threads.filter((thread) => thread.id !== threadId);
-        return jsonResponse(200, {
-          ok: true,
-          data: { deleted: true },
-        });
       }
 
       if (path === '/api/v1/talks/talk-1/messages/search' && method === 'GET') {

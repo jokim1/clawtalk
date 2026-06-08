@@ -52,15 +52,11 @@ import {
   runGreenfieldTalkJobNowRoute,
 } from './greenfield-jobs.js';
 import {
-  createGreenfieldThreadRoute,
   deleteGreenfieldMessagesRoute,
-  deleteGreenfieldThreadRoute,
   getGreenfieldRunContextRoute,
   getGreenfieldSnapshotRoute,
   listGreenfieldMessagesRoute,
   listGreenfieldRunsRoute,
-  listGreenfieldThreadsRoute,
-  patchGreenfieldThreadRoute,
   searchGreenfieldMessagesRoute,
 } from './greenfield-detail.js';
 import {
@@ -740,68 +736,6 @@ export function mountGreenfieldApiRoutes(app: GreenfieldApp): void {
       auth,
       workspaceId: requestedWorkspaceId(c),
       talkId: talkId.value,
-    });
-    return jsonResponse(result);
-  });
-
-  app.get('/api/v1/talks/:talkId/threads', async (c) => {
-    const auth = c.get('auth');
-    const rl = checkRateLimit({ principalId: auth.userId, bucket: 'read' });
-    if (!rl.allowed) return rateLimitedResponse(c, rl);
-    const result = await listGreenfieldThreadsRoute({
-      auth,
-      workspaceId: requestedWorkspaceId(c),
-      talkId: c.req.param('talkId'),
-    });
-    return jsonResponse(result);
-  });
-
-  app.post('/api/v1/talks/:talkId/threads', async (c) => {
-    const auth = c.get('auth');
-    const rl = checkRateLimit({ principalId: auth.userId, bucket: 'write' });
-    if (!rl.allowed) return rateLimitedResponse(c, rl);
-    const csrfFail = checkCsrf(c, auth);
-    if (csrfFail) return csrfFail;
-    const payload = await readJsonBody<{ title?: unknown }>(c);
-    if (!payload.ok) return invalidJsonResponse(c, payload.error);
-    const result = await createGreenfieldThreadRoute({
-      auth,
-      workspaceId: requestedWorkspaceId(c),
-      talkId: c.req.param('talkId'),
-    });
-    return jsonResponse(result);
-  });
-
-  app.patch('/api/v1/talks/:talkId/threads/:threadId', async (c) => {
-    const auth = c.get('auth');
-    const rl = checkRateLimit({ principalId: auth.userId, bucket: 'write' });
-    if (!rl.allowed) return rateLimitedResponse(c, rl);
-    const csrfFail = checkCsrf(c, auth);
-    if (csrfFail) return csrfFail;
-    const payload = await readJsonBody<{ title?: unknown; pinned?: unknown }>(
-      c,
-    );
-    if (!payload.ok) return invalidJsonResponse(c, payload.error);
-    const result = await patchGreenfieldThreadRoute({
-      auth,
-      workspaceId: requestedWorkspaceId(c),
-      talkId: c.req.param('talkId'),
-      threadId: c.req.param('threadId'),
-    });
-    return jsonResponse(result);
-  });
-
-  app.delete('/api/v1/talks/:talkId/threads/:threadId', async (c) => {
-    const auth = c.get('auth');
-    const rl = checkRateLimit({ principalId: auth.userId, bucket: 'write' });
-    if (!rl.allowed) return rateLimitedResponse(c, rl);
-    const csrfFail = checkCsrf(c, auth);
-    if (csrfFail) return csrfFail;
-    const result = await deleteGreenfieldThreadRoute({
-      auth,
-      workspaceId: requestedWorkspaceId(c),
-      talkId: c.req.param('talkId'),
-      threadId: c.req.param('threadId'),
     });
     return jsonResponse(result);
   });

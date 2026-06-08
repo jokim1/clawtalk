@@ -66,18 +66,6 @@ function isUuid(value: string): boolean {
   return UUID_RE.test(value);
 }
 
-function failure<T>(result: RouteResult<T>): RouteResult<never> {
-  if (result.body.ok) {
-    throw new Error('Expected failed route result');
-  }
-  return error(
-    result.statusCode,
-    result.body.error.code,
-    result.body.error.message,
-    result.body.error.details,
-  );
-}
-
 function requireWorkspaceWriter(
   workspace: WorkspaceSummaryRecord,
 ): RouteResult<never> | null {
@@ -161,33 +149,6 @@ function assertSyntheticThread(input: {
     return null;
   }
   return error(404, 'thread_not_found', 'Thread not found.');
-}
-
-function toThreadApi(
-  talk: GreenfieldTalkRecord,
-  metrics: GreenfieldThreadMetrics,
-): {
-  id: string;
-  talk_id: string;
-  title: string | null;
-  is_default: number;
-  is_pinned: number;
-  created_at: string;
-  updated_at: string;
-  message_count: number;
-  last_message_at: string | null;
-} {
-  return {
-    id: syntheticThreadId(talk.id),
-    talk_id: talk.id,
-    title: metrics.title,
-    is_default: 1,
-    is_pinned: 1,
-    created_at: metrics.created_at,
-    updated_at: metrics.updated_at,
-    message_count: metrics.message_count,
-    last_message_at: metrics.last_message_at,
-  };
 }
 
 function toSnapshotThreadApi(
@@ -710,105 +671,6 @@ export async function deleteGreenfieldMessagesRoute(input: {
         deletedMessageIds: deletedIds,
       });
     },
-  );
-}
-
-export async function listGreenfieldThreadsRoute(input: {
-  auth: AuthContext;
-  workspaceId?: string | null;
-  talkId: string;
-}): Promise<RouteResult<{ threads: ReturnType<typeof toThreadApi>[] }>> {
-  return withResolvedWorkspace(
-    input.auth,
-    input.workspaceId,
-    { talkId: input.talkId },
-    async (ctx) => {
-      const talk = await loadTalkOr404({
-        workspaceId: ctx.workspace.id,
-        talkId: input.talkId,
-      });
-      if ('statusCode' in talk) return talk;
-      const metrics = await getGreenfieldThreadMetrics({
-        workspaceId: ctx.workspace.id,
-        talkId: input.talkId,
-      });
-      if (!metrics) return error(404, 'talk_not_found', 'Talk not found.');
-      return ok({ threads: [toThreadApi(talk, metrics)] });
-    },
-  );
-}
-
-export async function createGreenfieldThreadRoute(input: {
-  auth: AuthContext;
-  workspaceId?: string | null;
-  talkId: string;
-}): Promise<RouteResult<{ thread: ReturnType<typeof toThreadApi> }>> {
-  return withResolvedWorkspace(
-    input.auth,
-    input.workspaceId,
-    { talkId: input.talkId },
-    async (ctx) => {
-      const talk = await loadTalkOr404({
-        workspaceId: ctx.workspace.id,
-        talkId: input.talkId,
-      });
-      if ('statusCode' in talk) return talk;
-      return error(
-        409,
-        'threads_not_supported',
-        'Greenfield Talks currently expose one default thread. Creating additional threads is not supported yet.',
-      );
-    },
-  );
-}
-
-export async function patchGreenfieldThreadRoute(input: {
-  auth: AuthContext;
-  workspaceId?: string | null;
-  talkId: string;
-  threadId: string;
-}): Promise<RouteResult<ReturnType<typeof toThreadApi>>> {
-  const threadError = assertSyntheticThread({
-    talkId: input.talkId,
-    threadId: input.threadId,
-  });
-  if (threadError) return threadError;
-  return withResolvedWorkspace(
-    input.auth,
-    input.workspaceId,
-    { talkId: input.talkId },
-    async (ctx) => {
-      const talk = await loadTalkOr404({
-        workspaceId: ctx.workspace.id,
-        talkId: input.talkId,
-      });
-      if ('statusCode' in talk) return talk;
-      return error(
-        409,
-        'thread_metadata_not_supported',
-        'Greenfield Talks currently expose one default thread, so thread rename and pin changes are not supported yet.',
-      );
-    },
-  );
-}
-
-export async function deleteGreenfieldThreadRoute(input: {
-  auth: AuthContext;
-  workspaceId?: string | null;
-  talkId: string;
-  threadId: string;
-}): Promise<RouteResult<{ deleted: true }>> {
-  const threadError = assertSyntheticThread({
-    talkId: input.talkId,
-    threadId: input.threadId,
-  });
-  if (threadError) return threadError;
-  const threads = await listGreenfieldThreadsRoute(input);
-  if (!threads.body.ok) return failure(threads);
-  return error(
-    409,
-    'default_thread_required',
-    'The default thread cannot be deleted.',
   );
 }
 

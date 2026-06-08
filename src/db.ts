@@ -535,9 +535,8 @@ export async function withRequestScopedDb<T>(
  * permitted. Callers that need REPEATABLE READ must therefore be the
  * outermost user-context for the request.
  *
- * The tx is intentionally NOT marked READ ONLY: accessors composed by the
- * snapshot path (e.g., `listTalkThreads` → `getOrCreateDefaultThread`)
- * issue heal-on-read INSERTs that would error under READ ONLY. The
+ * The tx is intentionally NOT marked READ ONLY: accessors composed by older
+ * read paths can issue heal-on-read INSERTs that would error under READ ONLY. The
  * load-bearing isolation guarantee here is REPEATABLE READ, which still
  * holds for the rest of the composed reads. Add READ ONLY if and when the
  * heal-on-read paths move out of the snapshot tx.

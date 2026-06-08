@@ -950,8 +950,7 @@ function buildEffectiveToolAccess(input: {
  *
  * Tools are a property of the Talk only — there is no per-agent tool list.
  * `opts.talkId` enables a light family iff the Talk currently has it toggled
- * on. Live read from greenfield `talk_tools`, with a legacy JSON fallback for
- * archived callers that still run on the old schema. Pass
+ * on. Live reads use native `talk_tools` rows. Pass
  * `opts.activeFamilies` instead to use an explicit snapshot (e.g. queue
  * consumer reading from the enqueued message — keeps a multi-agent response
  * group on a frozen tool set even if the user toggles mid-stream). Pass
@@ -982,46 +981,26 @@ export async function getEffectiveToolsForAgent(
   if (!agent) return [];
 
   const userPermissions = await listUserToolPermissions();
-  if (opts?.activeFamilies === undefined && opts?.talkId) {
-    const db = getDbPg();
-    if (await hasGreenfieldTalkToolsTable(db)) {
-      const rows = await db<{ tool_id: string; enabled: boolean }[]>`
-        select tool_id, enabled
-        from public.talk_tools
-        where talk_id = ${opts.talkId}::uuid
-      `;
-      return buildEffectiveToolsFromTalkToolRows(rows, userPermissions);
-    }
+  if (opts?.activeFamilies !== undefined) {
+    return buildEffectiveToolsFromActiveFamilies(
+      opts.activeFamilies,
+      userPermissions,
+    );
   }
 
-  const talkActive = await resolveActiveFamilies(opts);
-  return buildEffectiveToolsFromActiveFamilies(talkActive, userPermissions);
+  if (opts?.talkId) {
+    const db = getDbPg();
+    const rows = await db<{ tool_id: string; enabled: boolean }[]>`
+      select tool_id, enabled
+      from public.talk_tools
+      where talk_id = ${opts.talkId}::uuid
+    `;
+    return buildEffectiveToolsFromTalkToolRows(rows, userPermissions);
+  }
+
+  return buildEffectiveToolsFromActiveFamilies(null, userPermissions);
 }
 
-async function resolveActiveFamilies(opts?: {
-  talkId?: string;
-  activeFamilies?: Record<string, boolean>;
-}): Promise<Record<string, boolean> | null> {
-  // Explicit snapshot wins (queue consumer reading enqueued message).
-  if (opts?.activeFamilies !== undefined) return opts.activeFamilies;
-  if (!opts?.talkId) return null;
-  const db = getDbPg();
-
-  const rows = await db<
-    { active_tool_families_json: Record<string, boolean> }[]
-  >`
-    select active_tool_families_json
-    from public.talks
-    where id = ${opts.talkId}::uuid
-    limit 1
-  `;
-  if (!rows[0]) return {};
-  const raw = rows[0].active_tool_families_json;
-  if (!raw || typeof raw !== 'object') return {};
-  return raw;
-}
-
-let greenfieldTalkToolsTableExists: boolean | null = null;
 let userToolPermissionsTableExists: boolean | null = null;
 let agentFallbackStepsTableExists: boolean | null = null;
 
@@ -1035,20 +1014,6 @@ async function hasUserToolPermissionsTable(db: Sql): Promise<boolean> {
   const exists = rows[0]?.exists === true;
   if (exists) {
     userToolPermissionsTableExists = true;
-  }
-  return exists;
-}
-
-async function hasGreenfieldTalkToolsTable(db: Sql): Promise<boolean> {
-  if (greenfieldTalkToolsTableExists !== null) {
-    return greenfieldTalkToolsTableExists;
-  }
-  const rows = await db<{ exists: boolean }[]>`
-    select to_regclass('public.talk_tools') is not null as exists
-  `;
-  const exists = rows[0]?.exists === true;
-  if (exists) {
-    greenfieldTalkToolsTableExists = true;
   }
   return exists;
 }

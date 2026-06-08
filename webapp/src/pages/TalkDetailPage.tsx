@@ -13,7 +13,6 @@ import {
   getTalk,
   getTalkAgents,
   getTalkRuns,
-  listTalkThreads,
   listTalkMessages,
   TalkMessage,
   TalkRun,
@@ -209,7 +208,6 @@ export function TalkDetailPage({
     menuThread,
     resetTalkThreads,
     hydrateTalkThreads,
-    replaceThreadList,
     scheduleThreadListRefresh,
     ensureKnownThread,
     bumpThreadSummaryFromMessage,
@@ -229,8 +227,6 @@ export function TalkDetailPage({
     talkId,
     requestedThreadId,
     currentTab,
-    pageKind,
-    pageTalkId: pageTalk?.id ?? null,
     canEditThreads: canEditAgents,
     navigate,
     pendingComposerFocusRef,
@@ -554,20 +550,12 @@ export function TalkDetailPage({
       // disconnect (parity with the old hydrateDocumentFromSnapshot path).
       bumpDocReload();
       try {
-        const [threads, runs] = await Promise.all([
-          options?.refreshThreads === false
-            ? Promise.resolve(null)
-            : listTalkThreads(talkId),
-          getTalkRuns(talkId),
-        ]);
+        const runs = await getTalkRuns(talkId);
         if (
           threadId !== activeThreadIdRef.current ||
           threadCacheEpoch !== threadCacheEpochRef.current
         ) {
           return;
-        }
-        if (threads) {
-          replaceThreadList(threads);
         }
         dispatch({ type: 'MERGE_HISTORICAL_RUNS', runs });
         autoStickToBottomRef.current = 'smooth';
@@ -581,7 +569,6 @@ export function TalkDetailPage({
       bumpDocReload,
       handleUnauthorized,
       queryClient,
-      replaceThreadList,
       talkId,
       userId,
     ],
