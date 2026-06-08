@@ -1226,40 +1226,28 @@ export type ContentEditSummary = {
   createdAt: string;
 };
 
-export async function createTalkContent(input: {
+export async function createDocument(input: {
   talkId: string;
+  threadId?: string | null;
   title: string;
-  format?: ContentFormat;
-}): Promise<Content> {
-  const body: Record<string, unknown> = { title: input.title };
+  format?: NativeDocumentFormat;
+  workspaceId?: string | null;
+}): Promise<NativeDocument> {
+  const body: Record<string, unknown> = {
+    talkId: input.talkId,
+    title: input.title,
+  };
+  if (input.threadId) body.threadId = input.threadId;
   if (input.format) body.format = input.format;
-  const envelope = await apiMutationRequest<{ content: Content }>(
-    `/api/v1/talks/${encodeURIComponent(input.talkId)}/content`,
+  const envelope = await apiMutationRequest<{ document: NativeDocument }>(
+    withWorkspaceQuery('/api/v1/documents', input.workspaceId),
     {
       method: 'POST',
       includeJson: true,
       body: JSON.stringify(body),
     },
   );
-  return envelope.content;
-}
-
-export async function createThreadContent(input: {
-  threadId: string;
-  title: string;
-  format?: ContentFormat;
-}): Promise<Content> {
-  const body: Record<string, unknown> = { title: input.title };
-  if (input.format) body.format = input.format;
-  const envelope = await apiMutationRequest<{ content: Content }>(
-    `/api/v1/threads/${encodeURIComponent(input.threadId)}/content`,
-    {
-      method: 'POST',
-      includeJson: true,
-      body: JSON.stringify(body),
-    },
-  );
-  return envelope.content;
+  return envelope.document;
 }
 
 export async function listDocuments(input?: {

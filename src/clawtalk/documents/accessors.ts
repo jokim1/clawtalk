@@ -2,6 +2,7 @@ import { getDbPg, withTrustedDbWrites } from '../../db.js';
 import {
   acceptGreenfieldDocumentEdit,
   acceptGreenfieldDocumentEdits,
+  createGreenfieldDocumentForTalk,
   rejectGreenfieldDocumentEdit,
   type GreenfieldDocumentEditResolveResult,
 } from '../talks/greenfield-detail-accessors.js';
@@ -317,6 +318,23 @@ export async function getNativeDocument(input: {
     })),
     pending_edits: pendingEdits,
   };
+}
+
+export async function createNativeDocumentForTalk(input: {
+  workspaceId: string;
+  talkId: string;
+  title: string;
+  format: NativeDocumentFormat;
+}): Promise<NativeDocumentRecord> {
+  const created = await createGreenfieldDocumentForTalk(input);
+  const document = await getNativeDocument({
+    workspaceId: input.workspaceId,
+    documentId: created.id,
+  });
+  if (!document) {
+    throw new Error(`Created document ${created.id} could not load`);
+  }
+  return document;
 }
 
 export async function listNativeDocumentEdits(input: {

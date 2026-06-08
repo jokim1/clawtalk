@@ -19,11 +19,11 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { NavigateFunction } from 'react-router-dom';
 
 import {
-  ApiError,
-  createTalkContent,
-  createThreadContent,
+  createDocument,
   UnauthorizedError,
+  type Content,
   type ContentFormat,
+  type NativeDocument,
   type TalkSnapshot,
 } from '../lib/api';
 import {
@@ -45,6 +45,39 @@ type UseTalkDocPaneControllerInput = {
   onUnauthorized: () => void;
   onSidebarChanged: () => Promise<void> | void;
 };
+
+function contentMetadataFromNativeDocument(
+  document: NativeDocument,
+  input: { talkId: string; threadId: string },
+): Content {
+  return {
+    id: document.id,
+    talkId: document.primaryTalkId ?? input.talkId,
+    threadId: input.threadId,
+    title: document.title,
+    contentKind: 'document',
+    contentFormat: document.format,
+    bodyVersion: document.tabs[0]?.listVersion ?? 1,
+    anchorMap: Object.fromEntries(
+      document.tabs.flatMap((tab) =>
+        tab.blocks.map((block) => [
+          block.id,
+          {
+            kind: block.kind,
+            sortOrder: block.sortOrder,
+            preview: block.text.slice(0, 140),
+            version: block.version,
+          },
+        ]),
+      ),
+    ),
+    createdAt: document.createdAt,
+    updatedAt: document.updatedAt,
+    createdByUserId: null,
+    updatedByUserId: null,
+    updatedByRunId: null,
+  };
+}
 
 export function useTalkDocPaneController({
   talkId,
@@ -115,20 +148,18 @@ export function useTalkDocPaneController({
       setDocModalError(null);
       try {
         // The create route writes a native `documents` row and returns its
-        // metadata projection; we use only the ids/title to drive the native
-        // pane — never the document body. Seeding the snapshot cache with the
-        // returned record lets the pane resolve the new document id instantly.
-        const created = activeThreadId
-          ? await createThreadContent({
-              threadId: activeThreadId,
-              title: trimmed,
-              format: docModalFormat,
-            })
-          : await createTalkContent({
-              talkId,
-              title: trimmed,
-              format: docModalFormat,
-            });
+        // native tabs/blocks shape. This controller adapts only metadata into
+        // the still-compatible snapshot cache so the pane can resolve the new
+        // document id instantly; no flat body projection is read.
+        const document = await createDocument({
+          talkId,
+          title: trimmed,
+          format: docModalFormat,
+        });
+        const created = contentMetadataFromNativeDocument(document, {
+          talkId,
+          threadId: activeThreadId ?? document.primaryTalkId ?? talkId,
+        });
 
         const threadKey = snapshotQueryKey(userId, talkId, created.threadId);
         await queryClient.cancelQueries({ queryKey: threadKey });
@@ -151,9 +182,6 @@ export function useTalkDocPaneController({
         const message =
           err instanceof Error ? err.message : 'Failed to create document.';
         setDocModalError(message);
-        if (err instanceof ApiError && err.code === 'content_already_exists') {
-          await onSidebarChanged();
-        }
       } finally {
         setDocModalSubmitting(false);
       }
