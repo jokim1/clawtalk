@@ -30,12 +30,10 @@ import { TalkRunsPanel } from '../components/TalkRunsPanel';
 import { TalkHistoryEditor } from '../components/TalkHistoryEditor';
 import { TalkDetailShell } from '../components/Talk/TalkDetailShell';
 import { TalkDocumentCreateModal } from '../components/Talk/TalkDocumentCreateModal';
+import { TalkDocumentsPanel } from '../components/Talk/TalkDocumentsPanel';
 import { TalkTabContent } from '../components/Talk/TalkTabContent';
 import { getLastThreadForTalk } from '../lib/lastThreadForTalk';
-import {
-  loadThreadScroll,
-  saveThreadScroll,
-} from '../lib/threadScroll';
+import { loadThreadScroll, saveThreadScroll } from '../lib/threadScroll';
 import { useTalkRunStream } from '../hooks/useTalkRunStream';
 import {
   buildThreadHref,
@@ -239,14 +237,11 @@ export function TalkDetailPage({
     onUnauthorized: handleUnauthorized,
   });
 
-  const {
-    runContextPanels,
-    resetRunContextPanels,
-    handleToggleRunContext,
-  } = useTalkRunContextController({
-    talkId,
-    onUnauthorized: handleUnauthorized,
-  });
+  const { runContextPanels, resetRunContextPanels, handleToggleRunContext } =
+    useTalkRunContextController({
+      talkId,
+      onUnauthorized: handleUnauthorized,
+    });
 
   useEffect(() => {
     threadSnapshotVersionRef.current += 1;
@@ -974,6 +969,7 @@ export function TalkDetailPage({
   });
   const {
     threadAwareTalkTabHref,
+    documentsTabHref,
     agentsTabHref,
     contextTabHref,
     workspaceConnectorsTabHref,
@@ -1119,6 +1115,7 @@ export function TalkDetailPage({
           currentTab={currentTab}
           tabLinks={{
             threadAwareTalkTabHref,
+            documentsTabHref,
             agentsTabHref,
             contextTabHref,
             workspaceConnectorsTabHref,
@@ -1262,6 +1259,15 @@ export function TalkDetailPage({
               handleToggleRunContext={handleToggleRunContext}
               handleUnauthorized={handleUnauthorized}
               refreshBrowserRuns={refreshBrowserRuns}
+            />
+          ) : null}
+
+          {currentTab === 'documents' ? (
+            <TalkDocumentsPanel
+              talkId={talkId}
+              workspaceId={activeTalkWorkspaceId}
+              canEditDoc={canEditDoc}
+              onUnauthorized={handleUnauthorized}
             />
           ) : null}
 
