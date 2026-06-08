@@ -10,6 +10,7 @@ webapp/dist/
 test-results/
 webapp/test-results/
 webapp/playwright-report/
+webapp/playwright/__screens__/
 
 # Local data & auth
 store/

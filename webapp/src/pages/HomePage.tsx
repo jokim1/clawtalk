@@ -140,8 +140,7 @@ function recomputeSummary(
     ...(data.inbox ? { inbox: data.inbox.counts } : {}),
     recommendations: Math.max(
       0,
-      data.summary.counts.recommendations +
-        (options?.recommendationDelta ?? 0),
+      data.summary.counts.recommendations + (options?.recommendationDelta ?? 0),
     ),
   };
   const hero = data.recommendations?.hero ?? null;
@@ -399,11 +398,11 @@ export function HomePage(): JSX.Element {
             status: 'ready',
             data: recomputeSummary(
               {
-              ...prev.data,
-              recommendations: removeRecommendation(
-                prev.data.recommendations,
-                id,
-              ),
+                ...prev.data,
+                recommendations: removeRecommendation(
+                  prev.data.recommendations,
+                  id,
+                ),
               },
               { recommendationDelta: -1 },
             ),
@@ -421,12 +420,12 @@ export function HomePage(): JSX.Element {
                 status: 'ready',
                 data: recomputeSummary(
                   {
-                  ...prev.data,
-                  recommendations: restoreRecommendation(
-                    prev.data.recommendations,
-                    rec,
-                    wasHero ?? false,
-                  ),
+                    ...prev.data,
+                    recommendations: restoreRecommendation(
+                      prev.data.recommendations,
+                      rec,
+                      wasHero ?? false,
+                    ),
                   },
                   { recommendationDelta: 1 },
                 ),
@@ -442,12 +441,12 @@ export function HomePage(): JSX.Element {
     <div
       className="ct-screen-enter ct-thin-scroll"
       style={{
-        maxWidth: 980,
+        maxWidth: 1240,
         margin: '0 auto',
-        padding: '20px 20px 48px',
+        padding: '28px 36px 48px',
         display: 'flex',
         flexDirection: 'column',
-        gap: 20,
+        gap: 28,
       }}
     >
       <header>
@@ -455,14 +454,15 @@ export function HomePage(): JSX.Element {
           style={{
             margin: 0,
             fontFamily: salonFont.serif,
-            fontSize: 26,
+            fontSize: 40,
+            lineHeight: 1.05,
             fontWeight: 500,
             color: salon.ink,
           }}
         >
           Home
         </h1>
-        <p style={{ margin: '4px 0 0', fontSize: 13, color: salon.ink2 }}>
+        <p style={{ margin: '6px 0 0', fontSize: 14, color: salon.ink2 }}>
           What needs you across your workspace.
         </p>
       </header>

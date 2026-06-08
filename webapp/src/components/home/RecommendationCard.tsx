@@ -40,11 +40,28 @@ export function RecommendationCard({
       ? `/app/talks/${encodeURIComponent(ref.talkId)}`
       : targetToPath(rec.provenance),
   });
-  const titleSize = variant === 'hero' ? 18 : 15;
+  const isHero = variant === 'hero';
+  const titleSize = isHero ? 28 : 17;
 
   return (
-    <Card accentRail={rec.priority === 'decide'}>
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+    <Card
+      accentRail={isHero || rec.priority === 'decide'}
+      style={
+        isHero
+          ? {
+              padding: 24,
+              boxShadow: `inset 3px 0 0 var(--salon-accent, ${salon.accent}), 0 12px 32px rgba(31,27,22,0.06)`,
+            }
+          : undefined
+      }
+    >
+      <div
+        style={{
+          display: 'flex',
+          flexDirection: 'column',
+          gap: isHero ? 16 : 10,
+        }}
+      >
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
           <Badge tone={badge} />
           <span
@@ -68,7 +85,7 @@ export function RecommendationCard({
                 ...clampLines(2),
                 fontFamily: salonFont.serif,
                 fontSize: titleSize,
-                lineHeight: 1.3,
+                lineHeight: isHero ? 1.15 : 1.3,
                 color: salon.ink,
               }}
             >
@@ -78,9 +95,11 @@ export function RecommendationCard({
               <div
                 style={{
                   ...clampLines(3),
-                  fontSize: 12.5,
-                  lineHeight: 1.4,
-                  marginTop: 4,
+                  fontFamily: isHero ? salonFont.serif : undefined,
+                  fontStyle: isHero ? 'italic' : undefined,
+                  fontSize: isHero ? 15 : 12.5,
+                  lineHeight: isHero ? 1.55 : 1.4,
+                  marginTop: isHero ? 8 : 4,
                   color: salon.ink2,
                 }}
               >
