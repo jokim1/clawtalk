@@ -7,15 +7,10 @@ import {
   withUserContext,
 } from './test-helpers.js';
 import {
-  acceptPendingEdit,
-  acceptPendingRun,
   deletePendingEdit,
   deletePendingEditsByRun,
-  getPendingEditById,
   getPendingEditsByContent,
   insertPendingEdit,
-  rejectPendingEdit,
-  rejectPendingRun,
   updatePendingEdit,
 } from './content-edits-accessors.js';
 import { executeApplyContentEdit } from '../talks/content-apply-handler.js';
@@ -46,11 +41,10 @@ describe('legacy content-edits accessors against the greenfield baseline', () =>
   it('degrades retired pending-edit reads to empty results', async () => {
     await withUserContext(USER_ID, async () => {
       await expect(getPendingEditsByContent(CONTENT_ID)).resolves.toEqual([]);
-      await expect(getPendingEditById(EDIT_ID)).resolves.toBeNull();
     });
   });
 
-  it('fails closed for retired pending-edit writes and resolutions', async () => {
+  it('fails closed for retired pending-edit write helpers still used by the legacy apply handler', async () => {
     await withUserContext(USER_ID, async () => {
       await expect(
         insertPendingEdit({
@@ -82,26 +76,6 @@ describe('legacy content-edits accessors against the greenfield baseline', () =>
       );
       await expect(
         deletePendingEditsByRun({ contentId: CONTENT_ID, runId: RUN_ID }),
-      ).rejects.toThrow('legacy_content_edits_not_available');
-      await expect(
-        acceptPendingEdit({ editId: EDIT_ID, userId: USER_ID }),
-      ).rejects.toThrow('legacy_content_edits_not_available');
-      await expect(
-        rejectPendingEdit({ editId: EDIT_ID, userId: USER_ID }),
-      ).rejects.toThrow('legacy_content_edits_not_available');
-      await expect(
-        acceptPendingRun({
-          contentId: CONTENT_ID,
-          runId: RUN_ID,
-          userId: USER_ID,
-        }),
-      ).rejects.toThrow('legacy_content_edits_not_available');
-      await expect(
-        rejectPendingRun({
-          contentId: CONTENT_ID,
-          runId: RUN_ID,
-          userId: USER_ID,
-        }),
       ).rejects.toThrow('legacy_content_edits_not_available');
     });
   });
