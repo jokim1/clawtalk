@@ -1483,6 +1483,7 @@ export async function rejectDocumentEdit(input: {
 export async function acceptDocumentEditRun(input: {
   documentId: string;
   runId: string;
+  reviewedEditIds: string[];
   workspaceId?: string | null;
   expectedContentVersion?: number;
 }): Promise<{ document: NativeDocument; runId: string; editIds: string[] }> {
@@ -1499,6 +1500,7 @@ export async function acceptDocumentEditRun(input: {
       method: 'POST',
       includeJson: true,
       body: JSON.stringify({
+        reviewedEditIds: input.reviewedEditIds,
         expectedContentVersion: input.expectedContentVersion,
       }),
     },
@@ -1508,6 +1510,7 @@ export async function acceptDocumentEditRun(input: {
 export async function rejectDocumentEditRun(input: {
   documentId: string;
   runId: string;
+  reviewedEditIds: string[];
   workspaceId?: string | null;
 }): Promise<{ document: NativeDocument; runId: string; editIds: string[] }> {
   return apiMutationRequest<{
@@ -1522,13 +1525,14 @@ export async function rejectDocumentEditRun(input: {
     {
       method: 'POST',
       includeJson: true,
-      body: '{}',
+      body: JSON.stringify({ reviewedEditIds: input.reviewedEditIds }),
     },
   );
 }
 
 export async function acceptAllDocumentEdits(input: {
   documentId: string;
+  reviewedEditIds: string[];
   workspaceId?: string | null;
   expectedContentVersion?: number;
 }): Promise<{ document: NativeDocument; editIds: string[]; runId: string }> {
@@ -1545,6 +1549,7 @@ export async function acceptAllDocumentEdits(input: {
       method: 'POST',
       includeJson: true,
       body: JSON.stringify({
+        reviewedEditIds: input.reviewedEditIds,
         expectedContentVersion: input.expectedContentVersion,
       }),
     },
@@ -1553,6 +1558,7 @@ export async function acceptAllDocumentEdits(input: {
 
 export async function rejectAllDocumentEdits(input: {
   documentId: string;
+  reviewedEditIds: string[];
   workspaceId?: string | null;
 }): Promise<{ document: NativeDocument; editIds: string[] }> {
   return apiMutationRequest<{
@@ -1566,7 +1572,7 @@ export async function rejectAllDocumentEdits(input: {
     {
       method: 'POST',
       includeJson: true,
-      body: '{}',
+      body: JSON.stringify({ reviewedEditIds: input.reviewedEditIds }),
     },
   );
 }

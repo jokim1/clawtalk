@@ -175,6 +175,32 @@ function parseOptionalExpectedContentVersion(
   return value;
 }
 
+// Bulk accept/reject carry the exact edit-id set the reviewer saw on screen, so
+// the accessor can abort if the server's pending set has drifted (a pending edit
+// created after page load). Required for every bulk route — an array of edit-id
+// UUIDs (empty is valid: it gates against "no pending edits").
+function parseReviewedEditIds(value: unknown): string[] | RouteResult<never> {
+  if (!Array.isArray(value)) {
+    return error(
+      400,
+      'invalid_reviewed_edit_ids',
+      'reviewedEditIds must be an array of edit ids.',
+    );
+  }
+  const ids: string[] = [];
+  for (const entry of value) {
+    if (typeof entry !== 'string' || !isUuid(entry)) {
+      return error(
+        400,
+        'invalid_reviewed_edit_ids',
+        'reviewedEditIds must contain only edit id UUIDs.',
+      );
+    }
+    ids.push(entry);
+  }
+  return ids;
+}
+
 function toDocumentSummaryApi(document: NativeDocumentSummaryRecord): {
   id: string;
   workspaceId: string;
@@ -328,12 +354,22 @@ function anchorMissing(anchorId: string): RouteResult<never> {
   );
 }
 
+function editSetMismatch(pendingEditIds: string[]): RouteResult<never> {
+  return error(
+    409,
+    'edit_set_mismatch',
+    'New pending edits appeared since you reviewed these. Reload and re-check before applying in bulk.',
+    { pendingEditIds },
+  );
+}
+
 function resolveDocumentMutationFailure(
   result:
     | { kind: 'not_found' }
     | { kind: 'version_conflict'; currentVersion: number }
     | { kind: 'anchor_missing'; anchorId: string }
-    | { kind: 'invalid_edit'; message: string },
+    | { kind: 'invalid_edit'; message: string }
+    | { kind: 'edit_set_mismatch'; pendingEditIds: string[] },
 ): RouteResult<never> {
   switch (result.kind) {
     case 'not_found':
@@ -344,6 +380,8 @@ function resolveDocumentMutationFailure(
       return anchorMissing(result.anchorId);
     case 'invalid_edit':
       return error(409, 'invalid_pending_edit', result.message);
+    case 'edit_set_mismatch':
+      return editSetMismatch(result.pendingEditIds);
   }
 }
 
@@ -519,6 +557,7 @@ export async function acceptDocumentEditRunRoute(input: {
   workspaceId?: string | null;
   documentId: string;
   runId: string;
+  reviewedEditIds?: unknown;
   expectedContentVersion?: unknown;
 }): Promise<
   RouteResult<{
@@ -534,6 +573,8 @@ export async function acceptDocumentEditRunRoute(input: {
     input.expectedContentVersion,
   );
   if (typeof expected === 'object') return expected;
+  const reviewedEditIds = parseReviewedEditIds(input.reviewedEditIds);
+  if (!Array.isArray(reviewedEditIds)) return reviewedEditIds;
   return withDocumentsWorkspace(
     input.auth,
     input.workspaceId,
@@ -545,6 +586,7 @@ export async function acceptDocumentEditRunRoute(input: {
         workspaceId: ctx.workspace.id,
         documentId: input.documentId,
         runId: input.runId,
+        reviewedEditIds,
         expectedContentVersion: expected,
       });
       if (result.kind !== 'ok') return resolveDocumentMutationFailure(result);
@@ -562,6 +604,7 @@ export async function rejectDocumentEditRunRoute(input: {
   workspaceId?: string | null;
   documentId: string;
   runId: string;
+  reviewedEditIds?: unknown;
 }): Promise<
   RouteResult<{
     document: ReturnType<typeof toDocumentApi>;
@@ -572,6 +615,8 @@ export async function rejectDocumentEditRunRoute(input: {
   if (!isUuid(input.runId)) {
     return error(400, 'invalid_run_id', 'Run id must be a UUID.');
   }
+  const reviewedEditIds = parseReviewedEditIds(input.reviewedEditIds);
+  if (!Array.isArray(reviewedEditIds)) return reviewedEditIds;
   return withDocumentsWorkspace(
     input.auth,
     input.workspaceId,
@@ -583,7 +628,11 @@ export async function rejectDocumentEditRunRoute(input: {
         workspaceId: ctx.workspace.id,
         documentId: input.documentId,
         runId: input.runId,
+        reviewedEditIds,
       });
+      if (result.kind === 'edit_set_mismatch') {
+        return editSetMismatch(result.pendingEditIds);
+      }
       if (result.kind === 'not_found') {
         return error(
           404,
@@ -604,6 +653,7 @@ export async function acceptAllDocumentEditsRoute(input: {
   auth: AuthContext;
   workspaceId?: string | null;
   documentId: string;
+  reviewedEditIds?: unknown;
   expectedContentVersion?: unknown;
 }): Promise<
   RouteResult<{
@@ -616,6 +666,8 @@ export async function acceptAllDocumentEditsRoute(input: {
     input.expectedContentVersion,
   );
   if (typeof expected === 'object') return expected;
+  const reviewedEditIds = parseReviewedEditIds(input.reviewedEditIds);
+  if (!Array.isArray(reviewedEditIds)) return reviewedEditIds;
   return withDocumentsWorkspace(
     input.auth,
     input.workspaceId,
@@ -626,6 +678,7 @@ export async function acceptAllDocumentEditsRoute(input: {
       const result = await acceptAllNativeDocumentEdits({
         workspaceId: ctx.workspace.id,
         documentId: input.documentId,
+        reviewedEditIds,
         expectedContentVersion: expected,
       });
       if (result.kind !== 'ok') return resolveDocumentMutationFailure(result);
@@ -642,9 +695,12 @@ export async function rejectAllDocumentEditsRoute(input: {
   auth: AuthContext;
   workspaceId?: string | null;
   documentId: string;
+  reviewedEditIds?: unknown;
 }): Promise<
   RouteResult<{ document: ReturnType<typeof toDocumentApi>; editIds: string[] }>
 > {
+  const reviewedEditIds = parseReviewedEditIds(input.reviewedEditIds);
+  if (!Array.isArray(reviewedEditIds)) return reviewedEditIds;
   return withDocumentsWorkspace(
     input.auth,
     input.workspaceId,
@@ -655,7 +711,11 @@ export async function rejectAllDocumentEditsRoute(input: {
       const result = await rejectAllNativeDocumentEdits({
         workspaceId: ctx.workspace.id,
         documentId: input.documentId,
+        reviewedEditIds,
       });
+      if (result.kind === 'edit_set_mismatch') {
+        return editSetMismatch(result.pendingEditIds);
+      }
       if (result.kind === 'not_found') {
         return error(404, 'document_not_found', 'Document not found.');
       }
@@ -759,6 +819,7 @@ export function mountDocumentRoutes(
       const csrfFail = checkCsrf(c, auth);
       if (csrfFail) return csrfFail;
       const payload = await readOptionalJsonBody<{
+        reviewedEditIds?: unknown;
         expectedContentVersion?: unknown;
       }>(c);
       if (!payload.ok) return invalidJsonResponse(payload.error);
@@ -767,6 +828,7 @@ export function mountDocumentRoutes(
         workspaceId: requestedWorkspaceId(c),
         documentId: c.req.param('documentId'),
         runId: c.req.param('runId'),
+        reviewedEditIds: payload.data.reviewedEditIds,
         expectedContentVersion: payload.data.expectedContentVersion,
       });
       return jsonResponse(result);
@@ -781,13 +843,16 @@ export function mountDocumentRoutes(
       if (!rl.allowed) return rateLimitedResponse(c, rl);
       const csrfFail = checkCsrf(c, auth);
       if (csrfFail) return csrfFail;
-      const payload = await readOptionalJsonBody<Record<string, unknown>>(c);
+      const payload = await readOptionalJsonBody<{
+        reviewedEditIds?: unknown;
+      }>(c);
       if (!payload.ok) return invalidJsonResponse(payload.error);
       const result = await rejectDocumentEditRunRoute({
         auth,
         workspaceId: requestedWorkspaceId(c),
         documentId: c.req.param('documentId'),
         runId: c.req.param('runId'),
+        reviewedEditIds: payload.data.reviewedEditIds,
       });
       return jsonResponse(result);
     },
@@ -800,6 +865,7 @@ export function mountDocumentRoutes(
     const csrfFail = checkCsrf(c, auth);
     if (csrfFail) return csrfFail;
     const payload = await readOptionalJsonBody<{
+      reviewedEditIds?: unknown;
       expectedContentVersion?: unknown;
     }>(c);
     if (!payload.ok) return invalidJsonResponse(payload.error);
@@ -807,6 +873,7 @@ export function mountDocumentRoutes(
       auth,
       workspaceId: requestedWorkspaceId(c),
       documentId: c.req.param('documentId'),
+      reviewedEditIds: payload.data.reviewedEditIds,
       expectedContentVersion: payload.data.expectedContentVersion,
     });
     return jsonResponse(result);
@@ -818,12 +885,15 @@ export function mountDocumentRoutes(
     if (!rl.allowed) return rateLimitedResponse(c, rl);
     const csrfFail = checkCsrf(c, auth);
     if (csrfFail) return csrfFail;
-    const payload = await readOptionalJsonBody<Record<string, unknown>>(c);
+    const payload = await readOptionalJsonBody<{
+      reviewedEditIds?: unknown;
+    }>(c);
     if (!payload.ok) return invalidJsonResponse(payload.error);
     const result = await rejectAllDocumentEditsRoute({
       auth,
       workspaceId: requestedWorkspaceId(c),
       documentId: c.req.param('documentId'),
+      reviewedEditIds: payload.data.reviewedEditIds,
     });
     return jsonResponse(result);
   });

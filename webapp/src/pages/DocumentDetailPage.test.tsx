@@ -282,6 +282,7 @@ describe('DocumentDetailPage', () => {
     await waitFor(() =>
       expect(mockApi.acceptAllDocumentEdits).toHaveBeenCalledWith({
         documentId: 'doc-1',
+        reviewedEditIds: ['edit-1'],
       }),
     );
     expect(await screen.findByText(/No pending edits/)).toBeTruthy();
@@ -384,5 +385,71 @@ describe('DocumentDetailPage', () => {
       document: makeDoc({ pendingEditCount: 0, pendingEdits: [] }),
     });
     expect(await screen.findByText(/No pending edits/)).toBeTruthy();
+  });
+
+  it('per-run accept sends exactly the run-group edit ids it rendered', async () => {
+    mockApi.getDocument.mockResolvedValue(
+      makeDoc({
+        pendingEditCount: 2,
+        pendingEdits: [
+          edit({ id: 'edit-1' }),
+          edit({ id: 'edit-2', newText: 'Second change.' }),
+        ],
+      }),
+    );
+    mockApi.acceptDocumentEditRun.mockResolvedValue({
+      runId: 'run-1',
+      editIds: ['edit-1', 'edit-2'],
+      document: makeDoc({ pendingEditCount: 0, pendingEdits: [] }),
+    });
+    renderDetail();
+    await screen.findByText('Pending edits');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Accept run' }));
+
+    await waitFor(() =>
+      expect(mockApi.acceptDocumentEditRun).toHaveBeenCalledWith({
+        documentId: 'doc-1',
+        runId: 'run-1',
+        reviewedEditIds: ['edit-1', 'edit-2'],
+      }),
+    );
+    expect(await screen.findByText(/No pending edits/)).toBeTruthy();
+  });
+
+  it('recovers from a bulk edit_set_mismatch: refreshes, notifies, and surfaces the unseen edit', async () => {
+    mockApi.getDocument
+      .mockResolvedValueOnce(
+        makeDoc({ pendingEditCount: 1, pendingEdits: [edit()] }),
+      )
+      .mockResolvedValueOnce(
+        makeDoc({
+          pendingEditCount: 2,
+          pendingEdits: [
+            edit(),
+            edit({
+              id: 'edit-2',
+              proposedByRunId: 'run-2',
+              newText: 'A second proposal you had not seen.',
+            }),
+          ],
+        }),
+      );
+    mockApi.acceptAllDocumentEdits.mockRejectedValue(
+      new ApiError('mismatch', 409, 'edit_set_mismatch'),
+    );
+    renderDetail();
+    await screen.findByText('Pending edits');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Accept all' }));
+
+    // Recoverable: a notice appears, the list is refetched, and the previously
+    // unseen edit is now on screen for re-review — nothing was applied.
+    expect(await screen.findByText(/New edits arrived/)).toBeTruthy();
+    await waitFor(() => expect(mockApi.getDocument).toHaveBeenCalledTimes(2));
+    expect(
+      await screen.findByText('A second proposal you had not seen.'),
+    ).toBeTruthy();
+    expect(screen.getByText('Proposed replacement.')).toBeTruthy();
   });
 });

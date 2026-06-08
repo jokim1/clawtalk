@@ -1,10 +1,8 @@
 import { getDbPg, withTrustedDbWrites } from '../../db.js';
 import {
   acceptGreenfieldDocumentEdit,
-  acceptGreenfieldDocumentEditRun,
   acceptGreenfieldDocumentEdits,
   rejectGreenfieldDocumentEdit,
-  rejectGreenfieldDocumentEditRun,
   type GreenfieldDocumentEditResolveResult,
 } from '../talks/greenfield-detail-accessors.js';
 
@@ -103,7 +101,28 @@ export type NativeDocumentResolveResult =
   | { kind: 'not_found' }
   | { kind: 'version_conflict'; currentVersion: number }
   | { kind: 'anchor_missing'; anchorId: string }
-  | { kind: 'invalid_edit'; message: string };
+  | { kind: 'invalid_edit'; message: string }
+  | { kind: 'edit_set_mismatch'; pendingEditIds: string[] };
+
+/**
+ * True when two edit-id lists describe the same set (order-, duplicate-, and
+ * case-insensitive). Bulk accept/reject gate the reviewer's rendered set against
+ * the server's current pending set with this, so a pending edit created after
+ * page load (e.g. a job emitting a fresh proposal) can never be resolved unseen
+ * — the sets differ and the action aborts with `edit_set_mismatch`. Ids are
+ * lower-cased before comparison: the route validators accept upper-case UUIDs
+ * but Postgres returns its `uuid` columns lower-cased, so a raw compare would
+ * spuriously mismatch a reviewer who sent canonical-but-upper-case ids.
+ */
+function sameEditIdSet(a: readonly string[], b: readonly string[]): boolean {
+  const left = new Set(a.map((id) => id.toLowerCase()));
+  const right = new Set(b.map((id) => id.toLowerCase()));
+  if (left.size !== right.size) return false;
+  for (const id of left) {
+    if (!right.has(id)) return false;
+  }
+  return true;
+}
 
 function toNativeResolveResult(
   result: GreenfieldDocumentEditResolveResult,
@@ -338,6 +357,30 @@ export async function listNativeDocumentEdits(input: {
   `;
 }
 
+/**
+ * Pending edit ids for one run within a document, in canonical pending order
+ * (created_at asc, id asc). The run-level bulk accept/reject compute the
+ * server's current set for the run with this so it can be gated against the
+ * reviewer's rendered set before any edit is resolved.
+ */
+async function listNativeRunPendingEditIds(input: {
+  workspaceId: string;
+  documentId: string;
+  runId: string;
+}): Promise<string[]> {
+  const edits = await listNativeDocumentEdits({
+    workspaceId: input.workspaceId,
+    documentId: input.documentId,
+    status: 'pending',
+  });
+  // Compare lower-cased: the route accepts upper-case run-id UUIDs but Postgres
+  // returns proposed_by_run_id lower-cased.
+  const runId = input.runId.toLowerCase();
+  return edits
+    .filter((edit) => edit.proposed_by_run_id?.toLowerCase() === runId)
+    .map((edit) => edit.id);
+}
+
 export async function acceptNativeDocumentEdit(input: {
   workspaceId: string;
   documentId: string;
@@ -364,12 +407,21 @@ export async function acceptNativeDocumentEditRun(input: {
   workspaceId: string;
   documentId: string;
   runId: string;
+  reviewedEditIds: string[];
   expectedContentVersion?: number;
 }): Promise<NativeDocumentResolveResult> {
-  const result = await acceptGreenfieldDocumentEditRun({
+  // Preflight gate; same non-atomic supersede residual as acceptAllNativeDocumentEdits.
+  const runPendingEditIds = await listNativeRunPendingEditIds(input);
+  if (!sameEditIdSet(runPendingEditIds, input.reviewedEditIds)) {
+    return { kind: 'edit_set_mismatch', pendingEditIds: runPendingEditIds };
+  }
+  if (runPendingEditIds.length === 0) return { kind: 'not_found' };
+  // Accept exactly the run's gated edits by id rather than re-enumerating the
+  // run, so an edit appended to the run after page load cannot slip in.
+  const result = await acceptGreenfieldDocumentEdits({
     workspaceId: input.workspaceId,
     documentId: input.documentId,
-    runId: input.runId,
+    editIds: runPendingEditIds,
     expectedTargetTabListVersion: input.expectedContentVersion,
   });
   const document =
@@ -379,28 +431,45 @@ export async function acceptNativeDocumentEditRun(input: {
           documentId: input.documentId,
         })
       : undefined;
-  return toNativeResolveResult(result, document);
+  const native = toNativeResolveResult(result, document);
+  return native.kind === 'ok' ? { ...native, runId: input.runId } : native;
 }
 
 export async function acceptAllNativeDocumentEdits(input: {
   workspaceId: string;
   documentId: string;
+  reviewedEditIds: string[];
   expectedContentVersion?: number;
 }): Promise<NativeDocumentResolveResult> {
+  // This gate is a preflight consistency check, not atomic with the apply below.
+  // It fully closes the primary contract violation — an unseen edit being
+  // *applied* — because we only ever accept the explicit reviewed ids. A
+  // narrower residual remains: an edit inserted on an accepted edit's block in
+  // the preflight→apply window can be *superseded* (discarded, not applied) by
+  // the document_edits_bump_versions_on_accept trigger — the same inherent
+  // same-block supersede a single per-edit accept already triggers. Closing that
+  // fully requires serializing proposal-insertion (executor) against accepts;
+  // tracked as a follow-up, out of scope for this UI surface.
   const edits = await listNativeDocumentEdits({
     workspaceId: input.workspaceId,
     documentId: input.documentId,
     status: 'pending',
   });
-  if (edits.length === 0) {
+  const pendingEditIds = edits.map((edit) => edit.id);
+  if (!sameEditIdSet(pendingEditIds, input.reviewedEditIds)) {
+    return { kind: 'edit_set_mismatch', pendingEditIds };
+  }
+  if (pendingEditIds.length === 0) {
     const document = await getNativeDocument(input);
     if (!document) return { kind: 'not_found' };
     return { kind: 'ok', document, editIds: [], runId: null };
   }
+  // Apply exactly the gated set, in the server's canonical pending order
+  // (created_at asc, id asc) so insert ordering matches the prior behavior.
   const result = await acceptGreenfieldDocumentEdits({
     workspaceId: input.workspaceId,
     documentId: input.documentId,
-    editIds: edits.map((edit) => edit.id),
+    editIds: pendingEditIds,
     expectedTargetTabListVersion: input.expectedContentVersion,
   });
   const document =
@@ -442,6 +511,7 @@ export async function rejectNativeDocumentEditRun(input: {
   workspaceId: string;
   documentId: string;
   runId: string;
+  reviewedEditIds: string[];
 }): Promise<
   | {
       kind: 'ok';
@@ -450,22 +520,40 @@ export async function rejectNativeDocumentEditRun(input: {
       editIds: string[];
     }
   | { kind: 'not_found' }
+  | { kind: 'edit_set_mismatch'; pendingEditIds: string[] }
 > {
-  const result = await rejectGreenfieldDocumentEditRun(input);
-  if (result.kind === 'not_found') return result;
+  const runPendingEditIds = await listNativeRunPendingEditIds(input);
+  if (!sameEditIdSet(runPendingEditIds, input.reviewedEditIds)) {
+    return { kind: 'edit_set_mismatch', pendingEditIds: runPendingEditIds };
+  }
+  if (runPendingEditIds.length === 0) return { kind: 'not_found' };
+  const db = getDbPg();
+  const rows = await withTrustedDbWrites(
+    () => db<Array<{ id: string }>>`
+      update public.document_edits
+      set status = 'rejected',
+          resolved_at = now()
+      where workspace_id = ${input.workspaceId}::uuid
+        and document_id = ${input.documentId}::uuid
+        and id in ${db(runPendingEditIds)}
+        and status = 'pending'
+      returning id
+    `,
+  );
   const document = await getNativeDocument(input);
   if (!document) return { kind: 'not_found' };
   return {
     kind: 'ok',
     document,
-    runId: result.runId,
-    editIds: result.editIds,
+    runId: input.runId,
+    editIds: rows.map((row) => row.id),
   };
 }
 
 export async function rejectAllNativeDocumentEdits(input: {
   workspaceId: string;
   documentId: string;
+  reviewedEditIds: string[];
 }): Promise<
   | {
       kind: 'ok';
@@ -473,10 +561,14 @@ export async function rejectAllNativeDocumentEdits(input: {
       editIds: string[];
     }
   | { kind: 'not_found' }
+  | { kind: 'edit_set_mismatch'; pendingEditIds: string[] }
 > {
   const existing = await getNativeDocument(input);
   if (!existing) return { kind: 'not_found' };
   const pendingEditIds = existing.pending_edits.map((edit) => edit.id);
+  if (!sameEditIdSet(pendingEditIds, input.reviewedEditIds)) {
+    return { kind: 'edit_set_mismatch', pendingEditIds };
+  }
   if (pendingEditIds.length === 0) {
     return { kind: 'ok', document: existing, editIds: [] };
   }

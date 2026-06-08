@@ -10,6 +10,13 @@
  * quiet refetch + a notice, leaving the conflicting edit pending. We do not send
  * `expectedContentVersion`: the server's per-edit base-version check is the CAS,
  * and a single value is ambiguous for accept-all (which spans tabs).
+ *
+ * Bulk actions (accept-all / reject-all / per-run) send the exact set of edit
+ * ids the reviewer has on screen. The server gates that set against its current
+ * pending set and aborts the whole action with a 409 `edit_set_mismatch` if they
+ * differ, so a pending edit created after page load (e.g. a job proposal) can
+ * never be accepted or rejected unseen. That 409 is recoverable: quiet refetch +
+ * a notice, then the reviewer re-checks the refreshed list.
  */
 import {
   useCallback,
@@ -144,6 +151,16 @@ export function DocumentDetailPage(): JSX.Element {
   const handleMutationError = useCallback(
     async (err: unknown) => {
       if (err instanceof ApiError && err.status === 409) {
+        if (err.code === 'edit_set_mismatch') {
+          // A bulk accept/reject was gated: new pending edits appeared since the
+          // reviewer loaded the list, so the server applied nothing. Refresh so
+          // the new edits render, then let the reviewer re-check before retrying.
+          setConflictNotice(
+            'New edits arrived while you were reviewing. We refreshed the list — please re-check before accepting or rejecting in bulk.',
+          );
+          await load({ quiet: true });
+          return;
+        }
         const inapplicable =
           err.code === 'anchor_missing' || err.code === 'invalid_pending_edit';
         setConflictNotice(
@@ -211,7 +228,13 @@ export function DocumentDetailPage(): JSX.Element {
       setConflictNotice(null);
       setBusyRunIds((set) => addTo(set, runId));
       try {
-        const { document } = await acceptDocumentEditRun({ documentId, runId });
+        // Gate on exactly the run's edits the reviewer saw, so an edit appended
+        // to this run after page load can't be accepted unseen.
+        const { document } = await acceptDocumentEditRun({
+          documentId,
+          runId,
+          reviewedEditIds: group.edits.map((edit) => edit.id),
+        });
         applyDocument(document);
       } catch (err) {
         await handleMutationError(err);
@@ -230,7 +253,11 @@ export function DocumentDetailPage(): JSX.Element {
       setConflictNotice(null);
       setBusyRunIds((set) => addTo(set, runId));
       try {
-        const { document } = await rejectDocumentEditRun({ documentId, runId });
+        const { document } = await rejectDocumentEditRun({
+          documentId,
+          runId,
+          reviewedEditIds: group.edits.map((edit) => edit.id),
+        });
         applyDocument(document);
       } catch (err) {
         await handleMutationError(err);
@@ -242,32 +269,44 @@ export function DocumentDetailPage(): JSX.Element {
   );
 
   const handleAcceptAll = useCallback(async () => {
+    if (!doc) return;
+    // Gate on exactly the pending edits currently on screen; the server aborts
+    // with `edit_set_mismatch` if a new one slipped in since this render.
+    const reviewedEditIds = doc.pendingEdits.map((edit) => edit.id);
     setActionError(null);
     setConflictNotice(null);
     setAllBusy(true);
     try {
-      const { document } = await acceptAllDocumentEdits({ documentId });
+      const { document } = await acceptAllDocumentEdits({
+        documentId,
+        reviewedEditIds,
+      });
       applyDocument(document);
     } catch (err) {
       await handleMutationError(err);
     } finally {
       setAllBusy(false);
     }
-  }, [applyDocument, documentId, handleMutationError]);
+  }, [applyDocument, doc, documentId, handleMutationError]);
 
   const handleRejectAll = useCallback(async () => {
+    if (!doc) return;
+    const reviewedEditIds = doc.pendingEdits.map((edit) => edit.id);
     setActionError(null);
     setConflictNotice(null);
     setAllBusy(true);
     try {
-      const { document } = await rejectAllDocumentEdits({ documentId });
+      const { document } = await rejectAllDocumentEdits({
+        documentId,
+        reviewedEditIds,
+      });
       applyDocument(document);
     } catch (err) {
       await handleMutationError(err);
     } finally {
       setAllBusy(false);
     }
-  }, [applyDocument, documentId, handleMutationError]);
+  }, [applyDocument, doc, documentId, handleMutationError]);
 
   const activeTab = useMemo(
     () =>
