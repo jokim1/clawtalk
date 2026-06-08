@@ -1,6 +1,6 @@
 # ClawTalk MVP Eval Suite
 
-> **Status:** MVP dry-run harness implemented · **Updated:** 2026-06-07
+> **Status:** MVP dry-run harness implemented and CI-gated · **Updated:** 2026-06-07
 > Implements the Phase 13 offline eval gate shape from [`05-build-plan.md`](./05-build-plan.md) Phase 13 and [`06-agent-system-design.md`](./06-agent-system-design.md) §14.2.
 
 ## What Runs
@@ -14,6 +14,12 @@ npm run eval
 The default mode is deterministic `dry-run`. It reads scenario contracts from `eval/scenarios/*.json`, derives observed signals from nested fixture events/records/agent replies in `eval/fixtures/*.json`, validates grader prompt contracts from `eval/graders/*.json`, and prints a pretty report. Top-level fixture `signals` are rejected so the gate cannot pass by simply copying required signals into a flat array. Use `--output=<path>` for machine-readable reports, or `npm --silent run eval -- --format=json` when piping JSON stdout.
 
 Live evaluator-model grading is deliberately not claimed yet. `npm run eval -- --mode=live` exits blocked until a provider/backend adapter is wired. This keeps local launch-gate proof separate from future model-scored coverage.
+
+## CI Policy
+
+Pull-request CI runs the deterministic dry-run gate with `npm run eval` after root typecheck and before the Supabase-backed test phase. That makes scenario/fixture/grader drift a required merge signal without needing Joseph secrets, external providers, or local Supabase.
+
+Live eval remains manual and intentionally blocked in CI. Do not make `--mode=live` required until the Worker/workspace fixture adapter and evaluator-model credentials are implemented with stable launch thresholds.
 
 ## Launch-Critical Scenarios
 
