@@ -1,0 +1,124 @@
+{
+  "scenarioId": "s-talk-pricing-launch",
+  "observedAt": "2026-06-07T00:05:00.000Z",
+  "source": "fixture",
+  "transcript": [
+    "strategist: THESIS recommends a $49 seat price. CLAIMS: 1) design partners accept seat pricing, 2) usage caps control COGS, 3) $49 beats $29 revenue without $99 adoption drag. Confidence 4/5.",
+    "critic: WEAKEST PREMISE quotes \"design partners accept seat pricing\" and describes a design-partner churn failure mode.",
+    "researcher: I FOUND three comparable pricing sources and I INFER that $49 is defensible only with a usage cap.",
+    "quant: EXTRACTED CLAIMS checks $29/$49/$99 revenue bands: 50 seats yields $1,450/$2,450/$4,950 MRR, and flags missing activation-rate data.",
+    "editor: RECOMMENDATION chooses $49 by citing Strategist's claims, Critic's cap-risk objection, Researcher's sourced caveat, and Quant's revenue range."
+  ],
+  "agentReplies": {
+    "strategist": {
+      "reply": "THESIS: Launch at $49 per seat with a usage cap. CLAIMS: 1) design partners accept seat pricing, 2) usage caps control COGS, 3) $49 beats $29 revenue without $99 adoption drag. CONFIDENCE: 4/5 with activation-rate uncertainty.",
+      "roleMethod": "Thesis, exactly three supporting claims, confidence 1-5, what would change the answer.",
+      "tokenBudget": "compact role response under the configured Talk budget",
+      "toolManifest": [],
+      "signals": [
+        "agent.strategist.reply",
+        "strategist.thesis.unique",
+        "strategist.claims.not_editor_summary",
+        "strategist.confidence.names_uncertainty",
+        "strategist.claims.exactly_three",
+        "strategist.confidence.rated",
+        "strategist.recommends_price_path",
+        "strategist.within_budget"
+      ]
+    },
+    "critic": {
+      "reply": "WEAKEST PREMISE: \"design partners accept seat pricing\" is brittle. FAILURE MODE: design partners churn when usage caps feel punitive. REPAIR: cap included runs and meter overage plainly.",
+      "roleMethod": "One weakest premise, concrete failure mode, specific repair.",
+      "tokenBudget": "compact role response under the configured Talk budget",
+      "toolManifest": [],
+      "signals": [
+        "agent.critic.reply",
+        "critic.weakest_premise.references_strategist",
+        "critic.single_premise_only",
+        "critic.quote.present",
+        "critic.failure_mode.present",
+        "critic.repair.present",
+        "critic.risk_actionable",
+        "critic.within_budget"
+      ]
+    },
+    "researcher": {
+      "reply": "FOUND: three comparable pricing references: OpenView SaaS Benchmarks [1], G2 pricing page survey [2], and Stripe Billing packaging notes [3]. INFER: $49 is defensible with usage-cap evidence. CONTRADICTION: flat pro tiers benchmark differently.",
+      "roleMethod": "Bring outside evidence, cite sources, separate found facts from inference, and flag contradictions.",
+      "tokenBudget": "compact role response under the configured Talk budget",
+      "toolManifest": ["web_search"],
+      "signals": [
+        "agent.researcher.reply",
+        "researcher.sources.three",
+        "researcher.verifies_prior_claims",
+        "researcher.inline_citations",
+        "researcher.found_vs_infer",
+        "researcher.contradictions.flagged",
+        "researcher.evidence_changes_decision",
+        "researcher.within_budget"
+      ]
+    },
+    "editor": {
+      "reply": "AGREEMENT: Strategist and Quant support $49 if activation holds. DISAGREEMENT: Critic flags cap-risk churn, and Researcher says sourced comps diverge. RECOMMENDATION: launch $49 with a design-partner evidence checkpoint. OPEN QUESTIONS: activation-rate target.",
+      "roleMethod": "Synthesize agreement, disagreement, recommendation, and open questions.",
+      "tokenBudget": "compact role response under the configured Talk budget",
+      "toolManifest": [],
+      "signals": [
+        "agent.editor.reply",
+        "editor.recommendation.synthesizes_disagreement",
+        "editor.not_new_argument",
+        "editor.cites_agents",
+        "editor.agreement_disagreement_open_questions",
+        "editor.recommendation.actionable",
+        "editor.within_budget"
+      ]
+    },
+    "quant": {
+      "reply": "EXTRACTED CLAIMS: $29/$49/$99 bands. CALCULATION: at 50 seats, MRR is $1,450 at $29, $2,450 at $49, and $4,950 at $99. MISSING DATA: activation and usage distribution. RANGE: $49 is viable if activation stays 60-80%; below 50%, $29 reduces adoption risk.",
+      "roleMethod": "Extract numerical claims, show calculations, flag missing data, give ranges.",
+      "tokenBudget": "compact role response under the configured Talk budget",
+      "toolManifest": [],
+      "signals": [
+        "agent.quant.reply",
+        "quant.numerical_claims.not_strategy",
+        "quant.only_math_units",
+        "quant.missing_data.flagged",
+        "quant.ranges.present",
+        "quant.calculation_steps.present",
+        "quant.price_sensitivity.present",
+        "quant.within_budget"
+      ]
+    }
+  },
+  "events": [
+    {
+      "kind": "run.created",
+      "runId": "eval-run-talk-1",
+      "signals": ["run.created"]
+    },
+    {
+      "kind": "run.completed",
+      "runId": "eval-run-talk-1",
+      "signals": ["run.status.completed"]
+    }
+  ],
+  "records": [
+    {
+      "table": "runs",
+      "id": "eval-run-talk-1",
+      "status": "completed",
+      "signals": ["run.status.completed"]
+    },
+    {
+      "table": "messages",
+      "runId": "eval-run-talk-1",
+      "count": 5,
+      "signals": ["messages.persisted"]
+    },
+    {
+      "table": "agent_audits",
+      "count": 5,
+      "signals": ["audit.agent_results.persisted"]
+    }
+  ]
+}

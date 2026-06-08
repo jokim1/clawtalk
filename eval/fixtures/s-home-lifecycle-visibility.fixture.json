@@ -1,0 +1,67 @@
+{
+  "scenarioId": "s-home-lifecycle-visibility",
+  "observedAt": "2026-06-07T00:02:00.000Z",
+  "source": "fixture",
+  "events": [
+    {
+      "kind": "home_inbox.visible",
+      "type": "job_output_ready",
+      "signals": ["home_inbox.job_output_ready.visible"]
+    },
+    {
+      "kind": "home_inbox.visible",
+      "type": "job_blocked",
+      "signals": ["home_inbox.job_blocked.visible"]
+    },
+    {
+      "kind": "home_inbox.visible",
+      "type": "document_edit",
+      "signals": ["home_inbox.document_edit.visible"]
+    },
+    {
+      "kind": "home_item.lifecycle",
+      "transition": "read",
+      "signals": ["home_item.read.ok"]
+    },
+    {
+      "kind": "home_item.lifecycle",
+      "transition": "resolved",
+      "signals": ["home_item.resolve.ok"]
+    },
+    {
+      "kind": "home_item.lifecycle",
+      "transition": "dismissed",
+      "signals": ["home_item.dismiss.ok"]
+    },
+    {
+      "kind": "home_item.lifecycle",
+      "transition": "snoozed",
+      "signals": ["home_item.snooze.ok"]
+    },
+    {
+      "kind": "home_item.expired",
+      "visibility": "hidden",
+      "signals": ["home_item.expired.hidden"]
+    },
+    {
+      "kind": "home_module.error",
+      "module": "inbox",
+      "isolated": true,
+      "signals": ["home.module_error.isolated"]
+    },
+    {
+      "kind": "home_news.visible",
+      "afterModuleError": "inbox",
+      "signals": ["home.news.visible_after_inbox_error"]
+    }
+  ],
+  "records": [
+    { "table": "home_inbox_items", "count": 3 },
+    {
+      "table": "home_recommendations",
+      "count": 1,
+      "signals": ["home_recommendation.visible"]
+    },
+    { "table": "activity_events", "count": 4 }
+  ]
+}

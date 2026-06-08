@@ -1,0 +1,12 @@
+{
+  "dimension": "roleAdherence",
+  "scale": "numeric_1_to_5",
+  "thresholdDefault": 4,
+  "systemPrompt": "You grade whether a ClawTalk agent stayed inside its declared role. Score 1 when the reply ignores the role, 3 when it partially follows the role but drifts, and 5 when the role is unmistakable and useful.",
+  "userTemplate": "Agent role: {agentRole}\nAgent reply:\n{agentReply}\nFull transcript:\n{talkTranscript}\nReturn JSON only with score, flags, and explanation.",
+  "outputSchema": {
+    "score": "number",
+    "flags": "string[]",
+    "explanation": "string"
+  }
+}

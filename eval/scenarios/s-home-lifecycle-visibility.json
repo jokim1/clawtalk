@@ -1,0 +1,53 @@
+{
+  "id": "s-home-lifecycle-visibility",
+  "title": "Home lifecycle visibility",
+  "description": "Home shows launch-critical inbox items and supports read, resolve, dismiss, snooze, and expiry transitions.",
+  "category": "home",
+  "team": "default",
+  "mode": "ordered",
+  "roundsLimit": 1,
+  "userPrompt": "Open Home after new job, document, and recommendation events arrive, then move items through their lifecycle actions.",
+  "expectedDynamics": "Home surfaces job_output_ready, job_blocked, document edit, recommendation, and news items without cross-module failures hiding the rest of the page.",
+  "threshold": 4,
+  "fixture": "s-home-lifecycle-visibility.fixture.json",
+  "checks": [
+    {
+      "id": "home-inbox-critical-items-visible",
+      "area": "home",
+      "description": "Home inbox contains the MVP critical event types.",
+      "requiredSignals": [
+        "home_inbox.job_output_ready.visible",
+        "home_inbox.job_blocked.visible",
+        "home_inbox.document_edit.visible",
+        "home_recommendation.visible"
+      ],
+      "threshold": 4,
+      "launchCritical": true
+    },
+    {
+      "id": "home-lifecycle-actions",
+      "area": "home",
+      "description": "Read, resolve, dismiss, and snooze transitions are represented.",
+      "requiredSignals": [
+        "home_item.read.ok",
+        "home_item.resolve.ok",
+        "home_item.dismiss.ok",
+        "home_item.snooze.ok"
+      ],
+      "threshold": 4,
+      "launchCritical": true
+    },
+    {
+      "id": "home-expiry-and-module-isolation",
+      "area": "home",
+      "description": "Expired items are hidden and one failing module does not suppress other Home modules.",
+      "requiredSignals": [
+        "home_item.expired.hidden",
+        "home.module_error.isolated",
+        "home.news.visible_after_inbox_error"
+      ],
+      "threshold": 4,
+      "launchCritical": true
+    }
+  ]
+}

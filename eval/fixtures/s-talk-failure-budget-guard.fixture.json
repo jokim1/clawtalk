@@ -1,0 +1,60 @@
+{
+  "scenarioId": "s-talk-failure-budget-guard",
+  "observedAt": "2026-06-07T00:04:00.000Z",
+  "source": "fixture",
+  "transcript": [
+    "strategist: completed a compact thesis before the sibling failure.",
+    "critic: failed with provider_timeout and no agent message body.",
+    "researcher: completed a sourced note that remains visible.",
+    "quant: completed a compact range check that remains visible.",
+    "editor: budget guard rejected an oversized synthesis draft."
+  ],
+  "events": [
+    {
+      "kind": "run.partial_failure",
+      "runId": "eval-run-talk-failure-1",
+      "failedAgent": "critic",
+      "visible": true,
+      "signals": [
+        "talk.run.partial_failure.persisted",
+        "talk.run.partial_failure.visible",
+        "talk.run.partial_failure.not_silent_complete",
+        "talk.run.failed_agent.attributed"
+      ]
+    },
+    {
+      "kind": "agent_over_budget",
+      "runId": "eval-run-talk-failure-1",
+      "agent": "editor",
+      "cleanPass": false,
+      "signals": [
+        "talk.agent_over_budget.detected",
+        "talk.agent_over_budget.flagged",
+        "talk.agent_over_budget.not_clean_pass"
+      ]
+    },
+    {
+      "kind": "retry_or_cancel.available",
+      "runId": "eval-run-talk-failure-1",
+      "signals": ["talk.run.retry_or_cancel.available"]
+    }
+  ],
+  "records": [
+    {
+      "table": "runs",
+      "id": "eval-run-talk-failure-1",
+      "status": "partial_failed",
+      "signals": ["talk.run.partial_failure.persisted"]
+    },
+    {
+      "table": "messages",
+      "successfulAgentCount": 3,
+      "signals": ["talk.run.successful_outputs.preserved"]
+    },
+    {
+      "table": "agent_audits",
+      "overBudgetAgent": "editor",
+      "signals": ["talk.agent_over_budget.flagged"]
+    }
+  ]
+}

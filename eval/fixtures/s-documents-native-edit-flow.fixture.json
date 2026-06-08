@@ -1,0 +1,75 @@
+{
+  "scenarioId": "s-documents-native-edit-flow",
+  "observedAt": "2026-06-07T00:01:00.000Z",
+  "source": "fixture",
+  "events": [
+    {
+      "kind": "document_edit.pending",
+      "documentId": "doc-eval-1",
+      "editId": "edit-pending-1",
+      "signals": ["document_edits.pending.visible"]
+    },
+    {
+      "kind": "document_edit.accepted",
+      "documentId": "doc-eval-1",
+      "editId": "edit-accept-1",
+      "signals": [
+        "document_edits.accept.applies_blocks",
+        "document_edits.version.cas_enforced"
+      ]
+    },
+    {
+      "kind": "document_edit.rejected",
+      "documentId": "doc-eval-1",
+      "editId": "edit-reject-1",
+      "signals": ["document_edits.reject.no_mutation"]
+    },
+    {
+      "kind": "document_edit.accept_conflict",
+      "documentId": "doc-eval-1",
+      "editId": "edit-stale-1",
+      "signals": [
+        "document_edits.accept_stale.conflict_409",
+        "document_edits.version.cas_enforced"
+      ]
+    }
+  ],
+  "records": [
+    {
+      "table": "documents",
+      "id": "doc-eval-1",
+      "nativeId": "doc-eval-1",
+      "bodyMarkdown": null,
+      "bodyHtml": null,
+      "signals": [
+        "documents.route.list.ok",
+        "documents.route.read.ok",
+        "documents.native_ids.used",
+        "documents.body_markdown.not_required",
+        "documents.body_html.not_required"
+      ]
+    },
+    {
+      "table": "doc_tabs",
+      "id": "tab-eval-1",
+      "signals": ["documents.tabs.list.ok"]
+    },
+    {
+      "table": "doc_blocks",
+      "id": "block-eval-1",
+      "signals": ["documents.blocks.list.ok"]
+    },
+    {
+      "table": "document_edits",
+      "id": "edit-pending-1",
+      "status": "pending",
+      "baseVersion": 3,
+      "targetBlockId": "block-eval-1",
+      "signals": [
+        "document_edits.pending.visible",
+        "document_edits.base_version.present",
+        "document_edits.target_block.present"
+      ]
+    }
+  ]
+}

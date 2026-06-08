@@ -108,6 +108,81 @@ export type Content = {
   updatedByRunId: string | null;
 };
 
+export type NativeDocumentFormat = ContentFormat;
+export type NativeDocumentBlockKind =
+  | 'h1'
+  | 'h2'
+  | 'p'
+  | 'li'
+  | 'meta'
+  | 'code';
+
+export type NativeDocumentSummary = {
+  id: string;
+  workspaceId: string;
+  primaryTalkId: string | null;
+  folderId: string | null;
+  title: string;
+  format: NativeDocumentFormat;
+  wordCount: number;
+  lastEditAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+  tabCount: number;
+  blockCount: number;
+  pendingEditCount: number;
+};
+
+export type NativeDocumentBlock = {
+  id: string;
+  documentId: string;
+  tabId: string;
+  sortOrder: number;
+  version: number;
+  kind: NativeDocumentBlockKind;
+  text: string;
+  attrs: Record<string, unknown>;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type NativeDocumentTab = {
+  id: string;
+  documentId: string;
+  title: string;
+  sortOrder: number;
+  listVersion: number;
+  createdAt: string;
+  updatedAt: string;
+  blocks: NativeDocumentBlock[];
+};
+
+export type NativeDocumentEdit = {
+  id: string;
+  documentId: string;
+  tabId: string;
+  blockId: string | null;
+  baseBlockVersion: number | null;
+  baseListVersion: number | null;
+  afterBlockId: string | null;
+  proposedByAgentId: string | null;
+  proposedByAgentName: string | null;
+  proposedByRunId: string | null;
+  op: 'insert' | 'replace' | 'delete';
+  newKind: NativeDocumentBlockKind | null;
+  newText: string | null;
+  newAttrs: Record<string, unknown> | null;
+  status: 'pending' | 'accepted' | 'rejected' | 'superseded';
+  source: 'agent' | 'forge' | 'job';
+  createdAt: string;
+  resolvedAt: string | null;
+};
+
+export type NativeDocument = NativeDocumentSummary & {
+  tabs: NativeDocumentTab[];
+  pendingEdits: NativeDocumentEdit[];
+};
+
 // ---------------------------------------------------------------------------
 // Context tab types
 // ---------------------------------------------------------------------------
@@ -1304,6 +1379,190 @@ export async function rejectContentEditRun(input: {
 }): Promise<{ runId: string; editIds: string[] }> {
   return apiMutationRequest<{ runId: string; editIds: string[] }>(
     `/api/v1/contents/${encodeURIComponent(input.contentId)}/runs/${encodeURIComponent(input.runId)}/reject`,
+    {
+      method: 'POST',
+      includeJson: true,
+      body: '{}',
+    },
+  );
+}
+
+export async function listDocuments(input?: {
+  workspaceId?: string | null;
+  includeUnlinked?: boolean;
+}): Promise<NativeDocumentSummary[]> {
+  const params = new URLSearchParams();
+  params.set('include_unlinked', String(input?.includeUnlinked ?? true));
+  const path = withWorkspaceQuery(
+    `/api/v1/documents?${params.toString()}`,
+    input?.workspaceId,
+  );
+  const envelope = await apiRequest<{ documents: NativeDocumentSummary[] }>(
+    path,
+  );
+  return envelope.documents;
+}
+
+export async function getDocument(input: {
+  documentId: string;
+  workspaceId?: string | null;
+}): Promise<NativeDocument> {
+  const envelope = await apiRequest<{ document: NativeDocument }>(
+    withWorkspaceQuery(
+      `/api/v1/documents/${encodeURIComponent(input.documentId)}`,
+      input.workspaceId,
+    ),
+  );
+  return envelope.document;
+}
+
+export async function listDocumentEdits(input: {
+  documentId: string;
+  workspaceId?: string | null;
+  status?: NativeDocumentEdit['status'] | 'all';
+}): Promise<NativeDocumentEdit[]> {
+  const params = new URLSearchParams();
+  if (input.status) params.set('status', input.status);
+  const suffix = params.size > 0 ? `?${params.toString()}` : '';
+  const envelope = await apiRequest<{ edits: NativeDocumentEdit[] }>(
+    withWorkspaceQuery(
+      `/api/v1/documents/${encodeURIComponent(input.documentId)}/edits${suffix}`,
+      input.workspaceId,
+    ),
+  );
+  return envelope.edits;
+}
+
+export async function acceptDocumentEdit(input: {
+  documentId: string;
+  editId: string;
+  workspaceId?: string | null;
+  expectedContentVersion?: number;
+}): Promise<{ document: NativeDocument; editId: string; runId: string }> {
+  return apiMutationRequest<{
+    document: NativeDocument;
+    editId: string;
+    runId: string;
+  }>(
+    withWorkspaceQuery(
+      `/api/v1/documents/${encodeURIComponent(input.documentId)}/edits/${encodeURIComponent(input.editId)}/accept`,
+      input.workspaceId,
+    ),
+    {
+      method: 'POST',
+      includeJson: true,
+      body: JSON.stringify({
+        expectedContentVersion: input.expectedContentVersion,
+      }),
+    },
+  );
+}
+
+export async function rejectDocumentEdit(input: {
+  documentId: string;
+  editId: string;
+  workspaceId?: string | null;
+}): Promise<{ document: NativeDocument; editId: string; runId: string }> {
+  return apiMutationRequest<{
+    document: NativeDocument;
+    editId: string;
+    runId: string;
+  }>(
+    withWorkspaceQuery(
+      `/api/v1/documents/${encodeURIComponent(input.documentId)}/edits/${encodeURIComponent(input.editId)}/reject`,
+      input.workspaceId,
+    ),
+    {
+      method: 'POST',
+      includeJson: true,
+      body: '{}',
+    },
+  );
+}
+
+export async function acceptDocumentEditRun(input: {
+  documentId: string;
+  runId: string;
+  workspaceId?: string | null;
+  expectedContentVersion?: number;
+}): Promise<{ document: NativeDocument; runId: string; editIds: string[] }> {
+  return apiMutationRequest<{
+    document: NativeDocument;
+    runId: string;
+    editIds: string[];
+  }>(
+    withWorkspaceQuery(
+      `/api/v1/documents/${encodeURIComponent(input.documentId)}/edit-runs/${encodeURIComponent(input.runId)}/accept`,
+      input.workspaceId,
+    ),
+    {
+      method: 'POST',
+      includeJson: true,
+      body: JSON.stringify({
+        expectedContentVersion: input.expectedContentVersion,
+      }),
+    },
+  );
+}
+
+export async function rejectDocumentEditRun(input: {
+  documentId: string;
+  runId: string;
+  workspaceId?: string | null;
+}): Promise<{ document: NativeDocument; runId: string; editIds: string[] }> {
+  return apiMutationRequest<{
+    document: NativeDocument;
+    runId: string;
+    editIds: string[];
+  }>(
+    withWorkspaceQuery(
+      `/api/v1/documents/${encodeURIComponent(input.documentId)}/edit-runs/${encodeURIComponent(input.runId)}/reject`,
+      input.workspaceId,
+    ),
+    {
+      method: 'POST',
+      includeJson: true,
+      body: '{}',
+    },
+  );
+}
+
+export async function acceptAllDocumentEdits(input: {
+  documentId: string;
+  workspaceId?: string | null;
+  expectedContentVersion?: number;
+}): Promise<{ document: NativeDocument; editIds: string[]; runId: string }> {
+  return apiMutationRequest<{
+    document: NativeDocument;
+    editIds: string[];
+    runId: string;
+  }>(
+    withWorkspaceQuery(
+      `/api/v1/documents/${encodeURIComponent(input.documentId)}/accept-all`,
+      input.workspaceId,
+    ),
+    {
+      method: 'POST',
+      includeJson: true,
+      body: JSON.stringify({
+        expectedContentVersion: input.expectedContentVersion,
+      }),
+    },
+  );
+}
+
+export async function rejectAllDocumentEdits(input: {
+  documentId: string;
+  workspaceId?: string | null;
+}): Promise<{ document: NativeDocument; editIds: string[] }> {
+  return apiMutationRequest<{
+    document: NativeDocument;
+    editIds: string[];
+  }>(
+    withWorkspaceQuery(
+      `/api/v1/documents/${encodeURIComponent(input.documentId)}/reject-all`,
+      input.workspaceId,
+    ),
     {
       method: 'POST',
       includeJson: true,

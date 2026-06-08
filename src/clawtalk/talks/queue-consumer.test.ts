@@ -18,6 +18,10 @@ import {
 } from './greenfield-accessors.js';
 import { enqueueGreenfieldChatTurn } from './greenfield-chat-accessors.js';
 import {
+  createGreenfieldDocumentForTalk,
+  replaceGreenfieldDocumentBlocks,
+} from './greenfield-detail-accessors.js';
+import {
   createGreenfieldJob,
   createGreenfieldJobRunNow,
 } from './greenfield-job-accessors.js';
@@ -85,7 +89,11 @@ async function seedAuthUser(id: string, email: string): Promise<void> {
 
 async function purge(): Promise<void> {
   const db = getDbPg();
-  await db`delete from public.event_outbox where topic like 'talk:%'`;
+  await db`
+    delete from public.event_outbox
+    where topic like 'talk:%'
+       or topic like 'user:%'
+  `;
   await db`delete from public.workspaces where owner_id = ${OWNER_ID}::uuid`;
 }
 
@@ -170,11 +178,17 @@ async function setupRun(opts?: {
   });
 }
 
-async function setupJobRun(opts?: { status?: 'queued' | 'running' }): Promise<{
+async function setupJobRun(opts?: {
+  status?: 'queued' | 'running';
+  emitTalkMessage?: boolean;
+  emitDocumentAppend?: boolean;
+}): Promise<{
   workspaceId: string;
   talkId: string;
   jobId: string;
   runId: string;
+  documentId: string | null;
+  tabId: string | null;
 }> {
   const workspaceId = await ensureWorkspaceBootstrapForUser(OWNER_ID);
   return withUserContext(OWNER_ID, async () => {
@@ -185,6 +199,21 @@ async function setupJobRun(opts?: { status?: 'queued' | 'running' }): Promise<{
       title: 'Queue Consumer Job Test Talk',
       agentIds: [agentIds[0]!],
     });
+    let document: { id: string; tab_id: string } | null = null;
+    if (opts?.emitDocumentAppend) {
+      document = await createGreenfieldDocumentForTalk({
+        workspaceId,
+        talkId: talk.id,
+        title: 'Queue Consumer Job Document',
+        format: 'markdown',
+      });
+      await replaceGreenfieldDocumentBlocks({
+        workspaceId,
+        documentId: document.id,
+        tabId: document.tab_id,
+        blocks: [{ kind: 'p', text: 'Existing job document block.' }],
+      });
+    }
     const job = await createGreenfieldJob({
       workspaceId,
       talkId: talk.id,
@@ -194,6 +223,8 @@ async function setupJobRun(opts?: { status?: 'queued' | 'running' }): Promise<{
       schedule: { kind: 'interval', everyHours: 1 },
       timezone: 'UTC',
       sourceScope: { allowWeb: false, toolIds: [] },
+      emitTalkMessage: opts?.emitTalkMessage,
+      emitDocumentAppend: opts?.emitDocumentAppend,
       createdBy: OWNER_ID,
     });
     const enqueued = await createGreenfieldJobRunNow({
@@ -220,6 +251,8 @@ async function setupJobRun(opts?: { status?: 'queued' | 'running' }): Promise<{
       talkId: talk.id,
       jobId: job.id,
       runId: enqueued.runId,
+      documentId: document?.id ?? null,
+      tabId: document?.tab_id ?? null,
     };
   });
 }
@@ -243,6 +276,7 @@ function makeMockExecutor(behavior: {
   emitEvents?: TalkExecutionEvent[];
   waitFor?: Promise<unknown>;
   onExecuteStart?: () => void;
+  beforeReturn?: () => void | Promise<void>;
 }): TalkExecutor {
   return {
     async execute(
@@ -269,6 +303,7 @@ function makeMockExecutor(behavior: {
         ]);
       }
       if (behavior.throwError) throw behavior.throwError;
+      await behavior.beforeReturn?.();
       return {
         content: behavior.output?.content ?? 'mock response',
         metadataJson: behavior.output?.metadataJson ?? null,
@@ -558,6 +593,422 @@ describe('processTalkRunMessage', () => {
     expect(messages[0]?.metadata_json).not.toHaveProperty(
       'codexReasoningItems',
     );
+  });
+
+  it('emits a pending document edit and job_output_ready for dual-output job runs', async () => {
+    const { runId, talkId, jobId, documentId, tabId } = await setupJobRun({
+      emitDocumentAppend: true,
+    });
+    const { ctx, drain } = makeMockCtx();
+    const { env } = makeMockEventHub();
+
+    await withRequestScopedDb(TEST_DB_URL, ctx, env, async () => {
+      await withNotifyQueueScope(env, ctx, () =>
+        processTalkRunMessage({
+          runId,
+          executor: makeMockExecutor({
+            output: { content: 'Append this job output to the document.' },
+          }),
+          cancelPollIntervalMs: 50_000,
+        }),
+      );
+    });
+    await drain();
+
+    const run = await getGreenfieldQueueRunById(runId);
+    expect(run?.status).toBe('completed');
+
+    const db = getDbPg();
+    const messages = await db<Array<{ id: string; body: string | null }>>`
+      select id, body
+      from public.messages
+      where run_id = ${runId}::uuid
+        and author_kind = 'agent'
+      order by created_at asc
+    `;
+    expect(messages).toMatchObject([
+      { body: 'Append this job output to the document.' },
+    ]);
+
+    const edits = await db<
+      Array<{
+        id: string;
+        document_id: string;
+        tab_id: string;
+        after_block_id: string | null;
+        base_list_version: number | null;
+        op: string;
+        new_kind: string | null;
+        new_text: string | null;
+        source: string;
+        proposed_by_run_id: string | null;
+        proposed_by_agent_id: string | null;
+      }>
+    >`
+      select
+        id,
+        document_id,
+        tab_id,
+        after_block_id,
+        base_list_version,
+        op,
+        new_kind,
+        new_text,
+        source,
+        proposed_by_run_id,
+        proposed_by_agent_id
+      from public.document_edits
+      where proposed_by_run_id = ${runId}::uuid
+      order by created_at asc
+    `;
+    expect(edits).toHaveLength(1);
+    expect(edits[0]).toMatchObject({
+      document_id: documentId,
+      tab_id: tabId,
+      op: 'insert',
+      new_kind: 'p',
+      new_text: 'Append this job output to the document.',
+      source: 'job',
+      proposed_by_run_id: runId,
+    });
+    expect(edits[0]?.after_block_id).not.toBeNull();
+    expect(edits[0]?.base_list_version).toBeGreaterThanOrEqual(1);
+    expect(edits[0]?.proposed_by_agent_id).toBe(run?.target_agent_id);
+
+    const inbox = await db<
+      Array<{
+        id: string;
+        type: string;
+        ref_id: string | null;
+        job_id: string | null;
+        document_id: string | null;
+        tab_id: string | null;
+        target_json: Record<string, unknown>;
+      }>
+    >`
+      select id, type, ref_id, job_id, document_id, tab_id, target_json
+      from public.home_inbox_items
+      where type = 'job_output_ready'
+        and ref_id = ${runId}::uuid
+    `;
+    expect(inbox).toHaveLength(1);
+    expect(inbox[0]).toMatchObject({
+      type: 'job_output_ready',
+      ref_id: runId,
+      job_id: jobId,
+      document_id: documentId,
+      tab_id: tabId,
+    });
+    expect(inbox[0]?.target_json).toMatchObject({
+      jobId,
+      talkId,
+      runId,
+      emittedMessageId: messages[0]!.id,
+      emittedEditId: edits[0]!.id,
+    });
+
+    const userEvents = await getOutboxEventsForTopics([`user:${OWNER_ID}`], 0);
+    const ready = userEvents.find(
+      (event) =>
+        event.event_type === 'job_output_ready' &&
+        event.payload.runId === runId,
+    );
+    expect(ready?.payload).toMatchObject({
+      jobId,
+      talkId,
+      emittedMessageId: messages[0]!.id,
+      emittedEditId: edits[0]!.id,
+      inboxItemId: inbox[0]!.id,
+    });
+  });
+
+  it('falls back to a null proposed agent when the live agent is deleted before document append', async () => {
+    const { runId } = await setupJobRun({
+      emitDocumentAppend: true,
+    });
+    const staleRun = await getGreenfieldQueueRunById(runId);
+    expect(staleRun?.target_agent_id).toBeTruthy();
+    const { ctx, drain } = makeMockCtx();
+    const { env } = makeMockEventHub();
+
+    await withRequestScopedDb(TEST_DB_URL, ctx, env, async () => {
+      await withNotifyQueueScope(env, ctx, () =>
+        processTalkRunMessage({
+          runId,
+          executor: makeMockExecutor({
+            output: { content: 'Append after deleting the live agent.' },
+            beforeReturn: async () => {
+              const db = getDbPg();
+              await withTrustedDbWrites(
+                () =>
+                  db`
+                  delete from public.agents
+                  where workspace_id = ${staleRun!.workspace_id}::uuid
+                    and id = ${staleRun!.target_agent_id}::uuid
+                `,
+              );
+            },
+          }),
+          cancelPollIntervalMs: 50_000,
+        }),
+      );
+    });
+    await drain();
+
+    const run = await getGreenfieldQueueRunById(runId);
+    expect(run?.status).toBe('completed');
+
+    const db = getDbPg();
+    const edits = await db<
+      Array<{ new_text: string | null; proposed_by_agent_id: string | null }>
+    >`
+      select new_text, proposed_by_agent_id
+      from public.document_edits
+      where proposed_by_run_id = ${runId}::uuid
+    `;
+    expect(edits).toMatchObject([
+      {
+        new_text: 'Append after deleting the live agent.',
+        proposed_by_agent_id: null,
+      },
+    ]);
+  });
+
+  it('fails loud without posting a partial Talk message when a document-append target disappears', async () => {
+    const { runId, talkId, documentId } = await setupJobRun({
+      emitDocumentAppend: true,
+    });
+    const queuedRun = await getGreenfieldQueueRunById(runId);
+    expect(documentId).toBeTruthy();
+    const db = getDbPg();
+    await withTrustedDbWrites(
+      () =>
+        db`
+        delete from public.documents
+        where workspace_id = ${queuedRun!.workspace_id}::uuid
+          and id = ${documentId}::uuid
+      `,
+    );
+
+    const { ctx, drain } = makeMockCtx();
+    const { env } = makeMockEventHub();
+    await withRequestScopedDb(TEST_DB_URL, ctx, env, async () => {
+      await withNotifyQueueScope(env, ctx, () =>
+        processTalkRunMessage({
+          runId,
+          executor: makeMockExecutor({
+            output: { content: 'This must not post as a partial message.' },
+          }),
+          cancelPollIntervalMs: 50_000,
+        }),
+      );
+    });
+    await drain();
+
+    const run = await getGreenfieldQueueRunById(runId);
+    expect(run?.status).toBe('failed');
+
+    const messages = await db<Array<{ count: number }>>`
+      select count(*)::int as count
+      from public.messages
+      where run_id = ${runId}::uuid
+        and author_kind = 'agent'
+    `;
+    expect(messages[0]?.count).toBe(0);
+
+    const inbox = await db<Array<{ count: number }>>`
+      select count(*)::int as count
+      from public.home_inbox_items
+      where type = 'job_output_ready'
+        and ref_id = ${runId}::uuid
+    `;
+    expect(inbox[0]?.count).toBe(0);
+
+    const events = await getOutboxEventsForTopics([`talk:${talkId}`], 0);
+    expect(
+      events.some(
+        (event) =>
+          event.event_type === 'message_appended' &&
+          event.payload.runId === runId,
+      ),
+    ).toBe(false);
+    expect(
+      events.some(
+        (event) =>
+          event.event_type === 'talk_run_failed' &&
+          event.payload.runId === runId,
+      ),
+    ).toBe(true);
+
+    const userEvents = await getOutboxEventsForTopics([`user:${OWNER_ID}`], 0);
+    expect(
+      userEvents.some(
+        (event) =>
+          event.event_type === 'job_output_ready' &&
+          event.payload.runId === runId,
+      ),
+    ).toBe(false);
+  });
+
+  it('supports document-only job runs without appending a Talk message', async () => {
+    const { runId, talkId, jobId } = await setupJobRun({
+      emitTalkMessage: false,
+      emitDocumentAppend: true,
+    });
+    const { ctx, drain } = makeMockCtx();
+    const { env } = makeMockEventHub();
+
+    await withRequestScopedDb(TEST_DB_URL, ctx, env, async () => {
+      await withNotifyQueueScope(env, ctx, () =>
+        processTalkRunMessage({
+          runId,
+          executor: makeMockExecutor({
+            output: { content: 'Document-only job output.' },
+          }),
+          cancelPollIntervalMs: 50_000,
+        }),
+      );
+    });
+    await drain();
+
+    const db = getDbPg();
+    const messages = await db<Array<{ count: number }>>`
+      select count(*)::int as count
+      from public.messages
+      where run_id = ${runId}::uuid
+        and author_kind = 'agent'
+    `;
+    expect(messages[0]?.count).toBe(0);
+
+    const edits = await db<Array<{ id: string; new_text: string | null }>>`
+      select id, new_text
+      from public.document_edits
+      where proposed_by_run_id = ${runId}::uuid
+    `;
+    expect(edits).toMatchObject([{ new_text: 'Document-only job output.' }]);
+
+    const talkEvents = await getOutboxEventsForTopics([`talk:${talkId}`], 0);
+    expect(
+      talkEvents.some(
+        (event) =>
+          event.event_type === 'message_appended' &&
+          event.payload.runId === runId,
+      ),
+    ).toBe(false);
+    const completed = talkEvents.find(
+      (event) =>
+        event.event_type === 'talk_run_completed' &&
+        event.payload.runId === runId,
+    );
+    expect(completed?.payload).toMatchObject({
+      responseMessageId: null,
+    });
+
+    const inbox = await db<
+      Array<{ id: string; target_json: Record<string, unknown> }>
+    >`
+      select id, target_json
+      from public.home_inbox_items
+      where type = 'job_output_ready'
+        and ref_id = ${runId}::uuid
+    `;
+    expect(inbox[0]?.target_json).toMatchObject({
+      jobId,
+      emittedMessageId: null,
+      emittedEditId: edits[0]!.id,
+    });
+  });
+
+  it('emits one job_output_ready inbox item for talk-message-only job runs', async () => {
+    const { runId, talkId, jobId } = await setupJobRun();
+    const { ctx, drain } = makeMockCtx();
+    const { env } = makeMockEventHub();
+
+    await withRequestScopedDb(TEST_DB_URL, ctx, env, async () => {
+      await withNotifyQueueScope(env, ctx, () =>
+        processTalkRunMessage({
+          runId,
+          executor: makeMockExecutor({
+            output: { content: 'Talk-only job output.' },
+          }),
+          cancelPollIntervalMs: 50_000,
+        }),
+      );
+    });
+    await drain();
+
+    await withRequestScopedDb(TEST_DB_URL, ctx, env, async () => {
+      await withNotifyQueueScope(env, ctx, () =>
+        processTalkRunMessage({
+          runId,
+          executor: makeMockExecutor({
+            output: { content: 'Duplicate delivery should not execute.' },
+          }),
+          cancelPollIntervalMs: 50_000,
+        }),
+      );
+    });
+    await drain();
+
+    const db = getDbPg();
+    const messages = await db<Array<{ id: string; body: string | null }>>`
+      select id, body
+      from public.messages
+      where run_id = ${runId}::uuid
+        and author_kind = 'agent'
+      order by created_at asc
+    `;
+    expect(messages).toMatchObject([{ body: 'Talk-only job output.' }]);
+
+    const edits = await db<Array<{ count: number }>>`
+      select count(*)::int as count
+      from public.document_edits
+      where proposed_by_run_id = ${runId}::uuid
+    `;
+    expect(edits[0]?.count).toBe(0);
+
+    const inbox = await db<
+      Array<{
+        id: string;
+        job_id: string | null;
+        document_id: string | null;
+        tab_id: string | null;
+        target_json: Record<string, unknown>;
+      }>
+    >`
+      select id, job_id, document_id, tab_id, target_json
+      from public.home_inbox_items
+      where type = 'job_output_ready'
+        and ref_id = ${runId}::uuid
+      order by created_at asc
+    `;
+    expect(inbox).toHaveLength(1);
+    expect(inbox[0]).toMatchObject({
+      job_id: jobId,
+      document_id: null,
+      tab_id: null,
+    });
+    expect(inbox[0]?.target_json).toMatchObject({
+      jobId,
+      talkId,
+      runId,
+      emittedMessageId: messages[0]!.id,
+      emittedEditId: null,
+    });
+
+    const userEvents = await getOutboxEventsForTopics([`user:${OWNER_ID}`], 0);
+    const readyEvents = userEvents.filter(
+      (event) =>
+        event.event_type === 'job_output_ready' &&
+        event.payload.runId === runId,
+    );
+    expect(readyEvents).toHaveLength(1);
+    expect(readyEvents[0]?.payload).toMatchObject({
+      jobId,
+      talkId,
+      emittedMessageId: messages[0]!.id,
+      inboxItemId: inbox[0]!.id,
+    });
   });
 
   it('flushes talk_run_started before executor completion', async () => {
