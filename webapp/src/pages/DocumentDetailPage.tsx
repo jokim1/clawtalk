@@ -72,25 +72,17 @@ export function DocumentDetailPage(): JSX.Element {
   const [allBusy, setAllBusy] = useState(false);
 
   const activeLoad = useRef<{ cancelled: boolean } | null>(null);
-  // The currently-viewed document id, read at apply time. The detail-route
-  // component instance is reused across :documentId changes (no remount), so a
-  // mutation that resolves AFTER the user navigated to another document must not
-  // clobber the new document's state — applyDocument no-ops if the returned
-  // document is no longer the one on screen.
-  const documentIdRef = useRef(documentId);
-  useEffect(() => {
-    documentIdRef.current = documentId;
-  }, [documentId]);
 
   // Tab roving-focus refs for the WAI-ARIA tablist keyboard pattern.
   const tabBaseId = useId();
   const tabButtonsRef = useRef<Map<string, HTMLButtonElement>>(new Map());
 
-  // Apply a server document, keeping the active tab if it still exists. Stable
-  // (reads documentIdRef, not a closed-over id) so a single instance guards both
-  // load() and every mutation handler against a stale cross-document response.
+  // Apply a server document, keeping the active tab if it still exists. The
+  // route remounts this page per documentId (DocumentDetailRoute in App.tsx), so
+  // one instance only ever handles a single document — a stale accept/reject
+  // from a previous document resolves on an unmounted instance, not here, so no
+  // cross-document guard is needed.
   const applyDocument = useCallback((next: NativeDocument) => {
-    if (next.id !== documentIdRef.current) return;
     setDoc(next);
     setActiveTabId((current) => {
       if (current && next.tabs.some((tab) => tab.id === current))

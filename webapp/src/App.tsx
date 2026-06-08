@@ -5,6 +5,7 @@ import {
   Routes,
   useLocation,
   useNavigate,
+  useParams,
 } from 'react-router-dom';
 
 import { CommandPalette, type CommandItem } from './components/CommandPalette';
@@ -375,6 +376,17 @@ function buildOptimisticReorder(
       talks: talks.map((talk, index) => ({ ...talk, sortOrder: index })),
     };
   });
+}
+
+// Remount the document viewer per :documentId. The page holds page-owned
+// document state, a shared load-cancellation token, and in-flight accept/reject
+// promises; without a per-id key React reuses one instance across navigations,
+// so a mutation resolving after the user moved to another document could cancel
+// the new load or clobber its state. Keying by id makes those stale resolves
+// land on an unmounted instance (a no-op) and gives each document fresh state.
+function DocumentDetailRoute(): JSX.Element {
+  const { documentId } = useParams<{ documentId: string }>();
+  return <DocumentDetailPage key={documentId ?? 'none'} />;
 }
 
 function MainTalkRedirect({
@@ -1047,7 +1059,7 @@ export function App() {
             <Route path="/app/documents" element={<DocumentsPage />} />
             <Route
               path="/app/documents/:documentId"
-              element={<DocumentDetailPage />}
+              element={<DocumentDetailRoute />}
             />
             <Route
               path="/app/talks"
