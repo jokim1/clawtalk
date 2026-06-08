@@ -17,6 +17,9 @@ import type {
   AiAgentsPageData,
   RegisteredAgent,
   SessionUser,
+  UserGoogleAccount,
+  WebSearchProviderCard,
+  WebSearchProviderId,
 } from '../lib/api';
 
 const TEST_WORKSPACE_ID = '00000000-0000-4000-8000-000000000001';
@@ -48,6 +51,40 @@ describe('SettingsPage', () => {
     expect(
       screen.getByRole('heading', { name: 'Personal Information' }),
     ).toBeTruthy();
+  });
+
+  it('saves Profile display-name changes through the session API', async () => {
+    const user = userEvent.setup();
+    const helpers = installSettingsFetch();
+    const onUserUpdated = vi.fn();
+
+    render(
+      <MemoryRouter initialEntries={['/app/settings']}>
+        <SettingsPage
+          user={buildSessionUser()}
+          userRole="owner"
+          onUnauthorized={vi.fn()}
+          onUserUpdated={onUserUpdated}
+        />
+      </MemoryRouter>,
+    );
+
+    await screen.findByRole('heading', { name: 'My Profile' });
+    const nameInput = screen.getByLabelText('Full name');
+    await user.clear(nameInput);
+    await user.type(nameInput, 'Owner Renamed');
+    await user.click(screen.getByRole('button', { name: 'Save changes' }));
+
+    expect(await screen.findByText('Profile updated.')).toBeTruthy();
+    expect(helpers.getProfileUpdateCalls()).toEqual([
+      {
+        workspaceId: TEST_WORKSPACE_ID,
+        body: { displayName: 'Owner Renamed' },
+      },
+    ]);
+    expect(onUserUpdated).toHaveBeenCalledWith(
+      expect.objectContaining({ displayName: 'Owner Renamed' }),
+    );
   });
 
   it('opens the API Keys tab via ?tab=api-keys, defaults to Personal, and surfaces Workspace via sub-tab', async () => {
@@ -402,6 +439,51 @@ describe('SettingsPage', () => {
     expect(helpers.getOpenAiPollCalls()).toEqual(['openai-state-1']);
   });
 
+  it('completes the Claude subscription flow through the reload seam', async () => {
+    const user = userEvent.setup();
+    const helpers = installSettingsFetch();
+    const openSpy = vi.spyOn(window, 'open').mockReturnValue(null);
+    const reloadSpy = vi
+      .spyOn(settingsPageNavigation, 'reload')
+      .mockImplementation(() => undefined);
+
+    render(
+      <MemoryRouter initialEntries={['/app/settings?tab=api-keys']}>
+        <SettingsPage
+          user={buildSessionUser()}
+          userRole="owner"
+          onUnauthorized={vi.fn()}
+          onUserUpdated={vi.fn()}
+        />
+      </MemoryRouter>,
+    );
+
+    await screen.findByRole('heading', { name: 'Personal API Keys' });
+    await user.click(screen.getByRole('button', { name: 'Connect with Claude' }));
+
+    expect(openSpy).toHaveBeenCalledWith(
+      'https://claude.example/oauth',
+      '_blank',
+      'noopener,noreferrer',
+    );
+    expect(helpers.getAnthropicInitiateCalls()).toEqual([
+      { scope: 'user', workspaceId: TEST_WORKSPACE_ID },
+    ]);
+
+    await user.type(
+      await screen.findByLabelText('Paste the code (or full code#state blob)'),
+      'claude-code#ignored-state-fragment',
+    );
+    await user.click(
+      screen.getByRole('button', { name: 'Complete connection' }),
+    );
+
+    await waitFor(() => expect(reloadSpy).toHaveBeenCalledTimes(1));
+    expect(helpers.getAnthropicCompleteCalls()).toEqual([
+      { state: 'anthropic-state-1', code: 'claude-code' },
+    ]);
+  });
+
   it('opens the Agents tab and lists registered agents from the panel', async () => {
     installSettingsFetch();
 
@@ -507,6 +589,18 @@ function installSettingsFetch(options?: {
   const mainAgentUpdateCalls: string[] = [];
   const openAiPollCalls: string[] = [];
   const openAiPollResponses = [...(options?.openAiPollResponses ?? [])];
+  const anthropicInitiateCalls: Array<{
+    scope: 'user' | 'workspace';
+    workspaceId?: string | null;
+  }> = [];
+  const anthropicCompleteCalls: Array<{
+    state: string;
+    code: string;
+  }> = [];
+  const profileUpdateCalls: Array<{
+    workspaceId: string | null;
+    body: { displayName?: string };
+  }> = [];
   const providerSaveCalls: Record<
     string,
     Array<{
@@ -530,6 +624,26 @@ function installSettingsFetch(options?: {
       const parsed = new URL(url, 'http://localhost');
       const path = parsed.pathname;
       const method = init?.method || 'GET';
+
+      if (path === '/api/v1/session/me' && method === 'PATCH') {
+        const body = JSON.parse(String(init?.body || '{}')) as {
+          displayName?: string;
+        };
+        const workspaceId = parsed.searchParams.get('workspaceId');
+        profileUpdateCalls.push({ workspaceId, body });
+        const updatedUser = buildSessionUser({
+          displayName: body.displayName ?? 'Owner',
+          currentWorkspaceId: workspaceId ?? TEST_WORKSPACE_ID,
+        });
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            user: updatedUser,
+            workspaces: updatedUser.workspaces,
+            currentWorkspaceId: updatedUser.currentWorkspaceId,
+          },
+        });
+      }
 
       if (path === '/api/v1/agents' && method === 'GET') {
         return jsonResponse(200, { ok: true, data: snapshot });
@@ -564,6 +678,45 @@ function installSettingsFetch(options?: {
         }
         mainAgent = nextMain;
         return jsonResponse(200, { ok: true, data: nextMain });
+      }
+
+      if (
+        path === '/api/v1/agents/providers/provider.anthropic/oauth/initiate' &&
+        method === 'POST'
+      ) {
+        const body = JSON.parse(String(init?.body || '{}')) as {
+          scope?: 'user' | 'workspace';
+          workspaceId?: string | null;
+        };
+        anthropicInitiateCalls.push({
+          scope: body.scope ?? 'user',
+          workspaceId: body.workspaceId,
+        });
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            authorizationUrl: 'https://claude.example/oauth',
+            state: 'anthropic-state-1',
+          },
+        });
+      }
+
+      if (
+        path === '/api/v1/agents/providers/provider.anthropic/oauth/complete' &&
+        method === 'POST'
+      ) {
+        const body = JSON.parse(String(init?.body || '{}')) as {
+          state: string;
+          code: string;
+        };
+        anthropicCompleteCalls.push(body);
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            scope: 'user',
+            expiresAt: '2026-05-16T12:05:00.000Z',
+          },
+        });
       }
 
       if (
@@ -670,6 +823,9 @@ function installSettingsFetch(options?: {
       providerSaveCalls[providerId] || [],
     getMainAgentUpdateCalls: () => mainAgentUpdateCalls,
     getOpenAiPollCalls: () => openAiPollCalls,
+    getAnthropicInitiateCalls: () => anthropicInitiateCalls,
+    getAnthropicCompleteCalls: () => anthropicCompleteCalls,
+    getProfileUpdateCalls: () => profileUpdateCalls,
   };
 }
 
@@ -942,13 +1098,22 @@ describe('GoogleAccountSection (flag-gated)', () => {
     vi.restoreAllMocks();
   });
 
-  function installToolsFetch(opts: { connected: boolean }) {
-    const account = opts.connected
+  function installToolsFetch(opts: {
+    connected: boolean;
+    scopes?: string[];
+    webSearchProviders?: WebSearchProviderCard[];
+    activeProviderId?: WebSearchProviderId | null;
+  }) {
+    let account: UserGoogleAccount = opts.connected
       ? {
           connected: true,
           email: 'tester@example.com',
           displayName: 'Tester',
-          scopes: ['drive.readonly', 'documents', 'spreadsheets'],
+          scopes: opts.scopes ?? [
+            'drive.readonly',
+            'documents',
+            'spreadsheets',
+          ],
           accessExpiresAt: '2026-12-31T00:00:00.000Z',
         }
       : {
@@ -958,6 +1123,17 @@ describe('GoogleAccountSection (flag-gated)', () => {
           scopes: [],
           accessExpiresAt: null,
         };
+    let webSearchProviders = opts.webSearchProviders ?? [];
+    let activeProviderId = opts.activeProviderId ?? null;
+    const webSearchSaveCalls: Array<{
+      providerId: WebSearchProviderId;
+      apiKey: string;
+    }> = [];
+    const activeProviderCalls: Array<WebSearchProviderId | null> = [];
+    const googleConnectCalls: Array<{ scopes: string[] }> = [];
+    const googleExpandCalls: Array<{ scopes: string[] }> = [];
+    const googleDisconnectCalls: string[] = [];
+
     vi.stubGlobal(
       'fetch',
       vi.fn(async (request: RequestInfo | URL, init?: RequestInit) => {
@@ -987,10 +1163,50 @@ describe('GoogleAccountSection (flag-gated)', () => {
             data: buildRegisteredAgents()[0],
           });
         }
-        if (url.endsWith('/api/v1/web-search/providers') && method === 'GET') {
+        if (path === '/api/v1/web-search/providers' && method === 'GET') {
           return jsonResponse(200, {
             ok: true,
-            data: { providers: [], activeProvider: null },
+            data: {
+              providers: webSearchProviders,
+              activeProviderId,
+            },
+          });
+        }
+        const webSearchProviderMatch = path.match(
+          /\/api\/v1\/web-search\/providers\/([^/?]+)$/,
+        );
+        if (webSearchProviderMatch && method === 'PUT') {
+          const providerId = decodeURIComponent(
+            webSearchProviderMatch[1],
+          ) as WebSearchProviderId;
+          const body = JSON.parse(String(init?.body || '{}')) as {
+            apiKey: string;
+          };
+          webSearchSaveCalls.push({ providerId, apiKey: body.apiKey });
+          webSearchProviders = webSearchProviders.map((provider) =>
+            provider.id === providerId
+              ? {
+                  ...provider,
+                  hasCredential: true,
+                  credentialHint: '••••test',
+                }
+              : provider,
+          );
+          return jsonResponse(200, { ok: true, data: { saved: true } });
+        }
+        if (path === '/api/v1/web-search/active' && method === 'PUT') {
+          const body = JSON.parse(String(init?.body || '{}')) as {
+            providerId: WebSearchProviderId | null;
+          };
+          activeProviderId = body.providerId;
+          activeProviderCalls.push(activeProviderId);
+          webSearchProviders = webSearchProviders.map((provider) => ({
+            ...provider,
+            isActive: provider.id === activeProviderId,
+          }));
+          return jsonResponse(200, {
+            ok: true,
+            data: { activeProviderId },
           });
         }
         if (path === '/api/v1/me/google-account' && method === 'GET') {
@@ -1002,9 +1218,78 @@ describe('GoogleAccountSection (flag-gated)', () => {
             data: { googleAccount: account },
           });
         }
+        if (
+          path === '/api/v1/me/google-account/connect' &&
+          method === 'POST'
+        ) {
+          const body = JSON.parse(String(init?.body || '{}')) as {
+            scopes?: string[];
+          };
+          googleConnectCalls.push({ scopes: body.scopes ?? [] });
+          account = {
+            connected: true,
+            email: 'tester@example.com',
+            displayName: 'Tester',
+            scopes: body.scopes ?? [],
+            accessExpiresAt: '2026-12-31T00:00:00.000Z',
+          };
+          return jsonResponse(200, {
+            ok: true,
+            data: {
+              authorizationUrl: 'https://google.example/connect',
+              expiresInSec: 300,
+            },
+          });
+        }
+        if (
+          path === '/api/v1/me/google-account/expand-scopes' &&
+          method === 'POST'
+        ) {
+          const body = JSON.parse(String(init?.body || '{}')) as {
+            scopes?: string[];
+          };
+          googleExpandCalls.push({ scopes: body.scopes ?? [] });
+          account = {
+            ...account,
+            connected: true,
+            scopes: body.scopes ?? [],
+          };
+          return jsonResponse(200, {
+            ok: true,
+            data: {
+              authorizationUrl: 'https://google.example/expand',
+              expiresInSec: 300,
+            },
+          });
+        }
+        if (
+          path === '/api/v1/me/google-account/disconnect' &&
+          method === 'POST'
+        ) {
+          googleDisconnectCalls.push(TEST_WORKSPACE_ID);
+          account = {
+            connected: false,
+            email: null,
+            displayName: null,
+            scopes: [],
+            accessExpiresAt: null,
+          };
+          return jsonResponse(200, {
+            ok: true,
+            data: { disconnected: true },
+          });
+        }
         throw new Error(`Unexpected fetch: ${method} ${url}`);
       }),
     );
+
+    return {
+      getWebSearchSaveCalls: () => webSearchSaveCalls,
+      getActiveProviderCalls: () => activeProviderCalls,
+      getGoogleConnectCalls: () => googleConnectCalls,
+      getGoogleExpandCalls: () => googleExpandCalls,
+      getGoogleDisconnectCalls: () => googleDisconnectCalls,
+    };
   }
 
   it('does NOT render the Google account section when the flag is unset', async () => {
@@ -1081,6 +1366,151 @@ describe('GoogleAccountSection (flag-gated)', () => {
         name: /Connect Google account/i,
       }),
     ).toBeNull();
+  });
+
+  it('Google tools: connects and disconnects through the action handlers', async () => {
+    const user = userEvent.setup();
+    vi.stubEnv('VITE_GOOGLE_TOOLS_ENABLED', 'true');
+    const helpers = installToolsFetch({ connected: false });
+    vi.spyOn(window, 'open').mockReturnValue({ closed: false } as Window);
+
+    render(
+      <MemoryRouter initialEntries={['/app/settings?tab=tools']}>
+        <SettingsPage
+          user={buildSessionUser()}
+          userRole="owner"
+          onUnauthorized={vi.fn()}
+          onUserUpdated={vi.fn()}
+        />
+      </MemoryRouter>,
+    );
+
+    const section = await screen.findByTestId('google-account-section');
+    await user.click(
+      within(section).getByRole('button', { name: /Connect Google account/i }),
+    );
+    window.dispatchEvent(
+      new MessageEvent('message', {
+        origin: window.location.origin,
+        data: { type: 'clawtalk:google-account-link', status: 'success' },
+      }),
+    );
+
+    expect(await within(section).findByText('Google account connected.')).toBeTruthy();
+    expect(helpers.getGoogleConnectCalls()).toEqual([
+      { scopes: ['drive.readonly', 'documents', 'spreadsheets'] },
+    ]);
+    expect(within(section).getByText(/tester@example.com/)).toBeTruthy();
+
+    await user.click(within(section).getByRole('button', { name: /Disconnect/i }));
+
+    expect(
+      await within(section).findByText('Google account disconnected.'),
+    ).toBeTruthy();
+    expect(helpers.getGoogleDisconnectCalls()).toEqual([TEST_WORKSPACE_ID]);
+    expect(
+      within(section).getByRole('button', { name: /Connect Google account/i }),
+    ).toBeTruthy();
+  });
+
+  it('Google tools: re-requests missing required scopes', async () => {
+    const user = userEvent.setup();
+    vi.stubEnv('VITE_GOOGLE_TOOLS_ENABLED', 'true');
+    const helpers = installToolsFetch({
+      connected: true,
+      scopes: ['drive.readonly'],
+    });
+    vi.spyOn(window, 'open').mockReturnValue({ closed: false } as Window);
+
+    render(
+      <MemoryRouter initialEntries={['/app/settings?tab=tools']}>
+        <SettingsPage
+          user={buildSessionUser()}
+          userRole="owner"
+          onUnauthorized={vi.fn()}
+          onUserUpdated={vi.fn()}
+        />
+      </MemoryRouter>,
+    );
+
+    const section = await screen.findByTestId('google-account-section');
+    expect(
+      within(section).getByText(/Missing required scopes for Google Drive tools/),
+    ).toBeTruthy();
+    await user.click(
+      within(section).getByRole('button', { name: /Re-request scopes/i }),
+    );
+    window.dispatchEvent(
+      new MessageEvent('message', {
+        origin: window.location.origin,
+        data: { type: 'clawtalk:google-account-link', status: 'success' },
+      }),
+    );
+
+    expect(await within(section).findByText('Scopes updated.')).toBeTruthy();
+    expect(helpers.getGoogleExpandCalls()).toEqual([
+      { scopes: ['drive.readonly', 'documents', 'spreadsheets'] },
+    ]);
+    expect(
+      within(section).queryByText(
+        /Missing required scopes for Google Drive tools/,
+      ),
+    ).toBeNull();
+  });
+
+  it('Tools tab: saves a web search key and marks the provider active', async () => {
+    const user = userEvent.setup();
+    vi.stubEnv('VITE_GOOGLE_TOOLS_ENABLED', '');
+    const helpers = installToolsFetch({
+      connected: false,
+      webSearchProviders: [
+        {
+          id: 'web_search.tavily',
+          name: 'Tavily',
+          baseUrl: 'https://api.tavily.com',
+          enabled: true,
+          hasCredential: false,
+          credentialHint: null,
+          isActive: false,
+        },
+      ],
+    });
+
+    render(
+      <MemoryRouter initialEntries={['/app/settings?tab=tools']}>
+        <SettingsPage
+          user={buildSessionUser()}
+          userRole="owner"
+          onUnauthorized={vi.fn()}
+          onUserUpdated={vi.fn()}
+        />
+      </MemoryRouter>,
+    );
+
+    await screen.findByRole('heading', { name: 'Web Search' });
+    const tavilyCard = screen
+      .getByRole('heading', { name: 'Tavily' })
+      .closest('article');
+    if (!tavilyCard) throw new Error('Tavily card not found');
+
+    await user.type(
+      within(tavilyCard).getByPlaceholderText('tvly-...'),
+      'tvly-test-key',
+    );
+    await user.click(within(tavilyCard).getByRole('button', { name: 'Save' }));
+
+    expect(await screen.findByText('Saved.')).toBeTruthy();
+    expect(helpers.getWebSearchSaveCalls()).toEqual([
+      { providerId: 'web_search.tavily', apiKey: 'tvly-test-key' },
+    ]);
+
+    await user.click(
+      await screen.findByRole('button', { name: 'Set as active' }),
+    );
+
+    expect(await screen.findByText('Active provider updated.')).toBeTruthy();
+    expect(helpers.getActiveProviderCalls()).toEqual(['web_search.tavily']);
+    expect(screen.getByText('● Active')).toBeTruthy();
   });
 
   // ─── Connectors tab ──────────────────────────────────────────────────

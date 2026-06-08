@@ -20,7 +20,7 @@ Every Codex and Claude/Opus workstream is one scoped `/goal`, not an informal "c
 A `/goal` runs unattended only if the session is configured for it. For a Claude/Opus implementation lane, set the **unattended trifecta** before pasting the goal:
 
 1. **Auto mode / auto-accept** — tool calls within a turn run without a per-call prompt. Without this, every command pauses for Joseph.
-2. **`/effort ultracode`** — sends xhigh reasoning effort AND makes Claude auto-orchestrate a dynamic workflow (parallel subagents) for each *substantial* slice, instead of waiting to be asked. Run this for branching surface lanes (Salon, Documents, Home, de-facade hunt, surface completion). **Skip it for linear single-file or docs-only slices** (e.g. the Phase 0 docs-drift fix, deleting the zero-importer `TalkLlmSettingsCard.tsx`) — there a single high-effort agent is cheaper and the transcript stays clean.
+2. **`/effort ultracode`** — sends xhigh reasoning effort AND makes Claude auto-orchestrate a dynamic workflow (parallel subagents) for each *substantial* slice, instead of waiting to be asked. Run this for branching surface lanes (Salon, Documents, Home, de-facade hunt, surface completion). **Skip it for linear single-file or docs-only slices** (e.g. the Phase 0 docs-drift fix or a one-file deletion with repo-wide importer proof) — there a single high-effort agent is cheaper and the transcript stays clean.
 3. **`/goal <condition>`** — paste the packet (below). Setting the goal **starts the first turn immediately**; there is no separate kickoff prompt.
 
 Together: high-effort, self-orchestrating, fully unattended turns that stop only when the evaluator confirms the completion condition. **This trifecta IS the minimize-human-in-the-loop mechanism** named in §1.
@@ -77,15 +77,15 @@ This is the part the plan previously got wrong, so it is non-optional:
 - A deletion goal needs an enumerated consumer `rg` (paste before/after counts) plus a test/build gate; for a facade with more than one candidate consumer or any dynamic/registration-indirect access, run an adversarial-verify sweep and echo each verdict (see §2.3).
 - **No admin merge past known-red CI.** Backend CI is green again after the legacy cleanup, so red checks are blockers unless the failing job is unrelated and explicitly justified. Make this checkable: paste `gh run list --branch <branch> --limit 1 --json conclusion,status` showing `conclusion=success` in the handoff.
 
-### 2.5 Worked example (a real Phase 2 slice)
+### 2.5 Worked example (completed Phase 2 slice)
 
 ```text
 /goal
-Objective: Delete the orphaned TalkLlmSettingsCard.tsx (1,290 LOC, zero importers) from the webapp.
+Objective: Delete an orphaned component after repo-wide importer proof.
 Scope: webapp/src — remove the component file and any now-dead local references it leaves behind.
 Non-goals: TalkDetailPage/SettingsPage extraction, Salon work, behavior changes to any live surface.
 Done-when (transcript-checkable):
-  `rg -l TalkLlmSettingsCard webapp/src` returns ONLY the file being deleted before
+  `rg -l <ComponentName> webapp/src` returns ONLY the file being deleted before
   removal (output pasted), and returns nothing after; the file is deleted;
   `npm --prefix webapp run typecheck` exits 0, `npm --prefix webapp run test` shows
   the same-or-higher pass count with none skipped, and `npm --prefix webapp run build`
@@ -104,6 +104,8 @@ Handoff: update docs/REFACTOR-AUDIT.md §4a (drop the orphan row) and the deleti
 ## 3. Required Review Gate
 
 The review gate is **self-invoked by the implementing agent and folded into its `/goal` done-when** — the goal does not complete until the required review verdicts are surfaced PASS in **this** conversation (or every blocking finding is fixed / documented as a false positive). **Joseph is not in this loop.** The `/goal` evaluator reads only the main transcript and runs nothing, so the agent MUST run each review skill and paste its PASS/FAIL line and blocking findings inline; a verdict recorded only in the handoff file does not count.
+
+**Karpathy fallback:** if `karpathy-audit` / `/karpathy-audit diff` is not available as an executable command in the current Codex host, the approved fallback is to invoke the installed Codex `karpathy-diff` skill manually: read `~/.codex/skills/karpathy-diff/SKILL.md`, run its required `git status`, `git diff --stat`, and `git diff HEAD` review against the slice objective, then paste a `KARPATHY FALLBACK REVIEW GATE: PASS` or `KARPATHY FALLBACK REVIEW GATE: FAIL` line with blocking findings. This fallback counts only for diff review gates; instruction-file audits still require the `karpathy-audit` skill or an equivalent explicit instruction-file audit.
 
 The depth of the gate scales with slice risk. Do not run the heavy gate on a trivial slice, and never skip the heavy gate on a risky one.
 
@@ -184,8 +186,8 @@ These defaults are chosen to reduce Joseph interrupts. Override only when code r
 ### G2. Structural Cleanup
 
 - `TalkDetailPage.tsx`: extract the Talk tab shell and page-owned controller hooks until the file is near the 2.5k LOC target.
-- `SettingsPage.tsx`: extract Profile, Tools/Google/WebSearch, and OAuth state.
-- Delete orphaned `TalkLlmSettingsCard.tsx` after a repo-wide importer grep.
+- `SettingsPage.tsx`: Profile, Tools/Google/WebSearch, and provider OAuth extraction is complete; keep future Settings work scoped to product gaps, not structural cleanup.
+- `TalkLlmSettingsCard.tsx` orphan deletion is complete; keep running repo-wide importer greps for any future deletion candidates.
 - Gate: targeted component tests, webapp typecheck/test/build.
 
 ### G3. Native Documents
@@ -299,10 +301,10 @@ Codex:
 ```text
 /goal
 Objective: Reduce TalkDetailPage and SettingsPage structural risk without changing behavior.
-Scope: TalkDetailPage tab shell/controller extraction, SettingsPage Profile/Tools/OAuth extraction, orphan deletion candidates, targeted tests.
+Scope: TalkDetailPage tab shell/controller extraction and targeted tests. Settings Profile/Tools/OAuth extraction is complete.
 Non-goals: Visual redesign, Home/Documents feature work, backend schema changes, or changing chat/runtime behavior.
-Acceptance: TalkDetailPage moves materially toward the 2.5k LOC target through behavior-preserving components/hooks; SettingsPage sections are extracted; TalkLlmSettingsCard is deleted only if importer grep proves it is orphaned; tests cover extracted behavior.
-Verify: importer grep for deleted files; npm --prefix webapp run typecheck; targeted webapp tests; npm --prefix webapp run test; npm --prefix webapp run build.
+Acceptance: TalkDetailPage moves materially toward the 2.5k LOC target through behavior-preserving components/hooks; tests cover extracted behavior.
+Verify: npm --prefix webapp run typecheck; targeted webapp tests; npm --prefix webapp run test; npm --prefix webapp run build.
 Human gate: none unless extraction exposes contradictory behavior that needs product direction.
 Handoff: Update roadmap/audit LOC and deletion ledger; list tests, grep results, and review outcomes.
 ```
