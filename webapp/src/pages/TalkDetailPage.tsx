@@ -548,6 +548,13 @@ export function TalkDetailPage({
       void queryClient.invalidateQueries({
         queryKey: snapshotQueryKey(userId, talkId, threadId),
       });
+      // A resync runs when we may have missed live frames (replay gap,
+      // reconnect, content-less message). The snapshot refetch only updates
+      // the native document's metadata (id/title); its blocks + pending edits
+      // come from getDocument, so bump the reload signal to refetch them too —
+      // otherwise the in-Talk doc pane can show stale blocks after a
+      // disconnect (parity with the old hydrateDocumentFromSnapshot path).
+      bumpDocReload();
       try {
         const [threads, runs] = await Promise.all([
           options?.refreshThreads === false
@@ -572,7 +579,14 @@ export function TalkDetailPage({
         }
       }
     },
-    [handleUnauthorized, queryClient, replaceThreadList, talkId, userId],
+    [
+      bumpDocReload,
+      handleUnauthorized,
+      queryClient,
+      replaceThreadList,
+      talkId,
+      userId,
+    ],
   );
 
   const refreshBrowserRuns = useCallback(

@@ -3797,6 +3797,57 @@ describe('TalkDetailPage', () => {
     );
   });
 
+  it('reloads the native doc pane after a stream replay-gap resync', async () => {
+    installTalkDetailFetch({
+      contentByThreadId: {
+        [DEFAULT_THREAD_ID]: buildContent({
+          id: 'content-resync',
+          threadId: DEFAULT_THREAD_ID,
+          title: 'Resync doc',
+          contentFormat: 'markdown',
+          bodyMarkdown: '# Resync body',
+        }),
+      },
+    });
+    renderDetailPage('/app/talks/talk-1/talk?doc=1', {
+      sidebarContents: [
+        {
+          id: 'content-resync',
+          talkId: 'talk-1',
+          threadId: DEFAULT_THREAD_ID,
+          title: 'Resync doc',
+          updatedAt: '2026-03-06T00:00:00.000Z',
+        },
+      ],
+    });
+
+    // The native pane renders its blocks via getDocument.
+    const doc = await screen.findByLabelText('Talk document');
+    expect(await within(doc).findByText('# Resync body')).toBeInTheDocument();
+
+    const fetchMock = global.fetch as unknown as ReturnType<typeof vi.fn>;
+    const docFetchCount = () =>
+      fetchMock.mock.calls.filter((call) => {
+        const u =
+          typeof call[0] === 'string'
+            ? call[0]
+            : ((call[0] as Request | undefined)?.url ?? '');
+        return u.includes('/api/v1/documents/content-resync');
+      }).length;
+    const before = docFetchCount();
+    expect(before).toBeGreaterThanOrEqual(1);
+
+    // A replay gap forces a full resync. The snapshot refetch only refreshes
+    // the document's metadata, so the pane must bump its reload signal to
+    // refetch the native blocks — otherwise a doc edited while this tab was
+    // disconnected stays stale (regression caught in codex review).
+    expect(streamInput).toBeTruthy();
+    await act(async () => {
+      await streamInput?.onReplayGap?.();
+    });
+    await waitFor(() => expect(docFetchCount()).toBeGreaterThan(before));
+  });
+
   it.each(['/app/talks/talk-1/channels', '/app/talks/talk-1/data-connectors'])(
     'opens the Connectors tab for legacy connector path %s',
     async (path) => {
