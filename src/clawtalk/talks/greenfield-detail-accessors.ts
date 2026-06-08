@@ -281,7 +281,7 @@ export async function getGreenfieldThreadMetrics(input: {
 
 /**
  * Per-talk outbox high-water mark — `coalesce(max(event_id), 0)` over the
- * talk's `talk:<id>` topic. This is the snapshot's `snapshotVersion`: the
+ * talk's `talk:<id>` topic. This is the snapshot's `eventHighWater`: the
  * webapp's `applyMessageAppendedDelta` drops any streamed `message_appended`
  * whose outbox `eventId` is <= this cursor (already folded into the
  * snapshot's `messages`) and appends the rest. It therefore MUST live on the
@@ -293,7 +293,7 @@ export async function getGreenfieldThreadMetrics(input: {
  * Read on the BYPASSRLS out-of-band connection: migration 0001 revokes
  * SELECT on `public.event_outbox` from `authenticated`, so the RLS-scoped
  * request connection (`getDbPg`) can't read it. Mirrors the retired legacy
- * `public.get_talk_snapshot_version` SECURITY DEFINER helper.
+ * retired `public.get_talk_snapshot_version` SECURITY DEFINER helper.
  *
  * Callers MUST read this BEFORE loading the snapshot's messages so the
  * cursor stays a lower bound consistent with (a subset-time of) the returned
@@ -302,7 +302,7 @@ export async function getGreenfieldThreadMetrics(input: {
  * raise the cursor past a message a concurrent commit added mid-load, which
  * the client would then drop.
  */
-export async function getTalkSnapshotVersion(input: {
+export async function getTalkEventHighWater(input: {
   talkId: string;
 }): Promise<number> {
   const db = getOutOfBandSql();

@@ -23,7 +23,7 @@ type UseTalkHistoryControllerInput = {
   activeThreadId: string | null;
   hasActiveRound: boolean;
   pageMessages: TalkMessage[];
-  threadSnapshotVersionRef: MutableRefObject<number>;
+  threadCacheEpochRef: MutableRefObject<number>;
   rememberDeletedMessageIds: (messageIds: string[]) => void;
   resyncTalkState: (options?: { refreshThreads?: boolean }) => Promise<void>;
   onUnauthorized: () => void;
@@ -36,7 +36,7 @@ export function useTalkHistoryController({
   activeThreadId,
   hasActiveRound,
   pageMessages,
-  threadSnapshotVersionRef,
+  threadCacheEpochRef,
   rememberDeletedMessageIds,
   resyncTalkState,
   onUnauthorized,
@@ -106,7 +106,7 @@ export function useTalkHistoryController({
           messageIds,
           threadId,
         });
-        threadSnapshotVersionRef.current += 1;
+        threadCacheEpochRef.current += 1;
         rememberDeletedMessageIds(result.deletedMessageIds);
         await resyncTalkState({ refreshThreads: true });
         setHistoryEditorOpen(false);
@@ -122,7 +122,7 @@ export function useTalkHistoryController({
           return;
         }
         if (err instanceof ApiError && err.code === 'message_not_found') {
-          threadSnapshotVersionRef.current += 1;
+          threadCacheEpochRef.current += 1;
           rememberDeletedMessageIds(messageIds);
           void resyncTalkState({ refreshThreads: true });
         }
@@ -140,7 +140,7 @@ export function useTalkHistoryController({
       pageTalk,
       rememberDeletedMessageIds,
       resyncTalkState,
-      threadSnapshotVersionRef,
+      threadCacheEpochRef,
     ],
   );
 

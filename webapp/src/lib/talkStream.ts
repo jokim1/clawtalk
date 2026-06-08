@@ -26,7 +26,7 @@ export type MessageAppendedEvent = {
   metadata?: Record<string, unknown> | null;
   // Outbox row id of the framed event. Cache router uses it to drop
   // deltas that the snapshot already incorporates (per-delta version
-  // check vs. snapshot.snapshotVersion).
+  // check vs. snapshot.eventHighWater).
   eventId?: number;
 };
 
