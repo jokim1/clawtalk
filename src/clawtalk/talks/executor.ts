@@ -13,7 +13,6 @@ export interface TalkJobExecutionPolicy {
 export interface TalkExecutorInput {
   runId: string;
   talkId: string;
-  threadId: string;
   requestedBy: string;
   triggerMessageId: string;
   triggerContent: string;

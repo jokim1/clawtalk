@@ -229,7 +229,6 @@ export async function processTalkRunMessage(
         {
           runId: run.id,
           talkId: run.talk_id,
-          threadId: run.thread_id,
           requestedBy: run.requested_by,
           triggerMessageId: promptInput.id ?? '',
           triggerContent: promptInput.body,

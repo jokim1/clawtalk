@@ -17,6 +17,7 @@ LIVE_GLOBS=(
   --glob '!**/*.test.*'
   --glob '!**/*.spec.*'
 )
+BLOCKERS=0
 
 run_rg() {
   local output
@@ -55,6 +56,7 @@ scan_live() {
   printf 'pattern: %s\n' "$pattern"
   printf 'live_consumer_count: %s\n' "$count"
   if [ "$count" -gt 0 ]; then
+    BLOCKERS=$((BLOCKERS + 1))
     printf '%s\n' "$matches" | head -n "$limit"
   else
     printf '<none>\n'
@@ -77,6 +79,9 @@ scan_duplicate_mounts() {
 
   printf '\n## duplicate-route:%s\n' "$route"
   printf 'mount_or_definition_count: %s\n' "$count"
+  if [ "$count" -gt 3 ]; then
+    BLOCKERS=$((BLOCKERS + 1))
+  fi
   if [ "$count" -gt 0 ]; then
     printf '%s\n' "$matches"
   else
@@ -95,8 +100,13 @@ scan_live 'run-context-fabrication' 'TalkRunContextSourceManifestItem|TalkRunCon
 scan_live 'tool-family-compat' 'active_tool_families_json|tool_families|tool-families' 40
 scan_live 'connector-channel-compat' 'workspace/channels|workspace/data-connectors|data-connectors|talks/:talkId/connectors|/api/v1/talks/.*/connectors|connectors/channels' 40
 scan_live 'policy-facade-route' '/api/v1/talks/.*/policy|talks/:talkId/policy' 40
+scan_live 'attachments-not-available' 'attachments_not_available|/attachments|attachmentIds|uploadTalkAttachment|deleteTalkAttachment|read_attachment' 40
 
 scan_duplicate_mounts 'reorderGreenfieldTalkSidebarRoute'
 scan_duplicate_mounts 'getGreenfieldRunContextRoute'
 
-printf '\nDE_FACADE_READINESS: BLOCKED while any live_consumer_count is nonzero or duplicate routes are mounted in both worker-app.ts and greenfield-api.ts.\n'
+if [ "$BLOCKERS" -gt 0 ]; then
+  printf '\nDE_FACADE_READINESS: BLOCKED while any live_consumer_count is nonzero or duplicate route evidence exceeds the canonical definition/import/call triplet.\n'
+else
+  printf '\nDE_FACADE_READINESS: PASS.\n'
+fi

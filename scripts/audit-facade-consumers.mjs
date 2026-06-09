@@ -12,13 +12,12 @@ const facades = [
     id: 'synthetic-thread-id',
     name: 'Synthetic threadId',
     tokens:
-      '\\bthreadIds?\\b|\\?thread=|threadId=|/threads/|syntheticThreadId|ContentSidebarItem|TalkThread',
+      '\\bthreadIds?\\b|\\bthreadId\\b|\\?thread=|threadId=|/threads/|syntheticThreadId|ContentSidebarItem|TalkThread',
     imports:
-      'TalkThread|ContentSidebarItem|snapshotQueryKey|getThreadContent|createThread|updateThreadMetadata|deleteThread|lastThreadForTalk|threadScroll',
+      'TalkThread|ContentSidebarItem|getThreadContent|createThread|updateThreadMetadata|deleteThread|lastThreadForTalk|threadScroll',
     routes:
       '/api/v1/talks/:talkId/threads|/api/v1/threads/:threadId/content|threadId',
-    dynamic:
-      'clawtalk_doc_state|snapshotQueryKey|wsCacheRouter|lastThread|threadScroll|thread=|threadId',
+    dynamic: 'lastThread|threadScroll|thread=|threadId',
   },
   {
     id: 'runs-messages-threadid',
