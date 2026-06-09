@@ -476,6 +476,9 @@ export type TalkRun = {
   cancelReason: string | null;
   executorAlias: string | null;
   executorModel: string | null;
+  providerId?: string | null;
+  tokensIn?: number | null;
+  tokensOut?: number | null;
   browserBlock?: BrowserBlock | null;
   browserResume?: BrowserResume | null;
   carriedBrowserSessions?: CarriedBrowserSession[];
@@ -1186,6 +1189,9 @@ export type TalkSnapshotRun = {
   targetAgentId: string | null;
   executorAlias: string | null;
   executorModel: string | null;
+  providerId?: string | null;
+  tokensIn?: number | null;
+  tokensOut?: number | null;
 };
 
 export type TalkSnapshot = {

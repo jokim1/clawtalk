@@ -2376,10 +2376,17 @@ describe('TalkDetailPage', () => {
     // It will be replaced by the persisted assistant message bubble when
     // MESSAGE_APPENDED arrives — the dedup at line 1141-1147 handles that.
     expect(
-      screen.getByText(
-        /Yes — Thomas Massie did \*\*not lose his seat immediately\*\*/,
-      ),
-    ).toBeTruthy();
+      screen.getAllByText((_text, element) =>
+        Boolean(
+          element?.textContent?.includes(
+            'Yes — Thomas Massie did not lose his seat immediately',
+          ),
+        ),
+      ).length,
+    ).toBeGreaterThan(0);
+    expect(screen.getByText('not lose his seat immediately').tagName).toBe(
+      'STRONG',
+    );
     expect(screen.getByText('Done')).toBeTruthy();
 
     // MESSAGE_APPENDED replaces the panel with the persisted bubble.
@@ -2396,8 +2403,11 @@ describe('TalkDetailPage', () => {
         agentNickname: 'Claude Sonnet 4.6',
       });
     });
-    // After MESSAGE_APPENDED, "Done" pill is gone (panel was replaced).
-    expect(screen.queryByText('Done')).toBeNull();
+    // After MESSAGE_APPENDED, the transient live panel was replaced. Persisted
+    // assistant messages may still render a Done status badge in their byline.
+    expect(
+      screen.queryByLabelText('Claude Sonnet 4.6 (General), done'),
+    ).toBeNull();
     // The persisted assistant bubble now shows the same text.
     expect(screen.getByText(/Thomas Massie did/)).toBeTruthy();
   });

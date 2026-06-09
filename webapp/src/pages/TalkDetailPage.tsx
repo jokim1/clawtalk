@@ -81,6 +81,9 @@ function snapshotRunsToTalkRuns(snapshotRuns: TalkSnapshot['runs']): TalkRun[] {
     cancelReason: null,
     executorAlias: row.executorAlias,
     executorModel: row.executorModel,
+    providerId: row.providerId ?? null,
+    tokensIn: row.tokensIn ?? null,
+    tokensOut: row.tokensOut ?? null,
   }));
 }
 
@@ -1228,6 +1231,16 @@ export function TalkDetailPage({
               handleToggleTarget={composerSend.handleToggleTarget}
               sendState={state.sendState}
               composerTargetHelp={composerTargetHelp}
+              composerModeLabel={
+                pageTalk?.orchestrationMode === 'panel'
+                  ? 'Parallel'
+                  : 'Ordered'
+              }
+              composerRoundsLabel={
+                latestOrderedRound
+                  ? `${Math.max(1, latestOrderedRound.steps.length)} rounds`
+                  : '1 round'
+              }
               draft={composerInput.draft}
               TALK_MESSAGE_MAX_CHARS={composerInput.TALK_MESSAGE_MAX_CHARS}
               composerGuardrailMessage={composerGuardrailMessage}

@@ -178,6 +178,8 @@ type TalkTabContentProps = {
   handleToggleTarget: (agentId: string) => void;
   sendState: SendState;
   composerTargetHelp: string;
+  composerModeLabel: string;
+  composerRoundsLabel: string;
   draft: string;
   TALK_MESSAGE_MAX_CHARS: number;
   composerGuardrailMessage: string | null;
@@ -281,6 +283,8 @@ export function TalkTabContent({
   handleToggleTarget,
   sendState,
   composerTargetHelp,
+  composerModeLabel,
+  composerRoundsLabel,
   draft,
   TALK_MESSAGE_MAX_CHARS,
   composerGuardrailMessage,
@@ -562,6 +566,8 @@ export function TalkTabContent({
               handleToggleTarget={handleToggleTarget}
               sendState={sendState}
               composerTargetHelp={composerTargetHelp}
+              composerModeLabel={composerModeLabel}
+              composerRoundsLabel={composerRoundsLabel}
               draft={draft}
               TALK_MESSAGE_MAX_CHARS={TALK_MESSAGE_MAX_CHARS}
               composerGuardrailMessage={composerGuardrailMessage}
