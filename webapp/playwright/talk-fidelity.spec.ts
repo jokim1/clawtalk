@@ -18,6 +18,27 @@ function buildSession() {
       displayName: 'Samira',
       role: 'owner',
       createdAt: NOW,
+      currentWorkspaceId: WORKSPACE_ID,
+      workspaces: [
+        {
+          id: WORKSPACE_ID,
+          name: "Samira's workspace",
+          role: 'owner',
+          initials: 'SR',
+        },
+        {
+          id: '66666666-6666-4666-8666-666666666666',
+          name: 'Research Ops',
+          role: 'admin',
+          initials: 'RO',
+        },
+        {
+          id: '77777777-7777-4777-8777-777777777777',
+          name: 'Longreads Lab',
+          role: 'member',
+          initials: 'LL',
+        },
+      ],
     },
   };
 }
@@ -408,4 +429,41 @@ for (const state of ['populated', 'empty', 'active'] as const) {
       });
     });
   }
+}
+
+for (const vp of [
+  { label: 'desktop-1280', width: 1280, height: 800 },
+  { label: 'mobile-390', width: 390, height: 844 },
+]) {
+  test(`Salon profile menu fidelity at ${vp.label}`, async ({ page }) => {
+    await installMocks(page, 'populated');
+    await page.setViewportSize({ width: vp.width, height: vp.height });
+    await page.goto(`/app/talks/${TALK_ID}`);
+
+    await page
+      .getByRole('button', { name: /Samira — account and workspace menu/ })
+      .click();
+
+    await expect(
+      page.getByRole('menu', { name: 'Account and workspace menu' }),
+    ).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Workspaces' }))
+      .toBeVisible();
+    await expect(page.getByLabel('3 workspaces')).toBeVisible();
+    await expect(
+      page.getByRole('menuitemradio', { name: /Samira's workspace/ }),
+    ).toHaveAttribute('aria-checked', 'true');
+    await expect(
+      page.getByRole('menuitem', { name: "Invite people to Samira's workspace" }),
+    ).toBeVisible();
+    await expect(page.getByRole('menuitem', { name: 'API keys' }))
+      .toBeVisible();
+    await expect(page.getByRole('menuitem', { name: 'Log out' }))
+      .toBeVisible();
+
+    await page.screenshot({
+      path: `${SCREENS_DIR}/profile-menu-${vp.label}.png`,
+      fullPage: true,
+    });
+  });
 }

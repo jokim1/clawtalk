@@ -1,15 +1,14 @@
 import { useEffect, useRef, useState } from 'react';
-import type { CSSProperties } from 'react';
 import { createPortal } from 'react-dom';
 import { useNavigate } from 'react-router-dom';
 
 import type { SessionUser, SessionWorkspace } from '../../lib/api';
-import { Avatar, CTIcon, salon, salonFont } from '../../salon';
+import { Avatar, CTIcon } from '../../salon';
 import type { CTIconName } from '../../salon';
 import { getUserAvatar, getWorkspaceColor } from './userAvatar';
 
 type Props = {
-  /** Rect of the rail profile button — the popover anchors to its right edge. */
+  /** Rect of the rail profile button; the popover anchors to its right edge. */
   anchorRect: DOMRect | null;
   user: SessionUser;
   workspaces: SessionWorkspace[];
@@ -20,18 +19,33 @@ type Props = {
   onClose: () => void;
 };
 
-type AccountLink = { label: string; to: string; icon: CTIconName };
+type MenuLink = { label: string; to: string; icon: CTIconName };
 
-const ACCOUNT_LINKS: AccountLink[] = [
-  { label: 'Profile', to: '/app/settings?tab=profile', icon: 'settings' },
-  { label: 'API keys', to: '/app/settings?tab=api-keys', icon: 'bolt' },
+const WORKSPACE_LINKS: MenuLink[] = [
   { label: 'Members', to: '/app/settings?tab=members', icon: 'settings' },
   { label: 'AI agents', to: '/app/settings?tab=agents', icon: 'sparkle' },
   { label: 'Tools', to: '/app/settings?tab=tools', icon: 'globe' },
   { label: 'Connectors', to: '/app/settings?tab=connectors', icon: 'folder' },
 ];
 
-const WIDTH = 300;
+const ACCOUNT_LINKS: MenuLink[] = [
+  { label: 'Profile', to: '/app/settings?tab=profile', icon: 'settings' },
+  { label: 'API keys', to: '/app/settings?tab=api-keys', icon: 'bolt' },
+];
+
+const DESKTOP_WIDTH = 520;
+
+function titleCaseRole(role: string | null | undefined): string | null {
+  if (!role) return null;
+  return role.charAt(0).toUpperCase() + role.slice(1);
+}
+
+function roleLabel(
+  user: SessionUser,
+  activeWorkspace: SessionWorkspace | null,
+): string | null {
+  return titleCaseRole(activeWorkspace?.role ?? user.role);
+}
 
 export function RailProfileMenu({
   anchorRect,
@@ -57,12 +71,32 @@ export function RailProfileMenu({
       }
     };
     window.addEventListener('keydown', onKey);
-    // Move focus into the panel so Escape / tabbing is scoped here.
     panelRef.current?.focus();
     return () => window.removeEventListener('keydown', onKey);
   }, [onClose]);
 
   if (typeof document === 'undefined') return null;
+
+  const activeWorkspace =
+    workspaces.find((workspace) => workspace.id === currentWorkspaceId) ??
+    workspaces[0] ??
+    null;
+  const role = roleLabel(user, activeWorkspace);
+  const workspaceActionName = activeWorkspace
+    ? `Invite people to ${activeWorkspace.name}`
+    : 'Invite people';
+
+  const viewportW =
+    typeof window !== 'undefined' ? window.innerWidth : DESKTOP_WIDTH + 80;
+  const viewportH = typeof window !== 'undefined' ? window.innerHeight : 800;
+  const width = Math.min(DESKTOP_WIDTH, Math.max(280, viewportW - 16));
+  const left = anchorRect
+    ? Math.max(8, Math.min(anchorRect.right + 8, viewportW - width - 8))
+    : 64;
+  const bottom = anchorRect ? Math.max(8, viewportH - anchorRect.bottom) : 16;
+  const maxHeight = anchorRect
+    ? Math.max(240, viewportH - bottom - 12)
+    : viewportH - 32;
 
   const goTo = (to: string) => () => {
     onClose();
@@ -78,7 +112,6 @@ export function RailProfileMenu({
     setError(null);
     try {
       await onSwitchWorkspace(workspaceId);
-      // A successful switch reloads into the new workspace; closing is harmless.
       onClose();
     } catch (err) {
       setError(
@@ -89,26 +122,10 @@ export function RailProfileMenu({
     }
   };
 
-  // Anchor to the right of the rail button, growing upward from its bottom edge.
-  const viewportW =
-    typeof window !== 'undefined' ? window.innerWidth : WIDTH + 80;
-  const viewportH = typeof window !== 'undefined' ? window.innerHeight : 800;
-  const left = anchorRect
-    ? Math.min(anchorRect.right + 8, viewportW - WIDTH - 8)
-    : 64;
-  const bottom = anchorRect ? Math.max(8, viewportH - anchorRect.bottom) : 16;
-  const maxHeight = anchorRect
-    ? Math.max(220, anchorRect.bottom - 16)
-    : viewportH - 32;
-
-  const role = user.role
-    ? user.role.charAt(0).toUpperCase() + user.role.slice(1)
-    : null;
-
   return createPortal(
     <>
       <div
-        style={{ position: 'fixed', inset: 0, zIndex: 1000 }}
+        className="ct-rail-profile-backdrop"
         onMouseDown={onClose}
         aria-hidden="true"
       />
@@ -117,266 +134,145 @@ export function RailProfileMenu({
         role="menu"
         aria-label="Account and workspace menu"
         tabIndex={-1}
-        className="ct-screen-enter ct-thin-scroll"
+        className="ct-rail-profile-menu ct-screen-enter ct-thin-scroll"
         style={{
-          position: 'fixed',
-          zIndex: 1001,
           left,
           bottom,
-          width: WIDTH,
+          width,
           maxWidth: 'calc(100vw - 16px)',
           maxHeight,
-          overflowY: 'auto',
-          background: salon.card,
-          border: `1px solid ${salon.line}`,
-          borderRadius: 16,
-          boxShadow: '0 28px 64px rgba(31,27,22,0.22)',
-          outline: 'none',
         }}
       >
-        {/* User header */}
-        <div
-          style={{
-            display: 'flex',
-            alignItems: 'flex-start',
-            gap: 12,
-            padding: '14px 16px 12px',
-          }}
-        >
-          <Avatar initials={initials} color={color} size={40} />
-          <div style={{ minWidth: 0, flex: 1 }}>
-            <div
-              style={{
-                fontFamily: salonFont.serif,
-                fontSize: 15,
-                lineHeight: 1.2,
-                color: salon.ink,
-                overflow: 'hidden',
-                textOverflow: 'ellipsis',
-                whiteSpace: 'nowrap',
-              }}
-            >
-              {user.displayName}
-            </div>
-            <div
-              style={{
-                fontSize: 12,
-                color: salon.ink2,
-                marginTop: 2,
-                overflow: 'hidden',
-                textOverflow: 'ellipsis',
-                whiteSpace: 'nowrap',
-              }}
-            >
-              {user.email}
-            </div>
-          </div>
-          {role ? (
-            <span
-              style={{
-                fontSize: 10,
-                textTransform: 'uppercase',
-                letterSpacing: '0.14em',
-                fontFamily: salonFont.mono,
-                background: '#3f6b5c',
-                color: '#fff',
-                padding: '2px 6px',
-                borderRadius: 9999,
-                flexShrink: 0,
-              }}
-            >
-              {role}
+        <section className="ct-rail-profile-workspaces">
+          <div className="ct-rail-profile-section-head">
+            <h2>Workspaces</h2>
+            <span aria-label={`${workspaces.length} workspaces`}>
+              {workspaces.length}
             </span>
-          ) : null}
-        </div>
+          </div>
 
-        {/* Workspaces */}
-        {workspaces.length > 0 ? (
-          <>
-            <div
-              style={{ height: 1, margin: '0 12px', background: salon.line }}
-            />
-            <div style={{ padding: '8px 8px 4px' }}>
-              <div
-                style={{
-                  padding: '4px 8px',
-                  fontSize: 10.5,
-                  textTransform: 'uppercase',
-                  letterSpacing: '0.14em',
-                  fontWeight: 600,
-                  color: salon.ink2,
-                }}
-              >
-                Workspaces
-              </div>
-              {workspaces.map((workspace) => {
-                const active = workspace.id === currentWorkspaceId;
-                return (
-                  <button
-                    key={workspace.id}
-                    type="button"
-                    role="menuitemradio"
-                    aria-checked={active}
-                    disabled={switching}
-                    onClick={() => void handleSwitch(workspace.id)}
-                    className="ct-rail-menu-row"
-                    style={{
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: 8,
-                      width: '100%',
-                      padding: '6px 8px',
-                      borderRadius: 8,
-                      textAlign: 'left',
-                      background: active ? salon.paper2 : 'transparent',
-                      color: salon.ink,
-                      border: 'none',
-                      cursor: switching ? 'default' : 'pointer',
-                    }}
-                  >
-                    <span
-                      aria-hidden="true"
-                      style={{
-                        width: 22,
-                        height: 22,
-                        flexShrink: 0,
-                        borderRadius: 6,
-                        display: 'grid',
-                        placeItems: 'center',
-                        fontSize: 9.5,
-                        fontFamily: salonFont.mono,
-                        background: getWorkspaceColor(workspace.id),
-                        color: '#fff',
-                      }}
-                    >
-                      {workspace.initials}
-                    </span>
-                    <span
-                      style={{
-                        flex: 1,
-                        minWidth: 0,
-                        fontSize: 12.5,
-                        overflow: 'hidden',
-                        textOverflow: 'ellipsis',
-                        whiteSpace: 'nowrap',
-                        fontWeight: active ? 500 : 400,
-                      }}
-                    >
-                      {workspace.name}
-                    </span>
-                    {active ? (
-                      <CTIcon
-                        name="check"
-                        size={13}
-                        stroke={salon.accent}
-                        strokeWidth={2.4}
-                      />
-                    ) : null}
-                  </button>
-                );
-              })}
-              {error ? (
-                <p
-                  role="alert"
-                  style={{
-                    margin: '4px 8px 0',
-                    fontSize: 11.5,
-                    color: '#a8434a',
-                  }}
+          <div className="ct-rail-profile-workspace-list">
+            {workspaces.map((workspace) => {
+              const active = workspace.id === activeWorkspace?.id;
+              return (
+                <button
+                  key={workspace.id}
+                  type="button"
+                  role="menuitemradio"
+                  aria-checked={active}
+                  disabled={switching}
+                  onClick={() => void handleSwitch(workspace.id)}
+                  className={`ct-rail-profile-workspace${active ? ' active' : ''}`}
                 >
-                  {error}
-                </p>
-              ) : null}
-            </div>
-          </>
-        ) : null}
+                  <span
+                    className="ct-rail-profile-workspace-avatar"
+                    style={{ background: getWorkspaceColor(workspace.id) }}
+                    aria-hidden="true"
+                  >
+                    {workspace.initials}
+                  </span>
+                  <span className="ct-rail-profile-workspace-name">
+                    {workspace.name}
+                  </span>
+                  {active ? (
+                    <CTIcon
+                      name="check"
+                      size={13}
+                      className="ct-rail-profile-workspace-check"
+                      strokeWidth={2.4}
+                    />
+                  ) : null}
+                </button>
+              );
+            })}
+          </div>
 
-        {/* Account links */}
-        <div
-          style={{ height: 1, margin: '4px 12px', background: salon.line }}
-        />
-        <div style={{ padding: '4px 0' }}>
-          {ACCOUNT_LINKS.map((link) => (
+          {error ? (
+            <p className="ct-rail-profile-error" role="alert">
+              {error}
+            </p>
+          ) : null}
+
+          <div className="ct-rail-profile-signout">
+            <Avatar initials={initials} color={color} size={22} />
             <button
-              key={link.to}
               type="button"
               role="menuitem"
-              onClick={goTo(link.to)}
-              className="ct-rail-menu-row"
-              style={menuRowStyle}
+              disabled={signOutBusy}
+              onClick={() => {
+                onClose();
+                onSignOut();
+              }}
             >
-              <CTIcon
-                name={link.icon}
-                size={14}
-                stroke={salon.ink2}
-                strokeWidth={1.6}
-              />
-              {link.label}
+              <CTIcon name="logout" size={12} strokeWidth={1.8} />
+              {signOutBusy ? 'Signing out…' : 'Log out'}
             </button>
-          ))}
-          <a
-            href="https://clawtalk.app/help"
-            target="_blank"
-            rel="noreferrer"
-            role="menuitem"
-            onClick={onClose}
-            className="ct-rail-menu-row"
-            style={{ ...menuRowStyle, textDecoration: 'none' }}
-          >
-            <CTIcon
-              name="globe"
-              size={14}
-              stroke={salon.ink2}
-              strokeWidth={1.6}
-            />
-            Help
-          </a>
-        </div>
+          </div>
+        </section>
 
-        <div
-          style={{ height: 1, margin: '4px 12px', background: salon.line }}
-        />
-        <div style={{ padding: '4px 0 8px' }}>
-          <button
-            type="button"
-            role="menuitem"
-            disabled={signOutBusy}
-            onClick={() => {
-              onClose();
-              onSignOut();
-            }}
-            className="ct-rail-menu-row"
-            style={{
-              ...menuRowStyle,
-              color: '#a8434a',
-              cursor: signOutBusy ? 'default' : 'pointer',
-            }}
-          >
-            <CTIcon
-              name="logout"
-              size={14}
-              stroke="#a8434a"
-              strokeWidth={1.7}
-            />
-            {signOutBusy ? 'Signing out…' : 'Log out'}
-          </button>
-        </div>
+        <section className="ct-rail-profile-account">
+          <div className="ct-rail-profile-user">
+            <Avatar initials={initials} color={color} size={40} />
+            <div className="ct-rail-profile-user-copy">
+              <strong>{user.displayName}</strong>
+              <span>{user.email}</span>
+            </div>
+            {role ? <span className="ct-rail-profile-role">{role}</span> : null}
+          </div>
+
+          <div className="ct-rail-profile-status" aria-label="Status">
+            <span aria-hidden="true" />
+            Available · agents may notify
+            <em>Edit</em>
+          </div>
+
+          <div className="ct-rail-profile-divider" />
+
+          <div className="ct-rail-profile-row-group">
+            {WORKSPACE_LINKS.map((link) => (
+              <button
+                key={link.to}
+                type="button"
+                role="menuitem"
+                onClick={goTo(link.to)}
+                className="ct-rail-profile-row"
+              >
+                <CTIcon name={link.icon} size={14} strokeWidth={1.6} />
+                {link.label === 'Members' ? workspaceActionName : link.label}
+              </button>
+            ))}
+          </div>
+
+          <div className="ct-rail-profile-divider" />
+
+          <div className="ct-rail-profile-row-group">
+            {ACCOUNT_LINKS.map((link) => (
+              <button
+                key={link.to}
+                type="button"
+                role="menuitem"
+                onClick={goTo(link.to)}
+                className="ct-rail-profile-row"
+              >
+                <CTIcon name={link.icon} size={14} strokeWidth={1.6} />
+                {link.label}
+              </button>
+            ))}
+            <a
+              href="https://clawtalk.app/help"
+              target="_blank"
+              rel="noreferrer"
+              role="menuitem"
+              onClick={onClose}
+              className="ct-rail-profile-row"
+            >
+              <CTIcon name="globe" size={14} strokeWidth={1.6} />
+              Help
+            </a>
+          </div>
+        </section>
       </div>
     </>,
     document.body,
   );
 }
-
-const menuRowStyle: CSSProperties = {
-  display: 'flex',
-  alignItems: 'center',
-  gap: 10,
-  width: '100%',
-  padding: '7px 14px',
-  fontSize: 13,
-  textAlign: 'left',
-  background: 'transparent',
-  border: 'none',
-  color: salon.ink,
-  cursor: 'pointer',
-};

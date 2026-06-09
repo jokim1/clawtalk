@@ -52,6 +52,8 @@ describe('RailProfileMenu', () => {
 
   it('lists the workspaces and marks the active one', () => {
     renderMenu();
+    expect(screen.getByRole('heading', { name: 'Workspaces' })).toBeTruthy();
+    expect(screen.getByLabelText('2 workspaces')).toHaveTextContent('2');
     expect(screen.getByText('Oxbow')).toBeTruthy();
     const active = screen.getByRole('menuitemradio', { name: /Oxbow/ });
     expect(active.getAttribute('aria-checked')).toBe('true');
@@ -83,6 +85,16 @@ describe('RailProfileMenu', () => {
     renderMenu({ onClose });
     await user.click(screen.getByRole('menuitem', { name: 'API keys' }));
     expect(onClose).toHaveBeenCalled();
+  });
+
+  it('renders workspace action rows against the active workspace', () => {
+    renderMenu();
+    expect(
+      screen.getByRole('menuitem', { name: 'Invite people to Oxbow' }),
+    ).toBeTruthy();
+    expect(screen.getByRole('menuitem', { name: 'AI agents' })).toBeTruthy();
+    expect(screen.getByRole('menuitem', { name: 'Tools' })).toBeTruthy();
+    expect(screen.getByRole('menuitem', { name: 'Connectors' })).toBeTruthy();
   });
 
   it('keeps the external Help link in the menu', () => {

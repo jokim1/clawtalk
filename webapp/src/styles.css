@@ -149,17 +149,275 @@ a {
     0 0 0 4px var(--salon-accent, #c8643a) !important;
 }
 
-/* Rail profile popover rows (rendered through a portal). */
-.ct-rail-menu-row {
+/* Rail profile popover (rendered through a portal). */
+.ct-rail-profile-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+}
+.ct-rail-profile-menu {
+  position: fixed;
+  z-index: 1001;
+  display: grid;
+  grid-template-columns: 224px minmax(0, 1fr);
+  overflow: hidden;
+  border: 1px solid var(--salon-line, #e6e0d1);
+  border-radius: 16px;
+  background: var(--salon-card, #fff);
+  box-shadow:
+    0 28px 64px rgba(31, 27, 22, 0.22),
+    0 2px 6px rgba(31, 27, 22, 0.06);
+  outline: none;
+}
+.ct-rail-profile-workspaces {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--salon-paper-2, #f4ecdb);
+  border-right: 1px solid var(--salon-line, #e6e0d1);
+}
+.ct-rail-profile-section-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.8rem 0.88rem 0.48rem;
+}
+.ct-rail-profile-section-head h2 {
+  margin: 0;
+  color: var(--salon-ink, #1f1b16);
+  font-family: var(--salon-font-serif, Georgia, serif);
+  font-size: 0.82rem;
+  font-weight: 500;
+  letter-spacing: 0;
+}
+.ct-rail-profile-section-head span {
+  color: var(--salon-ink-2, #6b6660);
+  font-family: var(--salon-font-mono, ui-monospace, monospace);
+  font-size: 0.63rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+.ct-rail-profile-workspace-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: 20rem;
+  overflow-y: auto;
+  padding: 0 0.38rem 0.38rem;
+}
+.ct-rail-profile-workspace {
+  width: 100%;
+  min-height: 2.12rem;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0.12rem 0;
+  padding: 0.35rem 0.5rem;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--salon-ink, #1f1b16);
+  text-align: left;
+  cursor: pointer;
+  transition:
+    background 120ms ease,
+    border-color 120ms ease;
+}
+.ct-rail-profile-workspace:hover:not(:disabled),
+.ct-rail-profile-workspace:focus-visible {
+  background: rgba(31, 27, 22, 0.04);
+  outline: none;
+}
+.ct-rail-profile-workspace.active {
+  background: var(--salon-card, #fff);
+  border-color: var(--salon-line, #e6e0d1);
+}
+.ct-rail-profile-workspace:disabled {
+  cursor: default;
+  opacity: 0.65;
+}
+.ct-rail-profile-workspace-avatar {
+  flex: 0 0 auto;
+  width: 1.5rem;
+  height: 1.5rem;
+  display: grid;
+  place-items: center;
+  border-radius: 6px;
+  color: #fff;
+  font-family: var(--salon-font-mono, ui-monospace, monospace);
+  font-size: 0.6rem;
+  letter-spacing: 0.02em;
+}
+.ct-rail-profile-workspace-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--salon-ink, #1f1b16);
+  font-size: 0.78rem;
+  font-weight: 400;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ct-rail-profile-workspace.active .ct-rail-profile-workspace-name {
+  font-weight: 500;
+}
+.ct-rail-profile-workspace-check {
+  flex: 0 0 auto;
+  color: var(--salon-accent, #c8643a);
+}
+.ct-rail-profile-error {
+  margin: 0.15rem 0.75rem 0.5rem;
+  color: #a8434a;
+  font-size: 0.72rem;
+  line-height: 1.35;
+}
+.ct-rail-profile-signout {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 0.62rem;
+  border-top: 1px solid var(--salon-line, #e6e0d1);
+}
+.ct-rail-profile-signout button {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.38rem;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: #a8434a;
+  cursor: pointer;
+  font-size: 0.75rem;
+  font-weight: 500;
+  padding: 0.28rem 0.38rem;
+}
+.ct-rail-profile-signout button:hover:not(:disabled),
+.ct-rail-profile-signout button:focus-visible {
+  background: rgba(168, 67, 74, 0.08);
+  outline: none;
+}
+.ct-rail-profile-signout button:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+.ct-rail-profile-account {
+  min-width: 0;
+  background: var(--salon-card, #fff);
+  display: flex;
+  flex-direction: column;
+}
+.ct-rail-profile-user {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.75rem;
+  padding: 0.88rem 1rem 0.75rem;
+}
+.ct-rail-profile-user-copy {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.ct-rail-profile-user-copy strong {
+  display: block;
+  overflow: hidden;
+  color: var(--salon-ink, #1f1b16);
+  font-family: var(--salon-font-serif, Georgia, serif);
+  font-size: 0.94rem;
+  font-weight: 500;
+  line-height: 1.12;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ct-rail-profile-user-copy span {
+  display: block;
+  margin-top: 0.12rem;
+  overflow: hidden;
+  color: var(--salon-ink-2, #6b6660);
+  font-size: 0.72rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ct-rail-profile-role {
+  flex: 0 0 auto;
+  padding: 0.12rem 0.38rem;
+  border-radius: 999px;
+  background: #3f6b5c;
+  color: #fff;
+  font-family: var(--salon-font-mono, ui-monospace, monospace);
+  font-size: 0.59rem;
+  letter-spacing: 0.14em;
+  line-height: 1.25;
+  text-transform: uppercase;
+}
+.ct-rail-profile-status {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0 0.75rem 0.5rem;
+  padding: 0.42rem 0.62rem;
+  border: 1px solid var(--salon-line, #e6e0d1);
+  border-radius: 8px;
+  background: var(--salon-paper-2, #f4ecdb);
+  color: var(--salon-ink, #1f1b16);
+  font-size: 0.78rem;
+}
+.ct-rail-profile-status span {
+  width: 0.38rem;
+  height: 0.38rem;
+  border-radius: 999px;
+  background: #3f6b5c;
+}
+.ct-rail-profile-status em {
+  margin-left: auto;
+  color: var(--salon-ink-2, #6b6660);
+  font-size: 0.66rem;
+  font-style: normal;
+}
+.ct-rail-profile-divider {
+  height: 1px;
+  margin: 0 0.75rem;
+  background: var(--salon-line, #e6e0d1);
+}
+.ct-rail-profile-row-group {
+  padding: 0.25rem 0;
+}
+.ct-rail-profile-row {
+  width: 100%;
+  min-height: 1.95rem;
+  display: flex;
+  align-items: center;
+  gap: 0.62rem;
+  padding: 0.38rem 0.88rem;
+  border: 0;
+  background: transparent;
+  color: var(--salon-ink, #1f1b16);
+  cursor: pointer;
+  font-size: 0.82rem;
+  text-align: left;
+  text-decoration: none;
   transition: background 120ms ease;
 }
-.ct-rail-menu-row:hover:not(:disabled),
-.ct-rail-menu-row:focus-visible {
+.ct-rail-profile-row svg {
+  flex: 0 0 auto;
+  color: var(--salon-ink-2, #6b6660);
+}
+.ct-rail-profile-row:hover,
+.ct-rail-profile-row:focus-visible {
   background: var(--salon-paper-2, #f4ecdb);
   outline: none;
 }
-.ct-rail-menu-row:disabled {
-  opacity: 0.6;
+
+@media (max-width: 620px) {
+  .ct-rail-profile-menu {
+    grid-template-columns: 1fr;
+    overflow-y: auto;
+  }
+  .ct-rail-profile-workspaces {
+    border-right: 0;
+    border-bottom: 1px solid var(--salon-line, #e6e0d1);
+  }
+  .ct-rail-profile-workspace-list {
+    max-height: 12.5rem;
+  }
 }
 
 /* Secondary talk-list column. */
