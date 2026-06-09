@@ -215,7 +215,6 @@ export interface GreenfieldJob {
   schedule: GreenfieldJobApiSchedule;
   timezone: string;
   sourceScope: GreenfieldJobScope;
-  threadId: string;
   emitTalkMessage: boolean;
   emitDocumentAppend: boolean;
   catchUp: 'skip' | 'run_once';
@@ -231,7 +230,6 @@ export interface GreenfieldJob {
 
 export interface GreenfieldJobRunSummary {
   id: string;
-  threadId: string;
   status:
     | 'queued'
     | 'running'
@@ -794,7 +792,6 @@ function toJob(row: GreenfieldJobRow): GreenfieldJob {
     schedule: toApiSchedule(row.schedule_json),
     timezone: row.timezone,
     sourceScope: normalizeStoredScope(row.source_scope_json).api,
-    threadId: row.talk_id,
     emitTalkMessage: row.emit_talk_message,
     emitDocumentAppend: row.emit_document_append,
     catchUp: row.catch_up,
@@ -1676,7 +1673,6 @@ export async function listGreenfieldJobRuns(input: {
     });
     return {
       id: row.id,
-      threadId: input.talkId,
       status: row.status === 'awaiting' ? 'awaiting_confirmation' : row.status,
       createdAt: row.created_at,
       startedAt: row.started_at,

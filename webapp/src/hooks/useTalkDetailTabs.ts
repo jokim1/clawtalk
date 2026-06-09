@@ -11,7 +11,7 @@ export type TalkDetailTabKey =
   | 'runs';
 
 export type TalkDetailTabLinks = {
-  threadAwareTalkTabHref: string;
+  talkTabHref: string;
   documentsTabHref: string;
   agentsTabHref: string;
   contextTabHref: string;
@@ -46,7 +46,9 @@ export function buildTalkDetailHref(
   talkId: string,
   tab: TalkDetailTabKey = 'talk',
 ): string {
-  return tab === 'talk' ? `/app/talks/${talkId}` : `/app/talks/${talkId}/${tab}`;
+  return tab === 'talk'
+    ? `/app/talks/${talkId}`
+    : `/app/talks/${talkId}/${tab}`;
 }
 
 export function useTalkDetailRouteState(talkId: string): {
@@ -70,7 +72,6 @@ export function useTalkDetailTabLinks(input: {
 
   return useMemo(() => {
     const talkTabHref = `/app/talks/${talkId}`;
-    const threadAwareTalkTabHref = talkTabHref;
     const documentsTabHref = buildTalkDetailHref(talkId, 'documents');
     const agentsTabHref = buildTalkDetailHref(talkId, 'agents');
     const contextTabHref = buildTalkDetailHref(talkId, 'context');
@@ -81,11 +82,11 @@ export function useTalkDetailTabLinks(input: {
     const jobsTabHref = buildTalkDetailHref(talkId, 'jobs');
     const runsTabHref = buildTalkDetailHref(talkId, 'runs');
     const manageAgentsHref = `/app/settings?tab=agents&returnTo=${encodeURIComponent(
-      threadAwareTalkTabHref,
+      talkTabHref,
     )}`;
 
     return {
-      threadAwareTalkTabHref,
+      talkTabHref,
       documentsTabHref,
       agentsTabHref,
       contextTabHref,

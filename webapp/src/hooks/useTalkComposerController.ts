@@ -109,7 +109,7 @@ export type PendingComposerAttachment = {
 type ComposerInputControllerInput = {
   pageKind: PageKind;
   pageTalk: Talk | null;
-  activeThreadId: string | null;
+  activeConversationId: string | null;
   currentTab: TalkDetailTabKey;
   sendState: DetailState['sendState'];
   dispatch: Dispatch<DetailAction>;
@@ -123,7 +123,7 @@ type SendControllerInput = {
   pageKind: PageKind;
   pageTalk: Talk | null;
   activeTalkWorkspaceId: string | null;
-  activeThreadId: string | null;
+  activeConversationId: string | null;
   activeRound: boolean;
   hasUnsavedAgentChanges: boolean;
   composerGuardrailMessage: string | null;
@@ -187,7 +187,7 @@ function inferAttachmentMimeType(file: File): string {
 export function useTalkComposerInputController({
   pageKind,
   pageTalk,
-  activeThreadId,
+  activeConversationId,
   currentTab,
   sendState,
   dispatch,
@@ -337,7 +337,13 @@ export function useTalkComposerInputController({
 
   useEffect(() => {
     resizeComposerTextarea();
-  }, [activeThreadId, currentTab, draft, resizeComposerTextarea, pageKind]);
+  }, [
+    activeConversationId,
+    currentTab,
+    draft,
+    resizeComposerTextarea,
+    pageKind,
+  ]);
 
   const handleFilesSelected = useCallback(
     async (files: FileList | File[]) => {
@@ -613,7 +619,7 @@ export function useTalkSendController({
   pageKind,
   pageTalk,
   activeTalkWorkspaceId,
-  activeThreadId,
+  activeConversationId,
   activeRound,
   hasUnsavedAgentChanges,
   composerGuardrailMessage,
@@ -636,7 +642,7 @@ export function useTalkSendController({
 
   useEffect(() => {
     setRetryRunState(null);
-  }, [activeThreadId]);
+  }, [activeConversationId]);
 
   const handleToggleTarget = useCallback(
     (agentId: string) => {
@@ -654,8 +660,8 @@ export function useTalkSendController({
       targetAgentIds: string[];
       attachmentIds?: string[];
     }) => {
-      if (pageKind !== 'ready' || !pageTalk || !activeThreadId) {
-        throw new Error('Thread unavailable.');
+      if (pageKind !== 'ready' || !pageTalk || !activeConversationId) {
+        throw new Error('Conversation unavailable.');
       }
 
       const result = await sendTalkMessage({
@@ -701,7 +707,7 @@ export function useTalkSendController({
     },
     [
       activeTalkWorkspaceId,
-      activeThreadId,
+      activeConversationId,
       autoStickToBottomRef,
       dispatch,
       followBottomRef,
@@ -714,7 +720,7 @@ export function useTalkSendController({
   );
 
   const submitDraft = useCallback(async () => {
-    if (pageKind !== 'ready' || !pageTalk || !activeThreadId) return;
+    if (pageKind !== 'ready' || !pageTalk || !activeConversationId) return;
 
     const content = composer.draft.trim();
     if (!content) {
@@ -808,7 +814,7 @@ export function useTalkSendController({
     }
   }, [
     activeRound,
-    activeThreadId,
+    activeConversationId,
     composer,
     composerGuardrailMessage,
     dispatch,
@@ -823,7 +829,7 @@ export function useTalkSendController({
 
   const handleRetryAgentRun = useCallback(
     async (runId: string) => {
-      if (pageKind !== 'ready' || !pageTalk || !activeThreadId) return;
+      if (pageKind !== 'ready' || !pageTalk || !activeConversationId) return;
       if (activeRound) {
         setRetryRunState({
           runId,
@@ -885,7 +891,7 @@ export function useTalkSendController({
     },
     [
       activeRound,
-      activeThreadId,
+      activeConversationId,
       dispatch,
       hasUnsavedAgentChanges,
       onUnauthorized,
@@ -955,7 +961,7 @@ export function useTalkSendController({
   );
 
   const handleCancelRuns = useCallback(async () => {
-    if (pageKind !== 'ready' || !pageTalk || !activeThreadId) return;
+    if (pageKind !== 'ready' || !pageTalk || !activeConversationId) return;
     dispatch({ type: 'CANCEL_STARTED' });
     try {
       const result = await cancelTalkRuns(pageTalk.id, {
@@ -977,7 +983,7 @@ export function useTalkSendController({
     }
   }, [
     activeTalkWorkspaceId,
-    activeThreadId,
+    activeConversationId,
     dispatch,
     onUnauthorized,
     pageKind,

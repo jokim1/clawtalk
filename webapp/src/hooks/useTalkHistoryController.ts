@@ -23,7 +23,7 @@ type UseTalkHistoryControllerInput = {
   hasActiveRound: boolean;
   pageMessages: TalkMessage[];
   rememberDeletedMessageIds: (messageIds: string[]) => void;
-  resyncTalkState: (options?: { refreshThreads?: boolean }) => Promise<void>;
+  resyncTalkState: () => Promise<void>;
   onUnauthorized: () => void;
 };
 
@@ -100,7 +100,7 @@ export function useTalkHistoryController({
           messageIds,
         });
         rememberDeletedMessageIds(result.deletedMessageIds);
-        await resyncTalkState({ refreshThreads: true });
+        await resyncTalkState();
         setHistoryEditorOpen(false);
         setHistoryEditState({
           status: 'success',
@@ -115,7 +115,7 @@ export function useTalkHistoryController({
         }
         if (err instanceof ApiError && err.code === 'message_not_found') {
           rememberDeletedMessageIds(messageIds);
-          void resyncTalkState({ refreshThreads: true });
+          void resyncTalkState();
         }
         setHistoryEditState({
           status: 'error',

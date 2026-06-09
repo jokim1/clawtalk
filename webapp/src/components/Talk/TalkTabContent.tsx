@@ -12,7 +12,7 @@ import { DocPaneEdgeTab } from '../DocPaneEdgeTab';
 import type { SourceMentionOption } from '../SourceMentionPicker';
 import { TalkComposer } from '../TalkComposer';
 import { TalkDocPane } from './TalkDocPane';
-import { TalkThreadView } from '../TalkThreadView';
+import { TalkTimelineView } from '../TalkTimelineView';
 import { ThreadContextMenu } from '../ThreadContextMenu';
 import { ThreadRowTitleEditor } from '../ThreadRowTitleEditor';
 import { ThreadStartButton } from '../ThreadStartButton';
@@ -23,9 +23,12 @@ import type {
   TalkAgent,
   TalkMessage,
   TalkMessageSearchResult,
-  TalkThread,
+  TalkConversation,
 } from '../../lib/api';
-import { displayThreadTitle, formatThreadLabel } from '../../lib/threadTitles';
+import {
+  displayConversationTitle,
+  formatConversationLabel,
+} from '../../lib/conversationLabels';
 import type { TalkAgentExecutionGuardrail } from '../../lib/talkAgents';
 import type {
   OrderedRoundSummary,
@@ -33,8 +36,8 @@ import type {
   TalkTimelineEntry,
 } from '../../lib/talkRunReducer';
 
-type ThreadListState = {
-  threads: TalkThread[];
+type ConversationListState = {
+  conversations: TalkConversation[];
   loading: boolean;
   error: string | null;
 };
@@ -111,7 +114,7 @@ type TalkTabContentProps = {
   fileInputRef: RefObject<HTMLInputElement>;
   textareaRef: RefObject<HTMLTextAreaElement>;
   // Native primary-document metadata (no flat content facade). `null` id means
-  // the active thread has no document, so the split layout collapses to chat.
+  // the active conversation has no document, so the split layout collapses to chat.
   primaryDocumentId: string | null;
   primaryDocumentTitle: string;
   primaryDocumentFormat: NativeDocumentFormat;
@@ -126,15 +129,15 @@ type TalkTabContentProps = {
   handleResizeHandleKeyDown: (
     event: ReactKeyboardEvent<HTMLDivElement>,
   ) => void;
-  threadState: ThreadListState;
-  sortedThreads: TalkThread[];
-  editingThreadId: string | null;
-  setEditingThreadId: Dispatch<SetStateAction<string | null>>;
-  activeThreadId: string | null;
-  activeThread: TalkThread | null;
-  threadMenu: { threadId: string; x: number; y: number } | null;
-  menuThread: TalkThread | null;
-  handleCreateThread: () => Promise<void>;
+  conversationState: ConversationListState;
+  sortedConversations: TalkConversation[];
+  editingConversationId: string | null;
+  setEditingConversationId: Dispatch<SetStateAction<string | null>>;
+  activeConversationId: string | null;
+  activeConversation: TalkConversation | null;
+  conversationMenu: { conversationId: string; x: number; y: number } | null;
+  menuConversation: TalkConversation | null;
+  handleCreateConversation: () => Promise<void>;
   handleSearch: () => Promise<void>;
   searchQuery: string;
   setSearchQuery: Dispatch<SetStateAction<string>>;
@@ -142,19 +145,22 @@ type TalkTabContentProps = {
   searchError: string | null;
   searchResults: TalkMessageSearchResult[];
   handleSearchResultSelect: (result: TalkMessageSearchResult) => void;
-  handleThreadSecondaryClick: (
-    threadId: string,
+  handleConversationSecondaryClick: (
+    conversationId: string,
   ) => (event: ReactMouseEvent<HTMLElement>) => void;
-  handleThreadContextMenu: (
-    threadId: string,
+  handleConversationContextMenu: (
+    conversationId: string,
   ) => (event: ReactMouseEvent<HTMLElement>) => void;
-  handleRenameThread: (threadId: string, title: string) => Promise<void>;
-  handleSelectThread: (threadId: string) => void;
-  closeThreadMenu: () => void;
-  onRenameMenuThread: (thread: TalkThread) => void;
-  onToggleMenuThreadPin: (thread: TalkThread) => void;
-  onDeleteMenuThread: (thread: TalkThread) => void;
-  handleRenameActiveThread: (title: string) => Promise<void>;
+  handleRenameConversation: (
+    conversationId: string,
+    title: string,
+  ) => Promise<void>;
+  handleSelectConversation: (conversationId: string) => void;
+  closeConversationMenu: () => void;
+  onRenameMenuConversation: (conversation: TalkConversation) => void;
+  onToggleMenuConversationPin: (conversation: TalkConversation) => void;
+  onDeleteMenuConversation: (conversation: TalkConversation) => void;
+  handleRenameActiveConversation: (title: string) => Promise<void>;
   openHistoryEditor: () => void;
   canEditHistory: boolean;
   activeOrderedProgress: { label: string } | null;
@@ -240,15 +246,15 @@ export function TalkTabContent({
   setDocPaneHidden,
   chatRatio,
   handleResizeHandleKeyDown,
-  threadState,
-  sortedThreads,
-  editingThreadId,
-  setEditingThreadId,
-  activeThreadId,
-  activeThread,
-  threadMenu,
-  menuThread,
-  handleCreateThread,
+  conversationState,
+  sortedConversations,
+  editingConversationId,
+  setEditingConversationId,
+  activeConversationId,
+  activeConversation,
+  conversationMenu,
+  menuConversation,
+  handleCreateConversation,
   handleSearch,
   searchQuery,
   setSearchQuery,
@@ -256,15 +262,15 @@ export function TalkTabContent({
   searchError,
   searchResults,
   handleSearchResultSelect,
-  handleThreadSecondaryClick,
-  handleThreadContextMenu,
-  handleRenameThread,
-  handleSelectThread,
-  closeThreadMenu,
-  onRenameMenuThread,
-  onToggleMenuThreadPin,
-  onDeleteMenuThread,
-  handleRenameActiveThread,
+  handleConversationSecondaryClick,
+  handleConversationContextMenu,
+  handleRenameConversation,
+  handleSelectConversation,
+  closeConversationMenu,
+  onRenameMenuConversation,
+  onToggleMenuConversationPin,
+  onDeleteMenuConversation,
+  handleRenameActiveConversation,
   openHistoryEditor,
   canEditHistory,
   activeOrderedProgress,
@@ -398,10 +404,12 @@ export function TalkTabContent({
         }
       >
         <div className="talk-thread-shell">
-          <aside className="talk-thread-rail" aria-label="Talk threads">
+          <aside className="talk-thread-rail" aria-label="Talk conversations">
             <div className="talk-thread-rail-header">
-              <h2>Threads</h2>
-              <ThreadStartButton onClick={() => void handleCreateThread()} />
+              <h2>Conversations</h2>
+              <ThreadStartButton
+                onClick={() => void handleCreateConversation()}
+              />
             </div>
             <form
               className="talk-thread-search"
@@ -414,7 +422,7 @@ export function TalkTabContent({
                 type="search"
                 value={searchQuery}
                 onChange={(event) => setSearchQuery(event.target.value)}
-                placeholder="Search threads"
+                placeholder="Search conversations"
                 aria-label="Search Talk messages"
               />
               <button
@@ -439,43 +447,47 @@ export function TalkTabContent({
                       className="talk-thread-search-result"
                       onClick={() => handleSearchResultSelect(result)}
                     >
-                      <strong>{displayThreadTitle(result.threadTitle)}</strong>
+                      <strong>
+                        {displayConversationTitle(result.threadTitle)}
+                      </strong>
                       <span>{result.preview}</span>
                     </button>
                   </li>
                 ))}
               </ul>
             ) : null}
-            {threadState.error ? (
+            {conversationState.error ? (
               <p className="page-state" role="alert">
-                {threadState.error}
+                {conversationState.error}
               </p>
             ) : null}
-            {threadState.loading ? (
-              <p className="page-state">Loading threads…</p>
-            ) : sortedThreads.length === 0 ? (
-              <p className="page-state">No threads yet.</p>
+            {conversationState.loading ? (
+              <p className="page-state">Loading conversations…</p>
+            ) : sortedConversations.length === 0 ? (
+              <p className="page-state">No conversations yet.</p>
             ) : (
               <ul className="talk-thread-items">
-                {sortedThreads.map((thread) => (
+                {sortedConversations.map((thread) => (
                   <li key={thread.id}>
-                    {editingThreadId === thread.id ? (
+                    {editingConversationId === thread.id ? (
                       <div
                         className={`talk-thread-item${
-                          thread.id === activeThreadId
+                          thread.id === activeConversationId
                             ? ' talk-thread-item-active'
                             : ''
                         } talk-thread-item-editing`}
-                        onMouseDown={handleThreadSecondaryClick(thread.id)}
-                        onContextMenu={handleThreadContextMenu(thread.id)}
+                        onMouseDown={handleConversationSecondaryClick(
+                          thread.id,
+                        )}
+                        onContextMenu={handleConversationContextMenu(thread.id)}
                       >
                         <ThreadRowTitleEditor
-                          title={formatThreadLabel(thread)}
+                          title={formatConversationLabel(thread)}
                           isEditing={true}
                           onSave={(title) =>
-                            handleRenameThread(thread.id, title)
+                            handleRenameConversation(thread.id, title)
                           }
-                          onCancel={() => setEditingThreadId(null)}
+                          onCancel={() => setEditingConversationId(null)}
                           staticClassName="talk-thread-item-title"
                           inputClassName="thread-row-title-input"
                           errorClassName="thread-row-title-error"
@@ -495,16 +507,18 @@ export function TalkTabContent({
                       <button
                         type="button"
                         className={`talk-thread-item${
-                          thread.id === activeThreadId
+                          thread.id === activeConversationId
                             ? ' talk-thread-item-active'
                             : ''
                         }`}
-                        onClick={() => handleSelectThread(thread.id)}
-                        onMouseDown={handleThreadSecondaryClick(thread.id)}
-                        onContextMenu={handleThreadContextMenu(thread.id)}
+                        onClick={() => handleSelectConversation(thread.id)}
+                        onMouseDown={handleConversationSecondaryClick(
+                          thread.id,
+                        )}
+                        onContextMenu={handleConversationContextMenu(thread.id)}
                       >
                         <ThreadRowTitleEditor
-                          title={formatThreadLabel(thread)}
+                          title={formatConversationLabel(thread)}
                           isEditing={false}
                           onSave={() => undefined}
                           onCancel={() => undefined}
@@ -531,12 +545,12 @@ export function TalkTabContent({
           </aside>
 
           <div className="talk-thread-detail">
-            <TalkThreadView
+            <TalkTimelineView
               timelineRef={timelineRef}
               endRef={endRef}
               setMessageElementRef={setMessageElementRef}
-              activeThread={activeThread}
-              handleRenameActiveThread={handleRenameActiveThread}
+              activeConversation={activeConversation}
+              handleRenameActiveConversation={handleRenameActiveConversation}
               openHistoryEditor={openHistoryEditor}
               canEditHistory={canEditHistory}
               activeOrderedProgress={activeOrderedProgress}
@@ -596,7 +610,7 @@ export function TalkTabContent({
               contextSources={contextSources}
               activeRound={activeRound}
               hasUnsavedAgentChanges={hasUnsavedAgentChanges}
-              activeThreadId={activeThreadId}
+              activeConversationId={activeConversationId}
               pendingAttachments={pendingAttachments}
               handleRemoveAttachment={handleRemoveAttachment}
               handleAttachButtonClick={handleAttachButtonClick}
@@ -607,16 +621,16 @@ export function TalkTabContent({
               historyEditState={historyEditState}
             />
           </div>
-          {threadMenu && menuThread ? (
+          {conversationMenu && menuConversation ? (
             <ThreadContextMenu
-              x={threadMenu.x}
-              y={threadMenu.y}
-              isPinned={menuThread.isPinned}
-              canDelete={!menuThread.isDefault}
-              onClose={closeThreadMenu}
-              onRename={() => onRenameMenuThread(menuThread)}
-              onTogglePin={() => onToggleMenuThreadPin(menuThread)}
-              onDelete={() => onDeleteMenuThread(menuThread)}
+              x={conversationMenu.x}
+              y={conversationMenu.y}
+              isPinned={menuConversation.isPinned}
+              canDelete={!menuConversation.isDefault}
+              onClose={closeConversationMenu}
+              onRename={() => onRenameMenuConversation(menuConversation)}
+              onTogglePin={() => onToggleMenuConversationPin(menuConversation)}
+              onDelete={() => onDeleteMenuConversation(menuConversation)}
             />
           ) : null}
         </div>

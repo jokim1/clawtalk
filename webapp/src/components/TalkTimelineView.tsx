@@ -5,9 +5,9 @@ import { BrowserBlockedRunCard } from './BrowserBlockedRunCard';
 import { InlineEditableTitle } from './InlineEditableTitle';
 import { LiveResponsePanel } from './LiveResponsePanel';
 import { stripInternalAssistantText } from '../lib/assistantText';
-import type { TalkMessage, TalkThread } from '../lib/api';
+import type { TalkMessage, TalkConversation } from '../lib/api';
 import { linkifyText } from '../lib/linkifyText';
-import { formatThreadLabel } from '../lib/threadTitles';
+import { formatConversationLabel } from '../lib/conversationLabels';
 import type {
   OrderedRoundSummary,
   RunView,
@@ -29,15 +29,15 @@ function buildTalkAttachmentContentUrl(
   return `/api/v1/talks/${encodeURIComponent(talkId)}/attachments/${encodeURIComponent(attachmentId)}/content`;
 }
 
-interface TalkThreadViewProps {
+interface TalkTimelineViewProps {
   timelineRef: RefObject<HTMLDivElement>;
   endRef: RefObject<HTMLDivElement>;
   setMessageElementRef: (
     messageId: string,
     element: HTMLElement | null,
   ) => void;
-  activeThread: TalkThread | null;
-  handleRenameActiveThread: (title: string) => Promise<void>;
+  activeConversation: TalkConversation | null;
+  handleRenameActiveConversation: (title: string) => Promise<void>;
   openHistoryEditor: () => void;
   canEditHistory: boolean;
   activeOrderedProgress: { label: string } | null;
@@ -68,12 +68,12 @@ interface TalkThreadViewProps {
   handleClearUnread: () => void;
 }
 
-export function TalkThreadView({
+export function TalkTimelineView({
   timelineRef,
   endRef,
   setMessageElementRef,
-  activeThread,
-  handleRenameActiveThread,
+  activeConversation,
+  handleRenameActiveConversation,
   openHistoryEditor,
   canEditHistory,
   activeOrderedProgress,
@@ -98,7 +98,7 @@ export function TalkThreadView({
   handleOpenRunHistory,
   hasUnreadBelow,
   handleClearUnread,
-}: TalkThreadViewProps) {
+}: TalkTimelineViewProps) {
   return (
     <div
       ref={timelineRef}
@@ -107,20 +107,20 @@ export function TalkThreadView({
     >
       <div className="talk-thread-detail-header">
         <div>
-          {activeThread ? (
+          {activeConversation ? (
             <InlineEditableTitle
-              title={formatThreadLabel(activeThread)}
-              onSave={handleRenameActiveThread}
+              title={formatConversationLabel(activeConversation)}
+              onSave={handleRenameActiveConversation}
               buttonClassName="thread-detail-title-button"
               inputClassName="thread-detail-title-input"
               errorClassName="thread-detail-title-error"
             />
           ) : (
-            <h2>New thread</h2>
+            <h2>New conversation</h2>
           )}
           <p className="policy-muted">
             Use <code>/edit</code> or the button here to remove old messages
-            from this thread.
+            from this conversation.
           </p>
         </div>
         <button
@@ -203,7 +203,7 @@ export function TalkThreadView({
 
       <div className="timeline talk-thread-timeline">
         {!isSnapshotPending &&
-        activeThread &&
+        activeConversation &&
         olderMessagesAvailable &&
         !loadingOlderMessages &&
         pageMessages.length > 0 ? (
@@ -219,9 +219,9 @@ export function TalkThreadView({
           <p className="page-state">Loading earlier…</p>
         ) : null}
         {isSnapshotPending ? (
-          <p className="page-state">Loading thread…</p>
-        ) : !activeThread ? (
-          <p className="page-state">No thread selected.</p>
+          <p className="page-state">Loading conversation…</p>
+        ) : !activeConversation ? (
+          <p className="page-state">No conversation selected.</p>
         ) : talkTimeline.length === 0 ? (
           <div className="talk-onboarding-banner">
             <p>

@@ -21,7 +21,7 @@ export function ThreadRowTitleEditor({
   inputClassName,
   errorClassName,
   leadingVisual,
-  label = 'Rename thread',
+  label = 'Rename conversation',
 }: ThreadRowTitleEditorProps): JSX.Element {
   const [draft, setDraft] = useState(title);
   const [isSaving, setIsSaving] = useState(false);
@@ -55,7 +55,7 @@ export function ThreadRowTitleEditor({
     const trimmed = nextTitle.trim();
     if (!trimmed) {
       if (mountedRef.current) {
-        setError('Thread title cannot be empty.');
+        setError('Conversation title cannot be empty.');
       }
       return;
     }
@@ -72,7 +72,7 @@ export function ThreadRowTitleEditor({
     } catch (err) {
       if (mountedRef.current) {
         setError(
-          err instanceof Error ? err.message : 'Unable to rename thread.',
+          err instanceof Error ? err.message : 'Unable to rename conversation.',
         );
       }
     } finally {

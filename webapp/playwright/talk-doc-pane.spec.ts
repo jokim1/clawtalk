@@ -43,7 +43,7 @@ function buildSnapshot() {
       updatedAt: NOW,
       accessRole: 'owner' as const,
     },
-    threads: [
+    conversations: [
       {
         id: THREAD_ID,
         talkId: TALK_ID,
@@ -57,13 +57,11 @@ function buildSnapshot() {
         lastMessageAt: NOW,
       },
     ],
-    activeThreadId: THREAD_ID,
     messages: [],
     hasOlderMessages: false,
     primaryDocument: {
       id: 'doc-1',
       talkId: TALK_ID,
-      threadId: THREAD_ID,
       title: 'Launch brief',
       format: 'markdown',
       listVersion: 1,
@@ -181,7 +179,6 @@ async function installMocks(page: Page): Promise<void> {
         {
           id: 'doc-1',
           talkId: TALK_ID,
-          threadId: THREAD_ID,
           title: 'Launch brief',
           updatedAt: NOW,
         },
@@ -229,9 +226,7 @@ for (const vp of [
     await page.setViewportSize({ width: vp.width, height: vp.height });
 
     // The `talk` tab with ?doc=1 opens the document pane.
-    await page.goto(
-      `/app/talks/${TALK_ID}/talk?thread=${THREAD_ID}&doc=1`,
-    );
+    await page.goto(`/app/talks/${TALK_ID}/talk?thread=${THREAD_ID}&doc=1`);
 
     // The native doc pane region renders with the document's native blocks —
     // no legacy rich-text editor / HTML source surface.
@@ -241,7 +236,9 @@ for (const vp of [
       docPane.getByRole('heading', { name: 'Launch brief' }).first(),
     ).toBeVisible();
     await expect(
-      docPane.locator('article').getByText('Original paragraph about the launch.'),
+      docPane
+        .locator('article')
+        .getByText('Original paragraph about the launch.'),
     ).toBeVisible();
 
     // The pending-edit review console is offered to the owner.
@@ -253,7 +250,7 @@ for (const vp of [
       // Desktop: chat + doc are shown side by side, so the composer is visible
       // alongside the doc pane.
       await expect(
-        page.getByPlaceholder(/Send a message to this thread/),
+        page.getByPlaceholder(/Send a message to this conversation/),
       ).toBeVisible();
     } else {
       // Mobile: the layout is a Chat ↔ Doc toggle; with ?doc=1 the Doc pane is

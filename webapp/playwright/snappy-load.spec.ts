@@ -37,7 +37,7 @@ function buildSnapshot() {
       updatedAt: now,
       accessRole: 'owner' as const,
     },
-    threads: [
+    conversations: [
       {
         id: THREAD_ID,
         talkId: TALK_ID,
@@ -51,11 +51,9 @@ function buildSnapshot() {
         lastMessageAt: now,
       },
     ],
-    activeThreadId: THREAD_ID,
     messages: [
       {
         id: '44444444-4444-4444-4444-444444444444',
-        threadId: THREAD_ID,
         role: 'assistant' as const,
         content: FIRST_MESSAGE,
         createdBy: null,
@@ -72,7 +70,7 @@ function buildSnapshot() {
     pendingEdits: [],
     runs: [],
     agents: [],
-    snapshotVersion: 1,
+    eventHighWater: 1,
   };
 }
 
@@ -192,7 +190,7 @@ test('cached snapshot renders before network fires', async ({ page }) => {
   expect(counters.snapshotHits).toBe(0);
 });
 
-test('scrollToBottom fires exactly once per thread show', async ({ page }) => {
+test('scrollToBottom fires exactly once per Talk show', async ({ page }) => {
   const counters: Counters = { snapshotHits: 0 };
   await installApiMocks(page, counters);
 

@@ -54,7 +54,9 @@ export function InlineEditableTitle({
       await onSave(trimmed);
       setIsEditing(false);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Unable to rename thread.');
+      setError(
+        err instanceof Error ? err.message : 'Unable to rename conversation.',
+      );
     } finally {
       setIsSaving(false);
     }

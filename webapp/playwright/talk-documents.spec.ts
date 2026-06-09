@@ -39,7 +39,7 @@ function buildSnapshot() {
       updatedAt: now,
       accessRole: 'owner' as const,
     },
-    threads: [
+    conversations: [
       {
         id: THREAD_ID,
         talkId: TALK_ID,
@@ -53,14 +53,13 @@ function buildSnapshot() {
         lastMessageAt: now,
       },
     ],
-    activeThreadId: THREAD_ID,
     messages: [],
     hasOlderMessages: false,
     content: null,
     pendingEdits: [],
     runs: [],
     agents: [],
-    snapshotVersion: 1,
+    eventHighWater: 1,
   };
 }
 

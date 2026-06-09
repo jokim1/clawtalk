@@ -9,7 +9,7 @@ import {
 import { Link, useNavigate, useParams } from 'react-router-dom';
 
 import {
-  ContentSidebarItem,
+  DocumentSidebarItem,
   getTalk,
   getTalkAgents,
   getTalkRuns,
@@ -31,7 +31,7 @@ import { TalkDetailShell } from '../components/Talk/TalkDetailShell';
 import { TalkDocumentCreateModal } from '../components/Talk/TalkDocumentCreateModal';
 import { TalkDocumentsPanel } from '../components/Talk/TalkDocumentsPanel';
 import { TalkTabContent } from '../components/Talk/TalkTabContent';
-import { loadThreadScroll, saveThreadScroll } from '../lib/threadScroll';
+import { loadTalkScroll, saveTalkScroll } from '../lib/talkScroll';
 import { useTalkRunStream } from '../hooks/useTalkRunStream';
 import {
   buildTalkDetailHref,
@@ -45,7 +45,7 @@ import { useTalkJobsController } from '../hooks/useTalkJobsController';
 import { useTalkOrchestrationController } from '../hooks/useTalkOrchestrationController';
 import { useTalkHistoryController } from '../hooks/useTalkHistoryController';
 import { useTalkAgentsController } from '../hooks/useTalkAgentsController';
-import { useTalkThreadController } from '../hooks/useTalkThreadController';
+import { useTalkConversationController } from '../hooks/useTalkConversationController';
 import {
   useTalkComposerInputController,
   useTalkSendController,
@@ -103,7 +103,7 @@ export function TalkDetailPage({
   onRenameDraftCancel: (talkId: string) => void;
   onRenameDraftCommit: (talkId: string, draft: string) => Promise<void>;
   onSidebarChanged: () => Promise<void> | void;
-  sidebarContents: ContentSidebarItem[];
+  sidebarContents: DocumentSidebarItem[];
 }): JSX.Element {
   const { talkId = '' } = useParams<{ talkId: string }>();
   const navigate = useNavigate();
@@ -179,37 +179,37 @@ export function TalkDetailPage({
   }, []);
 
   const {
-    threadState,
-    editingThreadId,
-    setEditingThreadId,
-    threadMenu,
-    activeThreadId,
+    conversationState,
+    editingConversationId,
+    setEditingConversationId,
+    conversationMenu,
+    activeConversationId,
     searchQuery,
     setSearchQuery,
     searchResults,
     searchLoading,
     searchError,
-    sortedThreads,
-    activeThread,
-    menuThread,
-    resetTalkThreads,
-    hydrateTalkThreads,
-    handleRenameThread,
-    handleRenameActiveThread,
-    handleSelectThread,
-    handleThreadSecondaryClick,
-    handleThreadContextMenu,
-    handleCreateThread,
+    sortedConversations,
+    activeConversation,
+    menuConversation,
+    resetTalkConversations,
+    hydrateTalkConversations,
+    handleRenameConversation,
+    handleRenameActiveConversation,
+    handleSelectConversation,
+    handleConversationSecondaryClick,
+    handleConversationContextMenu,
+    handleCreateConversation,
     handleSearch,
     handleSearchResultSelect,
-    closeThreadMenu,
-    handleRenameMenuThread,
-    handleToggleMenuThreadPin,
-    handleDeleteMenuThread,
-  } = useTalkThreadController({
+    closeConversationMenu,
+    handleRenameMenuConversation,
+    handleToggleMenuConversationPin,
+    handleDeleteMenuConversation,
+  } = useTalkConversationController({
     talkId,
     currentTab,
-    canEditThreads: canEditAgents,
+    canEditConversations: canEditAgents,
     navigate,
     pendingComposerFocusRef,
     onUnauthorized: handleUnauthorized,
@@ -221,7 +221,7 @@ export function TalkDetailPage({
       onUnauthorized: handleUnauthorized,
     });
 
-  const currentThreadHasContent = useMemo(
+  const currentConversationHasContent = useMemo(
     () => Boolean(talkSnapshot?.primaryDocument),
     [talkSnapshot?.primaryDocument],
   );
@@ -256,7 +256,7 @@ export function TalkDetailPage({
     userId,
     currentTab,
     locationParams,
-    currentThreadHasContent,
+    currentConversationHasContent,
     queryClient,
     navigate,
     onUnauthorized,
@@ -363,7 +363,7 @@ export function TalkDetailPage({
   const composerInput = useTalkComposerInputController({
     pageKind,
     pageTalk,
-    activeThreadId,
+    activeConversationId,
     currentTab,
     sendState: state.sendState,
     dispatch,
@@ -492,37 +492,34 @@ export function TalkDetailPage({
     userId,
   ]);
 
-  const resyncTalkState = useCallback(
-    async (options?: { refreshThreads?: boolean }) => {
-      // PR C: messages + active runs come from the snapshot query —
-      // invalidate it and let RQ refetch. Historical runs are still
-      // separate; re-fetch them in parallel so the Runs tab updates.
-      // The threads list stays on its component-local state.
-      void queryClient.invalidateQueries({
-        queryKey: snapshotQueryKey(userId, talkId),
-      });
-      // A resync runs when we may have missed live frames (replay gap,
-      // reconnect, content-less message). The snapshot refetch only updates
-      // the native document's metadata (id/title); its blocks + pending edits
-      // come from getDocument, so bump the reload signal to refetch them too —
-      // otherwise the in-Talk doc pane can show stale blocks after a
-      // disconnect (parity with the old hydrateDocumentFromSnapshot path).
-      bumpDocReload();
-      try {
-        const runs = await getTalkRuns(talkId);
-        dispatch({ type: 'MERGE_HISTORICAL_RUNS', runs });
-        autoStickToBottomRef.current = 'smooth';
-      } catch (err) {
-        if (err instanceof UnauthorizedError) {
-          handleUnauthorized();
-        }
+  const resyncTalkState = useCallback(async () => {
+    // PR C: messages + active runs come from the snapshot query —
+    // invalidate it and let RQ refetch. Historical runs are still
+    // separate; re-fetch them in parallel so the Runs tab updates.
+    // The conversation list stays on its component-local state.
+    void queryClient.invalidateQueries({
+      queryKey: snapshotQueryKey(userId, talkId),
+    });
+    // A resync runs when we may have missed live frames (replay gap,
+    // reconnect, content-less message). The snapshot refetch only updates
+    // the native document's metadata (id/title); its blocks + pending edits
+    // come from getDocument, so bump the reload signal to refetch them too —
+    // otherwise the in-Talk doc pane can show stale blocks after a
+    // disconnect (parity with the old hydrateDocumentFromSnapshot path).
+    bumpDocReload();
+    try {
+      const runs = await getTalkRuns(talkId);
+      dispatch({ type: 'MERGE_HISTORICAL_RUNS', runs });
+      autoStickToBottomRef.current = 'smooth';
+    } catch (err) {
+      if (err instanceof UnauthorizedError) {
+        handleUnauthorized();
       }
-    },
-    [bumpDocReload, handleUnauthorized, queryClient, talkId, userId],
-  );
+    }
+  }, [bumpDocReload, handleUnauthorized, queryClient, talkId, userId]);
 
   const refreshBrowserRuns = useCallback(
-    async () => resyncTalkState({ refreshThreads: true }),
+    async () => resyncTalkState(),
     [resyncTalkState],
   );
 
@@ -549,8 +546,8 @@ export function TalkDetailPage({
     resyncTalkState,
   });
 
-  // Tracks the last (talkId, activeThreadId) we fully hydrated from the
-  // snapshot. PR C: same-thread refetches no longer dispatch into the
+  // Tracks the last (talkId, activeConversationId) we fully hydrated from the
+  // snapshot. PR C: same-talk refetches no longer dispatch into the
   // reducer at all — the snapshot owns messages/talk/content — but we
   // still gate the run-side SNAPSHOT_HYDRATED so we don't re-seed active
   // runs on every background refetch.
@@ -565,19 +562,19 @@ export function TalkDetailPage({
     resetSnapshotFallback();
     messageElementRefs.current.clear();
     deletedMessageIdsRef.current = new Set();
-    resetTalkThreads();
+    resetTalkConversations();
     resetTalkAgents();
     resetRunContextPanels();
   }, [
     resetRunContextPanels,
     resetSnapshotFallback,
     resetTalkAgents,
-    resetTalkThreads,
+    resetTalkConversations,
     talkId,
   ]);
 
   // Hydrate non-RQ side-effects the moment the snapshot resolves: the
-  // thread list (kept in component state because the threads tab edits
+  // conversation list (kept in component state because the rail edits
   // it independently), the doc panel useState bridges (kept until a
   // future PR migrates them to RQ), and the reducer's runs slice via
   // SNAPSHOT_HYDRATED. Same-thread refetches re-run only the bridges,
@@ -590,7 +587,7 @@ export function TalkDetailPage({
     if (snapshot.talk.id !== talkId) return;
     const hydrationKey = talkId;
     const isFirstHydration = hydratedKeyRef.current !== hydrationKey;
-    hydrateTalkThreads(snapshot.threads);
+    hydrateTalkConversations(snapshot.conversations);
     // Doc state is derived reactively from `talkSnapshot.content` (native
     // metadata) and the in-pane native fetch — no imperative content
     // hydration here anymore.
@@ -601,7 +598,12 @@ export function TalkDetailPage({
       type: 'SNAPSHOT_HYDRATED',
       runs: snapshotRunsToTalkRuns(snapshot.runs),
     });
-  }, [hydrateTalkThreads, snapshotQuery.data, snapshotQuery.error, talkId]);
+  }, [
+    hydrateTalkConversations,
+    snapshotQuery.data,
+    snapshotQuery.error,
+    talkId,
+  ]);
 
   // Rich runs (historical) + rich agents (provider/model/health) come
   // from these two existing endpoints — kept out of the snapshot wire
@@ -636,11 +638,11 @@ export function TalkDetailPage({
     };
   }, [handleUnauthorized, hydrateTalkAgents, talkId]);
 
-  // Thread-show scroll: restore the saved offset for this Talk rail item if
-  // the user had scrolled up to read history; otherwise park at the bottom.
+  // Talk timeline scroll: restore the saved offset if the user had scrolled
+  // up to read history; otherwise park at the bottom.
   useEffect(() => {
-    if (pageKind !== 'ready' || !activeThreadId) return;
-    const saved = loadThreadScroll(talkId, activeThreadId);
+    if (pageKind !== 'ready') return;
+    const saved = loadTalkScroll(talkId);
     const rafId = requestAnimationFrame(() => {
       if (pendingComposerFocusRef.current) {
         pendingComposerFocusRef.current = false;
@@ -667,25 +669,24 @@ export function TalkDetailPage({
     // scroll twice on warm-cache mounts where the gate passes on the
     // very first render.
     return () => cancelAnimationFrame(rafId);
-  }, [activeThreadId, scrollToBottom, pageKind, talkId]);
+  }, [scrollToBottom, pageKind, talkId]);
 
   // Persist scroll position + at-bottom flag on user scroll, debounced
-  // ~200ms. Owns the localStorage write end of the per-thread scroll
+  // ~200ms. Owns the localStorage write end of the Talk timeline scroll
   // memory so the next mount can restore.
   useEffect(() => {
     const container = timelineRef.current;
     if (!container) return;
-    if (pageKind !== 'ready' || !activeThreadId) return;
+    if (pageKind !== 'ready') return;
     let timer: ReturnType<typeof setTimeout> | null = null;
     const capturedTalkId = talkId;
-    const capturedThreadId = activeThreadId;
     const onScroll = () => {
       if (timer) clearTimeout(timer);
       timer = setTimeout(() => {
         timer = null;
         const el = timelineRef.current;
         if (!el) return;
-        saveThreadScroll(capturedTalkId, capturedThreadId, {
+        saveTalkScroll(capturedTalkId, {
           offset: el.scrollTop,
           atBottom: isNearBottom(),
         });
@@ -696,16 +697,15 @@ export function TalkDetailPage({
       container.removeEventListener('scroll', onScroll);
       if (timer) clearTimeout(timer);
     };
-  }, [activeThreadId, isNearBottom, pageKind, talkId]);
+  }, [isNearBottom, pageKind, talkId]);
 
-  // Reset the follow flag whenever the thread changes: default to "not
-  // following" until the per-thread scroll-restore effect above decides. This
-  // keeps the reflow stick inert during a cold thread-switch fetch (when the
-  // restore effect is gated out waiting on the snapshot), so it can never pin
-  // to the bottom over a restored mid-scroll position.
+  // Reset the follow flag whenever the Talk changes: default to "not
+  // following" until the scroll-restore effect above decides. This keeps the
+  // reflow stick inert during a cold Talk switch, so it can never pin to the
+  // bottom over a restored mid-scroll position.
   useEffect(() => {
     followBottomRef.current = false;
-  }, [activeThreadId]);
+  }, [talkId]);
 
   // Robust bottom-stick through reflow. The per-event stick + scrollToBottom
   // compute their scroll target in a single rAF, so when the timeline grows a
@@ -717,11 +717,15 @@ export function TalkDetailPage({
   // already current and we write scrollTop directly — no deferred rAF that
   // could yank a user who scrolled away in the meantime. We pin only while
   // following (never yanks a reader), skip the first/initial-size callback (so
-  // a remount or thread switch can't auto-scroll), and bind to the Talk tab
+  // a remount or tab switch can't auto-scroll), and bind to the Talk tab
   // only — the timeline unmounts on other tabs, so the effect must re-bind on
-  // tab re-entry (and per thread).
+  // tab re-entry.
   useEffect(() => {
-    if (pageKind !== 'ready' || !activeThreadId || currentTab !== 'talk') {
+    if (
+      pageKind !== 'ready' ||
+      !activeConversationId ||
+      currentTab !== 'talk'
+    ) {
       return;
     }
     const container = timelineRef.current;
@@ -753,7 +757,7 @@ export function TalkDetailPage({
       container.removeEventListener('scroll', onScroll);
       observer.disconnect();
     };
-  }, [activeThreadId, currentTab, isNearBottom, pageKind]);
+  }, [activeConversationId, currentTab, isNearBottom, pageKind]);
 
   useTalkRunStream({
     dispatch,
@@ -860,7 +864,7 @@ export function TalkDetailPage({
     runsById: state.runsById,
   });
   const {
-    threadAwareTalkTabHref,
+    talkTabHref,
     documentsTabHref,
     agentsTabHref,
     contextTabHref,
@@ -899,7 +903,7 @@ export function TalkDetailPage({
     pageKind,
     pageTalk,
     activeTalkWorkspaceId,
-    activeThreadId,
+    activeConversationId,
     activeRound,
     hasUnsavedAgentChanges,
     composerGuardrailMessage,
@@ -996,7 +1000,7 @@ export function TalkDetailPage({
           onRenameDraftCommit={onRenameDraftCommit}
           currentTab={currentTab}
           tabLinks={{
-            threadAwareTalkTabHref,
+            talkTabHref,
             documentsTabHref,
             agentsTabHref,
             contextTabHref,
@@ -1015,7 +1019,7 @@ export function TalkDetailPage({
           onOrchestrationModeChange={(mode) => {
             void handleOrchestrationModeChange(mode);
           }}
-          currentThreadHasContent={currentThreadHasContent}
+          currentConversationHasContent={currentConversationHasContent}
           openDocModal={openDocModal}
           effectiveAgents={effectiveAgents}
           talkAgentExecutionGuardrailsById={talkAgentExecutionGuardrailsById}
@@ -1177,15 +1181,15 @@ export function TalkDetailPage({
               setDocPaneHidden={setDocPaneHidden}
               chatRatio={chatRatio}
               handleResizeHandleKeyDown={handleResizeHandleKeyDown}
-              threadState={threadState}
-              sortedThreads={sortedThreads}
-              editingThreadId={editingThreadId}
-              setEditingThreadId={setEditingThreadId}
-              activeThreadId={activeThreadId}
-              activeThread={activeThread}
-              threadMenu={threadMenu}
-              menuThread={menuThread}
-              handleCreateThread={handleCreateThread}
+              conversationState={conversationState}
+              sortedConversations={sortedConversations}
+              editingConversationId={editingConversationId}
+              setEditingConversationId={setEditingConversationId}
+              activeConversationId={activeConversationId}
+              activeConversation={activeConversation}
+              conversationMenu={conversationMenu}
+              menuConversation={menuConversation}
+              handleCreateConversation={handleCreateConversation}
               handleSearch={handleSearch}
               searchQuery={searchQuery}
               setSearchQuery={setSearchQuery}
@@ -1193,15 +1197,17 @@ export function TalkDetailPage({
               searchError={searchError}
               searchResults={searchResults}
               handleSearchResultSelect={handleSearchResultSelect}
-              handleThreadSecondaryClick={handleThreadSecondaryClick}
-              handleThreadContextMenu={handleThreadContextMenu}
-              handleRenameThread={handleRenameThread}
-              handleSelectThread={handleSelectThread}
-              closeThreadMenu={closeThreadMenu}
-              onRenameMenuThread={handleRenameMenuThread}
-              onToggleMenuThreadPin={handleToggleMenuThreadPin}
-              onDeleteMenuThread={handleDeleteMenuThread}
-              handleRenameActiveThread={handleRenameActiveThread}
+              handleConversationSecondaryClick={
+                handleConversationSecondaryClick
+              }
+              handleConversationContextMenu={handleConversationContextMenu}
+              handleRenameConversation={handleRenameConversation}
+              handleSelectConversation={handleSelectConversation}
+              closeConversationMenu={closeConversationMenu}
+              onRenameMenuConversation={handleRenameMenuConversation}
+              onToggleMenuConversationPin={handleToggleMenuConversationPin}
+              onDeleteMenuConversation={handleDeleteMenuConversation}
+              handleRenameActiveConversation={handleRenameActiveConversation}
               openHistoryEditor={openHistoryEditor}
               canEditHistory={canEditHistory}
               activeOrderedProgress={activeOrderedProgress}

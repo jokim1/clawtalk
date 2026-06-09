@@ -10,7 +10,7 @@ import type { TalkJob, TalkJobRunSummary } from '../lib/api';
 
 type UseTalkJobsControllerInput = {
   talkId: string;
-  resyncTalkState: (options?: { refreshThreads?: boolean }) => Promise<void>;
+  resyncTalkState: () => Promise<void>;
 };
 
 export function useTalkJobsController({
@@ -48,7 +48,7 @@ export function useTalkJobsController({
 
   // After a Run-Now settles in TalkJobsPanel, resync the Talk timeline and runs.
   const handleJobRunSettled = useCallback(async () => {
-    await resyncTalkState({ refreshThreads: true });
+    await resyncTalkState();
   }, [resyncTalkState]);
 
   return {

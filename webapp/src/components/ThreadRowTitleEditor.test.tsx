@@ -1,4 +1,10 @@
-import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+} from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { ThreadRowTitleEditor } from './ThreadRowTitleEditor';
@@ -32,7 +38,7 @@ describe('ThreadRowTitleEditor', () => {
       />,
     );
 
-    const input = screen.getByRole('textbox', { name: 'Rename thread' });
+    const input = screen.getByRole('textbox', { name: 'Rename conversation' });
     fireEvent.change(input, { target: { value: 'New title' } });
     fireEvent.blur(input);
 
