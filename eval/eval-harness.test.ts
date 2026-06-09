@@ -206,6 +206,45 @@ describe('dry-run suite', () => {
     await expect(runCli(['--mode=live'])).resolves.toBe(2);
   });
 
+  it('runs live mode from persisted live observations when provided', async () => {
+    const roots = await writeLiveObservationFixture();
+    const report = await runEvaluation({
+      mode: 'live',
+      scenarioIds: 'all',
+      generatedAt: '2026-06-07T00:00:00.000Z',
+      scenarioRoot: roots.scenarioRoot,
+      liveObservationRoot: roots.liveObservationRoot,
+    });
+
+    expect(report).toMatchObject({
+      mode: 'live',
+      status: 'pass',
+      summary: {
+        scenarioCount: 1,
+        passedScenarioCount: 1,
+        failedCriticalCheckCount: 0,
+      },
+    });
+    expect(report.scenarios[0]?.agentAudits[0]?.runId).toBe(
+      's-live-observation:live',
+    );
+    expect(exitCodeForReport(report)).toBe(0);
+  });
+
+  it('rejects dry-run fixture files when live mode expects live observations', async () => {
+    const roots = await writeLiveObservationFixture({ source: 'fixture' });
+
+    await expect(
+      runEvaluation({
+        mode: 'live',
+        scenarioIds: 'all',
+        generatedAt: '2026-06-07T00:00:00.000Z',
+        scenarioRoot: roots.scenarioRoot,
+        liveObservationRoot: roots.liveObservationRoot,
+      }),
+    ).rejects.toThrow(/source must be live/);
+  });
+
   it('rejects malformed scenario contracts before scoring', async () => {
     const roots = await writeInvalidEvalFixture();
 
@@ -611,6 +650,74 @@ async function writeInvalidAgentReplyFixture(): Promise<{
   });
 
   return { scenarioRoot, fixtureRoot };
+}
+
+async function writeLiveObservationFixture(
+  observationOverrides: Record<string, unknown> = {},
+): Promise<{
+  scenarioRoot: string;
+  liveObservationRoot: string;
+}> {
+  const root = await mkdtemp(path.join(tmpdir(), 'clawtalk-eval-live-test-'));
+  const scenarioRoot = path.join(root, 'scenarios');
+  const liveObservationRoot = path.join(root, 'live');
+  await mkdir(scenarioRoot);
+  await mkdir(liveObservationRoot);
+
+  const scenario: EvalScenario = {
+    id: 's-live-observation',
+    title: 'Live observation',
+    description: 'A temporary scenario backed by persisted live observations.',
+    category: 'talk',
+    team: 'default',
+    mode: 'ordered',
+    roundsLimit: 1,
+    userPrompt: 'Prompt',
+    expectedDynamics: 'Dynamics',
+    threshold: 4,
+    fixture: 's-live-observation.fixture.json',
+    checks: [
+      {
+        id: 'critical-live-signal',
+        area: 'talk',
+        description: 'A passing live observation signal.',
+        launchCritical: true,
+        requiredSignals: ['live.critical.present'],
+      },
+    ],
+    agentExpectations: [
+      {
+        role: 'strategist',
+        dimensions: Object.fromEntries(
+          SCORE_DIMENSIONS.map((dimension) => [
+            dimension,
+            { requiredSignals: [`strategist.${dimension}.present`] },
+          ]),
+        ) as Record<ScoreDimension, { requiredSignals: string[] }>,
+      },
+    ],
+  };
+
+  await writeJson(path.join(scenarioRoot, 's-live-observation.json'), scenario);
+  await writeJson(path.join(liveObservationRoot, scenario.fixture), {
+    scenarioId: scenario.id,
+    observedAt: '2026-06-07T00:00:00.000Z',
+    source: 'live',
+    events: [{ kind: 'worker.event', signals: ['live.critical.present'] }],
+    agentReplies: {
+      strategist: {
+        reply: 'Observed live run completed with evidence.',
+        roleMethod: 'live persisted transcript',
+        tokenBudget: 'bounded',
+        signals: SCORE_DIMENSIONS.map(
+          (dimension) => `strategist.${dimension}.present`,
+        ),
+      },
+    },
+    ...observationOverrides,
+  });
+
+  return { scenarioRoot, liveObservationRoot };
 }
 
 async function writeJson(filePath: string, value: unknown): Promise<void> {

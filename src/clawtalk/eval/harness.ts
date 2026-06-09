@@ -6,12 +6,13 @@ import {
   type AgentAuditResult,
   DEFAULT_AGENT_ROLES,
   type DefaultAgentRole,
-  type DryRunFixture,
+  type EvalObservationFixture,
   type DryRunObservation,
   EVAL_SCENARIO_CATEGORIES,
   type EvalCheck,
   type EvalCheckResult,
   type EvalMode,
+  type EvalObservationSource,
   type EvalReport,
   type EvalScenario,
   type EvalScenarioReport,
@@ -42,6 +43,7 @@ interface RunEvaluationOptions {
   scenarioRoot?: string;
   fixtureRoot?: string;
   graderRoot?: string;
+  liveObservationRoot?: string;
 }
 
 interface CliOptions extends RunEvaluationOptions {
@@ -85,18 +87,31 @@ export async function runEvaluation(
 ): Promise<EvalReport> {
   const generatedAt = options.generatedAt ?? new Date().toISOString();
   if (options.mode === 'live') {
-    return buildBlockedReport(options.mode, generatedAt);
+    if (!options.liveObservationRoot) {
+      return buildBlockedReport(options.mode, generatedAt);
+    }
   }
 
   const scenarioDirectory = options.scenarioRoot ?? scenarioRoot;
   const fixtureDirectory = options.fixtureRoot ?? fixtureRoot;
+  const liveDirectory = options.liveObservationRoot;
   const graderDirectory = options.graderRoot ?? graderRoot;
   const scenarios = await loadScenarios(scenarioDirectory);
   await validateGraderContracts(graderDirectory);
   const selected = selectScenarios(scenarios, options.scenarioIds);
+  const observationRoot =
+    options.mode === 'live' ? liveDirectory! : fixtureDirectory;
+  const expectedSource: EvalObservationSource =
+    options.mode === 'live' ? 'live' : 'fixture';
   const scenarioReports = await Promise.all(
     selected.map((scenario) =>
-      evaluateDryRunScenario(scenario, generatedAt, fixtureDirectory),
+      evaluateObservationScenario(
+        scenario,
+        generatedAt,
+        observationRoot,
+        expectedSource,
+        options.mode,
+      ),
     ),
   );
 
@@ -261,6 +276,10 @@ export function renderPrettyReport(
     lines.push(
       'Mode note: deterministic fixture observations only; not live backend or model-behavior proof.',
     );
+  } else if (!report.blockedReason) {
+    lines.push(
+      'Mode note: persisted live observations; evaluator-model grading still uses deterministic signal contracts.',
+    );
   }
 
   if (report.blockedReason) {
@@ -348,6 +367,10 @@ function parseCliArgs(argv: string[]): CliOptions {
       options.format = format;
     } else if (arg.startsWith('--output=')) {
       options.output = arg.slice('--output='.length);
+    } else if (arg.startsWith('--live-root=')) {
+      options.liveObservationRoot = arg.slice('--live-root='.length);
+    } else if (arg.startsWith('--live-observations=')) {
+      options.liveObservationRoot = arg.slice('--live-observations='.length);
     } else {
       throw new Error(`Unknown eval argument: ${arg}`);
     }
@@ -361,10 +384,11 @@ function renderHelp(): string {
     'Usage: npm run eval -- [options]',
     '',
     'Options:',
-    '  --mode=dry-run|live       dry-run uses deterministic fixtures; live is blocked until provider wiring lands',
+    '  --mode=dry-run|live       dry-run uses deterministic fixtures; live requires --live-root',
     '  --scenarios=all|id,id     run all scenarios or a comma-separated subset',
     '  --format=pretty|json      print a table or raw JSON',
     '  --output=path             write the JSON report to a file',
+    '  --live-root=path          read persisted live observation JSON files for --mode=live',
     '  --list                    list scenario ids',
     '  --help                    show this help',
   ].join('\n');
@@ -501,13 +525,15 @@ function validateNonEmptyString(
   }
 }
 
-async function evaluateDryRunScenario(
+async function evaluateObservationScenario(
   scenario: EvalScenario,
   generatedAt: string,
   root: string,
+  expectedSource: EvalObservationSource,
+  mode: EvalMode,
 ): Promise<EvalScenarioReport> {
   const fixture = await readJson<unknown>(path.join(root, scenario.fixture));
-  validateDryRunFixture(fixture, scenario);
+  validateObservationFixture(fixture, scenario, expectedSource);
 
   const observedSignals = deriveObservedSignals(fixture, scenario);
   const checkResults = scenario.checks.map((check) =>
@@ -521,6 +547,7 @@ async function evaluateDryRunScenario(
         expectation.dimensions,
         observedSignals,
         generatedAt,
+        mode,
       ),
     ) ?? [];
 
@@ -545,44 +572,47 @@ async function evaluateDryRunScenario(
   };
 }
 
-function validateDryRunFixture(
+function validateObservationFixture(
   value: unknown,
   scenario: EvalScenario,
-): asserts value is DryRunFixture {
+  expectedSource: EvalObservationSource,
+): asserts value is EvalObservationFixture {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    throw new Error(`Fixture ${scenario.fixture} must be an object`);
+    throw new Error(`Observation ${scenario.fixture} must be an object`);
   }
 
-  const fixture = value as Partial<DryRunFixture>;
+  const fixture = value as Partial<EvalObservationFixture>;
   validateNonEmptyString(
     fixture.scenarioId,
-    `Fixture ${scenario.fixture} scenarioId`,
+    `Observation ${scenario.fixture} scenarioId`,
   );
   if (fixture.scenarioId !== scenario.id) {
     throw new Error(
-      `Fixture ${scenario.fixture} belongs to ${fixture.scenarioId}, not ${scenario.id}`,
+      `Observation ${scenario.fixture} belongs to ${fixture.scenarioId}, not ${scenario.id}`,
     );
   }
   validateUtcTimestamp(
     fixture.observedAt,
-    `Fixture ${scenario.fixture} observedAt`,
+    `Observation ${scenario.fixture} observedAt`,
   );
-  if (fixture.source !== 'fixture') {
-    throw new Error(`Fixture ${scenario.fixture} source must be fixture`);
+  if (fixture.source !== expectedSource) {
+    throw new Error(
+      `Observation ${scenario.fixture} source must be ${expectedSource}`,
+    );
   }
   if ('signals' in fixture) {
     throw new Error(
-      `Fixture ${scenario.fixture} must attach signals to events, records, or agentReplies`,
+      `Observation ${scenario.fixture} must attach signals to events, records, or agentReplies`,
     );
   }
   validateObservationSignals(fixture.events, scenario, 'events');
   validateObservationSignals(fixture.records, scenario, 'records');
   if (!fixture.events && !fixture.records && !fixture.agentReplies) {
     throw new Error(
-      `Fixture ${scenario.fixture} must define events, records, or agentReplies with signals`,
+      `Observation ${scenario.fixture} must define events, records, or agentReplies with signals`,
     );
   }
-  validateFixtureAgentReplies(fixture as DryRunFixture, scenario);
+  validateFixtureAgentReplies(fixture as EvalObservationFixture, scenario);
 }
 
 function validateObservationSignals(
@@ -594,7 +624,9 @@ function validateObservationSignals(
     return;
   }
   if (!Array.isArray(observations)) {
-    throw new Error(`Fixture ${scenario.fixture} ${label} must be an array`);
+    throw new Error(
+      `Observation ${scenario.fixture} ${label} must be an array`,
+    );
   }
   for (const [index, observation] of observations.entries()) {
     if (
@@ -603,13 +635,13 @@ function validateObservationSignals(
       Array.isArray(observation)
     ) {
       throw new Error(
-        `Fixture ${scenario.fixture} ${label}[${index}] must be an object`,
+        `Observation ${scenario.fixture} ${label}[${index}] must be an object`,
       );
     }
     if (observation.signals !== undefined) {
       validateSignalList(
         observation.signals,
-        `Fixture ${scenario.fixture} ${label}[${index}].signals`,
+        `Observation ${scenario.fixture} ${label}[${index}].signals`,
       );
     }
   }
@@ -628,7 +660,7 @@ function validateSignalList(
 }
 
 function deriveObservedSignals(
-  fixture: DryRunFixture,
+  fixture: EvalObservationFixture,
   scenario: EvalScenario,
 ): ReadonlySet<string> {
   const observedSignals = new Set<string>();
@@ -664,7 +696,7 @@ function collectSignalList(
 }
 
 function validateFixtureAgentReplies(
-  fixture: DryRunFixture,
+  fixture: EvalObservationFixture,
   scenario: EvalScenario,
 ): void {
   if (!scenario.agentExpectations || scenario.agentExpectations.length === 0) {
@@ -746,6 +778,7 @@ function evaluateAgentExpectation(
   dimensions: Record<ScoreDimension, SignalExpectation>,
   observedSignals: ReadonlySet<string>,
   generatedAt: string,
+  mode: EvalMode,
 ): AgentAuditResult {
   if (!DEFAULT_AGENT_ROLES.includes(role)) {
     throw new Error(`Unknown default agent role: ${role}`);
@@ -776,7 +809,7 @@ function evaluateAgentExpectation(
   });
 
   return {
-    runId: `${scenario.id}:dry-run`,
+    runId: `${scenario.id}:${mode}`,
     scenarioId: scenario.id,
     agentRole: role,
     evaluatorVersion: EVALUATOR_VERSION,
@@ -855,7 +888,7 @@ function buildBlockedReport(mode: EvalMode, generatedAt: string): EvalReport {
     },
     scenarios: [],
     blockedReason:
-      'Live eval mode is intentionally not wired in MVP. Use dry-run fixtures locally, then add provider/backend adapters before making live grading launch-blocking.',
+      'Live eval mode requires --live-root with persisted live observation JSON. Use dry-run fixtures locally, then add provider/backend capture plus evaluator-model adapters before making live grading launch-blocking.',
   };
 }
 
