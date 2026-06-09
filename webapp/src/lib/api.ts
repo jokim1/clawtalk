@@ -73,6 +73,7 @@ export type TalkSidebarTalk = {
   sortOrder: number;
   lastMessageAt?: string | null;
   messageCount?: number;
+  unreadCount?: number;
   hasActiveRun?: boolean;
   hasContent?: boolean;
 };

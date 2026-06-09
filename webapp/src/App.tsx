@@ -171,13 +171,23 @@ function buildSidebarViewItems(
   readMarkers: Record<string, TalkReadMarker>,
   activeTalkId: string,
 ): SidebarItemView[] {
-  const toViewTalk = (talk: TalkSidebarTalk): SidebarTalkView => ({
-    ...talk,
-    unreadCount: computeUnreadCount(
+  const toUnreadCount = (talk: TalkSidebarTalk): number => {
+    if (
+      typeof talk.unreadCount === 'number' &&
+      Number.isFinite(talk.unreadCount)
+    ) {
+      return Math.max(0, Math.floor(talk.unreadCount));
+    }
+    return computeUnreadCount(
       talk,
       readMarkers[talk.id],
       talk.id === activeTalkId,
-    ),
+    );
+  };
+
+  const toViewTalk = (talk: TalkSidebarTalk): SidebarTalkView => ({
+    ...talk,
+    unreadCount: toUnreadCount(talk),
     isResponding: !!talk.hasActiveRun,
   });
 
