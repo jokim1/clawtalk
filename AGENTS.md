@@ -15,16 +15,19 @@ ClawTalk is a web product where users invite different LLM personas into context
 
 ## Parallel-agent discipline
 
-Joseph often has multiple Claude agents running concurrently on this repo. **Always do non-trivial work inside its own git worktree under `.claude/worktrees/`** — never in the main `/Users/josephkim/dev/clawtalk` checkout — so concurrent agents don't blow each other's edits away.
+Joseph often has multiple Claude, Codex, and Opus agents running concurrently on this repo. **Always do non-trivial work inside an isolated git worktree** — never in the main `/Users/josephkim/dev/clawtalk` checkout — so concurrent agents do not overwrite each other's edits.
 
-- Create a worktree at the start of any multi-file or migration-touching task:
-  `git worktree add .claude/worktrees/<short-task-name> -b <branch-name> main`
+- If the host already placed you in an agent-managed worktree, stay there and create your branch from that checkout.
+- If you must create a worktree yourself, use the host's normal root:
+  - Claude/Opus: `.claude/worktrees/<short-task-name>`
+  - Codex: `.codex/worktrees/<short-task-name>`
+- Create manual worktrees from the repo root with `git worktree add <worktree-path> -b <branch-name> main`.
 - Use absolute paths under the worktree directory for every Edit / Read / Bash call.
 - Commit + push + open the PR from inside the worktree.
-- `git worktree remove` after the PR lands (or leave it for follow-up rebases).
+- Remove a manual worktree after the PR lands, unless it is needed for follow-up rebases.
 - Single-file doc tweaks or one-shot bash commands can stay in the main checkout.
 
-If your edits keep mysteriously reverting between tool calls, you're likely fighting another agent in the main checkout — bail out, create a worktree, and resume there.
+If your edits keep mysteriously reverting between tool calls, you are likely fighting another agent in the main checkout — bail out, create or move to an isolated worktree, and resume there.
 
 ## Engineering Defaults
 
