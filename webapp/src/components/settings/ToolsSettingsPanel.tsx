@@ -36,7 +36,24 @@ export function ToolsSettingsPanel({
   workspaceId,
 }: ToolsSettingsPanelProps): JSX.Element {
   return (
-    <>
+    <div className="settings-salon-panel settings-tools-panel">
+      <section className="settings-tools-summary" aria-label="Tools overview">
+        <div>
+          <span>Tool catalog</span>
+          <strong>Web + Workspace</strong>
+          <em>Keys and OAuth live here</em>
+        </div>
+        <div>
+          <span>Talk controls</span>
+          <strong>Per-talk toggles</strong>
+          <em>Agents inherit enabled integrations</em>
+        </div>
+        <div>
+          <span>Provider family</span>
+          <strong>Web search</strong>
+          <em>Provider selected per account</em>
+        </div>
+      </section>
       {isGoogleToolsEnabled() ? (
         <GoogleAccountSection
           onUnauthorized={onUnauthorized}
@@ -44,7 +61,7 @@ export function ToolsSettingsPanel({
         />
       ) : null}
       <WebSearchProvidersSection onUnauthorized={onUnauthorized} />
-    </>
+    </div>
   );
 }
 
@@ -203,7 +220,7 @@ function GoogleAccountSection({
 
   return (
     <section
-      className="settings-section"
+      className="settings-card settings-section settings-tools-section"
       aria-label="Google account"
       data-testid="google-account-section"
     >
@@ -219,13 +236,13 @@ function GoogleAccountSection({
       {notice ? <p className="settings-notice">{notice}</p> : null}
 
       {!scopedWorkspaceId ? (
-        <div className="settings-card">
+        <div className="settings-nested-card">
           <p>Select a workspace before connecting Google tools.</p>
         </div>
       ) : loading ? (
         <p>Loading…</p>
       ) : account?.connected ? (
-        <div className="settings-card">
+        <div className="settings-nested-card">
           <p>
             <strong>Connected as:</strong>{' '}
             {account.email ?? account.displayName ?? 'unknown'}
@@ -256,7 +273,7 @@ function GoogleAccountSection({
           </button>
         </div>
       ) : (
-        <div className="settings-card">
+        <div className="settings-nested-card">
           <p>No Google account connected.</p>
           <button
             type="button"

@@ -40,7 +40,21 @@ export function AiAgentsSettingsPanel({
   );
 
   return (
-    <>
+    <div className="settings-salon-panel settings-agents-panel">
+      <section className="settings-agent-summary" aria-label="Agent overview">
+        <div>
+          <span>Registered agents</span>
+          <strong>{agents.length}</strong>
+        </div>
+        <div>
+          <span>Enabled</span>
+          <strong>{agents.filter((agent) => agent.enabled).length}</strong>
+        </div>
+        <div>
+          <span>Main agent</span>
+          <strong>{selectedMain?.name ?? 'Not set'}</strong>
+        </div>
+      </section>
       <section className="settings-card">
         <RegisteredAgentsPanel
           providers={providers}
@@ -108,6 +122,6 @@ export function AiAgentsSettingsPanel({
           ) : null}
         </section>
       ) : null}
-    </>
+    </div>
   );
 }

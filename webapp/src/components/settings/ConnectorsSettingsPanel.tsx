@@ -147,14 +147,60 @@ export function ConnectorsSettingsPanel({
 }: ConnectorsSettingsPanelProps): JSX.Element {
   if (status.kind === 'loading') {
     return (
-      <section className="page-shell-section">
+      <section className="settings-salon-panel page-shell-section">
         <p className="page-state">Loading connectors…</p>
       </section>
     );
   }
 
   return (
-    <>
+    <div className="settings-salon-panel settings-connectors-panel">
+      <section
+        className="settings-connectors-overview"
+        aria-label="Connector overview"
+      >
+        <ConnectorOverviewCard
+          initial="G"
+          title="Google Drive"
+          description="Sync docs into Talks as context"
+          connected={dataConnectors.some(
+            (connector) => connector.kind === 'google_docs',
+          )}
+          actionLabel="Add data source"
+          canAct={isAdmin}
+          onAction={onOpenCreateDataConnector}
+        />
+        <ConnectorOverviewCard
+          initial="S"
+          title="Slack"
+          description="Post Talk summaries to channels"
+          connected={slackInstalls.length > 0 || channels.length > 0}
+          actionLabel="Connect"
+          canAct={isAdmin}
+          onAction={() => {
+            void onConnectSlackWorkspace();
+          }}
+        />
+        <ConnectorOverviewCard
+          initial="D"
+          title="Data sources"
+          description="Docs and Sheets available across Talks"
+          connected={dataConnectors.length > 0}
+          actionLabel="Add data source"
+          canAct={isAdmin}
+          onAction={onOpenCreateDataConnector}
+        />
+        <ConnectorOverviewCard
+          initial="#"
+          title="Channels"
+          description="Destinations agents can post to"
+          connected={channels.length > 0}
+          actionLabel="Add channel"
+          canAct={isAdmin}
+          onAction={onOpenCreateChannel}
+        />
+      </section>
+
       <section
         className="page-shell-section connectors-section"
         aria-label="Slack workspaces"
@@ -423,7 +469,44 @@ export function ConnectorsSettingsPanel({
           </p>
         </Sheet>
       ) : null}
-    </>
+    </div>
+  );
+}
+
+function ConnectorOverviewCard({
+  initial,
+  title,
+  description,
+  connected,
+  actionLabel,
+  canAct,
+  onAction,
+}: {
+  initial: string;
+  title: string;
+  description: string;
+  connected: boolean;
+  actionLabel: string;
+  canAct: boolean;
+  onAction: () => void;
+}): JSX.Element {
+  return (
+    <article className="settings-connector-card">
+      <span className="settings-connector-icon">{initial}</span>
+      <div>
+        <h3>{title}</h3>
+        <p>{description}</p>
+      </div>
+      {connected ? (
+        <span className="settings-connected-pill">Connected</span>
+      ) : canAct ? (
+        <button type="button" className="secondary-btn" onClick={onAction}>
+          {actionLabel}
+        </button>
+      ) : (
+        <span className="settings-muted-pill">Not connected</span>
+      )}
+    </article>
   );
 }
 

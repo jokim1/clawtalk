@@ -91,11 +91,12 @@ const TAB_PAGE_HEADERS: Record<
   { title: string; subtitle: string }
 > = {
   profile: {
-    title: 'My Profile',
-    subtitle: 'Manage your personal information.',
+    title: 'Profile',
+    subtitle:
+      'How you appear to agents in your salon, and the defaults used when you start a new Talk.',
   },
   'api-keys': {
-    title: 'API Keys',
+    title: 'API keys',
     subtitle:
       'Workspace-shared and personal AI provider credentials used by your agents.',
   },
@@ -104,8 +105,9 @@ const TAB_PAGE_HEADERS: Record<
     subtitle: 'Manage workspace access and ownership.',
   },
   agents: {
-    title: 'AI Agents',
-    subtitle: 'Register the agents available in your talks.',
+    title: 'AI agents',
+    subtitle:
+      'Personas you can invite into any Talk. Each one has its own prompt, model, and tool permissions.',
   },
   tools: {
     title: 'Tools',
@@ -181,61 +183,72 @@ export function SettingsPage({
   const [searchParams] = useSearchParams();
   const tab = parseTab(searchParams.get('tab'));
   const header = TAB_PAGE_HEADERS[tab];
+  const currentWorkspaceName =
+    user.workspaces?.find((workspace) => workspace.id === user.currentWorkspaceId)
+      ?.name ?? 'Workspace';
 
   return (
-    <section className="page-shell">
-      <header className="page-header">
+    <section className="settings-salon page-shell">
+      <header className="settings-salon-header">
         <div>
+          <span className="settings-salon-eyebrow">Settings</span>
           <h1>{header.title}</h1>
           <p>{header.subtitle}</p>
         </div>
+        <div className="settings-salon-save-state" aria-label="Settings status">
+          <span aria-hidden="true" />
+          <strong>Workspace settings</strong>
+          <em>{currentWorkspaceName}</em>
+        </div>
       </header>
 
-      {tab === 'profile' ? (
-        <ProfileSettingsPanel
-          user={user}
-          onUnauthorized={onUnauthorized}
-          onUserUpdated={onUserUpdated}
-        />
-      ) : null}
+      <div className="settings-salon-content">
+        {tab === 'profile' ? (
+          <ProfileSettingsPanel
+            user={user}
+            onUnauthorized={onUnauthorized}
+            onUserUpdated={onUserUpdated}
+          />
+        ) : null}
 
-      {tab === 'api-keys' ? (
-        <ApiKeysTab
-          onUnauthorized={onUnauthorized}
-          userRole={userRole}
-          workspaceId={user.currentWorkspaceId}
-        />
-      ) : null}
+        {tab === 'api-keys' ? (
+          <ApiKeysTab
+            onUnauthorized={onUnauthorized}
+            userRole={userRole}
+            workspaceId={user.currentWorkspaceId}
+          />
+        ) : null}
 
-      {tab === 'members' ? (
-        <WorkspaceMembersPanel
-          user={user}
-          onUnauthorized={onUnauthorized}
-          onUserUpdated={onUserUpdated}
-        />
-      ) : null}
+        {tab === 'members' ? (
+          <WorkspaceMembersPanel
+            user={user}
+            onUnauthorized={onUnauthorized}
+            onUserUpdated={onUserUpdated}
+          />
+        ) : null}
 
-      {tab === 'agents' ? (
-        <AgentsTab
-          onUnauthorized={onUnauthorized}
-          workspaceId={user.currentWorkspaceId}
-        />
-      ) : null}
+        {tab === 'agents' ? (
+          <AgentsTab
+            onUnauthorized={onUnauthorized}
+            workspaceId={user.currentWorkspaceId}
+          />
+        ) : null}
 
-      {tab === 'tools' ? (
-        <ToolsSettingsPanel
-          onUnauthorized={onUnauthorized}
-          workspaceId={user.currentWorkspaceId}
-        />
-      ) : null}
+        {tab === 'tools' ? (
+          <ToolsSettingsPanel
+            onUnauthorized={onUnauthorized}
+            workspaceId={user.currentWorkspaceId}
+          />
+        ) : null}
 
-      {tab === 'connectors' ? (
-        <ConnectorsTab
-          onUnauthorized={onUnauthorized}
-          userRole={userRole}
-          workspaceId={user.currentWorkspaceId}
-        />
-      ) : null}
+        {tab === 'connectors' ? (
+          <ConnectorsTab
+            onUnauthorized={onUnauthorized}
+            userRole={userRole}
+            workspaceId={user.currentWorkspaceId}
+          />
+        ) : null}
+      </div>
     </section>
   );
 }

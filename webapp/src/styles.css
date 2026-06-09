@@ -7551,3 +7551,659 @@ a {
     padding-inline: 0;
   }
 }
+
+/* ── Salon Settings Surfaces ─────────────────────────────────────────── */
+.settings-salon.page-shell {
+  width: 100%;
+  min-height: 100%;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  background: var(--salon-paper, #fbf7ef);
+  color: var(--salon-ink, #1f1b16);
+  padding: 0;
+  overflow: auto;
+}
+
+.settings-salon-header {
+  min-height: 64px;
+  border-bottom: 1px solid var(--salon-line, #e6e0d1);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.75rem 2.35rem;
+  background: var(--salon-paper, #fbf7ef);
+}
+
+.settings-salon-eyebrow,
+.settings-salon .settings-label,
+.settings-tools-summary span,
+.settings-agent-summary span {
+  display: block;
+  font-family: var(--salon-font-mono, ui-monospace, monospace);
+  font-size: 0.68rem;
+  line-height: 1.2;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--salon-ink-2, #6b6660);
+}
+
+.settings-salon-header h1 {
+  margin: 0.1rem 0 0;
+  font-family: var(--salon-font-serif, Georgia, serif);
+  font-size: 1.45rem;
+  font-weight: 500;
+  line-height: 1;
+  color: var(--salon-ink, #1f1b16);
+}
+
+.settings-salon-header p {
+  max-width: 54rem;
+  margin: 0.35rem 0 0;
+  font-size: 0.82rem;
+  color: var(--salon-ink-2, #6b6660);
+}
+
+.settings-salon-save-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  min-width: 13rem;
+  font-size: 0.78rem;
+  color: var(--salon-ink-2, #6b6660);
+}
+
+.settings-salon-save-state span {
+  width: 0.38rem;
+  height: 0.38rem;
+  border-radius: 999px;
+  background: #3f6b5c;
+}
+
+.settings-salon-save-state strong {
+  font-weight: 500;
+}
+
+.settings-salon-save-state em {
+  font-style: normal;
+  color: var(--salon-ink-2, #6b6660);
+}
+
+.settings-salon-content {
+  width: min(100%, 980px);
+  padding: 1.75rem 2.35rem 4rem;
+}
+
+.settings-salon-panel {
+  display: grid;
+  gap: 1rem;
+}
+
+.settings-salon .settings-card,
+.settings-salon .page-shell-section,
+.settings-nested-card,
+.settings-tools-summary,
+.settings-agent-summary,
+.settings-api-note,
+.settings-connector-card,
+.settings-salon .talk-llm-card,
+.settings-salon .registered-agent-card {
+  border: 1px solid var(--salon-line, #e6e0d1);
+  border-radius: 8px;
+  background: var(--salon-card, #fff);
+  box-shadow: none;
+}
+
+.settings-salon .settings-card,
+.settings-salon .page-shell-section {
+  padding: 1rem;
+}
+
+.settings-salon .settings-card h2,
+.settings-salon .page-shell-section h2,
+.settings-profile-intro h2,
+.settings-salon .registered-agents-header h3 {
+  margin: 0;
+  font-family: var(--salon-font-serif, Georgia, serif);
+  font-size: 1.25rem;
+  font-weight: 500;
+  line-height: 1.15;
+  color: var(--salon-ink, #1f1b16);
+}
+
+.settings-salon .settings-copy,
+.settings-salon .talk-llm-meta,
+.settings-profile-intro p,
+.settings-connector-card p,
+.settings-salon .registered-agent-card-meta,
+.settings-salon .registered-agents-empty,
+.settings-salon .registered-agents-loading,
+.settings-salon .page-state,
+.settings-salon .page-state-footer {
+  color: var(--salon-ink-2, #6b6660);
+  font-size: 0.78rem;
+  line-height: 1.55;
+}
+
+.settings-salon .settings-copy {
+  max-width: 44rem;
+  margin: 0.35rem 0 1rem;
+}
+
+.settings-salon a,
+.settings-salon .talk-llm-link-button {
+  color: #8f4d2e;
+  text-decoration: none;
+}
+
+.settings-salon a:hover,
+.settings-salon .talk-llm-link-button:hover {
+  text-decoration: underline;
+}
+
+.settings-salon .settings-banner {
+  border-radius: 8px;
+  font-size: 0.85rem;
+}
+
+.settings-salon .primary-btn,
+.settings-salon .btn-primary {
+  border: 1px solid var(--salon-accent-strong, #b05530);
+  border-radius: 999px;
+  background: var(--salon-accent-strong, #b05530);
+  color: #fff;
+  min-height: 2rem;
+  padding: 0.48rem 0.9rem;
+  font-size: 0.78rem;
+  font-weight: 600;
+}
+
+.settings-salon .secondary-btn,
+.settings-salon .btn:not(.btn-primary):not(.btn-danger):not(.btn-danger-outline),
+.settings-salon .talk-llm-eye-toggle {
+  border: 1px solid var(--salon-line, #e6e0d1);
+  border-radius: 999px;
+  background: var(--salon-card, #fff);
+  color: var(--salon-ink, #1f1b16);
+  min-height: 2rem;
+  padding: 0.45rem 0.8rem;
+  font-size: 0.78rem;
+}
+
+.settings-salon .btn-danger-outline {
+  border: 1px solid #d9b8ad;
+  border-radius: 999px;
+  background: transparent;
+  color: #a8434a;
+}
+
+.settings-salon .primary-btn:hover:not(:disabled),
+.settings-salon .btn-primary:hover:not(:disabled) {
+  filter: brightness(0.97);
+}
+
+.settings-salon button:disabled,
+.settings-salon .primary-btn:disabled,
+.settings-salon .secondary-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.58;
+}
+
+.settings-salon input,
+.settings-salon select,
+.settings-salon textarea,
+.settings-salon .profile-field-input,
+.settings-salon .talk-llm-grid input,
+.settings-salon .talk-llm-grid select,
+.settings-salon .agent-form-field input[type='text'],
+.settings-salon .agent-form-field select,
+.settings-salon .agent-form-textarea {
+  border: 1px solid var(--salon-line, #e6e0d1);
+  border-radius: 8px;
+  background: var(--salon-card, #fff);
+  color: var(--salon-ink, #1f1b16);
+  font: inherit;
+  font-size: 0.86rem;
+  padding: 0.6rem 0.72rem;
+}
+
+.settings-salon input:focus,
+.settings-salon select:focus,
+.settings-salon textarea:focus,
+.settings-salon .profile-field-input:focus,
+.settings-salon .talk-llm-grid input:focus,
+.settings-salon .talk-llm-grid select:focus {
+  outline: none;
+  border-color: var(--salon-accent, #c8643a);
+  box-shadow: 0 0 0 3px rgba(200, 100, 58, 0.16);
+}
+
+.settings-salon .profile-field-locked {
+  background: var(--salon-paper-2, #f4ecdb);
+  color: var(--salon-ink-2, #6b6660);
+}
+
+.settings-profile-grid {
+  display: grid;
+  grid-template-columns: 250px minmax(0, 1fr);
+  gap: 2.5rem;
+  max-width: 920px;
+}
+
+.settings-profile-intro p {
+  margin: 0.45rem 0 0;
+}
+
+.settings-profile-form {
+  display: grid;
+  gap: 0.95rem;
+}
+
+.settings-profile-form .profile-avatar-section {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+}
+
+.settings-profile-form .profile-avatar-lg {
+  width: 64px;
+  height: 64px;
+  font-size: 1.2rem;
+  font-family: var(--salon-font-serif, Georgia, serif);
+  font-weight: 600;
+}
+
+.profile-avatar-copy {
+  display: grid;
+  gap: 0.25rem;
+  justify-items: start;
+}
+
+.profile-avatar-copy span,
+.settings-salon .profile-field-hint {
+  color: var(--salon-ink-2, #6b6660);
+  font-size: 0.72rem;
+}
+
+.settings-salon .profile-field {
+  gap: 0.35rem;
+  margin: 0;
+}
+
+.settings-salon .profile-field-label,
+.settings-salon .agent-form-field span {
+  color: var(--salon-ink-2, #6b6660);
+  font-size: 0.76rem;
+  font-weight: 500;
+}
+
+.settings-salon .profile-actions {
+  align-items: center;
+  margin-top: 0.35rem;
+}
+
+.settings-salon .profile-role-row {
+  gap: 0.6rem;
+  color: var(--salon-ink-2, #6b6660);
+  font-size: 0.8rem;
+}
+
+.settings-salon .profile-role-row strong {
+  color: var(--salon-ink, #1f1b16);
+}
+
+.settings-salon .profile-role-badge {
+  border-radius: 999px;
+  background: #3f6b5c;
+  color: #fff;
+  padding: 0.18rem 0.45rem;
+  font-family: var(--salon-font-mono, ui-monospace, monospace);
+  font-size: 0.66rem;
+}
+
+.settings-salon .profile-meta-grid {
+  border-top: 1px solid var(--salon-line, #e6e0d1);
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1rem;
+  padding-top: 0.85rem;
+}
+
+.settings-api-panel {
+  max-width: 920px;
+}
+
+.settings-salon .settings-subtabs {
+  background: var(--salon-paper-2, #f4ecdb);
+  border: 1px solid var(--salon-line, #e6e0d1);
+  border-radius: 8px;
+  padding: 0.25rem;
+}
+
+.settings-salon .settings-subtab {
+  border-radius: 6px;
+  color: var(--salon-ink-2, #6b6660);
+  font-size: 0.78rem;
+}
+
+.settings-salon .settings-subtab-active {
+  background: var(--salon-card, #fff);
+  color: var(--salon-ink, #1f1b16);
+  box-shadow: none;
+}
+
+.settings-salon .talk-llm-card-list {
+  gap: 0;
+  overflow: hidden;
+  border: 1px solid var(--salon-line, #e6e0d1);
+  border-radius: 8px;
+  background: var(--salon-card, #fff);
+}
+
+.settings-salon .talk-llm-card {
+  border-width: 0 0 1px;
+  border-radius: 0;
+  padding: 0.85rem 1rem;
+}
+
+.settings-salon .talk-llm-card:last-child {
+  border-bottom: 0;
+}
+
+.settings-salon .talk-llm-card h4 {
+  font-size: 0.88rem;
+  font-weight: 650;
+}
+
+.settings-salon .talk-llm-grid {
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0.65rem;
+}
+
+.settings-salon .talk-llm-secret-input {
+  gap: 0.5rem;
+}
+
+.settings-salon .talk-llm-stored-key {
+  border: 1px solid var(--salon-line, #e6e0d1);
+  border-radius: 8px;
+  background: var(--salon-paper, #fbf7ef);
+  padding: 0.65rem 0.75rem;
+}
+
+.settings-api-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.75rem;
+  padding: 0.9rem 1rem;
+  background: var(--salon-paper-2, #f4ecdb);
+}
+
+.settings-api-note span {
+  color: var(--salon-ink-2, #6b6660);
+}
+
+.settings-api-note p {
+  margin: 0;
+  color: var(--salon-ink-2, #6b6660);
+  font-size: 0.78rem;
+  line-height: 1.5;
+}
+
+.settings-tools-panel {
+  max-width: 920px;
+}
+
+.settings-tools-summary,
+.settings-agent-summary {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 1rem;
+  padding: 1rem;
+}
+
+.settings-tools-summary strong,
+.settings-agent-summary strong {
+  display: block;
+  margin-top: 0.35rem;
+  font-family: var(--salon-font-serif, Georgia, serif);
+  font-size: 1.4rem;
+  font-weight: 500;
+  color: var(--salon-ink, #1f1b16);
+}
+
+.settings-tools-summary em {
+  display: block;
+  margin-top: 0.15rem;
+  color: var(--salon-ink-2, #6b6660);
+  font-size: 0.74rem;
+  font-style: normal;
+}
+
+.settings-tools-section > header {
+  margin-bottom: 1rem;
+}
+
+.settings-tools-section > header h2 {
+  margin-bottom: 0.35rem;
+}
+
+.settings-tools-section > header p {
+  max-width: 42rem;
+  margin: 0;
+  color: var(--salon-ink-2, #6b6660);
+  font-size: 0.78rem;
+}
+
+.settings-nested-card {
+  padding: 0.9rem 1rem;
+}
+
+.settings-nested-card p {
+  margin: 0.2rem 0 0.65rem;
+  color: var(--salon-ink-2, #6b6660);
+  font-size: 0.82rem;
+}
+
+.settings-salon .agent-form-field > div[style] {
+  align-items: center;
+}
+
+.settings-connectors-panel {
+  max-width: 920px;
+}
+
+.settings-connectors-overview {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.75rem;
+}
+
+.settings-connector-card {
+  min-height: 74px;
+  display: grid;
+  grid-template-columns: 40px minmax(0, 1fr) auto;
+  gap: 0.8rem;
+  align-items: center;
+  padding: 0.85rem;
+}
+
+.settings-connector-icon {
+  width: 40px;
+  height: 40px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--salon-line, #e6e0d1);
+  border-radius: 8px;
+  background: var(--salon-paper-2, #f4ecdb);
+  font-family: var(--salon-font-serif, Georgia, serif);
+  color: var(--salon-ink, #1f1b16);
+}
+
+.settings-connector-card h3 {
+  margin: 0;
+  font-size: 0.86rem;
+  color: var(--salon-ink, #1f1b16);
+}
+
+.settings-connector-card p {
+  margin: 0.18rem 0 0;
+}
+
+.settings-connected-pill,
+.settings-muted-pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  justify-self: end;
+  min-height: 1.75rem;
+  border-radius: 999px;
+  padding: 0 0.75rem;
+  font-size: 0.72rem;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.settings-connected-pill {
+  background: #3f6b5c;
+  color: #fff;
+}
+
+.settings-muted-pill {
+  border: 1px solid var(--salon-line, #e6e0d1);
+  color: var(--salon-ink-2, #6b6660);
+}
+
+.settings-salon .connectors-section {
+  margin: 0;
+}
+
+.settings-salon .connectors-section + .connectors-section {
+  margin-top: 0;
+}
+
+.settings-salon .agents-panel-header,
+.settings-salon .registered-agents-header {
+  align-items: center;
+  margin-bottom: 0.85rem;
+}
+
+.settings-salon .connector-table {
+  border: 1px solid var(--salon-line, #e6e0d1);
+  border-radius: 8px;
+  border-collapse: separate;
+  border-spacing: 0;
+  overflow: hidden;
+  background: var(--salon-card, #fff);
+}
+
+.settings-salon .connector-table th,
+.settings-salon .connector-table td {
+  border-bottom: 1px solid var(--salon-line, #e6e0d1);
+  padding: 0.7rem 0.85rem;
+}
+
+.settings-salon .connector-table th {
+  font-family: var(--salon-font-mono, ui-monospace, monospace);
+  font-size: 0.66rem;
+  letter-spacing: 0.14em;
+  color: var(--salon-ink-2, #6b6660);
+}
+
+.settings-salon .connector-table tr:last-child td {
+  border-bottom: 0;
+}
+
+.settings-salon .connector-row-subtitle {
+  color: var(--salon-ink-2, #6b6660);
+}
+
+.settings-salon .page-state {
+  margin: 0;
+  padding: 1rem;
+  text-align: center;
+}
+
+.settings-agents-panel {
+  max-width: 920px;
+}
+
+.settings-agent-summary strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-salon .registered-agents-panel {
+  gap: 0.85rem;
+}
+
+.settings-salon .registered-agent-card {
+  padding: 1rem;
+}
+
+.settings-salon .registered-agent-card-creating {
+  border-style: dashed;
+  border-color: var(--salon-accent, #c8643a);
+  background: var(--salon-paper, #fbf7ef);
+}
+
+.settings-salon .registered-agent-card-header h4 {
+  font-family: var(--salon-font-serif, Georgia, serif);
+  font-size: 1.05rem;
+  font-weight: 500;
+  color: var(--salon-ink, #1f1b16);
+}
+
+.settings-salon .registered-agent-tool-pill,
+.settings-salon .connector-status-pill,
+.settings-salon [class*='run-history-status-'],
+.settings-salon [class*='registered-agent-model-notice'] {
+  border-color: var(--salon-line, #e6e0d1);
+  background: var(--salon-paper-2, #f4ecdb);
+  color: var(--salon-ink, #1f1b16);
+  border-radius: 999px;
+}
+
+@media (max-width: 760px) {
+  .settings-salon-header {
+    align-items: flex-start;
+    flex-direction: column;
+    padding: 0.9rem 1rem;
+  }
+
+  .settings-salon-save-state {
+    justify-content: flex-start;
+    min-width: 0;
+  }
+
+  .settings-salon-content {
+    width: 100%;
+    padding: 1rem 1rem 6rem;
+  }
+
+  .settings-profile-grid,
+  .settings-connectors-overview,
+  .settings-tools-summary,
+  .settings-agent-summary {
+    grid-template-columns: 1fr;
+  }
+
+  .settings-connector-card {
+    grid-template-columns: 36px minmax(0, 1fr);
+  }
+
+  .settings-connector-card .secondary-btn,
+  .settings-connector-card .settings-connected-pill,
+  .settings-connector-card .settings-muted-pill {
+    grid-column: 1 / -1;
+    justify-self: start;
+  }
+
+  .settings-salon .connector-table {
+    display: block;
+    overflow-x: auto;
+  }
+}
