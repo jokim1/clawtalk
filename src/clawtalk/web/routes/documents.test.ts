@@ -397,7 +397,7 @@ describe('native document routes', () => {
 
     const created = await createDocumentRoute({
       auth: auth(),
-      threadId: talkId,
+      talkId,
       title: 'Native Create Draft',
       format: 'html',
     });
@@ -521,31 +521,6 @@ describe('native document routes', () => {
     expect(missingTalk.body).toMatchObject({
       ok: false,
       error: { code: 'talk_id_required' },
-    });
-
-    const badThread = await createDocumentRoute({
-      auth: auth(),
-      workspaceId,
-      threadId: 'not-a-uuid',
-      title: 'Bad Thread',
-    });
-    expect(badThread.statusCode).toBe(400);
-    expect(badThread.body).toMatchObject({
-      ok: false,
-      error: { code: 'invalid_thread_id' },
-    });
-
-    const mismatch = await createDocumentRoute({
-      auth: auth(),
-      workspaceId,
-      talkId,
-      threadId: OTHER_USER_ID,
-      title: 'Mismatched Thread',
-    });
-    expect(mismatch.statusCode).toBe(400);
-    expect(mismatch.body).toMatchObject({
-      ok: false,
-      error: { code: 'thread_talk_mismatch' },
     });
 
     const [count] = await getDbPg()<Array<{ count: number }>>`

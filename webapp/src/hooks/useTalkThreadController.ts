@@ -16,7 +16,10 @@ import {
   type TalkThread,
 } from '../lib/api';
 import { formatThreadLabel } from '../lib/threadTitles';
-import { buildTalkDetailHref, type TalkDetailTabKey } from './useTalkDetailTabs';
+import {
+  buildTalkDetailHref,
+  type TalkDetailTabKey,
+} from './useTalkDetailTabs';
 
 export type ThreadListState = {
   threads: TalkThread[];
@@ -73,13 +76,9 @@ export function useTalkThreadController({
   const [searchLoading, setSearchLoading] = useState(false);
   const [searchError, setSearchError] = useState<string | null>(null);
 
-  const activeThreadIdRef = useRef<string | null>(null);
-  const threadStateRef = useRef<ThreadListState>(threadState);
   const searchQueryRef = useRef(searchQuery);
   const threadStateTalkIdRef = useRef<string | null>(null);
 
-  activeThreadIdRef.current = activeThreadId;
-  threadStateRef.current = threadState;
   searchQueryRef.current = searchQuery;
 
   const sortedThreads = useMemo(
@@ -123,45 +122,6 @@ export function useTalkThreadController({
     [talkId],
   );
 
-  const scheduleThreadListRefresh = useCallback(() => {
-    // Thread list state is snapshot-owned. The retired `/threads` endpoint
-    // exposed the same single Talk conversation, so reconnect/replay recovery
-    // happens by invalidating the Talk snapshot rather than fetching a
-    // separate thread list.
-  }, []);
-
-  const ensureKnownThread = useCallback(
-    (threadId?: string | null): boolean => {
-      if (!threadId) return false;
-      const known = threadStateRef.current.threads.some(
-        (thread) => thread.id === threadId,
-      );
-      return known;
-    },
-    [],
-  );
-
-  const bumpThreadSummaryFromMessage = useCallback(
-    (threadId: string, createdAt: string) => {
-      const known = threadStateRef.current.threads.some(
-        (thread) => thread.id === threadId,
-      );
-      if (!known) return;
-      setThreadState((current) => {
-        const threads = current.threads.map((thread) => {
-          if (thread.id !== threadId) return thread;
-          return {
-            ...thread,
-            messageCount: thread.messageCount + 1,
-            lastMessageAt: createdAt,
-          };
-        });
-        return { ...current, threads: sortThreads(threads) };
-      });
-    },
-    [],
-  );
-
   useEffect(() => {
     if (threadState.loading) return;
     // Bail when threadState was loaded for a different talkId — happens
@@ -179,12 +139,7 @@ export function useTalkThreadController({
     if (activeThreadId !== validThreadId) {
       setActiveThreadId(validThreadId);
     }
-  }, [
-    activeThreadId,
-    talkId,
-    threadState.loading,
-    threadState.threads,
-  ]);
+  }, [activeThreadId, talkId, threadState.loading, threadState.threads]);
 
   useEffect(() => {
     setSearchResults([]);
@@ -193,7 +148,8 @@ export function useTalkThreadController({
 
   const handleRenameThread = useCallback(
     async (threadId: string, _title?: string) => {
-      const message = 'This Talk uses one conversation; rename the Talk instead.';
+      const message =
+        'This Talk uses one conversation; rename the Talk instead.';
       setThreadState((current) => ({
         ...current,
         error: message,
@@ -204,15 +160,12 @@ export function useTalkThreadController({
     [],
   );
 
-  const handleDeleteThread = useCallback(
-    async (thread: TalkThread) => {
-      setThreadState((current) => ({
-        ...current,
-        error: `"${formatThreadLabel(thread)}" is the Talk conversation and cannot be deleted separately.`,
-      }));
-    },
-    [],
-  );
+  const handleDeleteThread = useCallback(async (thread: TalkThread) => {
+    setThreadState((current) => ({
+      ...current,
+      error: `"${formatThreadLabel(thread)}" is the Talk conversation and cannot be deleted separately.`,
+    }));
+  }, []);
 
   const handleRenameActiveThread = useCallback(
     async (title: string) => {
@@ -308,15 +261,12 @@ export function useTalkThreadController({
     setEditingThreadId(thread.id);
   }, []);
 
-  const handleToggleMenuThreadPin = useCallback(
-    (thread: TalkThread) => {
-      setThreadState((current) => ({
-        ...current,
-        error: `"${formatThreadLabel(thread)}" is always pinned as the Talk conversation.`,
-      }));
-    },
-    [],
-  );
+  const handleToggleMenuThreadPin = useCallback((thread: TalkThread) => {
+    setThreadState((current) => ({
+      ...current,
+      error: `"${formatThreadLabel(thread)}" is always pinned as the Talk conversation.`,
+    }));
+  }, []);
 
   const handleDeleteMenuThread = useCallback(
     (thread: TalkThread) => {
@@ -331,7 +281,6 @@ export function useTalkThreadController({
     setEditingThreadId,
     threadMenu,
     activeThreadId,
-    activeThreadIdRef,
     searchQuery,
     setSearchQuery,
     searchResults,
@@ -342,9 +291,6 @@ export function useTalkThreadController({
     menuThread,
     resetTalkThreads,
     hydrateTalkThreads,
-    scheduleThreadListRefresh,
-    ensureKnownThread,
-    bumpThreadSummaryFromMessage,
     handleRenameThread,
     handleDeleteThread,
     handleRenameActiveThread,

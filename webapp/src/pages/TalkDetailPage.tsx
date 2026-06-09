@@ -67,7 +67,6 @@ const EMPTY_MESSAGES: TalkMessage[] = [];
 function snapshotRunsToTalkRuns(snapshotRuns: TalkSnapshot['runs']): TalkRun[] {
   return snapshotRuns.map((row) => ({
     id: row.id,
-    threadId: row.threadId,
     responseGroupId: row.responseGroupId,
     sequenceIndex: row.sequenceIndex,
     status: row.status,
@@ -138,7 +137,6 @@ export function TalkDetailPage({
   const endRef = useRef<HTMLDivElement | null>(null);
   const pendingComposerFocusRef = useRef(false);
   const pendingRunHistoryScrollRef = useRef<string | null>(null);
-  const threadCacheEpochRef = useRef(0);
   const deletedMessageIdsRef = useRef<Set<string>>(new Set());
   // Bumped whenever deleted ids are recorded so memoized message lists
   // re-run the deleted-id filter even if the messages array itself is
@@ -186,7 +184,6 @@ export function TalkDetailPage({
     setEditingThreadId,
     threadMenu,
     activeThreadId,
-    activeThreadIdRef,
     searchQuery,
     setSearchQuery,
     searchResults,
@@ -197,9 +194,6 @@ export function TalkDetailPage({
     menuThread,
     resetTalkThreads,
     hydrateTalkThreads,
-    scheduleThreadListRefresh,
-    ensureKnownThread,
-    bumpThreadSummaryFromMessage,
     handleRenameThread,
     handleRenameActiveThread,
     handleSelectThread,
@@ -227,23 +221,9 @@ export function TalkDetailPage({
       onUnauthorized: handleUnauthorized,
     });
 
-  useEffect(() => {
-    threadCacheEpochRef.current += 1;
-  }, [activeThreadId]);
-
-  // PR C: keep the reducer's selectedThreadId in lockstep with the
-  // page's activeThreadId useState. Several actions (RUN_QUEUED,
-  // RUN_STARTED, RESPONSE_FAILED) guard on this to decide whether a
-  // live-response panel belongs in the currently-rendered thread.
-  useEffect(() => {
-    dispatch({ type: 'THREAD_SELECTED', threadId: activeThreadId });
-  }, [activeThreadId]);
-
   const currentThreadHasContent = useMemo(
-    () =>
-      activeThreadId !== null &&
-      sidebarContents.some((c) => c.threadId === activeThreadId),
-    [activeThreadId, sidebarContents],
+    () => Boolean(talkSnapshot?.primaryDocument),
+    [talkSnapshot?.primaryDocument],
   );
 
   const {
@@ -274,7 +254,6 @@ export function TalkDetailPage({
   } = useTalkDocPaneController({
     talkId,
     userId,
-    activeThreadId,
     currentTab,
     locationParams,
     currentThreadHasContent,
@@ -469,8 +448,6 @@ export function TalkDetailPage({
   );
 
   const handleLoadOlderMessages = useCallback(async (): Promise<void> => {
-    const threadId = activeThreadIdRef.current;
-    if (!threadId) return;
     if (loadingOlderMessages) return;
     const oldest = pageKind === 'ready' ? pageMessages[0] : null;
     if (!oldest) return;
@@ -481,7 +458,6 @@ export function TalkDetailPage({
         before: oldest.createdAt,
         limit: pageSize,
       });
-      if (activeThreadIdRef.current !== threadId) return;
       const filtered = filterDeletedMessages(older);
       // Server returned fewer than we asked for → no more history. Patch
       // the snapshot's `hasOlderMessages` in the same setQueryData so a
@@ -518,9 +494,6 @@ export function TalkDetailPage({
 
   const resyncTalkState = useCallback(
     async (options?: { refreshThreads?: boolean }) => {
-      const threadId = activeThreadIdRef.current;
-      if (!threadId) return;
-      const threadCacheEpoch = threadCacheEpochRef.current;
       // PR C: messages + active runs come from the snapshot query —
       // invalidate it and let RQ refetch. Historical runs are still
       // separate; re-fetch them in parallel so the Runs tab updates.
@@ -537,12 +510,6 @@ export function TalkDetailPage({
       bumpDocReload();
       try {
         const runs = await getTalkRuns(talkId);
-        if (
-          threadId !== activeThreadIdRef.current ||
-          threadCacheEpoch !== threadCacheEpochRef.current
-        ) {
-          return;
-        }
         dispatch({ type: 'MERGE_HISTORICAL_RUNS', runs });
         autoStickToBottomRef.current = 'smooth';
       } catch (err) {
@@ -551,13 +518,7 @@ export function TalkDetailPage({
         }
       }
     },
-    [
-      bumpDocReload,
-      handleUnauthorized,
-      queryClient,
-      talkId,
-      userId,
-    ],
+    [bumpDocReload, handleUnauthorized, queryClient, talkId, userId],
   );
 
   const refreshBrowserRuns = useCallback(
@@ -585,7 +546,6 @@ export function TalkDetailPage({
     handleJobRunSettled,
   } = useTalkJobsController({
     talkId,
-    activeThreadIdRef,
     resyncTalkState,
   });
 
@@ -628,7 +588,7 @@ export function TalkDetailPage({
     const snapshot = snapshotQuery.data;
     if (!snapshot) return;
     if (snapshot.talk.id !== talkId) return;
-    const hydrationKey = `${talkId}::${snapshot.activeThreadId}`;
+    const hydrationKey = talkId;
     const isFirstHydration = hydratedKeyRef.current !== hydrationKey;
     hydrateTalkThreads(snapshot.threads);
     // Doc state is derived reactively from `talkSnapshot.content` (native
@@ -639,15 +599,9 @@ export function TalkDetailPage({
     hydratedKeyRef.current = hydrationKey;
     dispatch({
       type: 'SNAPSHOT_HYDRATED',
-      threadId: snapshot.activeThreadId,
       runs: snapshotRunsToTalkRuns(snapshot.runs),
     });
-  }, [
-    hydrateTalkThreads,
-    snapshotQuery.data,
-    snapshotQuery.error,
-    talkId,
-  ]);
+  }, [hydrateTalkThreads, snapshotQuery.data, snapshotQuery.error, talkId]);
 
   // Rich runs (historical) + rich agents (provider/model/health) come
   // from these two existing endpoints — kept out of the snapshot wire
@@ -682,21 +636,10 @@ export function TalkDetailPage({
     };
   }, [handleUnauthorized, hydrateTalkAgents, talkId]);
 
-  // Thread-show scroll: restore the saved offset for this (talkId,
-  // threadId) if the user had scrolled up to read history; otherwise
-  // park at the bottom.
-  //
-  // We gate on the snapshot's activeThreadId matching the current
-  // activeThreadId so a thread switch waits for the new snapshot to
-  // land before scrolling — pageKind stays 'ready' across switches via
-  // lastSnapshotRef, so the previous thread's DOM is what's mounted
-  // until the new snapshot resolves. snapshotActiveThreadId is a
-  // primitive derived from the cached snapshot, so background refetches
-  // for the same thread don't re-trigger this effect.
-  const snapshotActiveThreadId = snapshotQuery.data?.activeThreadId ?? null;
+  // Thread-show scroll: restore the saved offset for this Talk rail item if
+  // the user had scrolled up to read history; otherwise park at the bottom.
   useEffect(() => {
     if (pageKind !== 'ready' || !activeThreadId) return;
-    if (snapshotActiveThreadId !== activeThreadId) return;
     const saved = loadThreadScroll(talkId, activeThreadId);
     const rafId = requestAnimationFrame(() => {
       if (pendingComposerFocusRef.current) {
@@ -724,13 +667,7 @@ export function TalkDetailPage({
     // scroll twice on warm-cache mounts where the gate passes on the
     // very first render.
     return () => cancelAnimationFrame(rafId);
-  }, [
-    activeThreadId,
-    scrollToBottom,
-    pageKind,
-    snapshotActiveThreadId,
-    talkId,
-  ]);
+  }, [activeThreadId, scrollToBottom, pageKind, talkId]);
 
   // Persist scroll position + at-bottom flag on user scroll, debounced
   // ~200ms. Owns the localStorage write end of the per-thread scroll
@@ -825,17 +762,13 @@ export function TalkDetailPage({
     pageKind,
     queryClient,
     handleUnauthorized,
-    ensureKnownThread,
-    bumpThreadSummaryFromMessage,
     isNearBottom,
     rememberDeletedMessageIds,
-    scheduleThreadListRefresh,
     resyncTalkState,
     bumpDocReload,
     deletedMessageIdsRef,
     persistedRunMessageIdsRef,
     pendingMessageRefetchTimersRef,
-    activeThreadIdRef,
     autoStickToBottomRef,
     wsCacheRouterRef,
     setToolsRefreshKey,
@@ -888,7 +821,6 @@ export function TalkDetailPage({
     pageKind,
     pageTalk,
     agentCount: agents.length,
-    activeThreadIdRef,
     queryClient,
     onUnauthorized: handleUnauthorized,
   });
@@ -919,7 +851,6 @@ export function TalkDetailPage({
     canEditHistory,
     resolveMessageActorLabel,
   } = useTalkRunViewModel({
-    activeThreadId,
     agentLabelById,
     currentTab,
     liveResponsesByRunId: state.liveResponsesByRunId,
@@ -955,10 +886,8 @@ export function TalkDetailPage({
     talkId,
     pageKind,
     pageTalk,
-    activeThreadId,
     hasActiveRound: Boolean(activeRound),
     pageMessages,
-    threadCacheEpochRef,
     rememberDeletedMessageIds,
     resyncTalkState,
     onUnauthorized: handleUnauthorized,
@@ -1003,19 +932,11 @@ export function TalkDetailPage({
     element.scrollIntoView({ behavior: 'smooth', block: 'center' });
   };
 
-  const handleOpenRunTrigger = useCallback(
-    (run: TalkRun) => {
-      if (!run.threadId) return;
-      if (run.threadId !== activeThreadId) {
-        navigate(buildTalkDetailHref(talkId));
-        return;
-      }
-      if (run.triggerMessageId) {
-        jumpToMessage(run.triggerMessageId);
-      }
-    },
-    [activeThreadId, navigate, talkId],
-  );
+  const handleOpenRunTrigger = useCallback((run: TalkRun) => {
+    if (run.triggerMessageId) {
+      jumpToMessage(run.triggerMessageId);
+    }
+  }, []);
 
   useEffect(() => {
     if (!isRenaming) return;

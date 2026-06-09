@@ -164,7 +164,6 @@ function normalizeOptionalStringArray(
 
 function toMessageApi(message: GreenfieldMessageRecord): {
   id: string;
-  threadId: string;
   role: 'user' | 'assistant' | 'system' | 'tool';
   content: string;
   createdBy: string | null;
@@ -177,7 +176,6 @@ function toMessageApi(message: GreenfieldMessageRecord): {
 } {
   return {
     id: message.id,
-    threadId: message.talk_id,
     role: message.author_kind === 'agent' ? 'assistant' : 'user',
     content: message.body ?? '',
     createdBy: message.author_user_id,
@@ -208,7 +206,6 @@ function mapRunStatus(
 
 function toRunApi(run: GreenfieldChatRunRecord): {
   id: string;
-  threadId: string;
   responseGroupId: string | null;
   sequenceIndex: number | null;
   status: ReturnType<typeof mapRunStatus>;
@@ -231,7 +228,6 @@ function toRunApi(run: GreenfieldChatRunRecord): {
       : null;
   return {
     id: run.id,
-    threadId: run.talk_id,
     responseGroupId: run.response_group_id,
     sequenceIndex: run.sequence_index,
     status: mapRunStatus(run.status),

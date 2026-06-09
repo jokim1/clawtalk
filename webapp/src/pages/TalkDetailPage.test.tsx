@@ -330,7 +330,6 @@ describe('TalkDetailPage', () => {
     await screen.findByText('Check my LinkedIn messages.');
     streamInput?.onResponseStarted?.({
       talkId: 'talk-1',
-      threadId: DEFAULT_THREAD_ID,
       runId: 'run-browser-live',
       agentId: 'agent-claude',
       agentNickname: 'Claude Sonnet 4.6',
@@ -370,7 +369,6 @@ describe('TalkDetailPage', () => {
 
     streamInput?.onBrowserBlocked?.({
       talkId: 'talk-1',
-      threadId: DEFAULT_THREAD_ID,
       runId: 'run-browser-live',
       browserBlock: {
         kind: 'auth_required',
@@ -551,19 +549,13 @@ describe('TalkDetailPage', () => {
     );
     expect(within(contextPanel).getByText(/Estimated context:/)).toBeTruthy();
     expect(within(contextPanel).getByText(/History turns:/)).toBeTruthy();
-    expect(
-      within(contextPanel).getByText('read_context_source'),
-    ).toBeTruthy();
-    expect(
-      within(contextPanel).getByText('msg-user-1'),
-    ).toBeTruthy();
+    expect(within(contextPanel).getByText('read_context_source')).toBeTruthy();
+    expect(within(contextPanel).getByText('msg-user-1')).toBeTruthy();
     expect(contextRequestCount).toBe(1);
 
     await user.click(screen.getByRole('button', { name: 'Hide context' }));
     await waitFor(() => {
-      expect(
-        screen.queryByText('read_context_source'),
-      ).toBeNull();
+      expect(screen.queryByText('read_context_source')).toBeNull();
     });
 
     await user.click(screen.getByRole('button', { name: 'View context' }));
@@ -1213,9 +1205,7 @@ describe('TalkDetailPage', () => {
   it('applies an in-flight agent save after the Agents tab unmounts', async () => {
     const user = userEvent.setup();
     let savedRequest: SavedTalkAgentRequest | undefined;
-    let resolveSave:
-      | ((agents: TalkAgent[]) => void)
-      | undefined;
+    let resolveSave: ((agents: TalkAgent[]) => void) | undefined;
 
     installTalkDetailFetch({
       messages: [],
@@ -1526,7 +1516,6 @@ describe('TalkDetailPage', () => {
           runs: body.targetAgentIds.map((agentId, index) =>
             buildRun({
               id: `run-${index + 10}`,
-              threadId: body.threadId ?? DEFAULT_THREAD_ID,
               status: 'queued',
               createdAt: `2026-03-06T00:00:0${index + 6}.000Z`,
               triggerMessageId: 'msg-posted',
@@ -1625,7 +1614,6 @@ describe('TalkDetailPage', () => {
           runs: body.targetAgentIds.map((agentId, index) =>
             buildRun({
               id: `run-${index + 1}`,
-              threadId: body.threadId ?? DEFAULT_THREAD_ID,
               status: 'queued',
               createdAt: `2026-03-06T00:00:0${index + 6}.000Z`,
               triggerMessageId: 'msg-posted',
@@ -1929,7 +1917,6 @@ describe('TalkDetailPage', () => {
           id: 'run-cancellable',
           status: 'running',
           createdAt: '2026-03-06T00:00:06.000Z',
-          threadId: DEFAULT_THREAD_ID,
           targetAgentId: 'agent-claude',
           targetAgentNickname: 'Claude Sonnet 4.6',
         }),
@@ -1969,14 +1956,12 @@ describe('TalkDetailPage', () => {
     await act(async () => {
       stream.onRunStarted({
         talkId: 'talk-1',
-        threadId: DEFAULT_THREAD_ID,
         runId: 'run-claude',
         triggerMessageId: 'msg-1',
         status: 'running',
       });
       stream.onResponseStarted?.({
         talkId: 'talk-1',
-        threadId: DEFAULT_THREAD_ID,
         runId: 'run-claude',
         agentId: 'agent-claude',
         agentNickname: 'Claude Sonnet 4.6',
@@ -1985,7 +1970,6 @@ describe('TalkDetailPage', () => {
       });
       stream.onResponseDelta?.({
         talkId: 'talk-1',
-        threadId: DEFAULT_THREAD_ID,
         runId: 'run-claude',
         agentId: 'agent-claude',
         agentNickname: 'Claude Sonnet 4.6',
@@ -1996,14 +1980,12 @@ describe('TalkDetailPage', () => {
 
       stream.onRunStarted({
         talkId: 'talk-1',
-        threadId: DEFAULT_THREAD_ID,
         runId: 'run-openai',
         triggerMessageId: 'msg-1',
         status: 'running',
       });
       stream.onResponseStarted?.({
         talkId: 'talk-1',
-        threadId: DEFAULT_THREAD_ID,
         runId: 'run-openai',
         agentId: 'agent-openai',
         agentNickname: 'GPT-5 Mini',
@@ -2012,7 +1994,6 @@ describe('TalkDetailPage', () => {
       });
       stream.onResponseDelta?.({
         talkId: 'talk-1',
-        threadId: DEFAULT_THREAD_ID,
         runId: 'run-openai',
         agentId: 'agent-openai',
         agentNickname: 'GPT-5 Mini',
@@ -2189,7 +2170,6 @@ describe('TalkDetailPage', () => {
     await act(async () => {
       stream.onResponseStarted?.({
         talkId: 'talk-1',
-        threadId: DEFAULT_THREAD_ID,
         runId: 'run-claude',
         agentId: 'agent-claude',
         agentNickname: 'Claude Sonnet 4.6',
@@ -2198,7 +2178,6 @@ describe('TalkDetailPage', () => {
       });
       stream.onResponseDelta?.({
         talkId: 'talk-1',
-        threadId: DEFAULT_THREAD_ID,
         runId: 'run-claude',
         agentId: 'agent-claude',
         agentNickname: 'Claude Sonnet 4.6',
@@ -2208,7 +2187,6 @@ describe('TalkDetailPage', () => {
       });
       stream.onResponseDelta?.({
         talkId: 'talk-1',
-        threadId: DEFAULT_THREAD_ID,
         runId: 'run-claude',
         agentId: 'agent-claude',
         agentNickname: 'Claude Sonnet 4.6',
@@ -2218,7 +2196,6 @@ describe('TalkDetailPage', () => {
       });
       stream.onResponseDelta?.({
         talkId: 'talk-1',
-        threadId: DEFAULT_THREAD_ID,
         runId: 'run-claude',
         agentId: 'agent-claude',
         agentNickname: 'Claude Sonnet 4.6',
@@ -2302,7 +2279,6 @@ describe('TalkDetailPage', () => {
     await act(async () => {
       stream.onResponseStarted?.({
         talkId: 'talk-1',
-        threadId: DEFAULT_THREAD_ID,
         runId: 'run-failed',
         agentId: 'agent-claude',
         agentNickname: 'Claude Sonnet 4.6',
@@ -2311,7 +2287,6 @@ describe('TalkDetailPage', () => {
       });
       stream.onResponseDelta?.({
         talkId: 'talk-1',
-        threadId: DEFAULT_THREAD_ID,
         runId: 'run-failed',
         agentId: 'agent-claude',
         agentNickname: 'Claude Sonnet 4.6',
@@ -2321,7 +2296,6 @@ describe('TalkDetailPage', () => {
       });
       stream.onRunFailed({
         talkId: 'talk-1',
-        threadId: DEFAULT_THREAD_ID,
         runId: 'run-failed',
         triggerMessageId: 'msg-1',
         errorCode: 'tool_capability',
@@ -2388,7 +2362,6 @@ describe('TalkDetailPage', () => {
     await act(async () => {
       stream.onResponseFailed?.({
         talkId: 'talk-1',
-        threadId: DEFAULT_THREAD_ID,
         runId: 'run-failed',
         agentId: 'agent-claude',
         agentNickname: 'Claude Sonnet 4.6',
@@ -2397,7 +2370,6 @@ describe('TalkDetailPage', () => {
       });
       stream.onRunFailed({
         talkId: 'talk-1',
-        threadId: DEFAULT_THREAD_ID,
         runId: 'run-failed',
         triggerMessageId: 'msg-1',
         errorCode: 'auth_failed',
@@ -2435,7 +2407,6 @@ describe('TalkDetailPage', () => {
     await act(async () => {
       stream.onResponseStarted?.({
         talkId: 'talk-1',
-        threadId: DEFAULT_THREAD_ID,
         runId: 'run-streamed',
         agentId: 'agent-claude',
         agentNickname: 'Claude Sonnet 4.6',
@@ -2444,7 +2415,6 @@ describe('TalkDetailPage', () => {
       });
       stream.onResponseDelta?.({
         talkId: 'talk-1',
-        threadId: DEFAULT_THREAD_ID,
         runId: 'run-streamed',
         agentId: 'agent-claude',
         agentNickname: 'Claude Sonnet 4.6',
@@ -2454,7 +2424,6 @@ describe('TalkDetailPage', () => {
       });
       stream.onRunCompleted({
         talkId: 'talk-1',
-        threadId: DEFAULT_THREAD_ID,
         runId: 'run-streamed',
         triggerMessageId: 'msg-1',
         responseMessageId: null,
@@ -2465,7 +2434,6 @@ describe('TalkDetailPage', () => {
       // truncated zombie under the old delete-on-completed semantics).
       stream.onResponseDelta?.({
         talkId: 'talk-1',
-        threadId: DEFAULT_THREAD_ID,
         runId: 'run-streamed',
         agentId: 'agent-claude',
         agentNickname: 'Claude Sonnet 4.6',
@@ -2489,7 +2457,6 @@ describe('TalkDetailPage', () => {
     await act(async () => {
       stream.onMessageAppended({
         talkId: 'talk-1',
-        threadId: DEFAULT_THREAD_ID,
         messageId: 'msg-final',
         runId: 'run-streamed',
         role: 'assistant',
@@ -2550,7 +2517,6 @@ describe('TalkDetailPage', () => {
       await act(async () => {
         stream.onResponseStarted?.({
           talkId: 'talk-1',
-          threadId: DEFAULT_THREAD_ID,
           runId: 'run-streamed',
           agentId: 'agent-claude',
           agentNickname: 'Claude Sonnet 4.6',
@@ -2559,7 +2525,6 @@ describe('TalkDetailPage', () => {
         });
         stream.onRunCompleted({
           talkId: 'talk-1',
-          threadId: DEFAULT_THREAD_ID,
           runId: 'run-streamed',
           triggerMessageId: 'msg-1',
           responseMessageId: 'msg-assistant-late',
@@ -2610,14 +2575,12 @@ describe('TalkDetailPage', () => {
     await act(async () => {
       stream.onResponseStarted?.({
         talkId: 'talk-1',
-        threadId: DEFAULT_THREAD_ID,
         runId: 'run-failed',
         agentId: 'agent-claude',
         agentNickname: 'Claude Sonnet 4.6',
       });
       stream.onResponseDelta?.({
         talkId: 'talk-1',
-        threadId: DEFAULT_THREAD_ID,
         runId: 'run-failed',
         agentId: 'agent-claude',
         agentNickname: 'Claude Sonnet 4.6',
@@ -2625,7 +2588,6 @@ describe('TalkDetailPage', () => {
       });
       stream.onRunFailed({
         talkId: 'talk-1',
-        threadId: DEFAULT_THREAD_ID,
         runId: 'run-failed',
         triggerMessageId: 'msg-1',
         errorCode: 'execution_failed',
@@ -2638,7 +2600,6 @@ describe('TalkDetailPage', () => {
     await act(async () => {
       stream.onMessageAppended({
         talkId: 'talk-1',
-        threadId: DEFAULT_THREAD_ID,
         messageId: 'msg-2',
         runId: null,
         role: 'user',
@@ -2676,14 +2637,12 @@ describe('TalkDetailPage', () => {
     await act(async () => {
       stream.onResponseStarted?.({
         talkId: 'talk-1',
-        threadId: DEFAULT_THREAD_ID,
         runId: 'run-failed',
         agentId: 'agent-claude',
         agentNickname: 'Claude Sonnet 4.6',
       });
       stream.onResponseDelta?.({
         talkId: 'talk-1',
-        threadId: DEFAULT_THREAD_ID,
         runId: 'run-failed',
         agentId: 'agent-claude',
         agentNickname: 'Claude Sonnet 4.6',
@@ -2691,7 +2650,6 @@ describe('TalkDetailPage', () => {
       });
       stream.onRunFailed({
         talkId: 'talk-1',
-        threadId: DEFAULT_THREAD_ID,
         runId: 'run-failed',
         triggerMessageId: 'msg-1',
         errorCode: 'execution_failed',
@@ -2704,7 +2662,6 @@ describe('TalkDetailPage', () => {
     await act(async () => {
       stream.onMessageAppended({
         talkId: 'talk-1',
-        threadId: DEFAULT_THREAD_ID,
         messageId: 'msg-2',
         runId: 'run-completed',
         role: 'assistant',
@@ -2762,7 +2719,6 @@ describe('TalkDetailPage', () => {
     await act(async () => {
       stream.onRunFailed({
         talkId: 'talk-1',
-        threadId: 'thread-side',
         runId: 'run-side',
         triggerMessageId: null,
         errorCode: 'execution_failed',
@@ -2830,14 +2786,12 @@ describe('TalkDetailPage', () => {
       await act(async () => {
         stream.onResponseStarted?.({
           talkId: 'talk-1',
-          threadId: DEFAULT_THREAD_ID,
           runId: 'run-failed',
           agentId: 'agent-claude',
           agentNickname: 'Claude Sonnet 4.6',
         });
         stream.onResponseDelta?.({
           talkId: 'talk-1',
-          threadId: DEFAULT_THREAD_ID,
           runId: 'run-failed',
           agentId: 'agent-claude',
           agentNickname: 'Claude Sonnet 4.6',
@@ -2845,7 +2799,6 @@ describe('TalkDetailPage', () => {
         });
         stream.onRunFailed({
           talkId: 'talk-1',
-          threadId: DEFAULT_THREAD_ID,
           runId: 'run-failed',
           triggerMessageId: 'msg-1',
           errorCode: 'execution_failed',
@@ -3104,7 +3057,6 @@ describe('TalkDetailPage', () => {
     act(() => {
       streamInput?.onMessageAppended({
         talkId: 'talk-1',
-        threadId: DEFAULT_THREAD_ID,
         messageId: 'msg-1',
         runId: null,
         role: 'user',
@@ -3114,7 +3066,6 @@ describe('TalkDetailPage', () => {
       });
       streamInput?.onMessageAppended({
         talkId: 'talk-1',
-        threadId: DEFAULT_THREAD_ID,
         messageId: 'msg-2',
         runId: null,
         role: 'user',
@@ -3223,7 +3174,6 @@ describe('TalkDetailPage', () => {
       act(() => {
         streamInput?.onMessageAppended({
           talkId: 'talk-1',
-          threadId: DEFAULT_THREAD_ID,
           messageId: 'msg-run-sync',
           runId: 'run-sync',
           role: 'assistant',
@@ -3243,7 +3193,6 @@ describe('TalkDetailPage', () => {
     const onCreateDocument = vi.fn(({ title, format }) =>
       buildSnapshotDocument({
         id: 'content-new',
-        threadId: DEFAULT_THREAD_ID,
         title,
         format: (format as NativeDocumentFormat) ?? 'markdown',
       }),
@@ -3300,7 +3249,6 @@ describe('TalkDetailPage', () => {
     const onCreateDocument = vi.fn(({ title, format }) =>
       buildSnapshotDocument({
         id: 'content-new',
-        threadId: DEFAULT_THREAD_ID,
         title,
         format: (format as NativeDocumentFormat) ?? 'markdown',
       }),
@@ -3308,7 +3256,7 @@ describe('TalkDetailPage', () => {
 
     installTalkDetailFetch({
       onCreateDocument,
-      // Hold the next snapshot fetch in flight; documentByThreadId stays empty,
+      // Hold the next snapshot fetch in flight; documentByTalkId stays empty,
       // so when released it resolves primaryDocument:null (the stale,
       // pre-doc state).
       onListMessages: ({ visibleMessages }) => {
@@ -3362,10 +3310,9 @@ describe('TalkDetailPage', () => {
     const user = userEvent.setup();
     window.localStorage.clear();
     installTalkDetailFetch({
-      documentByThreadId: {
+      documentByTalkId: {
         [DEFAULT_THREAD_ID]: buildSnapshotDocument({
           id: 'content-hide',
-          threadId: DEFAULT_THREAD_ID,
           title: 'Hide me',
           format: 'markdown',
         }),
@@ -3376,7 +3323,6 @@ describe('TalkDetailPage', () => {
         {
           id: 'content-hide',
           talkId: 'talk-1',
-          threadId: DEFAULT_THREAD_ID,
           title: 'Hide me',
           updatedAt: '2026-03-06T00:00:00.000Z',
         },
@@ -3395,9 +3341,7 @@ describe('TalkDetailPage', () => {
     expect(edgeTab).toBeInTheDocument();
 
     // Persisted to localStorage.
-    const raw = window.localStorage.getItem(
-      `clawtalk_doc_pane:${DEFAULT_THREAD_ID}`,
-    );
+    const raw = window.localStorage.getItem('clawtalk_doc_pane:talk-1');
     expect(raw).not.toBeNull();
     expect(JSON.parse(raw as string)).toMatchObject({ hidden: true });
 
@@ -3469,7 +3413,9 @@ describe('TalkDetailPage', () => {
       name: /explicit thread/i,
     });
     expect(explicitButton.className).not.toContain('talk-thread-item-active');
-    expect(window.localStorage.getItem('clawtalk.lastThread:talk-1')).toBeNull();
+    expect(
+      window.localStorage.getItem('clawtalk.lastThread:talk-1'),
+    ).toBeNull();
   });
 
   it('ignores localStorage-saved thread ids and selects the first snapshot thread', async () => {
@@ -3502,10 +3448,9 @@ describe('TalkDetailPage', () => {
 
   it('reloads the native doc pane after a stream replay-gap resync', async () => {
     installTalkDetailFetch({
-      documentByThreadId: {
+      documentByTalkId: {
         [DEFAULT_THREAD_ID]: buildSnapshotDocument({
           id: 'content-resync',
-          threadId: DEFAULT_THREAD_ID,
           title: 'Resync doc',
           format: 'markdown',
           nativeBlockText: '# Resync body',
@@ -3517,7 +3462,6 @@ describe('TalkDetailPage', () => {
         {
           id: 'content-resync',
           talkId: 'talk-1',
-          threadId: DEFAULT_THREAD_ID,
           title: 'Resync doc',
           updatedAt: '2026-03-06T00:00:00.000Z',
         },
@@ -3841,7 +3785,7 @@ describe('TalkDetailPage', () => {
   it('@-mention: offers @doc when the talk has an attached document', async () => {
     const user = userEvent.setup();
     installTalkDetailFetch({
-      documentByThreadId: {
+      documentByTalkId: {
         [DEFAULT_THREAD_ID]: buildSnapshotDocument({
           id: 'content-1',
           title: 'Strategy Doc',
@@ -4272,7 +4216,6 @@ function buildMessage(
 ): TalkMessage {
   return {
     id: input.id,
-    threadId: input.threadId ?? DEFAULT_THREAD_ID,
     role: input.role,
     content: input.content,
     createdBy: input.createdBy ?? 'owner-1',
@@ -4306,7 +4249,6 @@ function buildRun(
 ): TalkRun {
   return {
     id: input.id,
-    threadId: input.threadId ?? DEFAULT_THREAD_ID,
     responseGroupId: input.responseGroupId ?? null,
     sequenceIndex: input.sequenceIndex ?? null,
     status: input.status,
@@ -4379,7 +4321,6 @@ function buildSnapshotDocument(
   return {
     id: input.id ?? 'content-default',
     talkId: input.talkId ?? 'talk-1',
-    threadId: input.threadId ?? DEFAULT_THREAD_ID,
     title: input.title ?? 'Untitled doc',
     format: input.format ?? 'markdown',
     listVersion: input.listVersion ?? 1,
@@ -4627,16 +4568,17 @@ function installTalkDetailFetch(input?: {
   dataConnectors?: TalkConnectorDataConnectorRow[];
   connectorChannels?: TalkConnectorChannelRow[];
   aiAgents?: AiAgentsPageData;
-  // Doc-pane integration: pre-existing content keyed by threadId, plus an
+  // Doc-pane integration: pre-existing content keyed by Talk, plus an
   // optional spy so tests can assert on native document creation.
-  documentByThreadId?: Record<string, TestSnapshotDocument>;
+  documentByTalkId?: Record<string, TestSnapshotDocument>;
   onCreateDocument?: (body: {
     talkId: string;
-    threadId: string | null;
     title: string;
     format?: string;
   }) => TestSnapshotDocument;
-  onPutAgents?: (body: SavedTalkAgentRequest) => Promise<TalkAgent[]> | TalkAgent[];
+  onPutAgents?: (
+    body: SavedTalkAgentRequest,
+  ) => Promise<TalkAgent[]> | TalkAgent[];
   onGetContext?: () => TalkContext;
   onCreateContextSource?: (body: {
     sourceType: ContextSource['sourceType'];
@@ -4650,10 +4592,8 @@ function installTalkDetailFetch(input?: {
     content: string;
     targetAgentIds: string[];
     attachmentIds?: string[];
-    threadId?: string | null;
   }) => { talkId: string; message: TalkMessage; runs: TalkRun[] };
   onListMessages?: (input: {
-    threadId: string | null;
     visibleMessages: TalkMessage[];
   }) => Promise<TalkMessage[]> | TalkMessage[];
   onRequest?: (url: string, init?: RequestInit) => void;
@@ -4674,13 +4614,8 @@ function installTalkDetailFetch(input?: {
       talkId: 'talk-1',
       title: null,
       isDefault: true,
-      messageCount: messages.filter(
-        (message) => message.threadId === DEFAULT_THREAD_ID,
-      ).length,
-      lastMessageAt:
-        messages
-          .filter((message) => message.threadId === DEFAULT_THREAD_ID)
-          .at(-1)?.createdAt ?? null,
+      messageCount: messages.length,
+      lastMessageAt: messages.at(-1)?.createdAt ?? null,
     }),
   ];
   let runs = input?.runs ?? [
@@ -4788,8 +4723,8 @@ function installTalkDetailFetch(input?: {
     buildTalkConnectorChannelRow(),
   ];
   const aiAgents = input?.aiAgents ?? buildAiAgentsData();
-  const documentByThreadId: Record<string, TestSnapshotDocument> = {
-    ...(input?.documentByThreadId ?? {}),
+  const documentByTalkId: Record<string, TestSnapshotDocument> = {
+    ...(input?.documentByTalkId ?? {}),
   };
 
   vi.stubGlobal(
@@ -4809,19 +4744,13 @@ function installTalkDetailFetch(input?: {
       input?.onRequest?.(url, init);
 
       if (path === '/api/v1/talks/talk-1/snapshot' && method === 'GET') {
-        const requestedThreadId = parsedUrl.searchParams.get('threadId');
         const activeThreadId =
-          (requestedThreadId &&
-            threads.find((t) => t.id === requestedThreadId)?.id) ||
           threads.find((t) => t.isDefault)?.id ||
           threads[0]?.id ||
           DEFAULT_THREAD_ID;
-        const baseMessages = messages.filter(
-          (m) => m.threadId === activeThreadId,
-        );
+        const baseMessages = messages;
         const activeThreadMessages = input?.onListMessages
           ? await input.onListMessages({
-              threadId: activeThreadId,
               visibleMessages: baseMessages,
             })
           : baseMessages;
@@ -4857,14 +4786,15 @@ function installTalkDetailFetch(input?: {
               messageCount: thread.messageCount,
               lastMessageAt: thread.lastMessageAt,
             })),
-            activeThreadId,
             messages: activeThreadMessages,
             hasOlderMessages: false,
-            primaryDocument: documentByThreadId[activeThreadId] ?? null,
+            primaryDocument:
+              documentByTalkId[talk.id] ??
+              Object.values(documentByTalkId)[0] ??
+              null,
             pendingEdits: [],
             runs: activeRuns.map((run) => ({
               id: run.id,
-              threadId: run.threadId,
               status: run.status,
               responseGroupId: run.responseGroupId,
               sequenceIndex: run.sequenceIndex,
@@ -4918,10 +4848,8 @@ function installTalkDetailFetch(input?: {
                 .slice(0, Number.isFinite(limit) ? limit : 20)
                 .map((message) => ({
                   messageId: message.id,
-                  threadId: message.threadId,
                   threadTitle:
-                    threads.find((thread) => thread.id === message.threadId)
-                      ?.title ?? null,
+                    threads.find((thread) => thread.isDefault)?.title ?? null,
                   role: message.role,
                   createdAt: message.createdAt,
                   preview: message.content.slice(0, 140),
@@ -4937,12 +4865,9 @@ function installTalkDetailFetch(input?: {
       }
 
       if (path === '/api/v1/talks/talk-1/messages' && method === 'GET') {
-        const threadId = parsedUrl.searchParams.get('threadId');
-        const visibleMessages = threadId
-          ? messages.filter((message) => message.threadId === threadId)
-          : messages;
+        const visibleMessages = messages;
         const responseMessages = input?.onListMessages
-          ? await input.onListMessages({ threadId, visibleMessages })
+          ? await input.onListMessages({ visibleMessages })
           : visibleMessages;
         return jsonResponse(200, {
           ok: true,
@@ -4969,22 +4894,19 @@ function installTalkDetailFetch(input?: {
           ? body.messageIds
           : [];
         const affectedThreadIds = new Set(
-          messages
-            .filter((message) => deletedMessageIds.includes(message.id))
-            .map((message) => message.threadId),
+          deletedMessageIds.length > 0
+            ? threads.map((thread) => thread.id)
+            : [],
         );
         messages = messages.filter(
           (message) => !deletedMessageIds.includes(message.id),
         );
         threads = threads.map((thread) => {
           if (!affectedThreadIds.has(thread.id)) return thread;
-          const threadMessages = messages.filter(
-            (message) => message.threadId === thread.id,
-          );
           return {
             ...thread,
-            messageCount: threadMessages.length,
-            lastMessageAt: threadMessages.at(-1)?.createdAt ?? null,
+            messageCount: messages.length,
+            lastMessageAt: messages.at(-1)?.createdAt ?? null,
           };
         });
         return jsonResponse(200, {
@@ -5513,19 +5435,18 @@ function installTalkDetailFetch(input?: {
         const body = JSON.parse(
           String(init?.body || '{}'),
         ) as SavedTalkAgentRequest;
-        const saved =
-          (input?.onPutAgents
-            ? await input.onPutAgents(body)
-            : body.agents.map((agent, index) => ({
-                ...agent,
-                displayOrder: index,
-                health:
-                  agent.sourceKind === 'claude_default'
-                    ? 'ready'
-                    : agent.providerId === 'provider.openai'
-                      ? 'invalid'
-                      : 'unknown',
-              })));
+        const saved = input?.onPutAgents
+          ? await input.onPutAgents(body)
+          : body.agents.map((agent, index) => ({
+              ...agent,
+              displayOrder: index,
+              health:
+                agent.sourceKind === 'claude_default'
+                  ? 'ready'
+                  : agent.providerId === 'provider.openai'
+                    ? 'invalid'
+                    : 'unknown',
+            }));
         return jsonResponse(200, {
           ok: true,
           data: { talkId: 'talk-1', agents: saved },
@@ -5537,13 +5458,11 @@ function installTalkDetailFetch(input?: {
           content: string;
           targetAgentIds: string[];
           attachmentIds?: string[];
-          threadId?: string | null;
         };
         const payload = input?.onSendMessage?.(body) ?? {
           talkId: 'talk-1',
           message: buildMessage({
             id: 'msg-posted',
-            threadId: body.threadId ?? DEFAULT_THREAD_ID,
             role: 'user',
             content: body.content,
             createdAt: '2026-03-06T00:00:05.000Z',
@@ -5551,7 +5470,6 @@ function installTalkDetailFetch(input?: {
           runs: body.targetAgentIds.map((agentId, index, all) =>
             buildRun({
               id: `run-${index + 10}`,
-              threadId: body.threadId ?? DEFAULT_THREAD_ID,
               responseGroupId: all.length > 1 ? 'group-default-send' : null,
               sequenceIndex: all.length > 1 ? index : null,
               status: 'queued',
@@ -5563,12 +5481,11 @@ function installTalkDetailFetch(input?: {
             }),
           ),
         };
-        const threadId = payload.message.threadId;
-        const threadMessages = [...messages, payload.message]
-          .filter((message) => message.threadId === threadId)
-          .sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+        const threadMessages = [...messages, payload.message].sort(
+          (left, right) => left.createdAt.localeCompare(right.createdAt),
+        );
         threads = threads.map((thread) =>
-          thread.id === threadId
+          thread.isDefault
             ? {
                 ...thread,
                 title: thread.title,
@@ -5581,14 +5498,11 @@ function installTalkDetailFetch(input?: {
       }
 
       if (path === '/api/v1/talks/talk-1/chat/cancel' && method === 'POST') {
-        const body = JSON.parse(String(init?.body || '{}')) as {
-          threadId?: string | null;
-        };
         return jsonResponse(200, {
           ok: true,
           data: {
             talkId: 'talk-1',
-            cancelledRuns: body.threadId ? 1 : 2,
+            cancelledRuns: 2,
           },
         });
       }
@@ -5626,27 +5540,22 @@ function installTalkDetailFetch(input?: {
       if (path === '/api/v1/documents' && method === 'POST') {
         const body = JSON.parse(String(init?.body || '{}')) as {
           talkId: string;
-          threadId?: string | null;
           title: string;
           format?: string;
         };
-        const threadId = body.threadId ?? DEFAULT_THREAD_ID;
         const document =
           input?.onCreateDocument?.({
             talkId: body.talkId,
-            threadId,
             title: body.title,
             format: body.format,
           }) ??
           buildSnapshotDocument({
-            id: `content-${threadId}`,
+            id: `content-${body.talkId}`,
             talkId: body.talkId,
-            threadId,
             title: body.title,
-            format:
-              (body.format as NativeDocumentFormat) ?? 'markdown',
+            format: (body.format as NativeDocumentFormat) ?? 'markdown',
           });
-        documentByThreadId[document.threadId] = document;
+        documentByTalkId[document.talkId] = document;
         return jsonResponse(201, {
           ok: true,
           data: { document: buildNativeDoc(document) },
@@ -5656,10 +5565,10 @@ function installTalkDetailFetch(input?: {
       const nativeDocMatch = path.match(/^\/api\/v1\/documents\/([^/]+)$/);
       if (nativeDocMatch && method === 'GET') {
         const documentId = decodeURIComponent(nativeDocMatch[1]);
-        const threadId = Object.keys(documentByThreadId).find(
-          (tid) => documentByThreadId[tid].id === documentId,
-        );
-        const document = threadId ? documentByThreadId[threadId] : null;
+        const document =
+          Object.values(documentByTalkId).find(
+            (doc) => doc.id === documentId,
+          ) ?? null;
         if (!document) {
           return jsonResponse(404, {
             ok: false,

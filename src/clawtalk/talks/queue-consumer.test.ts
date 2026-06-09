@@ -397,7 +397,7 @@ describe('markGreenfieldRunRunning', () => {
 });
 
 describe('processTalkRunMessage', () => {
-  it('emits retry visibility with the run thread id on queue redelivery', async () => {
+  it('emits retry visibility at Talk scope on queue redelivery', async () => {
     const { runIds, talkId } = await setupRun();
     const { ctx, drain } = makeMockCtx();
     const env: DbScopeEnvBindings = {};
@@ -417,7 +417,6 @@ describe('processTalkRunMessage', () => {
     const retrying = events.find((e) => e.event_type === 'talk_run_retrying');
     expect(retrying?.payload).toMatchObject({
       talkId,
-      threadId: talkId,
       runId: runIds[0]!,
       retryAttempt: 2,
       maxRetries: 5,

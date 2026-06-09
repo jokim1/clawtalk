@@ -1,10 +1,4 @@
-import {
-  useCallback,
-  useEffect,
-  useRef,
-  useState,
-  type MutableRefObject,
-} from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { QueryClient } from '@tanstack/react-query';
 
 import { patchTalkMetadata, UnauthorizedError, type Talk } from '../lib/api';
@@ -19,7 +13,6 @@ type UseTalkOrchestrationControllerInput = {
   pageKind: PageKind;
   pageTalk: Talk | null;
   agentCount: number;
-  activeThreadIdRef: MutableRefObject<string | null>;
   queryClient: QueryClient;
   onUnauthorized: () => void;
 };
@@ -30,7 +23,6 @@ export function useTalkOrchestrationController({
   pageKind,
   pageTalk,
   agentCount,
-  activeThreadIdRef,
   queryClient,
   onUnauthorized,
 }: UseTalkOrchestrationControllerInput) {
@@ -119,15 +111,7 @@ export function useTalkOrchestrationController({
         });
       }
     },
-    [
-      activeThreadIdRef,
-      onUnauthorized,
-      pageKind,
-      pageTalk,
-      queryClient,
-      talkId,
-      userId,
-    ],
+    [onUnauthorized, pageKind, pageTalk, queryClient, talkId, userId],
   );
 
   return {

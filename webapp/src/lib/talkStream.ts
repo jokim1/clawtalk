@@ -14,7 +14,6 @@ export type TalkStreamState =
 
 export type MessageAppendedEvent = {
   talkId: string;
-  threadId?: string | null;
   messageId: string;
   runId: string | null;
   role: 'user' | 'assistant' | 'system' | 'tool';
@@ -32,7 +31,6 @@ export type MessageAppendedEvent = {
 
 export type TalkRunStartedEvent = {
   talkId: string;
-  threadId?: string | null;
   runId: string;
   runKind?: 'conversation' | 'instruction_review';
   responseGroupId?: string | null;
@@ -47,7 +45,6 @@ export type TalkRunStartedEvent = {
 
 export type TalkRunCompletedEvent = {
   talkId: string;
-  threadId?: string | null;
   runId: string;
   runKind?: 'conversation' | 'instruction_review';
   responseGroupId?: string | null;
@@ -60,7 +57,6 @@ export type TalkRunCompletedEvent = {
 
 export type TalkResponseStartedEvent = {
   talkId: string;
-  threadId?: string | null;
   runId: string;
   agentId?: string | null;
   agentNickname?: string | null;
@@ -73,7 +69,6 @@ export type TalkResponseStartedEvent = {
 
 export type TalkResponseDeltaEvent = {
   talkId: string;
-  threadId?: string | null;
   runId: string;
   agentId?: string | null;
   agentNickname?: string | null;
@@ -87,7 +82,6 @@ export type TalkResponseDeltaEvent = {
 
 export type TalkProgressUpdateEvent = {
   talkId: string;
-  threadId?: string | null;
   runId: string;
   agentId?: string | null;
   agentNickname?: string | null;
@@ -101,7 +95,6 @@ export type TalkProgressUpdateEvent = {
 
 export type TalkResponseUsageEvent = {
   talkId: string;
-  threadId?: string | null;
   runId: string;
   agentId?: string | null;
   responseGroupId?: string | null;
@@ -119,7 +112,6 @@ export type TalkResponseUsageEvent = {
 
 export type TalkResponseTerminalEvent = {
   talkId: string;
-  threadId?: string | null;
   runId: string;
   agentId?: string | null;
   agentNickname?: string | null;
@@ -134,7 +126,6 @@ export type TalkResponseTerminalEvent = {
 
 export type TalkRunFailedEvent = {
   talkId: string;
-  threadId?: string | null;
   runId: string;
   runKind?: 'conversation' | 'instruction_review';
   responseGroupId?: string | null;
@@ -148,14 +139,12 @@ export type TalkRunFailedEvent = {
 
 export type TalkRunCancelledEvent = {
   talkId: string;
-  threadIds?: string[];
   cancelledBy: string;
   runIds: string[];
 };
 
 export type TalkHistoryEditedEvent = {
   talkId: string;
-  threadIds?: string[];
   deletedCount: number;
   deletedMessageIds: string[];
   editedAt: string;
@@ -163,14 +152,12 @@ export type TalkHistoryEditedEvent = {
 
 export type TalkBrowserBlockedEvent = {
   talkId: string;
-  threadId?: string | null;
   runId: string;
   browserBlock: BrowserBlock;
 };
 
 export type TalkBrowserUnblockedEvent = {
   talkId: string;
-  threadId?: string | null;
   runId: string;
   browserResume?: BrowserResume | null;
 };
@@ -215,7 +202,6 @@ export type TalkContentEditResolvedEvent = {
 
 export type TalkToolCallStartedEvent = {
   talkId: string;
-  threadId?: string | null;
   runId: string;
   agentId?: string | null;
   agentNickname?: string | null;
@@ -238,7 +224,6 @@ export type TalkToolsChangedEvent = {
 // N/maxRetries" so the user knows the queue is alive but waiting.
 export type TalkRunRetryingEvent = {
   talkId: string | null;
-  threadId: string | null;
   runId: string;
   retryAttempt: number;
   maxRetries: number;

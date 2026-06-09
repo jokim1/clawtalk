@@ -72,7 +72,13 @@ describe('SecondaryList', () => {
 
   it('renders the talk count summary and an Archive link', () => {
     const items: TalkSidebarItem[] = [
-      { type: 'talk', id: 'talk-1', title: 'D1 Retro', status: 'active', sortOrder: 0 },
+      {
+        type: 'talk',
+        id: 'talk-1',
+        title: 'D1 Retro',
+        status: 'active',
+        sortOrder: 0,
+      },
       {
         type: 'folder',
         id: 'folder-1',
@@ -96,7 +102,10 @@ describe('SecondaryList', () => {
           ? { ...item, isResponding: false }
           : {
               ...item,
-              talks: item.talks.map((t) => ({ ...t, isResponding: !!t.hasActiveRun })),
+              talks: item.talks.map((t) => ({
+                ...t,
+                isResponding: !!t.hasActiveRun,
+              })),
             },
       ),
     });
@@ -153,12 +162,24 @@ describe('SecondaryList', () => {
       },
     );
 
-    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 300 });
-    Object.defineProperty(window, 'innerHeight', { configurable: true, value: 640 });
+    Object.defineProperty(window, 'innerWidth', {
+      configurable: true,
+      value: 300,
+    });
+    Object.defineProperty(window, 'innerHeight', {
+      configurable: true,
+      value: 640,
+    });
 
     renderList({
       items: [
-        { type: 'talk', id: 'talk-1', title: 'D1 Retro', status: 'active', sortOrder: 0 },
+        {
+          type: 'talk',
+          id: 'talk-1',
+          title: 'D1 Retro',
+          status: 'active',
+          sortOrder: 0,
+        },
       ],
     });
 
@@ -167,7 +188,11 @@ describe('SecondaryList', () => {
     await waitFor(() => {
       const menu = document.body.querySelector('.clawtalk-sidebar-menu-portal');
       expect(menu).toBeTruthy();
-      expect(menu).toHaveStyle({ top: '374px', left: '92px', maxHeight: '542px' });
+      expect(menu).toHaveStyle({
+        top: '374px',
+        left: '92px',
+        maxHeight: '542px',
+      });
     });
 
     expect(screen.getByRole('button', { name: 'Rename Talk' })).toBeTruthy();
@@ -176,7 +201,13 @@ describe('SecondaryList', () => {
   it('renders the Content section empty-state hint when no documents exist', () => {
     renderList({
       items: [
-        { type: 'talk', id: 'talk-1', title: 'Untitled', status: 'active', sortOrder: 0 },
+        {
+          type: 'talk',
+          id: 'talk-1',
+          title: 'Untitled',
+          status: 'active',
+          sortOrder: 0,
+        },
       ],
     });
     expect(screen.getByText('Content')).toBeTruthy();
@@ -190,7 +221,6 @@ describe('SecondaryList', () => {
       {
         id: 'content-1',
         talkId: 'talk-with-doc',
-        threadId: 'thread-with-doc',
         title: 'Most recent doc',
         updatedAt: '2026-05-24T10:00:00.000Z',
       },

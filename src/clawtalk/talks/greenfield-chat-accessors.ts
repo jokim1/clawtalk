@@ -503,7 +503,6 @@ export async function enqueueGreenfieldChatTurn(input: {
       eventType: 'message_appended',
       payload: {
         talkId: input.talkId,
-        threadId: input.talkId,
         messageId: message.id,
         runId: null,
         role: 'user',
@@ -525,7 +524,6 @@ export async function enqueueGreenfieldChatTurn(input: {
         eventType: 'talk_run_queued',
         payload: {
           talkId: input.talkId,
-          threadId: input.talkId,
           runId: run.id,
           runKind: 'conversation',
           triggerMessageId: message.id,
@@ -643,7 +641,6 @@ export async function cancelGreenfieldTalkRuns(input: {
             talkId: input.talkId,
             cancelledBy: input.userId,
             runIds,
-            threadIds: [input.talkId],
           },
           ownerIds,
         });

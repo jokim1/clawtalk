@@ -46,7 +46,6 @@ import {
 import { withDurableObjectScopedDb } from '../../db.js';
 import {
   buildConversationRunEventFilter,
-  buildTalkThreadEventFilter,
   type OutboxEventFilter,
 } from './event-filters.js';
 
@@ -91,7 +90,6 @@ export interface SocketAttachment {
   scope: 'user' | 'talk';
   userId: string;
   talkId: string | null;
-  threadId: string | null;
   topic: string;
   jwtExp: number;
   connectedAtMs: number;
@@ -132,14 +130,12 @@ function parseAttachmentFromHeaders(req: Request): SocketAttachment {
   const userId = h.get('x-clawtalk-userid') ?? '';
   const topic = h.get('x-clawtalk-topic') ?? '';
   const talkId = h.get('x-clawtalk-talk-id') || null;
-  const threadId = h.get('x-clawtalk-thread-id') || null;
   const lastEventId = Number(h.get('x-clawtalk-last-event-id') ?? '0');
   const jwtExp = Number(h.get('x-clawtalk-jwt-exp') ?? '0');
   return {
     scope,
     userId,
     talkId,
-    threadId,
     topic,
     jwtExp: Number.isFinite(jwtExp) ? jwtExp : 0,
     connectedAtMs: Date.now(),
@@ -155,9 +151,6 @@ export function buildAttachmentFilter(
   const filters: OutboxEventFilter[] = [];
   if (attachment.scope === 'talk') {
     filters.push(buildConversationRunEventFilter());
-    if (attachment.threadId) {
-      filters.push(buildTalkThreadEventFilter(attachment.threadId));
-    }
   }
   if (filters.length === 0) return () => true;
   if (filters.length === 1) return filters[0]!;

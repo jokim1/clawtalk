@@ -107,7 +107,6 @@ export async function processTalkRunMessage(
         eventType: 'talk_run_retrying',
         payload: {
           talkId: runRow.talk_id,
-          threadId: runRow.thread_id,
           runId: input.runId,
           retryAttempt,
           maxRetries,

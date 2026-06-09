@@ -278,7 +278,6 @@ function buildApp(): Hono<{ Variables: Variables }> {
   app.use('/api/v1/teams', requireAuthMiddleware);
   app.use('/api/v1/talks', requireAuthMiddleware);
   app.use('/api/v1/talks/*', requireAuthMiddleware);
-  app.use('/api/v1/threads/*', requireAuthMiddleware);
   app.use('/api/v1/talk-folders', requireAuthMiddleware);
   app.use('/api/v1/talk-folders/*', requireAuthMiddleware);
   app.use('/api/v1/user/*', requireAuthMiddleware);

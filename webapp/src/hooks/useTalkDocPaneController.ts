@@ -31,12 +31,14 @@ import {
   setContentSplitRatio,
 } from '../lib/contentSplitRatio';
 import { snapshotQueryKey } from '../lib/useTalkSnapshot';
-import { buildTalkDetailHref, type TalkDetailTabKey } from './useTalkDetailTabs';
+import {
+  buildTalkDetailHref,
+  type TalkDetailTabKey,
+} from './useTalkDetailTabs';
 
 type UseTalkDocPaneControllerInput = {
   talkId: string;
   userId: string;
-  activeThreadId: string | null;
   currentTab: TalkDetailTabKey;
   locationParams: URLSearchParams;
   currentThreadHasContent: boolean;
@@ -48,12 +50,11 @@ type UseTalkDocPaneControllerInput = {
 
 function snapshotDocumentFromNativeDocument(
   document: NativeDocument,
-  input: { talkId: string; threadId: string },
+  input: { talkId: string },
 ): TalkSnapshotDocument {
   return {
     id: document.id,
     talkId: document.primaryTalkId ?? input.talkId,
-    threadId: input.threadId,
     title: document.title,
     format: document.format,
     listVersion: document.tabs[0]?.listVersion ?? 1,
@@ -65,7 +66,6 @@ function snapshotDocumentFromNativeDocument(
 export function useTalkDocPaneController({
   talkId,
   userId,
-  activeThreadId,
   currentTab,
   locationParams,
   currentThreadHasContent,
@@ -84,9 +84,9 @@ export function useTalkDocPaneController({
   const docModalInputRef = useRef<HTMLInputElement | null>(null);
 
   // ---- Split-pane layout -----------------------------------------------
-  // Visibility persists per thread via localStorage key
-  // `clawtalk_doc_pane:{threadId}` so the user's last layout choice survives
-  // reload + thread switch.
+  // Visibility persists per Talk via localStorage key
+  // `clawtalk_doc_pane:{talkId}` so the user's last layout choice survives
+  // reloads.
   const [docPaneHidden, setDocPaneHidden] = useState<boolean>(false);
   const docBodyRef = useRef<HTMLDivElement | null>(null);
   const docEdgeTabRef = useRef<HTMLButtonElement | null>(null);
@@ -141,7 +141,6 @@ export function useTalkDocPaneController({
         });
         const created = snapshotDocumentFromNativeDocument(document, {
           talkId,
-          threadId: activeThreadId ?? document.primaryTalkId ?? talkId,
         });
 
         const talkKey = snapshotQueryKey(userId, talkId);
@@ -168,7 +167,6 @@ export function useTalkDocPaneController({
       }
     },
     [
-      activeThreadId,
       currentTab,
       docModalFormat,
       docModalSubmitting,
@@ -188,7 +186,7 @@ export function useTalkDocPaneController({
   }, [docModalOpen]);
 
   // Reset the pane-visibility hydration guard when the Talk changes so the
-  // per-thread preference re-reads for the new Talk.
+  // per-Talk preference re-reads for the new Talk.
   const docStateHydratedForRef = useRef<string | null>(null);
   useEffect(() => {
     docStateHydratedForRef.current = null;
@@ -196,14 +194,11 @@ export function useTalkDocPaneController({
   }, [talkId]);
 
   useEffect(() => {
-    if (!activeThreadId) return;
     if (typeof window === 'undefined') return;
-    if (docStateHydratedForRef.current === activeThreadId) return;
-    docStateHydratedForRef.current = activeThreadId;
+    if (docStateHydratedForRef.current === talkId) return;
+    docStateHydratedForRef.current = talkId;
     try {
-      const raw = window.localStorage.getItem(
-        `clawtalk_doc_pane:${activeThreadId}`,
-      );
+      const raw = window.localStorage.getItem(`clawtalk_doc_pane:${talkId}`);
       if (raw) {
         const parsed = JSON.parse(raw) as { hidden?: boolean };
         setDocPaneHidden(parsed.hidden === true);
@@ -213,21 +208,20 @@ export function useTalkDocPaneController({
       // Malformed entry; fall through to default.
     }
     setDocPaneHidden(false);
-  }, [activeThreadId]);
+  }, [talkId]);
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
-    if (!activeThreadId) return;
-    if (docStateHydratedForRef.current !== activeThreadId) return;
+    if (docStateHydratedForRef.current !== talkId) return;
     try {
       window.localStorage.setItem(
-        `clawtalk_doc_pane:${activeThreadId}`,
+        `clawtalk_doc_pane:${talkId}`,
         JSON.stringify({ hidden: docPaneHidden }),
       );
     } catch {
       // Quota / private mode; silently ignore.
     }
-  }, [activeThreadId, docPaneHidden]);
+  }, [docPaneHidden, talkId]);
 
   const handleHideDocPane = useCallback(() => {
     setDocPaneHidden(true);

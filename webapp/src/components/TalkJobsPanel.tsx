@@ -261,10 +261,8 @@ type TalkJobsPanelProps = {
   status: TalkJobsStatusState;
   setStatus: Dispatch<SetStateAction<TalkJobsStatusState>>;
   onUnauthorized: () => void;
-  // After a Run-Now settles, if the job's thread is the active thread the page
-  // resyncs threads/runs. Encapsulating it here keeps activeThreadIdRef +
-  // resyncTalkState page-private.
-  onJobRunSettled: (jobThreadId: string | null) => void | Promise<void>;
+  // After a Run-Now settles, the page resyncs Talk timeline/runs.
+  onJobRunSettled: () => void | Promise<void>;
 };
 
 export function TalkJobsPanel({
@@ -752,7 +750,7 @@ export function TalkJobsPanel({
             if (!latest || !isTerminal(latest.status)) {
               continue;
             }
-            await onJobRunSettled(selectedJob.threadId);
+            await onJobRunSettled();
             setStatus(
               latest.status === 'completed'
                 ? { status: 'success', message: 'Job completed.' }

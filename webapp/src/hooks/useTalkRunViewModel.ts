@@ -14,7 +14,6 @@ import type { TalkDetailTabKey } from './useTalkDetailTabs';
 type PageKind = 'loading' | 'ready' | 'unavailable' | 'error';
 
 type UseTalkRunViewModelInput = {
-  activeThreadId: string | null;
   agentLabelById: Record<string, string>;
   currentTab: TalkDetailTabKey;
   liveResponsesByRunId: Record<string, LiveResponseView>;
@@ -48,7 +47,6 @@ function getOrderedStepStatusLabel(run: RunView, totalSteps: number): string {
 }
 
 export function useTalkRunViewModel({
-  activeThreadId,
   agentLabelById,
   currentTab,
   liveResponsesByRunId,
@@ -97,17 +95,14 @@ export function useTalkRunViewModel({
     () =>
       Object.values(runsById)
         .filter(
-          (run) =>
-            run.threadId === activeThreadId &&
-            Boolean(run.responseGroupId) &&
-            run.sequenceIndex != null,
+          (run) => Boolean(run.responseGroupId) && run.sequenceIndex != null,
         )
         .reduce<Record<string, RunView[]>>((acc, run) => {
           const groupId = run.responseGroupId!;
           (acc[groupId] ||= []).push(run);
           return acc;
         }, {}),
-    [activeThreadId, runsById],
+    [runsById],
   );
 
   const orderedGroupSizesById = useMemo(
@@ -289,7 +284,6 @@ export function useTalkRunViewModel({
         ...Object.values(runsById)
           .filter(
             (run) =>
-              run.threadId === activeThreadId &&
               run.status === 'awaiting_confirmation' &&
               Boolean(run.browserBlock),
           )
@@ -312,25 +306,18 @@ export function useTalkRunViewModel({
         (left, right) =>
           left.timestamp - right.timestamp || left.sortOrder - right.sortOrder,
       ),
-    [
-      activeThreadId,
-      liveResponses,
-      orderedGroupSizesById,
-      pageMessages,
-      runsById,
-    ],
+    [liveResponses, orderedGroupSizesById, pageMessages, runsById],
   );
 
   const activeRound = useMemo(
     () =>
       Object.values(runsById).some(
         (run) =>
-          run.threadId === activeThreadId &&
-          (run.status === 'queued' ||
-            run.status === 'running' ||
-            run.status === 'awaiting_confirmation'),
+          run.status === 'queued' ||
+          run.status === 'running' ||
+          run.status === 'awaiting_confirmation',
       ),
-    [activeThreadId, runsById],
+    [runsById],
   );
 
   const [nowTick, setNowTick] = useState(() => Date.now());

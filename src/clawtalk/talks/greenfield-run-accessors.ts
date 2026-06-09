@@ -549,7 +549,6 @@ export async function markGreenfieldRunRunning(
         eventType: 'talk_run_started',
         payload: {
           talkId: existing.talk_id,
-          threadId: existing.thread_id,
           runId: existing.id,
           runKind: existing.run_kind,
           triggerMessageId: existing.trigger_message_id,
@@ -714,7 +713,6 @@ export async function completeGreenfieldRun(input: {
           eventType: 'message_appended',
           payload: {
             talkId: run.talk_id,
-            threadId: run.thread_id,
             messageId: responseMessage.id,
             runId: run.id,
             role: 'assistant',
@@ -738,7 +736,6 @@ export async function completeGreenfieldRun(input: {
         eventType: 'talk_run_completed',
         payload: {
           talkId: run.talk_id,
-          threadId: run.thread_id,
           runId: run.id,
           runKind: run.run_kind,
           triggerMessageId: run.trigger_message_id,
@@ -838,7 +835,6 @@ export async function failGreenfieldRun(input: {
           eventType: 'talk_run_failed',
           payload: {
             talkId: run.talk_id,
-            threadId: run.thread_id,
             runId: run.id,
             runKind: run.run_kind,
             triggerMessageId: run.trigger_message_id,
@@ -956,7 +952,6 @@ export async function failGreenfieldDlqRun(input: {
         eventType: 'talk_run_failed',
         payload: {
           talkId: run.talk_id,
-          threadId: run.thread_id,
           runId: run.id,
           runKind: run.run_kind,
           triggerMessageId: run.trigger_message_id,

@@ -146,7 +146,6 @@ function uniqueTopic(): string {
 function makeAttachment(input: {
   scope: 'user' | 'talk';
   topic: string;
-  threadId?: string | null;
   cursor?: number;
   jwtExpSec?: number;
 }): SocketAttachment {
@@ -154,7 +153,6 @@ function makeAttachment(input: {
     scope: input.scope,
     userId: TEST_USER,
     talkId: input.scope === 'talk' ? 'talk-fixture' : null,
-    threadId: input.threadId ?? null,
     topic: input.topic,
     cursor: input.cursor ?? 0,
     jwtExp: input.jwtExpSec ?? Math.floor(Date.now() / 1000) + 3600,
@@ -221,13 +219,13 @@ describe('buildAttachmentFilter', () => {
         event_id: 1,
         topic: 'user:abc',
         event_type: 'message_appended',
-        payload: { runKind: 'job', threadId: 'unrelated' },
+        payload: { runKind: 'job' },
         created_at: '',
       }),
     ).toBe(true);
   });
 
-  it('talk-scope without threadId: conversation-run filter only', () => {
+  it('talk-scope: conversation-run filter only', () => {
     const att = makeAttachment({ scope: 'talk', topic: 'talk:t1' });
     const filter = buildAttachmentFilter(att);
     expect(
@@ -250,31 +248,18 @@ describe('buildAttachmentFilter', () => {
     ).toBe(true);
   });
 
-  it('talk-scope with threadId: also applies thread filter', () => {
-    const att = makeAttachment({
-      scope: 'talk',
-      topic: 'talk:t1',
-      threadId: 'thread-A',
-    });
+  it('talk-scope: accepts non-run streaming events at talk scope', () => {
+    const att = makeAttachment({ scope: 'talk', topic: 'talk:t1' });
     const filter = buildAttachmentFilter(att);
     expect(
       filter({
         event_id: 1,
         topic: 'talk:t1',
         event_type: 'talk_response_delta',
-        payload: { threadId: 'thread-A' },
+        payload: { deltaText: 'hello' },
         created_at: '',
       }),
     ).toBe(true);
-    expect(
-      filter({
-        event_id: 1,
-        topic: 'talk:t1',
-        event_type: 'talk_response_delta',
-        payload: { threadId: 'thread-B' },
-        created_at: '',
-      }),
-    ).toBe(false);
   });
 });
 
@@ -390,33 +375,31 @@ describe('drainOnce via /notify', () => {
     expect(ws.sent.map((m) => m.id)).toEqual([ids[1], ids[2]]);
   });
 
-  it('thread filter: talk-scope socket with threadId only sees matching rows', async () => {
+  it('talk filter: talk-scope socket receives all talk-level streaming rows', async () => {
     const state = new MockDurableObjectState();
     const topic = uniqueTopic();
     const allIds = await seedOutbox(topic, [
       {
         event_type: 'talk_response_delta',
-        payload: { threadId: 'thread-A', i: 1 },
+        payload: { i: 1 },
       },
       {
         event_type: 'talk_response_delta',
-        payload: { threadId: 'thread-B', i: 2 },
+        payload: { i: 2 },
       },
       {
         event_type: 'talk_response_delta',
-        payload: { threadId: 'thread-A', i: 3 },
+        payload: { i: 3 },
       },
     ]);
 
     const ws = new MockWebSocket();
-    ws.serializeAttachment(
-      makeAttachment({ scope: 'talk', topic, threadId: 'thread-A' }),
-    );
+    ws.serializeAttachment(makeAttachment({ scope: 'talk', topic }));
     state.attach(ws);
 
     const hub = createHub(state);
     await hub.fetch(new Request('http://hub/notify', { method: 'POST' }));
-    expect(ws.sent.map((m) => m.id)).toEqual([allIds[0], allIds[2]]);
+    expect(ws.sent.map((m) => m.id)).toEqual(allIds);
   });
 });
 
