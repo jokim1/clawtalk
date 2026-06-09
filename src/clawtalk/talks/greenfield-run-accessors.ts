@@ -17,7 +17,6 @@ export interface GreenfieldQueueRunRecord {
   id: string;
   workspace_id: string;
   talk_id: string;
-  thread_id: string;
   round: number;
   run_kind: 'conversation' | 'content_improvement';
   snapshot_group_id: string;
@@ -433,7 +432,6 @@ export async function getGreenfieldQueueRunById(
       r.id,
       r.workspace_id,
       r.talk_id,
-      r.talk_id as thread_id,
       r.round,
       r.run_kind,
       r.snapshot_group_id,

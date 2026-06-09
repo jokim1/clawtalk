@@ -1030,53 +1030,6 @@ async function hasAgentFallbackStepsTable(db: Sql): Promise<boolean> {
 }
 
 // ---------------------------------------------------------------------------
-// Message persistence (unified talk_messages table)
-// ---------------------------------------------------------------------------
-
-export type MessageRole = 'user' | 'assistant' | 'system' | 'tool';
-
-export async function createMessage(input: {
-  ownerId: string;
-  id?: string;
-  talkId?: string | null;
-  threadId: string;
-  role: MessageRole;
-  content: string;
-  agentId?: string | null;
-  createdBy?: string | null;
-  metadata?: Record<string, unknown> | null;
-}): Promise<void> {
-  const db = getDbPg();
-  // id defaults to gen_random_uuid() server-side when caller doesn't pass
-  // one. Some callers (executor streaming) pre-generate the id to thread
-  // through events before insert — preserve that capability.
-  if (input.id) {
-    await db`
-      insert into public.talk_messages
-        (id, talk_id, thread_id, owner_id, role, content, agent_id,
-         created_by, metadata_json)
-      values
-        (${input.id}::uuid, ${input.talkId ?? null}::uuid,
-         ${input.threadId}::uuid, ${input.ownerId}::uuid, ${input.role},
-         ${input.content}, ${input.agentId ?? null}::uuid,
-         ${input.createdBy ?? null}::uuid,
-         ${input.metadata ? db.json(input.metadata as never) : null})
-    `;
-  } else {
-    await db`
-      insert into public.talk_messages
-        (talk_id, thread_id, owner_id, role, content, agent_id,
-         created_by, metadata_json)
-      values
-        (${input.talkId ?? null}::uuid, ${input.threadId}::uuid,
-         ${input.ownerId}::uuid, ${input.role}, ${input.content},
-         ${input.agentId ?? null}::uuid, ${input.createdBy ?? null}::uuid,
-         ${input.metadata ? db.json(input.metadata as never) : null})
-    `;
-  }
-}
-
-// ---------------------------------------------------------------------------
 // LLM attempt tracking
 // ---------------------------------------------------------------------------
 

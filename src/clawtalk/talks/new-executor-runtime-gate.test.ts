@@ -122,7 +122,6 @@ describe('buildToolExecutor runtime tool gates', () => {
         {
           runId: RUN_ID,
           talkId: TALK_ID,
-          threadId: '0c878787-eeee-eeee-eeee-eeeeeeeeeeee',
           requestedBy: USER_ID,
           triggerMessageId: '0c878787-ffff-ffff-ffff-ffffffffffff',
           triggerContent: 'hello',
