@@ -1086,7 +1086,10 @@ export async function listHomeNews(
      and t.id = m.talk_id
      and t.archived_at is null
     where m.workspace_id = ${input.workspaceId}::uuid
-      and m.status = 'active'
+      and (
+        m.status = 'active'
+        or (m.status = 'snoozed' and m.snoozed_until <= now())
+      )
     order by
       effective_score desc,
       i.published_at desc nulls last,
@@ -1182,7 +1185,10 @@ async function homeCounts(input: {
          and t.id = m.talk_id
          and t.archived_at is null
         where m.workspace_id = ${input.workspaceId}::uuid
-          and m.status = 'active'
+          and (
+            m.status = 'active'
+            or (m.status = 'snoozed' and m.snoozed_until <= now())
+          )
       ) as news
   `;
   return rows[0] ?? { recommendations: 0, news: 0 };
@@ -1626,7 +1632,7 @@ export async function addHomeNewsToContext(input: {
          and t.archived_at is null
         where m.id = ${input.matchId}::uuid
           and m.workspace_id = ${input.workspaceId}::uuid
-          and m.status in ('active', 'added_to_context')
+          and m.status in ('active', 'snoozed', 'added_to_context')
         for update of m
       `;
       const match = rows[0];
@@ -1722,10 +1728,11 @@ export async function addHomeNewsToContext(input: {
 
       const updated = await txSql<HomeNewsMutationResult[]>`
         update public.home_news_matches
-           set status = 'added_to_context'
+           set status = 'added_to_context',
+               snoozed_until = null
          where id = ${match.id}::uuid
            and workspace_id = ${input.workspaceId}::uuid
-           and status in ('active', 'added_to_context')
+           and status in ('active', 'snoozed', 'added_to_context')
         returning id, status, ${sourceId}::uuid as "sourceId"
       `;
 
@@ -1762,6 +1769,43 @@ export async function addHomeNewsToContext(input: {
 }
 
 /**
+ * Snooze a news match until `until` (status -> `snoozed`). The read query
+ * re-surfaces snoozed matches once `snoozed_until <= now()`.
+ */
+export async function snoozeHomeNewsMatch(input: {
+  workspaceId: string;
+  matchId: string;
+  until: string;
+}): Promise<HomeNewsMutationResult | null> {
+  const db = getDbPg();
+  const rows = await db<HomeNewsMutationResult[]>`
+    update public.home_news_matches
+       set status = 'snoozed',
+           snoozed_until = ${input.until}::timestamptz
+     where id = ${input.matchId}::uuid
+       and workspace_id = ${input.workspaceId}::uuid
+       and status in ('active', 'snoozed')
+    returning id, status, null::uuid as "sourceId"
+  `;
+  const result = rows[0] ?? null;
+  if (result) {
+    await db`
+      insert into public.home_interaction_events (
+        workspace_id, surface, item_id, event_type, metadata_json
+      )
+      values (
+        ${input.workspaceId}::uuid,
+        'news',
+        ${input.matchId}::uuid,
+        'home.news_snoozed',
+        ${db.json({ until: input.until } as never)}
+      )
+    `;
+  }
+  return result;
+}
+
+/**
  * Mark a news match not relevant. Idempotent over already-not-relevant rows;
  * added / expired rows are left untouched.
  */
@@ -1772,10 +1816,11 @@ export async function markHomeNewsNotRelevant(input: {
   const db = getDbPg();
   const rows = await db<HomeNewsMutationResult[]>`
     update public.home_news_matches
-       set status = 'not_relevant'
+       set status = 'not_relevant',
+           snoozed_until = null
      where id = ${input.matchId}::uuid
        and workspace_id = ${input.workspaceId}::uuid
-       and status in ('active', 'not_relevant')
+       and status in ('active', 'snoozed', 'not_relevant')
     returning id, status, null::uuid as "sourceId"
   `;
   const result = rows[0] ?? null;

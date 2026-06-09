@@ -6,12 +6,24 @@
  * `salon.*`) and the Salon icon set. No Tailwind. Reused by every Home section
  * card so the cards stay visually identical.
  */
-import type { CSSProperties, MouseEvent, ReactNode, Ref } from 'react';
+import {
+  useRef,
+  useState,
+  type CSSProperties,
+  type MouseEvent,
+  type ReactNode,
+  type Ref,
+} from 'react';
 import { Link } from 'react-router-dom';
 
-import { CTIcon, salon, salonFont } from '../../salon';
+import { CTIcon, Popover, salon, salonFont } from '../../salon';
 import type { CTIconName } from '../../salon';
-import { truncate, type ActionBehavior, type BadgeTone } from './homeFormat';
+import {
+  snoozePresets,
+  truncate,
+  type ActionBehavior,
+  type BadgeTone,
+} from './homeFormat';
 
 export const CARD_STYLE: CSSProperties = {
   background: 'var(--salon-card, #ffffff)',
@@ -363,6 +375,66 @@ export function LifecycleIconButton({
     >
       <CTIcon name={icon} size={13} stroke={salon.ink2} />
     </button>
+  );
+}
+
+/** Snooze trigger + preset popover (1 hour / Tomorrow / Next week). */
+export function SnoozeControl({
+  onSnooze,
+}: {
+  onSnooze: (until: string) => void;
+}): JSX.Element {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLButtonElement>(null);
+  return (
+    <>
+      <LifecycleIconButton
+        icon="clock"
+        label="Snooze"
+        buttonRef={ref}
+        onClick={() => setOpen((value) => !value)}
+      />
+      {open ? (
+        <Popover
+          anchorRect={ref.current?.getBoundingClientRect() ?? null}
+          onClose={() => setOpen(false)}
+          width={196}
+          align="right"
+          ariaLabel="Snooze options"
+        >
+          <div style={{ padding: 6, display: 'flex', flexDirection: 'column' }}>
+            {snoozePresets(new Date()).map((preset) => (
+              <button
+                key={preset.label}
+                type="button"
+                className="salon-btn"
+                onClick={() => {
+                  setOpen(false);
+                  onSnooze(preset.until);
+                }}
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 8,
+                  textAlign: 'left',
+                  padding: '8px 10px',
+                  borderRadius: 8,
+                  background: 'transparent',
+                  border: 'none',
+                  cursor: 'pointer',
+                  fontFamily: salonFont.sans,
+                  fontSize: 13,
+                  color: salon.ink,
+                }}
+              >
+                <CTIcon name="clock" size={13} stroke={salon.ink2} />
+                {preset.label}
+              </button>
+            ))}
+          </div>
+        </Popover>
+      ) : null}
+    </>
   );
 }
 

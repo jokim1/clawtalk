@@ -47,6 +47,7 @@ function renderNews(payload: HomeNewsPayload): void {
       <NewsPreview
         payload={payload}
         onAddToContext={() => undefined}
+        onSnooze={() => undefined}
         onNotRelevant={() => undefined}
       />
     </MemoryRouter>,

@@ -3906,6 +3906,17 @@ export async function markHomeNewsNotRelevant(
   );
 }
 
+/** Snooze a News card until `until` (ISO-8601); it re-surfaces when due. */
+export async function snoozeHomeNews(
+  matchId: string,
+  until: string,
+): Promise<HomeNewsMutationResult> {
+  return apiMutationRequest<HomeNewsMutationResult>(
+    `/api/v1/home/news/${encodeURIComponent(matchId)}/snooze`,
+    { method: 'POST', includeJson: true, body: JSON.stringify({ until }) },
+  );
+}
+
 /** Dismiss a recommendation so it leaves the Recommendations rail. */
 export async function dismissHomeRecommendation(
   recommendationId: string,

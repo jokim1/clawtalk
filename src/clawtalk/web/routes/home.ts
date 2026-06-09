@@ -13,6 +13,7 @@ import {
   markHomeNewsNotRelevant,
   resolveHomeInboxItem,
   snoozeHomeInboxItem,
+  snoozeHomeNewsMatch,
   type HomeInboxMutationResult,
   type HomeInboxPayload,
   type HomeNewsMutationResult,
@@ -341,6 +342,30 @@ export async function markHomeNewsNotRelevantRoute(input: {
   });
 }
 
+export async function snoozeHomeNewsRoute(input: {
+  auth: AuthContext;
+  workspaceId?: string | null;
+  matchId: string;
+  until: unknown;
+}): Promise<RouteResult<HomeNewsMutationResult>> {
+  if (!isUuid(input.matchId)) {
+    return error(400, 'invalid_match_id', 'News match id must be a UUID.');
+  }
+  const until = parseSnoozeUntil(input.until);
+  if (!until.ok) return error(400, 'invalid_until', until.message);
+  return withHomeWorkspace(input, async ({ workspace }) => {
+    const writerError = requireHomeWriter(workspace);
+    if (writerError) return writerError;
+    const result = await snoozeHomeNewsMatch({
+      workspaceId: workspace.id,
+      matchId: input.matchId,
+      until: until.iso,
+    });
+    if (!result) return error(404, 'not_found', 'News match not found.');
+    return ok(result);
+  });
+}
+
 export async function dismissHomeRecommendationRoute(input: {
   auth: AuthContext;
   workspaceId?: string | null;
@@ -506,6 +531,25 @@ export function mountHomeRoutes(
       auth,
       workspaceId: requestedWorkspaceId(c),
       matchId: c.req.param('id'),
+    });
+    return jsonResponse(result);
+  });
+
+  app.post('/api/v1/home/news/:id/snooze', async (c) => {
+    const auth = c.get('auth');
+    const rl = checkRateLimit({ principalId: auth.userId, bucket: 'write' });
+    if (!rl.allowed) return rateLimitedResponse(c, rl);
+    const csrfFail = checkCsrf(c, auth);
+    if (csrfFail) return csrfFail;
+    const body = await readHomeJsonBody(c);
+    if (!body.ok) {
+      return jsonResponse(error(400, 'invalid_json', body.error));
+    }
+    const result = await snoozeHomeNewsRoute({
+      auth,
+      workspaceId: requestedWorkspaceId(c),
+      matchId: c.req.param('id'),
+      until: body.data.until,
     });
     return jsonResponse(result);
   });

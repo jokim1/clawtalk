@@ -32,6 +32,7 @@ import {
   markHomeNewsNotRelevantRoute,
   resolveHomeInboxRoute,
   snoozeHomeInboxRoute,
+  snoozeHomeNewsRoute,
 } from './home.js';
 
 const USER_ID = '0c888888-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
@@ -1878,6 +1879,53 @@ describe('Home write routes', () => {
     expect(await newsIds(workspaceId)).not.toContain(matchId);
   });
 
+  it('snoozes a news match out of News until it is due', async () => {
+    const { workspaceId, talkId } = await createWorkspaceFixture();
+    const matchId = await seedNewsMatch({
+      workspaceId,
+      talkId,
+      title: 'Temporarily noisy signal',
+    });
+    expect(await newsIds(workspaceId)).toContain(matchId);
+
+    const until = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+    const result = await snoozeHomeNewsRoute({
+      auth: auth(),
+      workspaceId,
+      matchId,
+      until,
+    });
+
+    expect(result.statusCode).toBe(200);
+    expect(result.body).toMatchObject({
+      ok: true,
+      data: { id: matchId, status: 'snoozed', sourceId: null },
+    });
+    expect(await newsIds(workspaceId)).not.toContain(matchId);
+
+    await getDbPg()`
+      update public.home_news_matches
+      set snoozed_until = now() - interval '1 minute'
+      where id = ${matchId}::uuid
+    `;
+    expect(await newsIds(workspaceId)).toContain(matchId);
+  });
+
+  it('rejects a news snooze without a future timestamp', async () => {
+    const { workspaceId } = await createWorkspaceFixture();
+    const result = await snoozeHomeNewsRoute({
+      auth: auth(),
+      workspaceId,
+      matchId: RANDOM_UUID,
+      until: '2026-01-01',
+    });
+    expect(result.statusCode).toBe(400);
+    expect(result.body).toMatchObject({
+      ok: false,
+      error: { code: 'invalid_until' },
+    });
+  });
+
   it('returns 404 dismissing an unknown recommendation', async () => {
     const { workspaceId } = await createWorkspaceFixture();
     const result = await dismissHomeRecommendationRoute({
@@ -1967,6 +2015,12 @@ describe('Home write routes', () => {
       workspaceId,
       matchId: newsMatchId,
     });
+    const snoozeNews = await snoozeHomeNewsRoute({
+      auth: auth(GUEST_USER_ID),
+      workspaceId,
+      matchId: newsMatchId,
+      until,
+    });
 
     for (const result of [
       dismissInbox,
@@ -1976,6 +2030,7 @@ describe('Home write routes', () => {
       resolveInbox,
       addNews,
       notRelevant,
+      snoozeNews,
     ]) {
       expect(result.statusCode).toBe(403);
       expect(result.body).toMatchObject({

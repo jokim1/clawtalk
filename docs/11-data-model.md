@@ -788,6 +788,7 @@ home_news_matches (
   status text not null default 'active' check (status in (
     'active','snoozed','added_to_context','not_relevant','expired'
   )),
+  snoozed_until timestamptz,
   algorithm_version text,
   created_at timestamptz not null default now(),
   foreign key (workspace_id, topic_id) references home_news_topics(workspace_id, id) on delete cascade,
@@ -795,6 +796,7 @@ home_news_matches (
   unique (workspace_id, news_item_id, topic_id)                -- one match row per (item, topic) per workspace
 )
 create index on home_news_matches (workspace_id, status, score desc);
+create index on home_news_matches (workspace_id, status, snoozed_until, score desc);
 
 home_interaction_events (
   id bigserial pk, workspace_id uuid not null references workspaces(id) on delete cascade,

@@ -4626,6 +4626,7 @@ Columns (mirrors `11-data-model.md` §7):
 - `score`
 - `confidence`
 - `status` — check: `active | snoozed | added_to_context | not_relevant | expired`; default `active`
+- `snoozed_until`
 - `algorithm_version`
 - `created_at`
 
@@ -4633,6 +4634,7 @@ Indexes:
 
 - unique `(workspace_id, news_item_id, topic_id)` — one match row per (item, topic) per workspace
 - `(workspace_id, status, score desc)`
+- `(workspace_id, status, snoozed_until, score desc)`
 
 ### 10.9 `home_interaction_events`
 
