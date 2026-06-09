@@ -1262,7 +1262,6 @@ export function mountGreenfieldApiRoutes(app: GreenfieldApp): void {
     const parsed = await readJsonBody<{
       content?: unknown;
       targetAgentIds?: unknown;
-      attachmentIds?: unknown;
     }>(c);
     if (!parsed.ok) {
       return c.json(
@@ -1276,7 +1275,6 @@ export function mountGreenfieldApiRoutes(app: GreenfieldApp): void {
       auth,
       content: parsed.data.content,
       targetAgentIds: parsed.data.targetAgentIds,
-      attachmentIds: parsed.data.attachmentIds,
     });
     if (result.statusCode === 202 && result.body.ok) {
       const runs = result.body.data.runs;

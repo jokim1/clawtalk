@@ -38,7 +38,6 @@ import type {
   TalkConnectorChannelRow,
   TalkConnectorDataConnectorRow,
   TalkMessage,
-  TalkMessageAttachment,
   TalkRun,
   TalkRunContextDetails,
   TalkJob,
@@ -213,7 +212,7 @@ describe('TalkDetailPage', () => {
       .closest('.composer-meta-row') as HTMLElement | null;
     expect(composerMeta).toBeTruthy();
     expect(within(composerMeta!).getByText('0/20000')).toBeTruthy();
-    expect(screen.getByRole('button', { name: 'Attach' })).toBeDisabled();
+    expect(screen.queryByRole('button', { name: 'Attach' })).toBeNull();
 
     const tabs = within(
       screen.getByRole('navigation', { name: 'Talk sections' }),
@@ -1662,7 +1661,6 @@ describe('TalkDetailPage', () => {
     expect(sendBodies[0]).toEqual({
       content: 'Which team has the edge?',
       targetAgentIds: ['agent-claude', 'agent-openai'],
-      attachmentIds: [],
     });
   });
 
@@ -1775,79 +1773,6 @@ describe('TalkDetailPage', () => {
         Reflect.deleteProperty(HTMLTextAreaElement.prototype, 'scrollHeight');
       }
     }
-  });
-
-  it('keeps message attachments disabled while greenfield attachment storage is unavailable', async () => {
-    const user = userEvent.setup();
-    let sentBody:
-      | {
-          content: string;
-          targetAgentIds: string[];
-          attachmentIds?: string[];
-        }
-      | undefined;
-
-    installTalkDetailFetch({
-      messages: [],
-      runs: [],
-      onUploadAttachment: () => {
-        throw new Error('Attachment upload should not be called');
-      },
-      onSendMessage: (body) => {
-        sentBody = body;
-        return {
-          talkId: 'talk-1',
-          message: buildMessage({
-            id: 'msg-posted',
-            role: 'user',
-            content: body.content,
-            createdAt: '2026-03-06T00:00:05.000Z',
-          }),
-          runs: [],
-        };
-      },
-    });
-
-    renderDetailPage('/app/talks/talk-1');
-    const composer = await screen.findByPlaceholderText(
-      /^Send a message to this conversation/,
-    );
-    const workspace = composer.closest('.talk-workspace');
-    if (!workspace) {
-      throw new Error('Expected talk workspace wrapper');
-    }
-    expect(screen.getByRole('button', { name: 'Attach' })).toBeDisabled();
-
-    const file = new File(['hello world'], 'notes.txt', { type: 'text/plain' });
-    const dataTransfer = createFileDataTransfer([file]);
-
-    const windowDragOverEvent = new Event('dragover', {
-      bubbles: true,
-      cancelable: true,
-    });
-    Object.defineProperty(windowDragOverEvent, 'dataTransfer', {
-      value: dataTransfer,
-    });
-    window.dispatchEvent(windowDragOverEvent);
-    expect(windowDragOverEvent.defaultPrevented).toBe(true);
-    expect(dataTransfer.dropEffect).toBe('none');
-
-    fireEvent.dragEnter(workspace, { dataTransfer });
-    expect(screen.queryByText('Drop files to attach')).toBeNull();
-
-    fireEvent.drop(workspace, { dataTransfer });
-    expect(screen.queryByText('notes.txt')).toBeNull();
-
-    await user.type(composer, 'Please review the attachment.');
-    await user.click(screen.getByRole('button', { name: 'Send' }));
-
-    await waitFor(() =>
-      expect(sentBody).toMatchObject({
-        content: 'Please review the attachment.',
-        targetAgentIds: ['agent-claude'],
-        attachmentIds: [],
-      }),
-    );
   });
 
   it('uses the snapshot workspace for talk-scoped catalog and chat actions', async () => {
@@ -4215,23 +4140,6 @@ function buildMessage(
     agentId: input.agentId ?? null,
     agentNickname: input.agentNickname ?? null,
     metadata: input.metadata ?? null,
-    attachments: input.attachments ?? [],
-  };
-}
-
-function buildMessageAttachment(
-  input: Partial<TalkMessageAttachment> &
-    Pick<
-      TalkMessageAttachment,
-      'id' | 'fileName' | 'fileSize' | 'mimeType' | 'extractionStatus'
-    >,
-): TalkMessageAttachment {
-  return {
-    id: input.id,
-    fileName: input.fileName,
-    fileSize: input.fileSize,
-    mimeType: input.mimeType,
-    extractionStatus: input.extractionStatus,
   };
 }
 
@@ -4259,25 +4167,6 @@ function buildRun(
     carriedBrowserSessions: input.carriedBrowserSessions ?? [],
     executionDecision: input.executionDecision ?? null,
   };
-}
-
-function createFileDataTransfer(files: File[]): DataTransfer {
-  return {
-    files,
-    items: files.map((file) => ({
-      kind: 'file',
-      type: file.type,
-      getAsFile: () => file,
-    })),
-    types: {
-      0: 'Files',
-      length: 1,
-      contains: (value: string) => value === 'Files',
-      item: (index: number) => (index === 0 ? 'Files' : null),
-    },
-    dropEffect: 'copy',
-    effectAllowed: 'all',
-  } as unknown as DataTransfer;
 }
 
 function buildTalkConnectorDataConnectorRow(
@@ -4576,11 +4465,9 @@ function installTalkDetailFetch(input?: {
     extractedText?: string | null;
   }) => ContextSource;
   onRetryContextSource?: (sourceId: string) => ContextSource;
-  onUploadAttachment?: (formData: FormData) => TalkMessageAttachment;
   onSendMessage?: (body: {
     content: string;
     targetAgentIds: string[];
-    attachmentIds?: string[];
   }) => { talkId: string; message: TalkMessage; runs: TalkRun[] };
   onListMessages?: (input: {
     visibleMessages: TalkMessage[];
@@ -4901,35 +4788,6 @@ function installTalkDetailFetch(input?: {
             deletedCount: deletedMessageIds.length,
             deletedMessageIds,
           },
-        });
-      }
-
-      if (
-        url.endsWith('/api/v1/talks/talk-1/attachments') &&
-        method === 'POST'
-      ) {
-        if (!(init?.body instanceof FormData)) {
-          throw new Error('Expected attachment uploads to use FormData');
-        }
-
-        const file = init.body.get('file');
-        if (!(file instanceof File)) {
-          throw new Error('Expected file payload for attachment upload');
-        }
-
-        const attachment =
-          input?.onUploadAttachment?.(init.body) ??
-          buildMessageAttachment({
-            id: 'att-1',
-            fileName: file.name,
-            fileSize: file.size,
-            mimeType: file.type,
-            extractionStatus: 'ready',
-          });
-
-        return jsonResponse(201, {
-          ok: true,
-          data: { attachment },
         });
       }
 
@@ -5444,7 +5302,6 @@ function installTalkDetailFetch(input?: {
         const body = JSON.parse(String(init?.body || '{}')) as {
           content: string;
           targetAgentIds: string[];
-          attachmentIds?: string[];
         };
         const payload = input?.onSendMessage?.(body) ?? {
           talkId: 'talk-1',

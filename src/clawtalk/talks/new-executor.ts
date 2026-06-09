@@ -204,14 +204,6 @@ export function buildToolExecutor(
       };
     }
 
-    if (toolName === 'read_attachment') {
-      return {
-        result:
-          'Error: attachments_not_available: Message attachments are not available on the greenfield chat route yet.',
-        isError: true,
-      };
-    }
-
     if (
       toolName === 'read_state' ||
       toolName === 'list_state' ||

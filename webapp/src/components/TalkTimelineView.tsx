@@ -14,21 +14,6 @@ import type {
   TalkTimelineEntry,
 } from '../lib/talkRunReducer';
 
-function isRenderableImageAttachment(mimeType: string): boolean {
-  return (
-    mimeType === 'image/png' ||
-    mimeType === 'image/jpeg' ||
-    mimeType === 'image/webp'
-  );
-}
-
-function buildTalkAttachmentContentUrl(
-  talkId: string,
-  attachmentId: string,
-): string {
-  return `/api/v1/talks/${encodeURIComponent(talkId)}/attachments/${encodeURIComponent(attachmentId)}/content`;
-}
-
 interface TalkTimelineViewProps {
   timelineRef: RefObject<HTMLDivElement>;
   endRef: RefObject<HTMLDivElement>;
@@ -285,48 +270,6 @@ export function TalkTimelineView({
                         : message.content,
                     )}
                   </p>
-                  {message.attachments && message.attachments.length > 0 ? (
-                    <div className="message-attachments">
-                      {message.attachments.map((att) => (
-                        <div key={att.id} className="message-attachment-item">
-                          {isRenderableImageAttachment(att.mimeType) ? (
-                            <a
-                              href={buildTalkAttachmentContentUrl(
-                                talkId,
-                                att.id,
-                              )}
-                              target="_blank"
-                              rel="noreferrer"
-                              className="message-attachment-image-link"
-                            >
-                              <img
-                                src={buildTalkAttachmentContentUrl(
-                                  talkId,
-                                  att.id,
-                                )}
-                                alt={att.fileName}
-                                className="message-attachment-image"
-                              />
-                            </a>
-                          ) : null}
-                          <span
-                            className="message-attachment-chip"
-                            title={att.mimeType}
-                          >
-                            {att.fileName}
-                            <span className="message-attachment-size">
-                              {' '}
-                              {att.fileSize < 1024
-                                ? `${att.fileSize} B`
-                                : att.fileSize < 1048576
-                                  ? `${(att.fileSize / 1024).toFixed(1)} KB`
-                                  : `${(att.fileSize / 1048576).toFixed(1)} MB`}
-                            </span>
-                          </span>
-                        </div>
-                      ))}
-                    </div>
-                  ) : null}
                 </article>
               );
             }

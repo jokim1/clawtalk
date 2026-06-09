@@ -36,8 +36,8 @@
 //                                         routes over context_sources
 //   /api/v1/talks/:talkId/jobs[/...]    — greenfield-api.ts compatibility
 //                                         routes over jobs/runs
-//   /api/v1/talks/:talkId/attachments[/...] — unavailable until greenfield
-//                                         attachment storage lands
+//   Message attachments are intentionally absent from v1; context-source file
+//                                         uploads use native context routes.
 //   /api/v1/documents[/...]                 — native document tabs, blocks,
 //                                         and document_edits routes
 //   /api/v1/events                  — events-upgrade.ts (user-scope
@@ -1128,42 +1128,6 @@ function buildApp(): Hono<{ Variables: Variables }> {
   app.get('/api/v1/events', userEventsUpgradeRoute);
   app.get('/api/v1/talks/:talkId/events', talkEventsUpgradeRoute);
 
-  // ── greenfield attachment compatibility guard ────────────────
-  app.post('/api/v1/talks/:talkId/attachments', async (c) => {
-    const auth = c.get('auth');
-    const rl = checkRateLimit({ principalId: auth.userId, bucket: 'write' });
-    if (!rl.allowed) return rateLimitedResponse(c, rl);
-    const csrfFail = checkCsrf(c, auth);
-    if (csrfFail) return csrfFail;
-    return attachmentsUnavailableResponse(c);
-  });
-
-  app.get('/api/v1/talks/:talkId/attachments', async (c) => {
-    const auth = c.get('auth');
-    const rl = checkRateLimit({ principalId: auth.userId, bucket: 'read' });
-    if (!rl.allowed) return rateLimitedResponse(c, rl);
-    return attachmentsUnavailableResponse(c);
-  });
-
-  app.get(
-    '/api/v1/talks/:talkId/attachments/:attachmentId/content',
-    async (c) => {
-      const auth = c.get('auth');
-      const rl = checkRateLimit({ principalId: auth.userId, bucket: 'read' });
-      if (!rl.allowed) return rateLimitedResponse(c, rl);
-      return attachmentsUnavailableResponse(c);
-    },
-  );
-
-  app.delete('/api/v1/talks/:talkId/attachments/:attachmentId', async (c) => {
-    const auth = c.get('auth');
-    const rl = checkRateLimit({ principalId: auth.userId, bucket: 'write' });
-    if (!rl.allowed) return rateLimitedResponse(c, rl);
-    const csrfFail = checkCsrf(c, auth);
-    if (csrfFail) return csrfFail;
-    return attachmentsUnavailableResponse(c);
-  });
-
   // 501 fallback for any /api/v1/* path that hasn't been mounted.
   // Routes still on sqlite, chassis-removed, or pending Queues
   // wiring (chat enqueue / SSE) all land here.
@@ -1310,20 +1274,6 @@ async function readJsonBody<T = Record<string, unknown>>(
 
 function invalidJsonResponse(c: Context, message: string): Response {
   return c.json({ ok: false, error: { code: 'invalid_json', message } }, 400);
-}
-
-function attachmentsUnavailableResponse(c: Context): Response {
-  return c.json(
-    {
-      ok: false,
-      error: {
-        code: 'attachments_not_available',
-        message:
-          'Message attachments are not available on the greenfield chat route yet.',
-      },
-    },
-    501,
-  );
 }
 
 type DecodedIdParam =

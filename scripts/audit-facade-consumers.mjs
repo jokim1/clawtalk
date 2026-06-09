@@ -103,7 +103,7 @@ const facades = [
     tokens:
       'attachments_not_available|/attachments|attachmentIds|uploadTalkAttachment|deleteTalkAttachment|read_attachment',
     imports:
-      'uploadTalkAttachment|deleteTalkAttachment|TalkMessageAttachment|attachment-storage|attachment-caps',
+      'uploadTalkAttachment|deleteTalkAttachment|TalkMessageAttachment|ComposerPendingAttachment|PendingComposerAttachment',
     routes:
       '/api/v1/talks/:talkId/attachments|attachmentsUnavailableResponse|attachments_not_available',
     dynamic:

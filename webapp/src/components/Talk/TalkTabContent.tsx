@@ -1,5 +1,4 @@
 import {
-  type ChangeEvent,
   type Dispatch,
   type FormEvent,
   type KeyboardEvent as ReactKeyboardEvent,
@@ -66,19 +65,6 @@ type CancelState = {
 
 type MentionState = { atIndex: number; selectedIndex: number } | null;
 
-type PendingAttachment = {
-  localId: string;
-  file: File;
-  fileName: string;
-  fileSize: number;
-  mimeType: string;
-  isImage: boolean;
-  previewUrl?: string;
-  status: 'uploading' | 'ready' | 'error';
-  attachmentId?: string;
-  errorMessage?: string;
-};
-
 function formatDateTime(value: string | null): string {
   if (!value) return 'Never';
   const parsed = new Date(value);
@@ -111,7 +97,6 @@ type TalkTabContentProps = {
     messageId: string,
     element: HTMLElement | null,
   ) => void;
-  fileInputRef: RefObject<HTMLInputElement>;
   textareaRef: RefObject<HTMLTextAreaElement>;
   // Native primary-document metadata (no flat content facade). `null` id means
   // the active conversation has no document, so the split layout collapses to chat.
@@ -186,9 +171,6 @@ type TalkTabContentProps = {
   handleClearUnread: () => void;
   toolsRefreshKey: number;
   handleSend: (event: FormEvent) => void;
-  ALLOWED_ATTACHMENT_EXTENSIONS: string;
-  handleFileInputChange: (event: ChangeEvent<HTMLInputElement>) => void;
-  GREENFIELD_MESSAGE_ATTACHMENTS_ENABLED: boolean;
   effectiveAgents: TalkAgent[];
   targetAgentIds: string[];
   talkAgentExecutionGuardrailsById: Record<string, TalkAgentExecutionGuardrail>;
@@ -210,9 +192,6 @@ type TalkTabContentProps = {
   contextSources: ContextSource[];
   activeRound: boolean;
   hasUnsavedAgentChanges: boolean;
-  pendingAttachments: PendingAttachment[];
-  handleRemoveAttachment: (localId: string) => void;
-  handleAttachButtonClick: () => void;
   canEditAgents: boolean;
   handleCancelRuns: () => void;
   cancelState: CancelState;
@@ -232,7 +211,6 @@ export function TalkTabContent({
   timelineRef,
   endRef,
   setMessageElementRef,
-  fileInputRef,
   textareaRef,
   primaryDocumentId,
   primaryDocumentTitle,
@@ -296,9 +274,6 @@ export function TalkTabContent({
   handleClearUnread,
   toolsRefreshKey,
   handleSend,
-  ALLOWED_ATTACHMENT_EXTENSIONS,
-  handleFileInputChange,
-  GREENFIELD_MESSAGE_ATTACHMENTS_ENABLED,
   effectiveAgents,
   targetAgentIds,
   talkAgentExecutionGuardrailsById,
@@ -318,9 +293,6 @@ export function TalkTabContent({
   contextSources,
   activeRound,
   hasUnsavedAgentChanges,
-  pendingAttachments,
-  handleRemoveAttachment,
-  handleAttachButtonClick,
   canEditAgents,
   handleCancelRuns,
   cancelState,
@@ -581,12 +553,6 @@ export function TalkTabContent({
 
             <TalkComposer
               handleSend={handleSend}
-              fileInputRef={fileInputRef}
-              ALLOWED_ATTACHMENT_EXTENSIONS={ALLOWED_ATTACHMENT_EXTENSIONS}
-              handleFileInputChange={handleFileInputChange}
-              GREENFIELD_MESSAGE_ATTACHMENTS_ENABLED={
-                GREENFIELD_MESSAGE_ATTACHMENTS_ENABLED
-              }
               effectiveAgents={effectiveAgents}
               targetAgentIds={targetAgentIds}
               talkAgentExecutionGuardrailsById={
@@ -611,9 +577,6 @@ export function TalkTabContent({
               activeRound={activeRound}
               hasUnsavedAgentChanges={hasUnsavedAgentChanges}
               activeConversationId={activeConversationId}
-              pendingAttachments={pendingAttachments}
-              handleRemoveAttachment={handleRemoveAttachment}
-              handleAttachButtonClick={handleAttachButtonClick}
               canEditAgents={canEditAgents}
               handleCancelRuns={handleCancelRuns}
               cancelState={cancelState}

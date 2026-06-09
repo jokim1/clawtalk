@@ -19,7 +19,6 @@ import {
 import {
   cancelTalkRuns,
   sendTalkMessage,
-  uploadTalkAttachment,
   UnauthorizedError,
   type ContextSource,
   type Talk,
@@ -32,56 +31,6 @@ import type { TalkDetailTabKey } from './useTalkDetailTabs';
 const TALK_MESSAGE_MAX_CHARS = 20_000;
 const COMPOSER_TEXTAREA_MIN_HEIGHT_PX = 48;
 const COMPOSER_TEXTAREA_MAX_HEIGHT_PX = 240;
-const GREENFIELD_MESSAGE_ATTACHMENTS_ENABLED = false;
-const ALLOWED_ATTACHMENT_EXTENSIONS =
-  '.txt,.md,.csv,.html,.rtf,' +
-  '.json,.xml,.yaml,.yml,.py,.js,.ts,.jsx,.tsx,.java,.c,.h,.cpp,.hpp,.go,.rs,.sh,.bash,.sql,.rb,.php,.swift,.kt,.lua,.r,.toml,.ini,.cfg,.env,.log,' +
-  '.pdf,.docx,.xlsx,.pptx,.png,.jpg,.jpeg,.webp';
-const ALLOWED_ATTACHMENT_MIMES = new Set([
-  // Text-based (existing)
-  'text/plain',
-  'text/markdown',
-  'text/csv',
-  'text/html',
-  // NEW: RTF
-  'text/rtf',
-  'application/rtf',
-  // NEW: Code / structured data (treated as plain text)
-  'text/xml',
-  'application/json',
-  'application/xml',
-  'text/yaml',
-  'text/x-yaml',
-  'application/x-yaml',
-  'text/x-python',
-  'text/x-java',
-  'text/javascript',
-  'application/javascript',
-  'text/typescript',
-  'text/x-c',
-  'text/x-c++',
-  'text/x-go',
-  'text/x-rust',
-  'text/x-shellscript',
-  'text/x-sql',
-  // Documents (existing + PPTX)
-  'application/pdf',
-  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-  'application/vnd.openxmlformats-officedocument.presentationml.presentation',
-  'image/png',
-  'image/jpeg',
-  'image/webp',
-]);
-const IMAGE_ATTACHMENT_MIMES = new Set([
-  'image/png',
-  'image/jpeg',
-  'image/webp',
-]);
-const MAX_ATTACHMENT_SIZE = 10 * 1024 * 1024;
-const MAX_IMAGE_ATTACHMENT_SIZE = 5 * 1024 * 1024;
-const MAX_ATTACHMENTS_PER_MESSAGE = 5;
-const MAX_IMAGE_ATTACHMENTS_PER_MESSAGE = 3;
 
 type PageKind = 'loading' | 'ready' | 'unavailable' | 'error';
 
@@ -93,27 +42,13 @@ type RetryRunState = {
 
 type MentionState = { atIndex: number; selectedIndex: number } | null;
 
-export type PendingComposerAttachment = {
-  localId: string;
-  file: File;
-  fileName: string;
-  fileSize: number;
-  mimeType: string;
-  isImage: boolean;
-  previewUrl?: string;
-  status: 'uploading' | 'ready' | 'error';
-  attachmentId?: string;
-  errorMessage?: string;
-};
-
 type ComposerInputControllerInput = {
   pageKind: PageKind;
-  pageTalk: Talk | null;
   activeConversationId: string | null;
   currentTab: TalkDetailTabKey;
+  contextSources: ContextSource[];
   sendState: DetailState['sendState'];
   dispatch: Dispatch<DetailAction>;
-  contextSources: ContextSource[];
   // The Talk's primary native document title for the `@doc` mention, or null
   // when no document is attached. No content body facade is read here.
   documentTitle: string | null;
@@ -143,10 +78,6 @@ type SendControllerInput = {
   composer: {
     draft: string;
     setDraft: Dispatch<SetStateAction<string>>;
-    pendingAttachments: PendingComposerAttachment[];
-    setPendingAttachments: Dispatch<
-      SetStateAction<PendingComposerAttachment[]>
-    >;
     mentionState: MentionState;
     mentionOptions: SourceMentionOption[];
     insertMentionOption: (option: SourceMentionOption) => void;
@@ -154,61 +85,23 @@ type SendControllerInput = {
   };
 };
 
-function hasFileTransfer(
-  dataTransfer: DataTransfer | null | undefined,
-): boolean {
-  if (!dataTransfer) return false;
-  if (dataTransfer.files.length > 0) return true;
-
-  const { types } = dataTransfer;
-  if (!types) return false;
-
-  const domTypes = types as unknown as DOMStringList;
-  if (typeof domTypes.contains === 'function') {
-    return domTypes.contains('Files');
-  }
-
-  return Array.from(types as ArrayLike<string>).includes('Files');
-}
-
-function inferAttachmentMimeType(file: File): string {
-  if (ALLOWED_ATTACHMENT_MIMES.has(file.type)) {
-    return file.type;
-  }
-  const lowerName = file.name.toLowerCase();
-  if (lowerName.endsWith('.png')) return 'image/png';
-  if (lowerName.endsWith('.jpg') || lowerName.endsWith('.jpeg')) {
-    return 'image/jpeg';
-  }
-  if (lowerName.endsWith('.webp')) return 'image/webp';
-  return file.type;
-}
-
 export function useTalkComposerInputController({
   pageKind,
-  pageTalk,
   activeConversationId,
   currentTab,
+  contextSources,
   sendState,
   dispatch,
-  contextSources,
   documentTitle,
 }: ComposerInputControllerInput) {
   const [draft, setDraft] = useState('');
-  const [pendingAttachments, setPendingAttachments] = useState<
-    PendingComposerAttachment[]
-  >([]);
   // Composer `@`-mention typeahead. Tracks the live `@` index in the
   // draft and the active picker selection. Opens when @ lands at a word
   // boundary AND the Talk has an attached doc OR at least one ready
   // saved source. The popover offers `@doc` (if applicable) plus every
   // ready source filtered by the chars typed after `@`.
   const [mentionState, setMentionState] = useState<MentionState>(null);
-  const [isDragOver, setIsDragOver] = useState(false);
-  const fileInputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
-  const pendingAttachmentsRef = useRef(pendingAttachments);
-  const dragCounterRef = useRef(0);
 
   const mentionFilter = useMemo(() => {
     if (!mentionState) return '';
@@ -345,272 +238,15 @@ export function useTalkComposerInputController({
     pageKind,
   ]);
 
-  const handleFilesSelected = useCallback(
-    async (files: FileList | File[]) => {
-      if (!pageTalk || !GREENFIELD_MESSAGE_ATTACHMENTS_ENABLED) return;
-      const fileArray = Array.from(files);
-      const currentCount = pendingAttachments.length;
-      if (currentCount + fileArray.length > MAX_ATTACHMENTS_PER_MESSAGE) {
-        dispatch({
-          type: 'SEND_FAILED',
-          message: `You can attach up to ${MAX_ATTACHMENTS_PER_MESSAGE} files per message.`,
-          lastDraft: draft,
-        });
-        return;
-      }
-
-      const currentImageCount = pendingAttachments.filter(
-        (attachment) => attachment.isImage,
-      ).length;
-      const incomingImageCount = fileArray.filter((file) =>
-        IMAGE_ATTACHMENT_MIMES.has(inferAttachmentMimeType(file)),
-      ).length;
-      if (
-        currentImageCount + incomingImageCount >
-        MAX_IMAGE_ATTACHMENTS_PER_MESSAGE
-      ) {
-        dispatch({
-          type: 'SEND_FAILED',
-          message: `You can attach up to ${MAX_IMAGE_ATTACHMENTS_PER_MESSAGE} images per message.`,
-          lastDraft: draft,
-        });
-        return;
-      }
-
-      for (const file of fileArray) {
-        const mimeType = inferAttachmentMimeType(file);
-        const isImage = IMAGE_ATTACHMENT_MIMES.has(mimeType);
-
-        if (!ALLOWED_ATTACHMENT_MIMES.has(mimeType) && file.type !== '') {
-          dispatch({
-            type: 'SEND_FAILED',
-            message: `File type "${file.type}" is not supported. Supported: text, markdown, CSV, HTML, RTF, PDF, DOCX, XLSX, PPTX, PNG, JPEG, WEBP, and common code/config files.`,
-            lastDraft: draft,
-          });
-          continue;
-        }
-        const maxSize = isImage
-          ? MAX_IMAGE_ATTACHMENT_SIZE
-          : MAX_ATTACHMENT_SIZE;
-        if (file.size > maxSize) {
-          dispatch({
-            type: 'SEND_FAILED',
-            message: `"${file.name}" exceeds the ${maxSize / (1024 * 1024)} MB size limit.`,
-            lastDraft: draft,
-          });
-          continue;
-        }
-
-        const localId = `local-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-        const previewUrl = isImage ? URL.createObjectURL(file) : undefined;
-        setPendingAttachments((prev) => [
-          ...prev,
-          {
-            localId,
-            file,
-            fileName: file.name,
-            fileSize: file.size,
-            mimeType,
-            isImage,
-            previewUrl,
-            status: 'uploading',
-          },
-        ]);
-
-        try {
-          const result = await uploadTalkAttachment(pageTalk.id, file);
-          setPendingAttachments((prev) =>
-            prev.map((a) =>
-              a.localId === localId
-                ? {
-                    ...a,
-                    status: 'ready' as const,
-                    attachmentId: result.attachment.id,
-                  }
-                : a,
-            ),
-          );
-        } catch (err) {
-          setPendingAttachments((prev) =>
-            prev.map((a) =>
-              a.localId === localId
-                ? {
-                    ...a,
-                    status: 'error' as const,
-                    errorMessage:
-                      err instanceof Error ? err.message : 'Upload failed',
-                  }
-                : a,
-            ),
-          );
-        }
-      }
-    },
-    [dispatch, draft, pageTalk, pendingAttachments],
-  );
-
-  const handleRemoveAttachment = useCallback((localId: string) => {
-    setPendingAttachments((prev) => {
-      const next: typeof prev = [];
-      for (const attachment of prev) {
-        if (attachment.localId === localId) {
-          if (attachment.previewUrl) {
-            URL.revokeObjectURL(attachment.previewUrl);
-          }
-          continue;
-        }
-        next.push(attachment);
-      }
-      return next;
-    });
-  }, []);
-
-  const handleAttachButtonClick = useCallback(() => {
-    if (!GREENFIELD_MESSAGE_ATTACHMENTS_ENABLED) return;
-    fileInputRef.current?.click();
-  }, []);
-
-  const handleFileInputChange = useCallback(
-    (event: React.ChangeEvent<HTMLInputElement>) => {
-      if (event.target.files && event.target.files.length > 0) {
-        void handleFilesSelected(event.target.files);
-        event.target.value = '';
-      }
-    },
-    [handleFilesSelected],
-  );
-
-  useEffect(() => {
-    pendingAttachmentsRef.current = pendingAttachments;
-  }, [pendingAttachments]);
-
-  const handleDragEnter = useCallback((event: React.DragEvent) => {
-    event.preventDefault();
-    event.stopPropagation();
-    if (!GREENFIELD_MESSAGE_ATTACHMENTS_ENABLED) return;
-    dragCounterRef.current += 1;
-    if (hasFileTransfer(event.dataTransfer)) {
-      setIsDragOver(true);
-    }
-  }, []);
-
-  const handleDragLeave = useCallback((event: React.DragEvent) => {
-    event.preventDefault();
-    event.stopPropagation();
-    if (!GREENFIELD_MESSAGE_ATTACHMENTS_ENABLED) return;
-    dragCounterRef.current = Math.max(0, dragCounterRef.current - 1);
-    if (dragCounterRef.current === 0) {
-      setIsDragOver(false);
-    }
-  }, []);
-
-  const handleDragOver = useCallback((event: React.DragEvent) => {
-    event.preventDefault();
-    event.stopPropagation();
-    if (
-      GREENFIELD_MESSAGE_ATTACHMENTS_ENABLED &&
-      hasFileTransfer(event.dataTransfer)
-    ) {
-      event.dataTransfer.dropEffect = 'copy';
-    }
-  }, []);
-
-  const handleDrop = useCallback(
-    (event: React.DragEvent) => {
-      event.preventDefault();
-      event.stopPropagation();
-      dragCounterRef.current = 0;
-      setIsDragOver(false);
-      if (
-        GREENFIELD_MESSAGE_ATTACHMENTS_ENABLED &&
-        event.dataTransfer.files.length > 0
-      ) {
-        void handleFilesSelected(event.dataTransfer.files);
-      }
-    },
-    [handleFilesSelected],
-  );
-
-  useEffect(() => {
-    return () => {
-      pendingAttachmentsRef.current.forEach((attachment) => {
-        if (attachment.previewUrl) {
-          URL.revokeObjectURL(attachment.previewUrl);
-        }
-      });
-    };
-  }, []);
-
-  useEffect(() => {
-    // Always start a tab visit with a clean drag-overlay state — even
-    // when we just switched TO 'talk'. The workspace dragCounter can
-    // stick at >0 if a child dropzone in another tab (e.g. the Context
-    // tab's SavedSourcesPanel) stops propagation on its own drop,
-    // leaving the workspace's matching dragLeave unfired. Without this
-    // reset, switching back to the Talk tab would re-render the
-    // overlay with no live drag in progress.
-    dragCounterRef.current = 0;
-    setIsDragOver(false);
-
-    if (currentTab !== 'talk') return;
-
-    const preventWindowFileNavigation = (event: DragEvent) => {
-      if (!hasFileTransfer(event.dataTransfer)) return;
-      event.preventDefault();
-      if (event.dataTransfer) {
-        event.dataTransfer.dropEffect = GREENFIELD_MESSAGE_ATTACHMENTS_ENABLED
-          ? 'copy'
-          : 'none';
-      }
-      if (event.type === 'drop') {
-        dragCounterRef.current = 0;
-        setIsDragOver(false);
-      }
-    };
-
-    window.addEventListener('dragenter', preventWindowFileNavigation, true);
-    window.addEventListener('dragover', preventWindowFileNavigation, true);
-    window.addEventListener('drop', preventWindowFileNavigation, true);
-
-    return () => {
-      window.removeEventListener(
-        'dragenter',
-        preventWindowFileNavigation,
-        true,
-      );
-      window.removeEventListener('dragover', preventWindowFileNavigation, true);
-      window.removeEventListener('drop', preventWindowFileNavigation, true);
-    };
-  }, [currentTab]);
-
-  const hasPendingImageAttachments = useMemo(
-    () => pendingAttachments.some((attachment) => attachment.isImage),
-    [pendingAttachments],
-  );
-
   return {
     draft,
     setDraft,
-    fileInputRef,
     textareaRef,
     mentionState,
     mentionOptions,
     insertMentionOption,
     setMentionState,
     handleDraftChange,
-    pendingAttachments,
-    setPendingAttachments,
-    handleFileInputChange,
-    handleRemoveAttachment,
-    handleAttachButtonClick,
-    isDragOver,
-    handleDragEnter,
-    handleDragLeave,
-    handleDragOver,
-    handleDrop,
-    hasPendingImageAttachments,
-    ALLOWED_ATTACHMENT_EXTENSIONS,
-    GREENFIELD_MESSAGE_ATTACHMENTS_ENABLED,
     TALK_MESSAGE_MAX_CHARS,
   };
 }
@@ -655,11 +291,7 @@ export function useTalkSendController({
   );
 
   const queueTalkMessage = useCallback(
-    async (input: {
-      content: string;
-      targetAgentIds: string[];
-      attachmentIds?: string[];
-    }) => {
+    async (input: { content: string; targetAgentIds: string[] }) => {
       if (pageKind !== 'ready' || !pageTalk || !activeConversationId) {
         throw new Error('Conversation unavailable.');
       }
@@ -669,7 +301,6 @@ export function useTalkSendController({
         talkId: pageTalk.id,
         content: input.content,
         targetAgentIds: input.targetAgentIds,
-        attachmentIds: input.attachmentIds,
       });
       // The user just submitted — show them where their message landed, even
       // if they were scrolled up reading earlier history. Mark them following
@@ -770,36 +401,13 @@ export function useTalkSendController({
       return;
     }
 
-    // Collect ready attachment IDs
-    const readyAttachments = composer.pendingAttachments.filter(
-      (a) => a.status === 'ready' && a.attachmentId,
-    );
-    const stillUploading = composer.pendingAttachments.some(
-      (a) => a.status === 'uploading',
-    );
-    if (stillUploading) {
-      dispatch({
-        type: 'SEND_FAILED',
-        message: 'Wait for file uploads to finish before sending.',
-        lastDraft: content,
-      });
-      return;
-    }
-
     dispatch({ type: 'SEND_STARTED' });
     try {
       await queueTalkMessage({
         content,
         targetAgentIds,
-        attachmentIds: readyAttachments.map((a) => a.attachmentId!),
-      });
-      composer.pendingAttachments.forEach((attachment) => {
-        if (attachment.previewUrl) {
-          URL.revokeObjectURL(attachment.previewUrl);
-        }
       });
       composer.setDraft('');
-      composer.setPendingAttachments([]);
       dispatch({ type: 'SEND_CLEARED' });
     } catch (err) {
       if (err instanceof UnauthorizedError) {

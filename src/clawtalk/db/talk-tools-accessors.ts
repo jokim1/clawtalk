@@ -21,7 +21,6 @@ type JsonMap = Record<string, unknown>;
 
 export type TalkToolFamily =
   | 'saved_sources'
-  | 'attachments'
   | 'web'
   | 'gmail'
   | 'google_drive'
@@ -33,8 +32,7 @@ export type TalkResourceBindingKind =
   | 'google_drive_folder'
   | 'google_drive_file'
   | 'data_connector'
-  | 'saved_source'
-  | 'message_attachment';
+  | 'saved_source';
 
 export interface BuiltinTalkToolDefinition {
   id: string;
@@ -57,16 +55,6 @@ export const BUILTIN_TALK_TOOLS: ReadonlyArray<BuiltinTalkToolDefinition> = [
     defaultGrant: true,
     mutatesExternalState: false,
     sortOrder: 10,
-  },
-  {
-    id: 'attachments',
-    family: 'attachments',
-    displayName: 'Message Attachments',
-    description: 'Read attached Talk files.',
-    requiresBinding: false,
-    defaultGrant: true,
-    mutatesExternalState: false,
-    sortOrder: 20,
   },
   {
     id: 'web_search',

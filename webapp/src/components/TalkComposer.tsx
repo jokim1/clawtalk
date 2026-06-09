@@ -1,5 +1,4 @@
 import type {
-  ChangeEvent,
   Dispatch,
   FormEvent,
   KeyboardEvent as ReactKeyboardEvent,
@@ -34,33 +33,6 @@ type ComposerHistoryEditState = {
   message?: string;
 };
 type ComposerMentionState = { atIndex: number; selectedIndex: number } | null;
-type ComposerPendingAttachment = {
-  localId: string;
-  file: File;
-  fileName: string;
-  fileSize: number;
-  mimeType: string;
-  isImage: boolean;
-  previewUrl?: string;
-  status: 'uploading' | 'ready' | 'error';
-  attachmentId?: string;
-  errorMessage?: string;
-};
-
-function ComposerAttachIcon(): JSX.Element {
-  return (
-    <svg viewBox="0 0 16 16" focusable="false" aria-hidden="true">
-      <path
-        d="M9.95 3.05a2.75 2.75 0 0 1 3.89 3.89L7.42 13.37a4 4 0 1 1-5.66-5.66l6.19-6.19a2.5 2.5 0 1 1 3.53 3.53L5.64 10.9a1.25 1.25 0 1 1-1.77-1.77l5.13-5.13"
-        fill="none"
-        stroke="currentColor"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        strokeWidth="1.4"
-      />
-    </svg>
-  );
-}
 
 function ComposerCancelRunsIcon(): JSX.Element {
   return (
@@ -101,10 +73,6 @@ function buildAgentChipLabel(agent: Pick<TalkAgent, 'nickname'>): string {
 
 type TalkComposerProps = {
   handleSend: (event: FormEvent) => void;
-  fileInputRef: RefObject<HTMLInputElement>;
-  ALLOWED_ATTACHMENT_EXTENSIONS: string;
-  handleFileInputChange: (event: ChangeEvent<HTMLInputElement>) => void;
-  GREENFIELD_MESSAGE_ATTACHMENTS_ENABLED: boolean;
   effectiveAgents: TalkAgent[];
   targetAgentIds: string[];
   talkAgentExecutionGuardrailsById: Record<string, TalkAgentExecutionGuardrail>;
@@ -129,9 +97,6 @@ type TalkComposerProps = {
   activeRound: boolean;
   hasUnsavedAgentChanges: boolean;
   activeConversationId: string | null;
-  pendingAttachments: ComposerPendingAttachment[];
-  handleRemoveAttachment: (localId: string) => void;
-  handleAttachButtonClick: () => void;
   canEditAgents: boolean;
   handleCancelRuns: () => void;
   cancelState: ComposerCancelState;
@@ -141,18 +106,12 @@ type TalkComposerProps = {
 
 /**
  * Presentational message composer (target chips, char count, guardrail banner,
- * @-mention textarea, attachment chips, attach/cancel/send actions). Every
- * piece of mutation-written state (draft, mentionState, pendingAttachments,
- * targetAgentIds, send/cancel reducer state) stays page-owned and is threaded
- * in; the page also keeps the textarea/file refs (the @-mention cursor math +
- * autosize effects read them). The composer is pure render + callbacks.
+ * @-mention textarea, cancel/send actions). Mutation-written state stays
+ * page-owned and is threaded in; the page also keeps the textarea ref because
+ * the @-mention cursor math and autosize effects read it.
  */
 export function TalkComposer({
   handleSend,
-  fileInputRef,
-  ALLOWED_ATTACHMENT_EXTENSIONS,
-  handleFileInputChange,
-  GREENFIELD_MESSAGE_ATTACHMENTS_ENABLED,
   effectiveAgents,
   targetAgentIds,
   talkAgentExecutionGuardrailsById,
@@ -175,9 +134,6 @@ export function TalkComposer({
   activeRound,
   hasUnsavedAgentChanges,
   activeConversationId,
-  pendingAttachments,
-  handleRemoveAttachment,
-  handleAttachButtonClick,
   canEditAgents,
   handleCancelRuns,
   cancelState,
@@ -186,15 +142,6 @@ export function TalkComposer({
 }: TalkComposerProps): JSX.Element {
   return (
     <form className="composer talk-workspace-composer" onSubmit={handleSend}>
-      <input
-        ref={fileInputRef}
-        type="file"
-        multiple
-        accept={ALLOWED_ATTACHMENT_EXTENSIONS}
-        onChange={handleFileInputChange}
-        disabled={!GREENFIELD_MESSAGE_ATTACHMENTS_ENABLED}
-        style={{ display: 'none' }}
-      />
       <div
         className="composer-targets"
         role="group"
@@ -285,66 +232,8 @@ export function TalkComposer({
           }
         />
 
-        {pendingAttachments.length > 0 ? (
-          <div className="composer-attachments">
-            {pendingAttachments.map((att) => (
-              <span
-                key={att.localId}
-                className={`composer-attachment-chip composer-attachment-${att.status}`}
-                title={att.status === 'error' ? att.errorMessage : att.fileName}
-              >
-                {att.isImage && att.previewUrl ? (
-                  <img
-                    src={att.previewUrl}
-                    alt={att.fileName}
-                    className="composer-attachment-preview"
-                  />
-                ) : null}
-                <span className="composer-attachment-name">{att.fileName}</span>
-                {att.status === 'uploading' ? (
-                  <span className="composer-attachment-status">
-                    {' '}
-                    uploading…
-                  </span>
-                ) : null}
-                {att.status === 'error' ? (
-                  <span className="composer-attachment-status"> failed</span>
-                ) : null}
-                <button
-                  type="button"
-                  className="composer-attachment-remove"
-                  onClick={() => handleRemoveAttachment(att.localId)}
-                  aria-label={`Remove ${att.fileName}`}
-                >
-                  ×
-                </button>
-              </span>
-            ))}
-          </div>
-        ) : null}
-
         <div className="composer-controls">
           <div className="composer-tool-buttons">
-            <button
-              type="button"
-              className="composer-icon-btn composer-attach-btn"
-              onClick={handleAttachButtonClick}
-              disabled={
-                sendState.status === 'posting' ||
-                activeRound ||
-                hasUnsavedAgentChanges ||
-                !activeConversationId ||
-                !GREENFIELD_MESSAGE_ATTACHMENTS_ENABLED
-              }
-              aria-label="Attach"
-              title={
-                GREENFIELD_MESSAGE_ATTACHMENTS_ENABLED
-                  ? 'Attach files'
-                  : 'Attachments unavailable'
-              }
-            >
-              <ComposerAttachIcon />
-            </button>
             {canEditAgents && activeRound ? (
               <button
                 type="button"

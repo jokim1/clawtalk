@@ -714,7 +714,6 @@ describe('worker-app — chat enqueue mount (Queues port U2)', () => {
           body: JSON.stringify({
             content: 42,
             targetAgentIds: [],
-            attachmentIds: [],
           }),
         },
       ),
@@ -754,119 +753,6 @@ describe('worker-app — chat enqueue mount (Queues port U2)', () => {
     expect(res.status).toBe(400);
     const body = (await res.json()) as { error?: { code?: string } };
     expect(body.error?.code).toBe('invalid_target_agent_id');
-  });
-
-  it('POST /api/v1/talks/:talkId/chat rejects non-string attachmentIds before dispatch', async () => {
-    const app = getWorkerApp();
-    const jwt = await mintJwt();
-    const csrf = 'csrf-chat-attachments';
-    const res = await app.request(
-      new Request(
-        'https://app.test/api/v1/talks/00000000-0000-4000-8000-000000000aaa/chat',
-        {
-          method: 'POST',
-          headers: {
-            cookie: `${ACCESS_TOKEN_COOKIE}=${jwt}; ${CSRF_TOKEN_COOKIE}=${csrf}`,
-            'x-csrf-token': csrf,
-            'content-type': 'application/json',
-          },
-          body: JSON.stringify({
-            content: 'hi',
-            attachmentIds: [123],
-          }),
-        },
-      ),
-      undefined,
-      envForWorker(),
-    );
-
-    expect(res.status).toBe(400);
-    const body = (await res.json()) as { error?: { code?: string } };
-    expect(body.error?.code).toBe('invalid_attachment_id');
-  });
-
-  it('POST /api/v1/talks/:talkId/chat rejects nonempty attachmentIds as unavailable', async () => {
-    const app = getWorkerApp();
-    const jwt = await mintJwt();
-    const csrf = 'csrf-chat-attachments-unavailable';
-    const res = await app.request(
-      new Request(
-        'https://app.test/api/v1/talks/00000000-0000-4000-8000-000000000aaa/chat',
-        {
-          method: 'POST',
-          headers: {
-            cookie: `${ACCESS_TOKEN_COOKIE}=${jwt}; ${CSRF_TOKEN_COOKIE}=${csrf}`,
-            'x-csrf-token': csrf,
-            'content-type': 'application/json',
-          },
-          body: JSON.stringify({
-            content: 'hi',
-            attachmentIds: ['00000000-0000-4000-8000-000000000abc'],
-          }),
-        },
-      ),
-      undefined,
-      envForWorker(),
-    );
-
-    expect(res.status).toBe(400);
-    const body = (await res.json()) as { error?: { code?: string } };
-    expect(body.error?.code).toBe('attachments_not_available');
-  });
-});
-
-describe('worker-app — greenfield attachment guard', () => {
-  it('POST /api/v1/talks/:talkId/attachments returns structured unavailable', async () => {
-    const app = getWorkerApp();
-    const jwt = await mintJwt();
-    const csrf = 'csrf-attachments';
-    const form = new FormData();
-    form.set('file', new File(['hello'], 'hello.txt', { type: 'text/plain' }));
-
-    const res = await app.request(
-      new Request(
-        'https://app.test/api/v1/talks/00000000-0000-4000-8000-000000000aaa/attachments',
-        {
-          method: 'POST',
-          headers: {
-            cookie: `${ACCESS_TOKEN_COOKIE}=${jwt}; ${CSRF_TOKEN_COOKIE}=${csrf}`,
-            'x-csrf-token': csrf,
-          },
-          body: form,
-        },
-      ),
-      undefined,
-      envForWorker(),
-    );
-
-    expect(res.status).toBe(501);
-    const body = (await res.json()) as { error?: { code?: string } };
-    expect(body.error?.code).toBe('attachments_not_available');
-  });
-
-  it('DELETE /api/v1/talks/:talkId/attachments/:attachmentId returns structured unavailable', async () => {
-    const app = getWorkerApp();
-    const jwt = await mintJwt();
-    const csrf = 'csrf-attachments-delete';
-
-    const res = await app.request(
-      new Request(
-        'https://app.test/api/v1/talks/00000000-0000-4000-8000-000000000aaa/attachments/00000000-0000-4000-8000-000000000bbb',
-        {
-          method: 'DELETE',
-          headers: {
-            cookie: `${ACCESS_TOKEN_COOKIE}=${jwt}; ${CSRF_TOKEN_COOKIE}=${csrf}`,
-            'x-csrf-token': csrf,
-          },
-        },
-      ),
-      undefined,
-      envForWorker(),
-    );
-
-    expect(res.status).toBe(501);
-    const body = (await res.json()) as { error?: { code?: string } };
-    expect(body.error?.code).toBe('attachments_not_available');
   });
 });
 

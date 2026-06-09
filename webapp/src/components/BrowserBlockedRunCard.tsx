@@ -74,13 +74,6 @@ function getDecisionSummary(
   return `${backend} via ${auth}`;
 }
 
-function buildTalkAttachmentContentUrl(
-  talkId: string,
-  attachmentId: string,
-): string {
-  return `/api/v1/talks/${encodeURIComponent(talkId)}/attachments/${encodeURIComponent(attachmentId)}/content`;
-}
-
 function describeArtifact(
   artifact: BrowserBlockArtifact,
   talkId?: string | null,
@@ -89,8 +82,8 @@ function describeArtifact(
   if (talkId && artifact.attachmentId) {
     return {
       label,
-      href: buildTalkAttachmentContentUrl(talkId, artifact.attachmentId),
-      detail: artifact.contentType || null,
+      href: null,
+      detail: artifact.contentType || artifact.attachmentId,
     };
   }
 

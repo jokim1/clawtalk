@@ -176,13 +176,6 @@ function toMessageApi(message: GreenfieldMessageRecord): {
   agentId: string | null;
   agentNickname: string | null;
   metadata: Record<string, unknown> | null;
-  attachments: Array<{
-    id: string;
-    fileName: string;
-    fileSize: number;
-    mimeType: string;
-    extractionStatus: 'pending' | 'ready' | 'failed';
-  }>;
 } {
   return {
     id: message.id,
@@ -198,7 +191,6 @@ function toMessageApi(message: GreenfieldMessageRecord): {
       authorKind: message.author_kind,
       agentRole: message.agent_role_key,
     },
-    attachments: [],
   };
 }
 
