@@ -35,9 +35,16 @@ import {
 } from '../../talks/greenfield-accessors.js';
 import { emitOutboxEvent } from '../../talks/outbox-emit.js';
 import {
+  addExistingWorkspaceMember,
   getWorkspaceUser,
+  listWorkspaceMembers,
   listWorkspacesForUser,
+  removeWorkspaceMember,
   resolveWorkspaceForUser,
+  transferWorkspaceOwnership,
+  updateWorkspaceMemberRole,
+  type WorkspaceMemberRecord,
+  type WorkspaceRole,
   type WorkspaceSummaryRecord,
   type WorkspaceUserRecord,
 } from '../../workspaces/accessors.js';
@@ -102,6 +109,28 @@ function requireWorkspaceWriter(
     403,
     'workspace_writer_required',
     'Workspace write access is required.',
+  );
+}
+
+function requireWorkspaceAdmin(
+  workspace: WorkspaceSummaryRecord,
+): RouteResult<never> | null {
+  if (workspace.role === 'owner' || workspace.role === 'admin') return null;
+  return error(
+    403,
+    'workspace_admin_required',
+    'Workspace admin access is required.',
+  );
+}
+
+function requireWorkspaceOwner(
+  workspace: WorkspaceSummaryRecord,
+): RouteResult<never> | null {
+  if (workspace.role === 'owner') return null;
+  return error(
+    403,
+    'workspace_owner_required',
+    'Workspace owner access is required.',
   );
 }
 
@@ -213,6 +242,28 @@ function toSessionMePayload(input: {
       initials: workspace.initials || workspace.name.slice(0, 2).toUpperCase(),
     })),
     currentWorkspaceId: input.currentWorkspaceId,
+  };
+}
+
+function toWorkspaceMemberApiRecord(member: WorkspaceMemberRecord): {
+  workspaceId: string;
+  userId: string;
+  email: string;
+  name: string;
+  avatarColor: string | null;
+  initials: string | null;
+  role: WorkspaceRole;
+  createdAt: string;
+} {
+  return {
+    workspaceId: member.workspace_id,
+    userId: member.user_id,
+    email: member.email,
+    name: member.name,
+    avatarColor: member.avatar_color,
+    initials: member.initials,
+    role: member.role,
+    createdAt: member.created_at,
   };
 }
 
@@ -502,6 +553,191 @@ export async function switchGreenfieldWorkspaceRoute(input: {
   return withResolvedWorkspace(input.auth, input.workspaceId, async (ctx) =>
     ok({ currentWorkspaceId: ctx.workspace.id }),
   );
+}
+
+export async function listWorkspaceMembersRoute(input: {
+  auth: AuthContext;
+  workspaceId?: string | null;
+}): Promise<
+  RouteResult<{ members: ReturnType<typeof toWorkspaceMemberApiRecord>[] }>
+> {
+  if (!input.workspaceId || !isUuid(input.workspaceId)) {
+    return error(
+      400,
+      'workspace_id_required',
+      'A valid workspaceId is required.',
+    );
+  }
+  return withResolvedWorkspace(input.auth, input.workspaceId, async (ctx) => {
+    const members = await listWorkspaceMembers({
+      workspaceId: ctx.workspace.id,
+    });
+    return ok({ members: members.map(toWorkspaceMemberApiRecord) });
+  });
+}
+
+export async function inviteWorkspaceMemberRoute(input: {
+  auth: AuthContext;
+  workspaceId?: string | null;
+  body: { email?: unknown; role?: unknown };
+}): Promise<
+  RouteResult<{ member: ReturnType<typeof toWorkspaceMemberApiRecord> }>
+> {
+  if (!input.workspaceId || !isUuid(input.workspaceId)) {
+    return error(
+      400,
+      'workspace_id_required',
+      'A valid workspaceId is required.',
+    );
+  }
+  const email =
+    typeof input.body.email === 'string' ? input.body.email.trim() : '';
+  if (
+    !email ||
+    email.length > 320 ||
+    !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)
+  ) {
+    return error(400, 'invalid_email', 'A valid email address is required.');
+  }
+  const role = input.body.role ?? 'member';
+  if (role !== 'admin' && role !== 'member' && role !== 'guest') {
+    return error(400, 'invalid_role', 'Role must be admin, member, or guest.');
+  }
+
+  return withResolvedWorkspace(input.auth, input.workspaceId, async (ctx) => {
+    const adminError = requireWorkspaceAdmin(ctx.workspace);
+    if (adminError) return adminError;
+    const result = await addExistingWorkspaceMember({
+      workspaceId: ctx.workspace.id,
+      email,
+      role,
+    });
+    if (!result.ok) {
+      return error(result.statusCode, result.code, result.message);
+    }
+    return ok({ member: toWorkspaceMemberApiRecord(result.data.member) }, 201);
+  });
+}
+
+export async function updateWorkspaceMemberRoleRoute(input: {
+  auth: AuthContext;
+  workspaceId?: string | null;
+  userId?: string | null;
+  body: { role?: unknown };
+}): Promise<
+  RouteResult<{ member: ReturnType<typeof toWorkspaceMemberApiRecord> }>
+> {
+  if (!input.workspaceId || !isUuid(input.workspaceId)) {
+    return error(
+      400,
+      'workspace_id_required',
+      'A valid workspaceId is required.',
+    );
+  }
+  if (!input.userId || !isUuid(input.userId)) {
+    return error(400, 'user_id_required', 'A valid userId is required.');
+  }
+  const role = input.body.role;
+  if (role !== 'admin' && role !== 'member' && role !== 'guest') {
+    return error(
+      400,
+      'invalid_role',
+      'Role must be admin, member, or guest. Use transfer ownership for owners.',
+    );
+  }
+
+  return withResolvedWorkspace(input.auth, input.workspaceId, async (ctx) => {
+    const adminError = requireWorkspaceAdmin(ctx.workspace);
+    if (adminError) return adminError;
+    const result = await updateWorkspaceMemberRole({
+      workspaceId: ctx.workspace.id,
+      userId: input.userId!,
+      role,
+    });
+    if (!result.ok) {
+      return error(result.statusCode, result.code, result.message);
+    }
+    return ok({ member: toWorkspaceMemberApiRecord(result.data.member) });
+  });
+}
+
+export async function removeWorkspaceMemberRoute(input: {
+  auth: AuthContext;
+  workspaceId?: string | null;
+  userId?: string | null;
+}): Promise<RouteResult<{ removed: true }>> {
+  if (!input.workspaceId || !isUuid(input.workspaceId)) {
+    return error(
+      400,
+      'workspace_id_required',
+      'A valid workspaceId is required.',
+    );
+  }
+  if (!input.userId || !isUuid(input.userId)) {
+    return error(400, 'user_id_required', 'A valid userId is required.');
+  }
+  return withResolvedWorkspace(input.auth, input.workspaceId, async (ctx) => {
+    const adminError = requireWorkspaceAdmin(ctx.workspace);
+    if (adminError) return adminError;
+    const result = await removeWorkspaceMember({
+      workspaceId: ctx.workspace.id,
+      actorUserId: input.auth.userId,
+      userId: input.userId!,
+    });
+    if (!result.ok) {
+      return error(result.statusCode, result.code, result.message);
+    }
+    return ok(result.data);
+  });
+}
+
+export async function transferWorkspaceOwnershipRoute(input: {
+  auth: AuthContext;
+  workspaceId?: string | null;
+  body: { newOwnerUserId?: unknown };
+}): Promise<
+  RouteResult<{
+    workspaceId: string;
+    newOwnerUserId: string;
+    members: ReturnType<typeof toWorkspaceMemberApiRecord>[];
+  }>
+> {
+  if (!input.workspaceId || !isUuid(input.workspaceId)) {
+    return error(
+      400,
+      'workspace_id_required',
+      'A valid workspaceId is required.',
+    );
+  }
+  const newOwnerUserId =
+    typeof input.body.newOwnerUserId === 'string'
+      ? input.body.newOwnerUserId
+      : '';
+  if (!isUuid(newOwnerUserId)) {
+    return error(
+      400,
+      'new_owner_user_id_required',
+      'A valid newOwnerUserId is required.',
+    );
+  }
+
+  return withResolvedWorkspace(input.auth, input.workspaceId, async (ctx) => {
+    const ownerError = requireWorkspaceOwner(ctx.workspace);
+    if (ownerError) return ownerError;
+    const result = await transferWorkspaceOwnership({
+      workspaceId: ctx.workspace.id,
+      actorUserId: input.auth.userId,
+      newOwnerUserId,
+    });
+    if (!result.ok) {
+      return error(result.statusCode, result.code, result.message);
+    }
+    return ok({
+      workspaceId: result.data.workspaceId,
+      newOwnerUserId: result.data.newOwnerUserId,
+      members: result.data.members.map(toWorkspaceMemberApiRecord),
+    });
+  });
 }
 
 export async function listGreenfieldAgentsRoute(input: {

@@ -10,21 +10,26 @@ import {
   getGreenfieldMeRoute,
   getGreenfieldTalkRoute,
   getGreenfieldTalkToolsRoute,
+  inviteWorkspaceMemberRoute,
   listGreenfieldAgentsRoute,
   listGreenfieldFoldersRoute,
   listGreenfieldTalkAgentsRoute,
   listGreenfieldTalkSidebarRoute,
   listGreenfieldTalksRoute,
+  listWorkspaceMembersRoute,
   deleteGreenfieldFolderRoute,
   patchGreenfieldFolderRoute,
   patchGreenfieldTalkRoute,
   reorderGreenfieldTalkSidebarRoute,
+  removeWorkspaceMemberRoute,
+  transferWorkspaceOwnershipRoute,
   updateGreenfieldTalkAgentsRoute,
   updateGreenfieldTalkToolRoute,
+  updateWorkspaceMemberRoleRoute,
 } from './greenfield-core.js';
 
-const USER_ID = '0c929292-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
-const OTHER_USER_ID = '0c929292-bbbb-bbbb-bbbb-bbbbbbbbbbbb';
+const USER_ID = '0c929292-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+const OTHER_USER_ID = '0c929292-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
 const EXPECTED_TALK_TOOL_FAMILIES = [
   'web',
   'connectors',
@@ -484,6 +489,176 @@ describe('greenfield core routes', () => {
     expect(guestGet.statusCode).toBe(200);
     if (!guestGet.body.ok) throw new Error('Expected guest get to succeed');
     expect(guestGet.body.data.talk.accessRole).toBe('viewer');
+  });
+
+  it('manages existing signed-in workspace members and transfers ownership', async () => {
+    const workspaceId = await currentWorkspaceId();
+    await seedAuthUser(
+      OTHER_USER_ID,
+      'member-admin@clawtalk.local',
+      'Member Admin',
+    );
+
+    const invited = await inviteWorkspaceMemberRoute({
+      auth: auth(),
+      workspaceId,
+      body: {
+        email: 'member-admin@clawtalk.local',
+        role: 'member',
+      },
+    });
+    expect(invited.statusCode).toBe(201);
+    expect(invited.body).toMatchObject({
+      ok: true,
+      data: {
+        member: {
+          userId: OTHER_USER_ID,
+          email: 'member-admin@clawtalk.local',
+          name: 'Member Admin',
+          role: 'member',
+        },
+      },
+    });
+
+    const updated = await updateWorkspaceMemberRoleRoute({
+      auth: auth(),
+      workspaceId,
+      userId: OTHER_USER_ID,
+      body: { role: 'admin' },
+    });
+    expect(updated.statusCode).toBe(200);
+    expect(updated.body).toMatchObject({
+      ok: true,
+      data: { member: { userId: OTHER_USER_ID, role: 'admin' } },
+    });
+
+    const removed = await removeWorkspaceMemberRoute({
+      auth: auth(),
+      workspaceId,
+      userId: OTHER_USER_ID,
+    });
+    expect(removed.statusCode).toBe(200);
+    expect(removed.body).toMatchObject({
+      ok: true,
+      data: { removed: true },
+    });
+
+    const readded = await inviteWorkspaceMemberRoute({
+      auth: auth(),
+      workspaceId,
+      body: {
+        email: 'member-admin@clawtalk.local',
+        role: 'admin',
+      },
+    });
+    expect(readded.statusCode).toBe(201);
+
+    const transferred = await transferWorkspaceOwnershipRoute({
+      auth: auth(),
+      workspaceId,
+      body: { newOwnerUserId: OTHER_USER_ID },
+    });
+    expect(transferred.statusCode).toBe(200);
+    expect(transferred.body).toMatchObject({
+      ok: true,
+      data: {
+        workspaceId,
+        newOwnerUserId: OTHER_USER_ID,
+        members: expect.arrayContaining([
+          expect.objectContaining({ userId: USER_ID, role: 'admin' }),
+          expect.objectContaining({ userId: OTHER_USER_ID, role: 'owner' }),
+        ]),
+      },
+    });
+
+    const ownerSession = await getGreenfieldMeRoute({
+      auth: auth(OTHER_USER_ID),
+      requestedWorkspaceId: workspaceId,
+    });
+    expect(ownerSession.statusCode).toBe(200);
+    expect(ownerSession.body).toMatchObject({
+      ok: true,
+      data: { user: { role: 'owner' } },
+    });
+
+    const previousOwnerSession = await getGreenfieldMeRoute({
+      auth: auth(),
+      requestedWorkspaceId: workspaceId,
+    });
+    expect(previousOwnerSession.statusCode).toBe(200);
+    expect(previousOwnerSession.body).toMatchObject({
+      ok: true,
+      data: { user: { role: 'admin' } },
+    });
+  });
+
+  it('enforces workspace member management role gates', async () => {
+    const workspaceId = await currentWorkspaceId();
+    await seedAuthUser(
+      OTHER_USER_ID,
+      'member-gate@clawtalk.local',
+      'Member Gate',
+    );
+    const db = getDbPg();
+    await db`
+      insert into public.workspace_members (workspace_id, user_id, role)
+      values (${workspaceId}::uuid, ${OTHER_USER_ID}::uuid, 'member')
+    `;
+
+    const listed = await listWorkspaceMembersRoute({
+      auth: auth(OTHER_USER_ID),
+      workspaceId,
+    });
+    expect(listed.statusCode).toBe(200);
+    if (!listed.body.ok) throw new Error('Expected member list to succeed');
+    expect(
+      listed.body.data.members.map((member) => member.userId).sort(),
+    ).toEqual([OTHER_USER_ID, USER_ID].sort());
+
+    const deniedInvite = await inviteWorkspaceMemberRoute({
+      auth: auth(OTHER_USER_ID),
+      workspaceId,
+      body: { email: 'owner@example.com', role: 'member' },
+    });
+    expect(deniedInvite.statusCode).toBe(403);
+    expect(deniedInvite.body).toMatchObject({
+      ok: false,
+      error: { code: 'workspace_admin_required' },
+    });
+
+    const ownerRoleUpdate = await updateWorkspaceMemberRoleRoute({
+      auth: auth(),
+      workspaceId,
+      userId: USER_ID,
+      body: { role: 'admin' },
+    });
+    expect(ownerRoleUpdate.statusCode).toBe(409);
+    expect(ownerRoleUpdate.body).toMatchObject({
+      ok: false,
+      error: { code: 'owner_transfer_required' },
+    });
+
+    const selfRemove = await removeWorkspaceMemberRoute({
+      auth: auth(),
+      workspaceId,
+      userId: USER_ID,
+    });
+    expect(selfRemove.statusCode).toBe(400);
+    expect(selfRemove.body).toMatchObject({
+      ok: false,
+      error: { code: 'self_remove_not_supported' },
+    });
+
+    const unknownInvite = await inviteWorkspaceMemberRoute({
+      auth: auth(),
+      workspaceId,
+      body: { email: 'not-yet@clawtalk.local', role: 'member' },
+    });
+    expect(unknownInvite.statusCode).toBe(404);
+    expect(unknownInvite.body).toMatchObject({
+      ok: false,
+      error: { code: 'user_not_found' },
+    });
   });
 
   it('resolves omitted workspaceId for talk-scoped core routes from the visible talk', async () => {

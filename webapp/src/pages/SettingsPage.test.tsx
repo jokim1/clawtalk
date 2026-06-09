@@ -20,6 +20,8 @@ import type {
   UserGoogleAccount,
   WebSearchProviderCard,
   WebSearchProviderId,
+  WorkspaceMember,
+  WorkspaceRole,
 } from '../lib/api';
 
 const TEST_WORKSPACE_ID = '00000000-0000-4000-8000-000000000001';
@@ -85,6 +87,72 @@ describe('SettingsPage', () => {
     expect(onUserUpdated).toHaveBeenCalledWith(
       expect.objectContaining({ displayName: 'Owner Renamed' }),
     );
+  });
+
+  it('lists workspace members and lets admins add and update signed-in users', async () => {
+    const user = userEvent.setup();
+    const helpers = installSettingsFetch();
+
+    render(
+      <MemoryRouter initialEntries={['/app/settings?tab=members']}>
+        <SettingsPage
+          user={buildSessionUser()}
+          userRole="owner"
+          onUnauthorized={vi.fn()}
+          onUserUpdated={vi.fn()}
+        />
+      </MemoryRouter>,
+    );
+
+    await screen.findByRole('heading', { name: 'Members' });
+    expect(await screen.findByText('Owner (you)')).toBeTruthy();
+    expect(screen.getByText('admin@example.com')).toBeTruthy();
+
+    await user.selectOptions(
+      screen.getByLabelText('Role for Member User'),
+      'guest',
+    );
+    expect(await screen.findByText('Role updated.')).toBeTruthy();
+
+    await user.type(screen.getByLabelText('Email'), 'new@example.com');
+    await user.selectOptions(screen.getByLabelText('Role'), 'admin');
+    await user.click(screen.getByRole('button', { name: /add/i }));
+
+    expect(await screen.findByText('Workspace member added.')).toBeTruthy();
+    expect(await screen.findByText('new@example.com')).toBeTruthy();
+    expect(helpers.getMemberMutationCalls()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          method: 'PATCH',
+          body: { role: 'guest' },
+        }),
+        expect.objectContaining({
+          method: 'POST',
+          path: `/api/v1/workspaces/${TEST_WORKSPACE_ID}/invite`,
+          body: { email: 'new@example.com', role: 'admin' },
+        }),
+      ]),
+    );
+  });
+
+  it('renders workspace members read-only for non-admin roles', async () => {
+    installSettingsFetch();
+
+    render(
+      <MemoryRouter initialEntries={['/app/settings?tab=members']}>
+        <SettingsPage
+          user={buildSessionUser({ role: 'member' })}
+          userRole="member"
+          onUnauthorized={vi.fn()}
+          onUserUpdated={vi.fn()}
+        />
+      </MemoryRouter>,
+    );
+
+    await screen.findByRole('heading', { name: 'Members' });
+    expect(await screen.findByText('Admin User')).toBeTruthy();
+    expect(screen.queryByRole('heading', { name: 'Add Member' })).toBeNull();
+    expect(screen.queryByLabelText('Role for Member User')).toBeNull();
   });
 
   it('opens the API Keys tab via ?tab=api-keys, defaults to Personal, and surfaces Workspace via sub-tab', async () => {
@@ -573,6 +641,7 @@ describe('SettingsPage', () => {
 function installSettingsFetch(options?: {
   registeredAgents?: RegisteredAgent[];
   mainAgent?: RegisteredAgent | null;
+  workspaceMembers?: WorkspaceMember[];
   openAiPollIntervalSeconds?: number;
   openAiPollResponses?: Array<
     | { status: 'pending' }
@@ -586,9 +655,15 @@ function installSettingsFetch(options?: {
 }) {
   let snapshot = buildAiAgentsData();
   let registeredAgents = options?.registeredAgents ?? buildRegisteredAgents();
+  let workspaceMembers = options?.workspaceMembers ?? buildWorkspaceMembers();
   let mainAgent: RegisteredAgent | null =
     options?.mainAgent ?? registeredAgents[0] ?? null;
   const mainAgentUpdateCalls: string[] = [];
+  const memberMutationCalls: Array<{
+    method: string;
+    path: string;
+    body: Record<string, unknown>;
+  }> = [];
   const openAiPollCalls: string[] = [];
   const openAiPollResponses = [...(options?.openAiPollResponses ?? [])];
   const anthropicInitiateCalls: Array<{
@@ -627,6 +702,22 @@ function installSettingsFetch(options?: {
       const path = parsed.pathname;
       const method = init?.method || 'GET';
 
+      if (path === '/api/v1/session/me' && method === 'GET') {
+        const updatedUser = buildSessionUser({
+          role:
+            workspaceMembers.find((member) => member.userId === 'user-1')
+              ?.role ?? 'owner',
+        });
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            user: updatedUser,
+            workspaces: updatedUser.workspaces,
+            currentWorkspaceId: updatedUser.currentWorkspaceId,
+          },
+        });
+      }
+
       if (path === '/api/v1/session/me' && method === 'PATCH') {
         const body = JSON.parse(String(init?.body || '{}')) as {
           displayName?: string;
@@ -643,6 +734,104 @@ function installSettingsFetch(options?: {
             user: updatedUser,
             workspaces: updatedUser.workspaces,
             currentWorkspaceId: updatedUser.currentWorkspaceId,
+          },
+        });
+      }
+
+      if (
+        path === `/api/v1/workspaces/${TEST_WORKSPACE_ID}/members` &&
+        method === 'GET'
+      ) {
+        return jsonResponse(200, {
+          ok: true,
+          data: { members: workspaceMembers },
+        });
+      }
+
+      if (
+        path === `/api/v1/workspaces/${TEST_WORKSPACE_ID}/invite` &&
+        method === 'POST'
+      ) {
+        const body = JSON.parse(String(init?.body || '{}')) as {
+          email: string;
+          role: Exclude<WorkspaceRole, 'owner'>;
+        };
+        memberMutationCalls.push({ method, path, body });
+        const member: WorkspaceMember = {
+          workspaceId: TEST_WORKSPACE_ID,
+          userId: `user-${body.email.split('@')[0]}`,
+          email: body.email,
+          name: 'Invited Member',
+          avatarColor: null,
+          initials: 'IM',
+          role: body.role,
+          createdAt: '2026-02-02T00:00:00.000Z',
+        };
+        workspaceMembers = [
+          ...workspaceMembers.filter((entry) => entry.email !== body.email),
+          member,
+        ];
+        return jsonResponse(201, {
+          ok: true,
+          data: { member },
+        });
+      }
+
+      const memberMatch = path.match(
+        new RegExp(`^/api/v1/workspaces/${TEST_WORKSPACE_ID}/members/([^/]+)$`),
+      );
+      if (memberMatch && method === 'PATCH') {
+        const userId = decodeURIComponent(memberMatch[1]);
+        const body = JSON.parse(String(init?.body || '{}')) as {
+          role: Exclude<WorkspaceRole, 'owner'>;
+        };
+        memberMutationCalls.push({ method, path, body });
+        let updated: WorkspaceMember | null = null;
+        workspaceMembers = workspaceMembers.map((member) => {
+          if (member.userId !== userId) return member;
+          updated = { ...member, role: body.role };
+          return updated;
+        });
+        return jsonResponse(200, {
+          ok: true,
+          data: { member: updated },
+        });
+      }
+      if (memberMatch && method === 'DELETE') {
+        const userId = decodeURIComponent(memberMatch[1]);
+        memberMutationCalls.push({ method, path, body: {} });
+        workspaceMembers = workspaceMembers.filter(
+          (member) => member.userId !== userId,
+        );
+        return jsonResponse(200, {
+          ok: true,
+          data: { removed: true },
+        });
+      }
+
+      if (
+        path === `/api/v1/workspaces/${TEST_WORKSPACE_ID}/transfer-ownership` &&
+        method === 'POST'
+      ) {
+        const body = JSON.parse(String(init?.body || '{}')) as {
+          newOwnerUserId: string;
+        };
+        memberMutationCalls.push({ method, path, body });
+        workspaceMembers = workspaceMembers.map((member) => {
+          if (member.userId === body.newOwnerUserId) {
+            return { ...member, role: 'owner' };
+          }
+          if (member.role === 'owner') {
+            return { ...member, role: 'admin' };
+          }
+          return member;
+        });
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            workspaceId: TEST_WORKSPACE_ID,
+            newOwnerUserId: body.newOwnerUserId,
+            members: workspaceMembers,
           },
         });
       }
@@ -828,6 +1017,7 @@ function installSettingsFetch(options?: {
     getAnthropicInitiateCalls: () => anthropicInitiateCalls,
     getAnthropicCompleteCalls: () => anthropicCompleteCalls,
     getProfileUpdateCalls: () => profileUpdateCalls,
+    getMemberMutationCalls: () => memberMutationCalls,
   };
 }
 
@@ -850,6 +1040,41 @@ function buildSessionUser(overrides?: Partial<SessionUser>): SessionUser {
     ],
     ...overrides,
   };
+}
+
+function buildWorkspaceMembers(): WorkspaceMember[] {
+  return [
+    {
+      workspaceId: TEST_WORKSPACE_ID,
+      userId: 'user-1',
+      email: 'owner@example.com',
+      name: 'Owner',
+      avatarColor: null,
+      initials: 'OW',
+      role: 'owner',
+      createdAt: '2026-01-01T00:00:00.000Z',
+    },
+    {
+      workspaceId: TEST_WORKSPACE_ID,
+      userId: 'user-admin',
+      email: 'admin@example.com',
+      name: 'Admin User',
+      avatarColor: null,
+      initials: 'AU',
+      role: 'admin',
+      createdAt: '2026-01-02T00:00:00.000Z',
+    },
+    {
+      workspaceId: TEST_WORKSPACE_ID,
+      userId: 'user-member',
+      email: 'member@example.com',
+      name: 'Member User',
+      avatarColor: null,
+      initials: 'MU',
+      role: 'member',
+      createdAt: '2026-01-03T00:00:00.000Z',
+    },
+  ];
 }
 
 function buildAiAgentsData(): AiAgentsPageData {

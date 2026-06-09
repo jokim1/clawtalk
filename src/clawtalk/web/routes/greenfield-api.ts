@@ -68,18 +68,23 @@ import {
   getGreenfieldMeRoute,
   getGreenfieldTalkRoute,
   getGreenfieldTalkToolsRoute,
+  inviteWorkspaceMemberRoute,
   listGreenfieldAgentsRoute,
   listGreenfieldFoldersRoute,
   listGreenfieldTalkAgentsRoute,
   listGreenfieldTalksRoute,
   listGreenfieldTalkSidebarRoute,
   listGreenfieldWorkspacesRoute,
+  listWorkspaceMembersRoute,
   patchGreenfieldFolderRoute,
   patchGreenfieldTalkRoute,
   reorderGreenfieldTalkSidebarRoute,
+  removeWorkspaceMemberRoute,
   switchGreenfieldWorkspaceRoute,
+  transferWorkspaceOwnershipRoute,
   updateGreenfieldTalkAgentsRoute,
   updateGreenfieldTalkToolRoute,
+  updateWorkspaceMemberRoleRoute,
 } from './greenfield-core.js';
 
 type Variables = {
@@ -272,6 +277,83 @@ export function mountGreenfieldApiRoutes(app: GreenfieldApp): void {
     const result = await switchGreenfieldWorkspaceRoute({
       auth,
       workspaceId: payload.data.workspaceId,
+    });
+    return jsonResponse(result);
+  });
+
+  app.get('/api/v1/workspaces/:workspaceId/members', async (c) => {
+    const auth = c.get('auth');
+    const rl = checkRateLimit({ principalId: auth.userId, bucket: 'read' });
+    if (!rl.allowed) return rateLimitedResponse(c, rl);
+    const result = await listWorkspaceMembersRoute({
+      auth,
+      workspaceId: decodeURIComponent(c.req.param('workspaceId')),
+    });
+    return jsonResponse(result);
+  });
+
+  app.post('/api/v1/workspaces/:workspaceId/invite', async (c) => {
+    const auth = c.get('auth');
+    const rl = checkRateLimit({ principalId: auth.userId, bucket: 'write' });
+    if (!rl.allowed) return rateLimitedResponse(c, rl);
+    const csrfFail = checkCsrf(c, auth);
+    if (csrfFail) return csrfFail;
+    const payload = await readJsonBody<{
+      email?: unknown;
+      role?: unknown;
+    }>(c);
+    if (!payload.ok) return invalidJsonResponse(c, payload.error);
+    const result = await inviteWorkspaceMemberRoute({
+      auth,
+      workspaceId: decodeURIComponent(c.req.param('workspaceId')),
+      body: payload.data,
+    });
+    return jsonResponse(result);
+  });
+
+  app.patch('/api/v1/workspaces/:workspaceId/members/:userId', async (c) => {
+    const auth = c.get('auth');
+    const rl = checkRateLimit({ principalId: auth.userId, bucket: 'write' });
+    if (!rl.allowed) return rateLimitedResponse(c, rl);
+    const csrfFail = checkCsrf(c, auth);
+    if (csrfFail) return csrfFail;
+    const payload = await readJsonBody<{ role?: unknown }>(c);
+    if (!payload.ok) return invalidJsonResponse(c, payload.error);
+    const result = await updateWorkspaceMemberRoleRoute({
+      auth,
+      workspaceId: decodeURIComponent(c.req.param('workspaceId')),
+      userId: decodeURIComponent(c.req.param('userId')),
+      body: payload.data,
+    });
+    return jsonResponse(result);
+  });
+
+  app.delete('/api/v1/workspaces/:workspaceId/members/:userId', async (c) => {
+    const auth = c.get('auth');
+    const rl = checkRateLimit({ principalId: auth.userId, bucket: 'write' });
+    if (!rl.allowed) return rateLimitedResponse(c, rl);
+    const csrfFail = checkCsrf(c, auth);
+    if (csrfFail) return csrfFail;
+    const result = await removeWorkspaceMemberRoute({
+      auth,
+      workspaceId: decodeURIComponent(c.req.param('workspaceId')),
+      userId: decodeURIComponent(c.req.param('userId')),
+    });
+    return jsonResponse(result);
+  });
+
+  app.post('/api/v1/workspaces/:workspaceId/transfer-ownership', async (c) => {
+    const auth = c.get('auth');
+    const rl = checkRateLimit({ principalId: auth.userId, bucket: 'write' });
+    if (!rl.allowed) return rateLimitedResponse(c, rl);
+    const csrfFail = checkCsrf(c, auth);
+    if (csrfFail) return csrfFail;
+    const payload = await readJsonBody<{ newOwnerUserId?: unknown }>(c);
+    if (!payload.ok) return invalidJsonResponse(c, payload.error);
+    const result = await transferWorkspaceOwnershipRoute({
+      auth,
+      workspaceId: decodeURIComponent(c.req.param('workspaceId')),
+      body: payload.data,
     });
     return jsonResponse(result);
   });
