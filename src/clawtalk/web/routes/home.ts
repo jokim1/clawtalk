@@ -2,15 +2,20 @@ import type { Context, Hono, MiddlewareHandler } from 'hono';
 
 import { withUserContext } from '../../../db.js';
 import {
+  addHomeNewsToContext,
   dismissHomeInboxItem,
   dismissHomeRecommendation,
   getHomeSummary,
   listHomeInboxItems,
   listHomeNews,
   listHomeRecommendations,
+  markHomeInboxItemRead,
+  markHomeNewsNotRelevant,
+  resolveHomeInboxItem,
   snoozeHomeInboxItem,
   type HomeInboxMutationResult,
   type HomeInboxPayload,
+  type HomeNewsMutationResult,
   type HomeNewsPayload,
   type HomeRecommendationMutationResult,
   type HomeRecommendationsPayload,
@@ -224,6 +229,46 @@ export async function dismissHomeInboxRoute(input: {
   });
 }
 
+export async function markHomeInboxReadRoute(input: {
+  auth: AuthContext;
+  workspaceId?: string | null;
+  itemId: string;
+}): Promise<RouteResult<HomeInboxMutationResult>> {
+  if (!isUuid(input.itemId)) {
+    return error(400, 'invalid_item_id', 'Inbox item id must be a UUID.');
+  }
+  return withHomeWorkspace(input, async ({ workspace }) => {
+    const writerError = requireHomeWriter(workspace);
+    if (writerError) return writerError;
+    const result = await markHomeInboxItemRead({
+      workspaceId: workspace.id,
+      itemId: input.itemId,
+    });
+    if (!result) return error(404, 'not_found', 'Inbox item not found.');
+    return ok(result);
+  });
+}
+
+export async function resolveHomeInboxRoute(input: {
+  auth: AuthContext;
+  workspaceId?: string | null;
+  itemId: string;
+}): Promise<RouteResult<HomeInboxMutationResult>> {
+  if (!isUuid(input.itemId)) {
+    return error(400, 'invalid_item_id', 'Inbox item id must be a UUID.');
+  }
+  return withHomeWorkspace(input, async ({ workspace }) => {
+    const writerError = requireHomeWriter(workspace);
+    if (writerError) return writerError;
+    const result = await resolveHomeInboxItem({
+      workspaceId: workspace.id,
+      itemId: input.itemId,
+    });
+    if (!result) return error(404, 'not_found', 'Inbox item not found.');
+    return ok(result);
+  });
+}
+
 export async function snoozeHomeInboxRoute(input: {
   auth: AuthContext;
   workspaceId?: string | null;
@@ -244,6 +289,54 @@ export async function snoozeHomeInboxRoute(input: {
       until: until.iso,
     });
     if (!result) return error(404, 'not_found', 'Inbox item not found.');
+    return ok(result);
+  });
+}
+
+export async function addHomeNewsToContextRoute(input: {
+  auth: AuthContext;
+  workspaceId?: string | null;
+  matchId: string;
+}): Promise<RouteResult<HomeNewsMutationResult>> {
+  if (!isUuid(input.matchId)) {
+    return error(400, 'invalid_match_id', 'News match id must be a UUID.');
+  }
+  return withHomeWorkspace(input, async ({ workspace }) => {
+    const writerError = requireHomeWriter(workspace);
+    if (writerError) return writerError;
+    try {
+      const result = await addHomeNewsToContext({
+        workspaceId: workspace.id,
+        matchId: input.matchId,
+        userId: input.auth.userId,
+      });
+      if (!result) return error(404, 'not_found', 'News match not found.');
+      return ok(result);
+    } catch (err) {
+      if (err instanceof Error && err.message.includes('Maximum 50')) {
+        return error(400, 'source_limit', err.message);
+      }
+      throw err;
+    }
+  });
+}
+
+export async function markHomeNewsNotRelevantRoute(input: {
+  auth: AuthContext;
+  workspaceId?: string | null;
+  matchId: string;
+}): Promise<RouteResult<HomeNewsMutationResult>> {
+  if (!isUuid(input.matchId)) {
+    return error(400, 'invalid_match_id', 'News match id must be a UUID.');
+  }
+  return withHomeWorkspace(input, async ({ workspace }) => {
+    const writerError = requireHomeWriter(workspace);
+    if (writerError) return writerError;
+    const result = await markHomeNewsNotRelevant({
+      workspaceId: workspace.id,
+      matchId: input.matchId,
+    });
+    if (!result) return error(404, 'not_found', 'News match not found.');
     return ok(result);
   });
 }
@@ -342,6 +435,34 @@ export function mountHomeRoutes(
     return jsonResponse(result);
   });
 
+  app.post('/api/v1/home/inbox/:id/read', async (c) => {
+    const auth = c.get('auth');
+    const rl = checkRateLimit({ principalId: auth.userId, bucket: 'write' });
+    if (!rl.allowed) return rateLimitedResponse(c, rl);
+    const csrfFail = checkCsrf(c, auth);
+    if (csrfFail) return csrfFail;
+    const result = await markHomeInboxReadRoute({
+      auth,
+      workspaceId: requestedWorkspaceId(c),
+      itemId: c.req.param('id'),
+    });
+    return jsonResponse(result);
+  });
+
+  app.post('/api/v1/home/inbox/:id/resolve', async (c) => {
+    const auth = c.get('auth');
+    const rl = checkRateLimit({ principalId: auth.userId, bucket: 'write' });
+    if (!rl.allowed) return rateLimitedResponse(c, rl);
+    const csrfFail = checkCsrf(c, auth);
+    if (csrfFail) return csrfFail;
+    const result = await resolveHomeInboxRoute({
+      auth,
+      workspaceId: requestedWorkspaceId(c),
+      itemId: c.req.param('id'),
+    });
+    return jsonResponse(result);
+  });
+
   app.post('/api/v1/home/inbox/:id/snooze', async (c) => {
     const auth = c.get('auth');
     const rl = checkRateLimit({ principalId: auth.userId, bucket: 'write' });
@@ -357,6 +478,34 @@ export function mountHomeRoutes(
       workspaceId: requestedWorkspaceId(c),
       itemId: c.req.param('id'),
       until: body.data.until,
+    });
+    return jsonResponse(result);
+  });
+
+  app.post('/api/v1/home/news/:id/add-to-context', async (c) => {
+    const auth = c.get('auth');
+    const rl = checkRateLimit({ principalId: auth.userId, bucket: 'write' });
+    if (!rl.allowed) return rateLimitedResponse(c, rl);
+    const csrfFail = checkCsrf(c, auth);
+    if (csrfFail) return csrfFail;
+    const result = await addHomeNewsToContextRoute({
+      auth,
+      workspaceId: requestedWorkspaceId(c),
+      matchId: c.req.param('id'),
+    });
+    return jsonResponse(result);
+  });
+
+  app.post('/api/v1/home/news/:id/not-relevant', async (c) => {
+    const auth = c.get('auth');
+    const rl = checkRateLimit({ principalId: auth.userId, bucket: 'write' });
+    if (!rl.allowed) return rateLimitedResponse(c, rl);
+    const csrfFail = checkCsrf(c, auth);
+    if (csrfFail) return csrfFail;
+    const result = await markHomeNewsNotRelevantRoute({
+      auth,
+      workspaceId: requestedWorkspaceId(c),
+      matchId: c.req.param('id'),
     });
     return jsonResponse(result);
   });

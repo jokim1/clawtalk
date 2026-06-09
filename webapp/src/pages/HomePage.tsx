@@ -4,25 +4,30 @@
  * Built on the GET /api/v1/home/* read API plus the lifecycle write endpoints.
  * Renders the stat strip, a "Do this next" curator pick (hero), a "Then maybe"
  * list, and full-width inbox + "News for your Talks" sections. Inbox
- * dismiss/snooze and recommendation dismiss are
- * wired to the write API with page-owned optimistic state (entity-scoped revert
- * on failure; a 404 is treated as already-gone). News add-to-context and inbox
- * resolve/mark-read are still navigation/disabled pending their own surfaces.
+ * dismiss/snooze/mark-read/resolve, recommendation dismiss, and News
+ * add-to-context/not-relevant are wired to the write API with page-owned
+ * optimistic state (entity-scoped revert on failure; a 404 is treated as
+ * already-gone).
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { Button, salon, salonFont } from '../salon';
 import {
   ApiError,
+  addHomeNewsToContext,
   dismissHomeInboxItem,
   dismissHomeRecommendation,
   getHomeSummary,
   listHomeInbox,
   listHomeNews,
   listHomeRecommendations,
+  markHomeInboxItemRead,
+  markHomeNewsNotRelevant,
+  resolveHomeInboxItem,
   snoozeHomeInboxItem,
   type HomeInboxItem,
   type HomeInboxPayload,
+  type HomeNewsItem,
   type HomeNewsPayload,
   type HomeRecommendation,
   type HomeRecommendationsPayload,
@@ -132,7 +137,7 @@ function firstSevereInboxItem(
 
 function recomputeSummary(
   data: HomeData,
-  options?: { recommendationDelta?: number },
+  options?: { recommendationDelta?: number; newsDelta?: number },
 ): HomeData {
   if (!data.summary) return data;
   const currentCurator = data.summary.curator;
@@ -143,6 +148,7 @@ function recomputeSummary(
       0,
       data.summary.counts.recommendations + (options?.recommendationDelta ?? 0),
     ),
+    news: Math.max(0, data.summary.counts.news + (options?.newsDelta ?? 0)),
   };
   const hero = data.recommendations?.hero ?? null;
   const severeInbox = firstSevereInboxItem(data.inbox);
@@ -188,6 +194,45 @@ function removeInboxItem(
     ...inbox,
     items: inbox.items.filter((entry) => entry.id !== id),
     counts,
+  };
+}
+
+/** Mark an Inbox item read and decrement only the unread count. */
+function markInboxItemRead(
+  inbox: HomeInboxPayload,
+  id: string,
+): HomeInboxPayload {
+  const item = inbox.items.find((entry) => entry.id === id);
+  if (!item || item.status !== 'unread') return inbox;
+  return {
+    ...inbox,
+    items: inbox.items.map((entry) =>
+      entry.id === id ? { ...entry, status: 'read' } : entry,
+    ),
+    counts: {
+      ...inbox.counts,
+      unread: Math.max(0, inbox.counts.unread - 1),
+    },
+  };
+}
+
+/** Restore an Inbox item from `read` back to `unread` after a failed mark-read. */
+function restoreInboxItemStatus(
+  inbox: HomeInboxPayload,
+  id: string,
+  status: HomeInboxItem['status'],
+): HomeInboxPayload {
+  const item = inbox.items.find((entry) => entry.id === id);
+  if (!item || item.status === status) return inbox;
+  const wasReadNowUnread = item.status === 'read' && status === 'unread';
+  return {
+    ...inbox,
+    items: inbox.items.map((entry) =>
+      entry.id === id ? { ...entry, status } : entry,
+    ),
+    counts: wasReadNowUnread
+      ? { ...inbox.counts, unread: inbox.counts.unread + 1 }
+      : inbox.counts,
   };
 }
 
@@ -267,6 +312,22 @@ function restoreRecommendation(
     };
   }
   return { ...recs, items, thenMaybe: [rec, ...recs.thenMaybe] };
+}
+
+function removeNewsItem(news: HomeNewsPayload, id: string): HomeNewsPayload {
+  if (!news.items.some((entry) => entry.id === id)) return news;
+  return { ...news, items: news.items.filter((entry) => entry.id !== id) };
+}
+
+function reinsertNewsItem(
+  news: HomeNewsPayload,
+  item: HomeNewsItem,
+  index: number,
+): HomeNewsPayload {
+  if (news.items.some((entry) => entry.id === item.id)) return news;
+  const items = [...news.items];
+  items.splice(Math.max(0, Math.min(index, items.length)), 0, item);
+  return { ...news, items };
 }
 
 export function HomePage(): JSX.Element {
@@ -385,6 +446,51 @@ export function HomePage(): JSX.Element {
     [mutateInbox],
   );
 
+  const handleResolveInbox = useCallback(
+    (id: string) => void mutateInbox(id, () => resolveHomeInboxItem(id)),
+    [mutateInbox],
+  );
+
+  const handleMarkInboxRead = useCallback(async (id: string) => {
+    const inbox = readyDataRef.current?.inbox;
+    const currentStatus = inbox?.items.find((entry) => entry.id === id)?.status;
+    setActionError(null);
+    setState((prev) =>
+      prev.status === 'ready' && prev.data.inbox
+        ? {
+            status: 'ready',
+            data: recomputeSummary({
+              ...prev.data,
+              inbox: markInboxItemRead(prev.data.inbox, id),
+            }),
+          }
+        : prev,
+    );
+    try {
+      await markHomeInboxItemRead(id);
+    } catch (err) {
+      if (isAlreadyGone(err)) return;
+      if (currentStatus) {
+        setState((prev) =>
+          prev.status === 'ready' && prev.data.inbox
+            ? {
+                status: 'ready',
+                data: recomputeSummary({
+                  ...prev.data,
+                  inbox: restoreInboxItemStatus(
+                    prev.data.inbox,
+                    id,
+                    currentStatus,
+                  ),
+                }),
+              }
+            : prev,
+        );
+      }
+      setActionError(ACTION_ERROR_MESSAGE);
+    }
+  }, []);
+
   const handleDismissRecommendation = useCallback(async (id: string) => {
     const recs = readyDataRef.current?.recommendations;
     const wasHero = recs?.hero?.id === id;
@@ -437,6 +543,63 @@ export function HomePage(): JSX.Element {
       setActionError(ACTION_ERROR_MESSAGE);
     }
   }, []);
+
+  const mutateNews = useCallback(
+    async (id: string, run: () => Promise<unknown>) => {
+      const news = readyDataRef.current?.news;
+      const index = news?.items.findIndex((entry) => entry.id === id) ?? -1;
+      const removed: HomeNewsItem | undefined =
+        index >= 0 ? news?.items[index] : undefined;
+      setActionError(null);
+      setState((prev) =>
+        prev.status === 'ready' && prev.data.news
+          ? {
+              status: 'ready',
+              data: recomputeSummary(
+                {
+                  ...prev.data,
+                  news: removeNewsItem(prev.data.news, id),
+                },
+                { newsDelta: -1 },
+              ),
+            }
+          : prev,
+      );
+      try {
+        await run();
+      } catch (err) {
+        if (isAlreadyGone(err)) return;
+        if (removed) {
+          setState((prev) =>
+            prev.status === 'ready' && prev.data.news
+              ? {
+                  status: 'ready',
+                  data: recomputeSummary(
+                    {
+                      ...prev.data,
+                      news: reinsertNewsItem(prev.data.news, removed, index),
+                    },
+                    { newsDelta: 1 },
+                  ),
+                }
+              : prev,
+          );
+        }
+        setActionError(ACTION_ERROR_MESSAGE);
+      }
+    },
+    [],
+  );
+
+  const handleAddNewsToContext = useCallback(
+    (id: string) => void mutateNews(id, () => addHomeNewsToContext(id)),
+    [mutateNews],
+  );
+
+  const handleMarkNewsNotRelevant = useCallback(
+    (id: string) => void mutateNews(id, () => markHomeNewsNotRelevant(id)),
+    [mutateNews],
+  );
 
   return (
     <div
@@ -514,7 +677,11 @@ export function HomePage(): JSX.Element {
           data={state.data}
           onDismissInbox={handleDismissInbox}
           onSnoozeInbox={handleSnoozeInbox}
+          onMarkInboxRead={handleMarkInboxRead}
+          onResolveInbox={handleResolveInbox}
           onDismissRecommendation={handleDismissRecommendation}
+          onAddNewsToContext={handleAddNewsToContext}
+          onMarkNewsNotRelevant={handleMarkNewsNotRelevant}
         />
       ) : null}
     </div>
@@ -525,12 +692,20 @@ function HomeContent({
   data,
   onDismissInbox,
   onSnoozeInbox,
+  onMarkInboxRead,
+  onResolveInbox,
   onDismissRecommendation,
+  onAddNewsToContext,
+  onMarkNewsNotRelevant,
 }: {
   data: HomeData;
   onDismissInbox: (id: string) => void;
   onSnoozeInbox: (id: string, until: string) => void;
+  onMarkInboxRead: (id: string) => void;
+  onResolveInbox: (id: string) => void;
   onDismissRecommendation: (id: string) => void;
+  onAddNewsToContext: (id: string) => void;
+  onMarkNewsNotRelevant: (id: string) => void;
 }): JSX.Element {
   const recs = data.recommendations;
   const hero = recs?.hero ?? null;
@@ -590,8 +765,14 @@ function HomeContent({
         payload={data.inbox ?? EMPTY_INBOX}
         onDismiss={onDismissInbox}
         onSnooze={onSnoozeInbox}
+        onMarkRead={onMarkInboxRead}
+        onResolve={onResolveInbox}
       />
-      <NewsPreview payload={data.news ?? EMPTY_NEWS} />
+      <NewsPreview
+        payload={data.news ?? EMPTY_NEWS}
+        onAddToContext={onAddNewsToContext}
+        onNotRelevant={onMarkNewsNotRelevant}
+      />
     </>
   );
 }

@@ -122,6 +122,13 @@ async function installMocks(page: Page): Promise<void> {
   await page.route('**/api/v1/home/inbox/i1/dismiss', (route) =>
     fulfillJson(route, { id: 'i1', status: 'dismissed' }),
   );
+  await page.route('**/api/v1/home/news/n1/add-to-context', (route) =>
+    fulfillJson(route, {
+      id: 'n1',
+      status: 'added_to_context',
+      sourceId: 'source-1',
+    }),
+  );
 }
 
 for (const vp of [
@@ -142,6 +149,11 @@ for (const vp of [
 
     await expect(page.getByText(INBOX_TITLE)).toHaveCount(0);
     await expect(page.getByText(NEWS_TITLE)).toHaveCount(2);
+
+    await page.getByRole('button', { name: 'Add to context' }).click();
+
+    await expect(page.getByText(NEWS_TITLE)).toHaveCount(0);
+    await expect(page.getByText('Start a Talk')).toBeVisible();
     await page.screenshot({
       path: testInfo.outputPath(`home-${vp.label}.png`),
       fullPage: true,

@@ -2,8 +2,8 @@
  * Inbox preview — top actionable arrivals/blockers/waits (docs/07 §6.8). Shows
  * the highest-scored items (already ranked by the API). Ported from the inbox
  * rows in prototype/home-shared.jsx. Navigation actions route where possible;
- * each row also carries Snooze + Dismiss lifecycle controls wired to the Home
- * write API (the parent owns the list state + optimistic removal).
+ * each row also carries Mark-read, Resolve, Snooze, and Dismiss lifecycle
+ * controls wired to the Home write API (the parent owns optimistic state).
  */
 import { useRef, useState } from 'react';
 
@@ -92,11 +92,15 @@ function InboxRow({
   first,
   onDismiss,
   onSnooze,
+  onMarkRead,
+  onResolve,
 }: {
   item: HomeInboxItem;
   first: boolean;
   onDismiss: (id: string) => void;
   onSnooze: (id: string, until: string) => void;
+  onMarkRead: (id: string) => void;
+  onResolve: (id: string) => void;
 }): JSX.Element {
   const sev = INBOX_SEVERITY_BADGE[item.severity] ?? INBOX_SEVERITY_BADGE.info;
   const icon = INBOX_TYPE_ICON[item.type] ?? 'chat';
@@ -189,6 +193,18 @@ function InboxRow({
                 variant={item.severity === 'blocking' ? 'primary' : 'secondary'}
               />
             ) : null}
+            {item.status === 'unread' ? (
+              <LifecycleIconButton
+                icon="eye"
+                label="Mark read"
+                onClick={() => onMarkRead(item.id)}
+              />
+            ) : null}
+            <LifecycleIconButton
+              icon="check"
+              label="Resolve"
+              onClick={() => onResolve(item.id)}
+            />
             <SnoozeControl onSnooze={(until) => onSnooze(item.id, until)} />
             <LifecycleIconButton
               icon="x"
@@ -206,10 +222,14 @@ export function InboxPreview({
   payload,
   onDismiss,
   onSnooze,
+  onMarkRead,
+  onResolve,
 }: {
   payload: HomeInboxPayload;
   onDismiss: (id: string) => void;
   onSnooze: (id: string, until: string) => void;
+  onMarkRead: (id: string) => void;
+  onResolve: (id: string) => void;
 }): JSX.Element {
   const items = payload.items.slice(0, 5);
   const count = `${payload.counts.unread} unread · ${payload.counts.blocking} blocking`;
@@ -231,6 +251,8 @@ export function InboxPreview({
               first={index === 0}
               onDismiss={onDismiss}
               onSnooze={onSnooze}
+              onMarkRead={onMarkRead}
+              onResolve={onResolve}
             />
           ))}
         </Card>

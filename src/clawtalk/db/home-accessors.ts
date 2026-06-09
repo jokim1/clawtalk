@@ -1,4 +1,4 @@
-import { getDbPg, type Sql } from '../../db.js';
+import { getDbPg, withTrustedDbWrites, type Sql } from '../../db.js';
 
 export const HOME_READ_ALGORITHM_VERSION = 'home_read_v1';
 
@@ -1430,6 +1430,62 @@ export type HomeRecommendationMutationResult = {
   status: HomeRecommendationStatus;
 };
 
+export type HomeNewsMutationResult = {
+  id: string;
+  status: HomeNewsStatus;
+  sourceId: string | null;
+};
+
+async function withExistingOrNewTransaction<T>(
+  db: Sql,
+  fn: (txSql: Sql) => Promise<T>,
+): Promise<T> {
+  const maybeTransaction = db as Sql & { begin?: unknown; savepoint?: unknown };
+  if (
+    typeof maybeTransaction.savepoint === 'function' ||
+    typeof maybeTransaction.begin !== 'function'
+  ) {
+    return fn(db);
+  }
+  return (await maybeTransaction.begin(async (tx) =>
+    fn(tx as unknown as Sql),
+  )) as T;
+}
+
+async function lockHomeNewsContextOnSql(
+  sql: Sql,
+  input: {
+    workspaceId: string;
+    talkId: string;
+  },
+): Promise<void> {
+  await sql`
+    select pg_advisory_xact_lock(
+      hashtextextended(
+        ${`home-news-context:${input.workspaceId}:${input.talkId}`},
+        0
+      )
+    )
+  `;
+}
+
+async function nextContextSourceSortOrderOnSql(
+  sql: Sql,
+  input: {
+    workspaceId: string;
+    talkId: string;
+  },
+): Promise<number> {
+  const rows = await sql<Array<{ max_order: number }>>`
+    select coalesce(max(sort_order), -1)::int as max_order
+    from public.context_sources
+    where workspace_id = ${input.workspaceId}::uuid
+      and talk_id = ${input.talkId}::uuid
+      and kind <> 'rule'
+  `;
+  return (rows[0]?.max_order ?? -1) + 1;
+}
+
 /**
  * Dismiss an Inbox item (status → `dismissed`). Idempotent: re-dismissing an
  * already-dismissed item is a no-op that still returns the row. Resolved /
@@ -1447,6 +1503,47 @@ export async function dismissHomeInboxItem(input: {
      where id = ${input.itemId}::uuid
        and workspace_id = ${input.workspaceId}::uuid
        and status in ('unread', 'read', 'snoozed', 'dismissed')
+    returning id, status
+  `;
+  return rows[0] ?? null;
+}
+
+/**
+ * Mark an Inbox item read without removing it from the active list. Idempotent
+ * over already-read rows; terminal rows return null.
+ */
+export async function markHomeInboxItemRead(input: {
+  workspaceId: string;
+  itemId: string;
+}): Promise<HomeInboxMutationResult | null> {
+  const db = getDbPg();
+  const rows = await db<HomeInboxMutationResult[]>`
+    update public.home_inbox_items
+       set status = 'read'
+     where id = ${input.itemId}::uuid
+       and workspace_id = ${input.workspaceId}::uuid
+       and status in ('unread', 'read')
+    returning id, status
+  `;
+  return rows[0] ?? null;
+}
+
+/**
+ * Resolve an Inbox item (status → `resolved`). Idempotent over already-resolved
+ * rows and stamps `resolved_at` on the first transition.
+ */
+export async function resolveHomeInboxItem(input: {
+  workspaceId: string;
+  itemId: string;
+}): Promise<HomeInboxMutationResult | null> {
+  const db = getDbPg();
+  const rows = await db<HomeInboxMutationResult[]>`
+    update public.home_inbox_items
+       set status = 'resolved',
+           resolved_at = coalesce(resolved_at, now())
+     where id = ${input.itemId}::uuid
+       and workspace_id = ${input.workspaceId}::uuid
+       and status in ('unread', 'read', 'snoozed', 'resolved')
     returning id, status
   `;
   return rows[0] ?? null;
@@ -1473,6 +1570,230 @@ export async function snoozeHomeInboxItem(input: {
     returning id, status
   `;
   return rows[0] ?? null;
+}
+
+type HomeNewsContextRow = {
+  id: string;
+  status: HomeNewsStatus;
+  news_item_id: string;
+  talk_id: string;
+  algorithm_version: string | null;
+  canonical_url: string;
+  title: string;
+  source: string | null;
+  published_at: string | null;
+  excerpt: string | null;
+  matched_on_json: unknown;
+  impact: HomeNewsImpact;
+  why_it_matters: string | null;
+};
+
+/**
+ * Add a matched news item to its Talk context as a native `kind='news'`
+ * context source, then mark the match terminal. Idempotent: a repeat call
+ * returns the first source created for this Home news match instead of creating
+ * duplicate context rows.
+ */
+export async function addHomeNewsToContext(input: {
+  workspaceId: string;
+  matchId: string;
+  userId: string;
+}): Promise<HomeNewsMutationResult | null> {
+  const db = getDbPg();
+  return withTrustedDbWrites(() =>
+    withExistingOrNewTransaction(db, async (txSql) => {
+      const rows = await txSql<HomeNewsContextRow[]>`
+        select
+          m.id,
+          m.status,
+          m.news_item_id,
+          m.talk_id,
+          m.algorithm_version,
+          i.canonical_url,
+          i.title,
+          i.source,
+          i.published_at,
+          i.excerpt,
+          m.matched_on_json,
+          m.impact,
+          m.why_it_matters
+        from public.home_news_matches m
+        join public.home_news_items i
+          on i.id = m.news_item_id
+        join public.talks t
+          on t.workspace_id = m.workspace_id
+         and t.id = m.talk_id
+         and t.archived_at is null
+        where m.id = ${input.matchId}::uuid
+          and m.workspace_id = ${input.workspaceId}::uuid
+          and m.status in ('active', 'added_to_context')
+        for update of m
+      `;
+      const match = rows[0];
+      if (!match) return null;
+
+      await lockHomeNewsContextOnSql(txSql, {
+        workspaceId: input.workspaceId,
+        talkId: match.talk_id,
+      });
+
+      const existing = await txSql<Array<{ id: string }>>`
+        select id
+        from public.context_sources
+        where workspace_id = ${input.workspaceId}::uuid
+          and talk_id = ${match.talk_id}::uuid
+          and kind = 'news'
+          and meta_json->>'homeNewsMatchId' = ${match.id}
+        order by created_at asc, id asc
+        limit 1
+      `;
+      let sourceId = existing[0]?.id ?? null;
+
+      if (!sourceId) {
+        const countRows = await txSql<Array<{ count: number }>>`
+          select count(*)::int as count
+          from public.context_sources
+          where workspace_id = ${input.workspaceId}::uuid
+            and talk_id = ${match.talk_id}::uuid
+            and kind <> 'rule'
+        `;
+        if ((countRows[0]?.count ?? 0) >= 50) {
+          throw new Error('Maximum 50 saved sources per talk');
+        }
+
+        const sortOrder = await nextContextSourceSortOrderOnSql(txSql, {
+          workspaceId: input.workspaceId,
+          talkId: match.talk_id,
+        });
+        const now = new Date().toISOString();
+        const extractedText = [
+          match.title,
+          match.excerpt,
+          match.why_it_matters ? `Why it matters: ${match.why_it_matters}` : '',
+          `Source: ${match.canonical_url}`,
+        ]
+          .filter((part) => part && part.trim().length > 0)
+          .join('\n\n');
+        const created = await txSql<Array<{ id: string }>>`
+          insert into public.context_sources (
+            workspace_id,
+            talk_id,
+            kind,
+            name,
+            payload_ref,
+            extracted_text,
+            summary,
+            meta_json,
+            include_in_prompt,
+            sort_order,
+            added_by_user_id
+          )
+          values (
+            ${input.workspaceId}::uuid,
+            ${match.talk_id}::uuid,
+            'news',
+            ${match.title},
+            ${match.canonical_url},
+            ${extractedText},
+            ${match.why_it_matters},
+            ${txSql.json({
+              sourceType: 'url',
+              sourceUrl: match.canonical_url,
+              status: 'ready',
+              extractedAt: now,
+              extractionError: null,
+              fetchStrategy: 'managed',
+              lastFetchedAt: now,
+              homeNewsMatchId: match.id,
+              homeNewsItemId: match.news_item_id,
+              impact: match.impact,
+              source: match.source,
+              publishedAt: match.published_at,
+              matchedOn: normalizeMatchedOn(match.matched_on_json),
+            } as never)},
+            true,
+            ${sortOrder},
+            ${input.userId}::uuid
+          )
+          returning id
+        `;
+        sourceId = created[0]?.id ?? null;
+      }
+
+      const updated = await txSql<HomeNewsMutationResult[]>`
+        update public.home_news_matches
+           set status = 'added_to_context'
+         where id = ${match.id}::uuid
+           and workspace_id = ${input.workspaceId}::uuid
+           and status in ('active', 'added_to_context')
+        returning id, status, ${sourceId}::uuid as "sourceId"
+      `;
+
+      await txSql`
+        update public.home_inbox_items
+           set status = 'resolved',
+               resolved_at = coalesce(resolved_at, now())
+         where workspace_id = ${input.workspaceId}::uuid
+           and news_item_id = ${match.news_item_id}::uuid
+           and status in ('unread', 'read', 'snoozed')
+      `;
+      await txSql`
+        insert into public.home_interaction_events (
+          workspace_id, surface, item_id, event_type, algorithm_version,
+          metadata_json
+        )
+        values (
+          ${input.workspaceId}::uuid,
+          'news',
+          ${match.id}::uuid,
+          'home.news_added_to_context',
+          ${match.algorithm_version ?? HOME_READ_ALGORITHM_VERSION},
+          ${txSql.json({
+            talkId: match.talk_id,
+            newsItemId: match.news_item_id,
+            sourceId,
+          } as never)}
+        )
+      `;
+
+      return updated[0] ?? null;
+    }),
+  );
+}
+
+/**
+ * Mark a news match not relevant. Idempotent over already-not-relevant rows;
+ * added / expired rows are left untouched.
+ */
+export async function markHomeNewsNotRelevant(input: {
+  workspaceId: string;
+  matchId: string;
+}): Promise<HomeNewsMutationResult | null> {
+  const db = getDbPg();
+  const rows = await db<HomeNewsMutationResult[]>`
+    update public.home_news_matches
+       set status = 'not_relevant'
+     where id = ${input.matchId}::uuid
+       and workspace_id = ${input.workspaceId}::uuid
+       and status in ('active', 'not_relevant')
+    returning id, status, null::uuid as "sourceId"
+  `;
+  const result = rows[0] ?? null;
+  if (result) {
+    await db`
+      insert into public.home_interaction_events (
+        workspace_id, surface, item_id, event_type, metadata_json
+      )
+      values (
+        ${input.workspaceId}::uuid,
+        'news',
+        ${input.matchId}::uuid,
+        'home.news_not_relevant',
+        '{}'::jsonb
+      )
+    `;
+  }
+  return result;
 }
 
 /**

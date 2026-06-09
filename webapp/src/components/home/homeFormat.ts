@@ -157,9 +157,8 @@ export type ActionBehavior =
   | { kind: 'href'; href: string; label: string }
   | { kind: 'disabled'; reason: string; label: string };
 
-/** Shown on actions whose mutation endpoint is not implemented yet. */
-export const HOME_WRITE_PENDING_REASON =
-  'Lifecycle actions arrive with the Home write API.';
+/** Shown on action payloads whose specific mutation endpoint is not wired. */
+export const HOME_WRITE_PENDING_REASON = 'This Home action is not wired yet.';
 
 /**
  * Classify a Home action into a UI behavior. Navigation-shaped actions (open a
