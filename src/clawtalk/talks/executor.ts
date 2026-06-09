@@ -41,7 +41,6 @@ export type TalkExecutionEvent =
       type: 'talk_response_started';
       runId: string;
       talkId: string;
-      threadId?: string | null;
       agentId?: string | null;
       agentNickname?: string | null;
       responseGroupId?: string | null;
@@ -54,7 +53,6 @@ export type TalkExecutionEvent =
       type: 'talk_response_delta';
       runId: string;
       talkId: string;
-      threadId?: string | null;
       agentId?: string | null;
       agentNickname?: string | null;
       responseGroupId?: string | null;
@@ -68,7 +66,6 @@ export type TalkExecutionEvent =
       type: 'talk_progress_update';
       runId: string;
       talkId: string;
-      threadId?: string | null;
       agentId?: string | null;
       agentNickname?: string | null;
       responseGroupId?: string | null;
@@ -82,7 +79,6 @@ export type TalkExecutionEvent =
       type: 'talk_response_usage';
       runId: string;
       talkId: string;
-      threadId?: string | null;
       agentId?: string | null;
       responseGroupId?: string | null;
       sequenceIndex?: number | null;
@@ -95,7 +91,6 @@ export type TalkExecutionEvent =
       type: 'talk_response_completed';
       runId: string;
       talkId: string;
-      threadId?: string | null;
       agentId?: string | null;
       agentNickname?: string | null;
       responseGroupId?: string | null;
@@ -110,7 +105,6 @@ export type TalkExecutionEvent =
       type: 'talk_response_failed';
       runId: string;
       talkId: string;
-      threadId?: string | null;
       agentId?: string | null;
       agentNickname?: string | null;
       responseGroupId?: string | null;
@@ -126,7 +120,6 @@ export type TalkExecutionEvent =
       type: 'talk_response_cancelled';
       runId: string;
       talkId: string;
-      threadId?: string | null;
       agentId?: string | null;
       responseGroupId?: string | null;
       sequenceIndex?: number | null;
@@ -135,7 +128,6 @@ export type TalkExecutionEvent =
       type: 'tool_call_started';
       runId: string;
       talkId: string;
-      threadId?: string | null;
       agentId?: string | null;
       agentNickname?: string | null;
       responseGroupId?: string | null;

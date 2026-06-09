@@ -1149,7 +1149,6 @@ function mapExecutionEvent(
   const shared = {
     runId: input.runId,
     talkId: input.talkId,
-    threadId: input.threadId,
     agentId: run.source_agent_id ?? run.agent_snapshot_id,
     agentNickname: run.agent_name ?? null,
     responseGroupId: input.responseGroupId ?? null,

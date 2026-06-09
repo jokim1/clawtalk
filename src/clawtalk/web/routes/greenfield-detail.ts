@@ -137,10 +137,6 @@ async function findVisibleWorkspaceIdForScope(input: {
   return undefined;
 }
 
-function syntheticThreadId(talkId: string): string {
-  return talkId;
-}
-
 function toSnapshotThreadApi(
   talk: GreenfieldTalkRecord,
   metrics: GreenfieldThreadMetrics,
@@ -157,7 +153,7 @@ function toSnapshotThreadApi(
   lastMessageAt: string | null;
 } {
   return {
-    id: syntheticThreadId(talk.id),
+    id: talk.id,
     talkId: talk.id,
     title: metrics.title,
     isDefault: true,
@@ -172,7 +168,6 @@ function toSnapshotThreadApi(
 
 function toMessageApi(message: GreenfieldMessageRecord): {
   id: string;
-  threadId: string;
   role: 'user' | 'assistant' | 'system' | 'tool';
   content: string;
   createdBy: string | null;
@@ -191,7 +186,6 @@ function toMessageApi(message: GreenfieldMessageRecord): {
 } {
   return {
     id: message.id,
-    threadId: syntheticThreadId(message.talk_id),
     role: message.author_kind === 'agent' ? 'assistant' : 'user',
     content: message.body ?? '',
     createdBy: message.author_user_id,
@@ -210,18 +204,15 @@ function toMessageApi(message: GreenfieldMessageRecord): {
 
 function toSearchResult(message: GreenfieldMessageRecord): {
   messageId: string;
-  threadId: string;
   threadTitle: string | null;
   role: 'user' | 'assistant' | 'system' | 'tool';
   createdAt: string;
   preview: string;
 } {
-  const apiMessage = toMessageApi(message);
   return {
     messageId: message.id,
-    threadId: apiMessage.threadId,
     threadTitle: null,
-    role: apiMessage.role,
+    role: message.author_kind === 'agent' ? 'assistant' : 'user',
     createdAt: message.created_at,
     preview: (message.body ?? '').replace(/\s+/g, ' ').slice(0, 240),
   };
@@ -241,7 +232,6 @@ function mapRunStatus(
 
 function toRunApi(run: GreenfieldRunRecord): {
   id: string;
-  threadId: string;
   responseGroupId: string | null;
   sequenceIndex: number | null;
   status:
@@ -270,7 +260,6 @@ function toRunApi(run: GreenfieldRunRecord): {
       : null;
   return {
     id: run.id,
-    threadId: syntheticThreadId(run.talk_id),
     responseGroupId: run.response_group_id,
     sequenceIndex: run.sequence_index,
     status: mapRunStatus(run.status),
@@ -295,7 +284,6 @@ function toRunApi(run: GreenfieldRunRecord): {
 
 function toSnapshotRunApi(run: GreenfieldRunRecord): {
   id: string;
-  threadId: string;
   status: ReturnType<typeof mapRunStatus>;
   responseGroupId: string | null;
   sequenceIndex: number | null;
@@ -310,7 +298,6 @@ function toSnapshotRunApi(run: GreenfieldRunRecord): {
 } {
   return {
     id: run.id,
-    threadId: syntheticThreadId(run.talk_id),
     status: mapRunStatus(run.status),
     responseGroupId: run.response_group_id,
     sequenceIndex: run.sequence_index,
@@ -391,7 +378,6 @@ function toRunContextDetails(
 function toPrimaryDocumentApi(document: GreenfieldDocumentRecord): {
   id: string;
   talkId: string;
-  threadId: string;
   title: string;
   format: 'markdown' | 'html';
   listVersion: number;
@@ -401,9 +387,6 @@ function toPrimaryDocumentApi(document: GreenfieldDocumentRecord): {
   return {
     id: document.id,
     talkId: document.primary_talk_id ?? '',
-    threadId: document.primary_talk_id
-      ? syntheticThreadId(document.primary_talk_id)
-      : document.tab_id,
     title: document.title,
     format: document.format,
     listVersion: document.list_version,
@@ -755,7 +738,6 @@ export async function getGreenfieldSnapshotRoute(input: {
   RouteResult<{
     talk: ReturnType<typeof toSnapshotTalk>;
     threads: ReturnType<typeof toSnapshotThreadApi>[];
-    activeThreadId: string;
     messages: ReturnType<typeof toMessageApi>[];
     hasOlderMessages: boolean;
     primaryDocument: ReturnType<typeof toPrimaryDocumentApi> | null;
@@ -821,7 +803,6 @@ export async function getGreenfieldSnapshotRoute(input: {
           userId: input.auth.userId,
         }),
         threads: [toSnapshotThreadApi(talk, metrics)],
-        activeThreadId: syntheticThreadId(talk.id),
         messages: messages.map(toMessageApi),
         hasOlderMessages: rawMessages.length > 200,
         primaryDocument: documentPayload.primaryDocument,

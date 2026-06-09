@@ -52,11 +52,8 @@ export type UseTalkRunStreamParams = {
   queryClient: QueryClient;
   // Page callbacks the stream handlers invoke (in the effect dep array).
   handleUnauthorized: () => void;
-  ensureKnownThread: (threadId?: string | null) => boolean;
-  bumpThreadSummaryFromMessage: (threadId: string, createdAt: string) => void;
   isNearBottom: () => boolean;
   rememberDeletedMessageIds: (messageIds: string[]) => void;
-  scheduleThreadListRefresh: () => void;
   resyncTalkState: (options?: { refreshThreads?: boolean }) => Promise<void>;
   // Bump the native doc pane's reload signal when an agent content-edit
   // stream event lands, so `TalkDocumentView` refetches the native document.
@@ -67,7 +64,6 @@ export type UseTalkRunStreamParams = {
   pendingMessageRefetchTimersRef: MutableRefObject<
     Map<string, ReturnType<typeof setTimeout>>
   >;
-  activeThreadIdRef: MutableRefObject<string | null>;
   autoStickToBottomRef: MutableRefObject<ScrollBehavior | null>;
   wsCacheRouterRef: MutableRefObject<WsCacheRouter>;
   // Page-owned state setters (stable; not deps).
@@ -81,17 +77,13 @@ export function useTalkRunStream({
   pageKind,
   queryClient,
   handleUnauthorized,
-  ensureKnownThread,
-  bumpThreadSummaryFromMessage,
   isNearBottom,
   rememberDeletedMessageIds,
-  scheduleThreadListRefresh,
   resyncTalkState,
   bumpDocReload,
   deletedMessageIdsRef,
   persistedRunMessageIdsRef,
   pendingMessageRefetchTimersRef,
-  activeThreadIdRef,
   autoStickToBottomRef,
   wsCacheRouterRef,
   setToolsRefreshKey,
@@ -117,21 +109,8 @@ export function useTalkRunStream({
         // Surgical RQ cache patch — keeps the persisted IDB snapshot
         // exact across reloads even when no React consumer is mounted.
         applyMessageAppendedDelta({ queryClient, userId, event });
-        if (event.threadId) {
-          ensureKnownThread(event.threadId);
-        }
         if (!event.content || !event.createdAt) {
-          if (event.threadId && event.threadId === activeThreadIdRef.current) {
-            void resyncTalkState({ refreshThreads: true });
-          } else {
-            scheduleThreadListRefresh();
-          }
-          return;
-        }
-        if (event.threadId) {
-          bumpThreadSummaryFromMessage(event.threadId, event.createdAt);
-        }
-        if (!event.threadId || event.threadId !== activeThreadIdRef.current) {
+          void resyncTalkState({ refreshThreads: true });
           return;
         }
         const nearBottom = isNearBottom();
@@ -143,7 +122,6 @@ export function useTalkRunStream({
           wasNearBottom: nearBottom,
           message: {
             id: event.messageId,
-            threadId: event.threadId || activeThreadIdRef.current || '',
             role: event.role,
             content: event.content,
             createdBy: event.createdBy,
@@ -157,11 +135,9 @@ export function useTalkRunStream({
       },
       onRunStarted: (event: TalkRunStartedEvent) => {
         if (event.talkId !== talkId) return;
-        ensureKnownThread(event.threadId);
         dispatch({
           type: event.status === 'queued' ? 'RUN_QUEUED' : 'RUN_STARTED',
           runId: event.runId,
-          threadId: event.threadId,
           triggerMessageId: event.triggerMessageId,
           executorAlias: event.executorAlias,
           executorModel: event.executorModel,
@@ -171,11 +147,9 @@ export function useTalkRunStream({
       },
       onRunQueued: (event: TalkRunStartedEvent) => {
         if (event.talkId !== talkId) return;
-        ensureKnownThread(event.threadId);
         dispatch({
           type: 'RUN_QUEUED',
           runId: event.runId,
-          threadId: event.threadId,
           triggerMessageId: event.triggerMessageId,
           executorAlias: event.executorAlias,
           executorModel: event.executorModel,
@@ -185,7 +159,6 @@ export function useTalkRunStream({
       },
       onResponseStarted: (event: TalkResponseStartedEvent) => {
         if (event.talkId !== talkId) return;
-        if (event.threadId !== activeThreadIdRef.current) return;
         // If the user is parked at the bottom (typical right after a
         // send), stay stuck so the "Thinking…" placeholder is visible
         // when the agent starts streaming. Mirrors onResponseDelta.
@@ -195,12 +168,10 @@ export function useTalkRunStream({
       },
       onProgressUpdate: (event: TalkProgressUpdateEvent) => {
         if (event.talkId !== talkId) return;
-        if (event.threadId !== activeThreadIdRef.current) return;
         dispatch({ type: 'RESPONSE_PROGRESS', event });
       },
       onResponseDelta: (event: TalkResponseDeltaEvent) => {
         if (event.talkId !== talkId) return;
-        if (event.threadId !== activeThreadIdRef.current) return;
         const nearBottom = isNearBottom();
         if (nearBottom) autoStickToBottomRef.current = 'auto';
         dispatch({ type: 'RESPONSE_DELTA', event });
@@ -210,22 +181,18 @@ export function useTalkRunStream({
       },
       onResponseCompleted: (event: TalkResponseTerminalEvent) => {
         if (event.talkId !== talkId) return;
-        if (event.threadId !== activeThreadIdRef.current) return;
         dispatch({ type: 'RESPONSE_COMPLETED', event });
       },
       onResponseFailed: (event: TalkResponseTerminalEvent) => {
         if (event.talkId !== talkId) return;
-        if (event.threadId !== activeThreadIdRef.current) return;
         dispatch({ type: 'RESPONSE_FAILED', event });
       },
       onResponseCancelled: (event: TalkResponseTerminalEvent) => {
         if (event.talkId !== talkId) return;
-        if (event.threadId !== activeThreadIdRef.current) return;
         dispatch({ type: 'RESPONSE_CANCELLED', event });
       },
       onRunCompleted: (event: TalkRunCompletedEvent) => {
         if (event.talkId !== talkId) return;
-        ensureKnownThread(event.threadId);
         // If MESSAGE_APPENDED never arrives for this run, the timeline
         // shows nothing for the response (RUN_COMPLETED deletes the
         // liveResponse buffer). Schedule a refetch fallback that fires
@@ -233,10 +200,7 @@ export function useTalkRunStream({
         // landed yet. Scoped to the user's active thread — refetching
         // is a no-op otherwise, and the message arrives via
         // THREAD_MESSAGES_LOADING when they navigate back.
-        if (
-          event.threadId === activeThreadIdRef.current &&
-          !persistedRunMessageIdsRef.current.has(event.runId)
-        ) {
+        if (!persistedRunMessageIdsRef.current.has(event.runId)) {
           const existingTimer = pendingMessageRefetchTimersRef.current.get(
             event.runId,
           );
@@ -251,7 +215,6 @@ export function useTalkRunStream({
         dispatch({
           type: 'RUN_COMPLETED',
           runId: event.runId,
-          threadId: event.threadId,
           triggerMessageId: event.triggerMessageId,
           responseMessageId: event.responseMessageId,
           executorAlias: event.executorAlias,
@@ -262,12 +225,10 @@ export function useTalkRunStream({
       },
       onRunFailed: (event: TalkRunFailedEvent) => {
         if (event.talkId !== talkId) return;
-        ensureKnownThread(event.threadId);
         dispatch({
           type: 'RUN_FAILED',
           runId: event.runId,
-          threadId: event.threadId,
-          showInlineFailure: event.threadId === activeThreadIdRef.current,
+          showInlineFailure: true,
           triggerMessageId: event.triggerMessageId,
           errorCode: event.errorCode,
           errorMessage: event.errorMessage,
@@ -287,34 +248,16 @@ export function useTalkRunStream({
       },
       onHistoryEdited: (event: TalkHistoryEditedEvent) => {
         if (event.talkId !== talkId) return;
-        if (event.threadIds?.includes(activeThreadIdRef.current || '')) {
-          rememberDeletedMessageIds(event.deletedMessageIds || []);
-          void resyncTalkState({ refreshThreads: true });
-          return;
-        }
-        scheduleThreadListRefresh();
+        rememberDeletedMessageIds(event.deletedMessageIds || []);
+        void resyncTalkState({ refreshThreads: true });
       },
       onBrowserBlocked: (event: TalkBrowserBlockedEvent) => {
         if (event.talkId !== talkId) return;
-        if (event.threadId) {
-          ensureKnownThread(event.threadId);
-        }
-        if (event.threadId && event.threadId === activeThreadIdRef.current) {
-          void resyncTalkState({ refreshThreads: true });
-          return;
-        }
-        scheduleThreadListRefresh();
+        void resyncTalkState({ refreshThreads: true });
       },
       onBrowserUnblocked: (event: TalkBrowserUnblockedEvent) => {
         if (event.talkId !== talkId) return;
-        if (event.threadId) {
-          ensureKnownThread(event.threadId);
-        }
-        if (event.threadId && event.threadId === activeThreadIdRef.current) {
-          void resyncTalkState({ refreshThreads: true });
-          return;
-        }
-        scheduleThreadListRefresh();
+        void resyncTalkState({ refreshThreads: true });
       },
       onContentUpdated: () => {
         // A document changed (title/blocks). Invalidate the shared cache and
@@ -347,9 +290,8 @@ export function useTalkRunStream({
         wsCacheRouterRef.current.scheduleInvalidate({ userId, talkId });
         // Cross-tab sync: another tab toggled a tool chip. Bumping
         // refreshKey causes ToolChipsBar to refetch and reflect the
-        // post-toggle active set. The event filter at
-        // src/clawtalk/talks/event-filters.ts allowlists this event
-        // for thread-scoped subscriptions (T7).
+        // post-toggle active set. Talk streams are now scoped at the Talk
+        // boundary, so every open tab for this Talk should reconcile chips.
         setToolsRefreshKey((k) => k + 1);
       },
       onTalkRunRetrying: (event: TalkRunRetryingEvent) => {
@@ -403,14 +345,11 @@ export function useTalkRunStream({
     };
   }, [
     bumpDocReload,
-    bumpThreadSummaryFromMessage,
-    ensureKnownThread,
     handleUnauthorized,
     isNearBottom,
     queryClient,
     rememberDeletedMessageIds,
     resyncTalkState,
-    scheduleThreadListRefresh,
     pageKind,
     talkId,
     userId,

@@ -218,44 +218,25 @@ function parseCreateDocumentFormat(
 
 function parseCreateDocumentTalkId(input: {
   talkId?: unknown;
-  threadId?: unknown;
 }): string | RouteResult<never> {
   const talkId =
     input.talkId === undefined || input.talkId === null
       ? undefined
       : input.talkId;
-  const threadId =
-    input.threadId === undefined || input.threadId === null
-      ? undefined
-      : input.threadId;
   if (talkId !== undefined && typeof talkId !== 'string') {
     return error(400, 'invalid_talk_id', 'Talk id must be a UUID.');
   }
-  if (threadId !== undefined && typeof threadId !== 'string') {
-    return error(400, 'invalid_thread_id', 'Thread id must be a UUID.');
-  }
-  const resolved = threadId ?? talkId;
-  if (!resolved) {
+  if (!talkId) {
     return error(
       400,
       'talk_id_required',
-      'Creating a document requires a talkId or threadId.',
+      'Creating a document requires a talkId.',
     );
   }
-  if (talkId !== undefined && !isUuid(talkId)) {
+  if (!isUuid(talkId)) {
     return error(400, 'invalid_talk_id', 'Talk id must be a UUID.');
   }
-  if (threadId !== undefined && !isUuid(threadId)) {
-    return error(400, 'invalid_thread_id', 'Thread id must be a UUID.');
-  }
-  if (talkId && threadId && talkId.toLowerCase() !== threadId.toLowerCase()) {
-    return error(
-      400,
-      'thread_talk_mismatch',
-      'Thread id must match the talk id for native document creation.',
-    );
-  }
-  return resolved;
+  return talkId;
 }
 
 function parseOptionalExpectedContentVersion(
@@ -509,13 +490,11 @@ export async function createDocumentRoute(input: {
   auth: AuthContext;
   workspaceId?: string | null;
   talkId?: unknown;
-  threadId?: unknown;
   title?: unknown;
   format?: unknown;
 }): Promise<RouteResult<{ document: ReturnType<typeof toDocumentApi> }>> {
   const talkId = parseCreateDocumentTalkId({
     talkId: input.talkId,
-    threadId: input.threadId,
   });
   if (typeof talkId === 'object') return talkId;
   const title =
@@ -898,7 +877,6 @@ export function mountDocumentRoutes(
     if (csrfFail) return csrfFail;
     const payload = await readOptionalJsonBody<{
       talkId?: unknown;
-      threadId?: unknown;
       title?: unknown;
       format?: unknown;
     }>(c);
@@ -907,7 +885,6 @@ export function mountDocumentRoutes(
       auth,
       workspaceId: requestedWorkspaceId(c),
       talkId: payload.data.talkId,
-      threadId: payload.data.threadId,
       title: payload.data.title,
       format: payload.data.format,
     });

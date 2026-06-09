@@ -120,7 +120,10 @@ export function applyMessageAppendedDelta(input: {
     if (!prev) return prev;
     // Drop deltas the snapshot already includes — they would arrive on
     // a fresh page-load while the WS replay buffer is catching up.
-    if (typeof event.eventId === 'number' && event.eventId <= prev.eventHighWater) {
+    if (
+      typeof event.eventId === 'number' &&
+      event.eventId <= prev.eventHighWater
+    ) {
       return prev;
     }
     // Drop duplicate IDs — same event arriving twice during a
@@ -131,7 +134,6 @@ export function applyMessageAppendedDelta(input: {
     if (!event.content || !event.createdAt) return prev;
     const appended: TalkMessage = {
       id: event.messageId,
-      threadId: event.threadId || prev.activeThreadId,
       role: event.role,
       content: event.content,
       createdBy: event.createdBy,
@@ -147,8 +149,7 @@ export function applyMessageAppendedDelta(input: {
       // Advance the event high-water in lock-step so subsequent deltas
       // with eventId<=this don't get re-appended.
       eventHighWater:
-        typeof event.eventId === 'number' &&
-        event.eventId > prev.eventHighWater
+        typeof event.eventId === 'number' && event.eventId > prev.eventHighWater
           ? event.eventId
           : prev.eventHighWater,
     };
@@ -156,10 +157,7 @@ export function applyMessageAppendedDelta(input: {
 }
 
 export function createWsCacheRouter(queryClient: QueryClient): {
-  scheduleInvalidate: (input: {
-    userId: string;
-    talkId: string;
-  }) => void;
+  scheduleInvalidate: (input: { userId: string; talkId: string }) => void;
   invalidateAllSnapshots: () => void;
   scheduleInvalidateAllSnapshots: () => void;
 } {

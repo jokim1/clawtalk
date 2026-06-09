@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type MutableRefObject } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 
 import {
   ApiError,
@@ -20,10 +20,8 @@ type UseTalkHistoryControllerInput = {
   talkId: string;
   pageKind: PageKind;
   pageTalk: Talk | null;
-  activeThreadId: string | null;
   hasActiveRound: boolean;
   pageMessages: TalkMessage[];
-  threadCacheEpochRef: MutableRefObject<number>;
   rememberDeletedMessageIds: (messageIds: string[]) => void;
   resyncTalkState: (options?: { refreshThreads?: boolean }) => Promise<void>;
   onUnauthorized: () => void;
@@ -33,10 +31,8 @@ export function useTalkHistoryController({
   talkId,
   pageKind,
   pageTalk,
-  activeThreadId,
   hasActiveRound,
   pageMessages,
-  threadCacheEpochRef,
   rememberDeletedMessageIds,
   resyncTalkState,
   onUnauthorized,
@@ -83,8 +79,6 @@ export function useTalkHistoryController({
   const handleDeleteHistoryMessages = useCallback(
     async (messageIds: string[]) => {
       if (pageKind !== 'ready' || !pageTalk) return;
-      const threadId = activeThreadId;
-      if (!threadId) return;
       if (messageIds.length === 0) {
         setHistoryEditState({
           status: 'error',
@@ -105,7 +99,6 @@ export function useTalkHistoryController({
           talkId: pageTalk.id,
           messageIds,
         });
-        threadCacheEpochRef.current += 1;
         rememberDeletedMessageIds(result.deletedMessageIds);
         await resyncTalkState({ refreshThreads: true });
         setHistoryEditorOpen(false);
@@ -121,7 +114,6 @@ export function useTalkHistoryController({
           return;
         }
         if (err instanceof ApiError && err.code === 'message_not_found') {
-          threadCacheEpochRef.current += 1;
           rememberDeletedMessageIds(messageIds);
           void resyncTalkState({ refreshThreads: true });
         }
@@ -133,13 +125,11 @@ export function useTalkHistoryController({
       }
     },
     [
-      activeThreadId,
       onUnauthorized,
       pageKind,
       pageTalk,
       rememberDeletedMessageIds,
       resyncTalkState,
-      threadCacheEpochRef,
     ],
   );
 

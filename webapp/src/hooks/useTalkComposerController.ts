@@ -311,7 +311,14 @@ export function useTalkComposerInputController({
         }
       }
     },
-    [contextSources, dispatch, mentionState, pageKind, sendState, documentTitle],
+    [
+      contextSources,
+      dispatch,
+      mentionState,
+      pageKind,
+      sendState,
+      documentTitle,
+    ],
   );
 
   const resizeComposerTextarea = useCallback(() => {
@@ -680,7 +687,6 @@ export function useTalkSendController({
         dispatch({
           type: 'RUN_QUEUED',
           runId: run.id,
-          threadId: run.threadId,
           triggerMessageId: run.triggerMessageId,
           createdAt: run.createdAt,
           targetAgentId: run.targetAgentId,

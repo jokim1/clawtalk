@@ -92,7 +92,6 @@ export type TalkTimelineEntry =
 // fan-out needs to render token-by-token without re-rendering the
 // snapshot subscriber tree.
 export type DetailState = {
-  selectedThreadId: string | null;
   runsById: Record<string, RunView>;
   streamState: TalkStreamState;
   sendState: {
@@ -110,8 +109,7 @@ export type DetailState = {
 
 export type DetailAction =
   | { type: 'TALK_RESET' }
-  | { type: 'SNAPSHOT_HYDRATED'; threadId: string; runs: TalkRun[] }
-  | { type: 'THREAD_SELECTED'; threadId: string | null }
+  | { type: 'SNAPSHOT_HYDRATED'; runs: TalkRun[] }
   | { type: 'MERGE_HISTORICAL_RUNS'; runs: TalkRun[] }
   | {
       type: 'MESSAGE_LANDED';
@@ -121,7 +119,6 @@ export type DetailAction =
   | {
       type: 'RUN_STARTED';
       runId: string;
-      threadId?: string | null;
       triggerMessageId: string | null;
       executorAlias?: string | null;
       executorModel?: string | null;
@@ -134,7 +131,6 @@ export type DetailAction =
   | {
       type: 'RUN_QUEUED';
       runId: string;
-      threadId?: string | null;
       triggerMessageId: string | null;
       executorAlias?: string | null;
       executorModel?: string | null;
@@ -153,7 +149,6 @@ export type DetailAction =
   | {
       type: 'RUN_COMPLETED';
       runId: string;
-      threadId?: string | null;
       triggerMessageId: string | null;
       responseMessageId: string | null;
       executorAlias?: string | null;
@@ -164,7 +159,6 @@ export type DetailAction =
   | {
       type: 'RUN_FAILED';
       runId: string;
-      threadId?: string | null;
       showInlineFailure: boolean;
       triggerMessageId: string | null;
       errorCode: string;
@@ -216,7 +210,6 @@ export function getOrderedStepTone(run: RunView): OrderedRoundStepTone {
 
 export function createInitialDetailState(): DetailState {
   return {
-    selectedThreadId: null,
     runsById: {},
     streamState: 'connecting',
     sendState: { status: 'idle' },
@@ -244,11 +237,9 @@ function mapRunsById(runs: TalkRun[]): Record<string, RunView> {
 
 function deriveLiveResponsesFromRuns(
   runs: TalkRun[],
-  threadId: string | null,
 ): Record<string, LiveResponseView> {
   const result: Record<string, LiveResponseView> = {};
   for (const run of runs) {
-    if (threadId !== null && run.threadId !== threadId) continue;
     if (!isNonTerminalRunStatus(run.status)) continue;
     const queuedAt = Date.parse(run.createdAt) || Date.now();
     result[run.id] = {
@@ -308,31 +299,23 @@ function isNonTerminalRunStatus(
   );
 }
 
-function clearFailedLiveResponsesForThread(
+function clearFailedLiveResponses(
   liveResponsesByRunId: Record<string, LiveResponseView>,
-  runsById: Record<string, RunView>,
-  threadId: string,
 ): Record<string, LiveResponseView> {
   const next = { ...liveResponsesByRunId };
   for (const [runId, response] of Object.entries(next)) {
     if (response.terminalStatus !== 'failed') continue;
-    if (runsById[runId]?.threadId !== threadId) continue;
     delete next[runId];
   }
   return next;
 }
 
 function shouldShowInlineFailure(input: {
-  selectedThreadId: string | null;
-  eventThreadId?: string | null;
   existing?: LiveResponseView;
   priorRun?: RunView;
   showInlineFailure?: boolean;
 }): boolean {
   if (input.showInlineFailure === false) return false;
-  if (!input.eventThreadId || input.eventThreadId !== input.selectedThreadId) {
-    return false;
-  }
   return (
     Boolean(input.existing) || isNonTerminalRunStatus(input.priorRun?.status)
   );
@@ -349,10 +332,6 @@ function withRun(
     ...state.runsById,
     [runId]: {
       id: runId,
-      threadId:
-        patch.threadId !== undefined
-          ? patch.threadId
-          : (current?.threadId ?? ''),
       status: patch.status,
       createdAt:
         patch.createdAt ?? current?.createdAt ?? new Date(now).toISOString(),
@@ -422,7 +401,7 @@ export function detailReducer(
       // talk's runs/live state must not survive into the new one.
       return createInitialDetailState();
     case 'SNAPSHOT_HYDRATED': {
-      // First snapshot hydration for a (talkId, threadId). Seed runsById
+      // First snapshot hydration for a Talk. Seed runsById
       // from the snapshot's active runs while preserving any live-state
       // already accumulated from WS deltas that beat the snapshot. The
       // first-paint scroll position is owned by threadScroll — the
@@ -432,30 +411,18 @@ export function detailReducer(
       for (const [runId, view] of Object.entries(state.runsById)) {
         merged[runId] = { ...merged[runId], ...view };
       }
-      const seededLive = deriveLiveResponsesFromRuns(
-        action.runs,
-        action.threadId,
-      );
+      const seededLive = deriveLiveResponsesFromRuns(action.runs);
       const liveResponsesByRunId = { ...state.liveResponsesByRunId };
       for (const [runId, view] of Object.entries(seededLive)) {
         if (!liveResponsesByRunId[runId]) liveResponsesByRunId[runId] = view;
       }
       return {
         ...state,
-        selectedThreadId: action.threadId,
         runsById: pruneEventRunCache(merged),
         liveResponsesByRunId,
         hasUnreadBelow: false,
       };
     }
-    case 'THREAD_SELECTED':
-      if (state.selectedThreadId === action.threadId) return state;
-      return {
-        ...state,
-        selectedThreadId: action.threadId,
-        liveResponsesByRunId: {},
-        hasUnreadBelow: false,
-      };
     case 'MERGE_HISTORICAL_RUNS': {
       // Server-authoritative refresh: every run in `action.runs` carries
       // the latest persisted shape (status, browserBlock, errorMessage,
@@ -484,11 +451,7 @@ export function detailReducer(
         delete liveResponsesByRunId[action.message.runId];
       }
       if (action.message.role === 'user') {
-        liveResponsesByRunId = clearFailedLiveResponsesForThread(
-          liveResponsesByRunId,
-          state.runsById,
-          action.message.threadId,
-        );
+        liveResponsesByRunId = clearFailedLiveResponses(liveResponsesByRunId);
       }
       return {
         ...state,
@@ -500,7 +463,6 @@ export function detailReducer(
     }
     case 'RUN_STARTED': {
       const runsById = withRun(state, action.runId, {
-        threadId: action.threadId || undefined,
         status: 'running',
         triggerMessageId: action.triggerMessageId,
         executorAlias: action.executorAlias,
@@ -512,9 +474,6 @@ export function detailReducer(
         responseGroupId: action.responseGroupId,
         sequenceIndex: action.sequenceIndex,
       });
-      if (action.threadId && action.threadId !== state.selectedThreadId) {
-        return { ...state, runsById };
-      }
       const existing = state.liveResponsesByRunId[action.runId];
       const queuedAt = existing?.queuedAt ?? Date.now();
       const liveResponsesByRunId = {
@@ -544,7 +503,6 @@ export function detailReducer(
     }
     case 'RUN_QUEUED': {
       const runsById = withRun(state, action.runId, {
-        threadId: action.threadId || undefined,
         status: 'queued',
         triggerMessageId: action.triggerMessageId,
         executorAlias: action.executorAlias,
@@ -555,9 +513,6 @@ export function detailReducer(
         responseGroupId: action.responseGroupId,
         sequenceIndex: action.sequenceIndex,
       });
-      if (action.threadId && action.threadId !== state.selectedThreadId) {
-        return { ...state, runsById };
-      }
       const existing = state.liveResponsesByRunId[action.runId];
       const queuedAt = existing?.queuedAt ?? Date.now();
       const liveResponsesByRunId = {
@@ -602,7 +557,6 @@ export function detailReducer(
     }
     case 'RUN_COMPLETED': {
       const runsById = withRun(state, action.runId, {
-        threadId: action.threadId || undefined,
         status: 'completed',
         triggerMessageId: action.triggerMessageId,
         executorAlias: action.executorAlias,
@@ -637,7 +591,6 @@ export function detailReducer(
       const existing = state.liveResponsesByRunId[action.runId];
       const priorRun = state.runsById[action.runId];
       const runsById = withRun(state, action.runId, {
-        threadId: action.threadId || undefined,
         status: 'failed',
         triggerMessageId: action.triggerMessageId,
         errorCode: action.errorCode,
@@ -650,8 +603,6 @@ export function detailReducer(
       });
       if (
         !shouldShowInlineFailure({
-          selectedThreadId: state.selectedThreadId,
-          eventThreadId: action.threadId,
           existing,
           priorRun,
           showInlineFailure: action.showInlineFailure,
@@ -707,7 +658,6 @@ export function detailReducer(
         runsById[runId] = {
           ...(runsById[runId] || {
             id: runId,
-            threadId: '',
             status: 'cancelled',
             createdAt: new Date().toISOString(),
             startedAt: null,
@@ -854,8 +804,6 @@ export function detailReducer(
       const priorRun = state.runsById[action.event.runId];
       if (
         !shouldShowInlineFailure({
-          selectedThreadId: state.selectedThreadId,
-          eventThreadId: action.event.threadId,
           existing,
           priorRun,
         })

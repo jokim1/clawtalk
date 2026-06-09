@@ -192,9 +192,6 @@ export async function talkEventsUpgradeRoute(
       'x-clawtalk-scope': 'talk',
       'x-clawtalk-topic': `talk:${talkId}`,
       'x-clawtalk-talk-id': talkId,
-      // Greenfield has no separate thread table; the Talk id is the stable
-      // synthetic thread id carried by run/message events.
-      'x-clawtalk-thread-id': talkId,
       'x-clawtalk-last-event-id': String(lastEventId),
       'x-clawtalk-jwt-exp': String(jwtExp),
     },

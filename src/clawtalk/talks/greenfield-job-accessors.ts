@@ -2308,7 +2308,6 @@ async function claimDueGreenfieldJobRun(input: {
       eventType: 'talk_run_queued',
       payload: {
         talkId: input.talkId,
-        threadId: input.talkId,
         runId,
         runKind: 'conversation',
         triggerMessageId: null,
@@ -2716,7 +2715,6 @@ export async function createGreenfieldJobRunNow(input: {
         eventType: 'talk_run_queued',
         payload: {
           talkId: input.talkId,
-          threadId: input.talkId,
           runId,
           runKind: 'conversation',
           triggerMessageId: null,

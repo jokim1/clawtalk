@@ -323,7 +323,7 @@ describe('greenfield detail routes', () => {
       data: {
         talkId,
         messages: [
-          { id: seeded.userMessageId, role: 'user', threadId: talkId },
+          { id: seeded.userMessageId, role: 'user' },
           {
             id: seeded.agentMessageId,
             role: 'assistant',
@@ -342,7 +342,7 @@ describe('greenfield detail routes', () => {
     expect(search.body).toMatchObject({
       ok: true,
       data: {
-        results: [{ messageId: seeded.agentMessageId, threadId: talkId }],
+        results: [{ messageId: seeded.agentMessageId }],
       },
     });
 
@@ -475,7 +475,6 @@ describe('greenfield detail routes', () => {
     expect(snapshot.body).toMatchObject({
       ok: true,
       data: {
-        activeThreadId: talkId,
         talk: { accessRole: 'owner', workspaceId },
         threads: [{ id: talkId, talkId, messageCount: 2 }],
         messages: [{ id: seeded.userMessageId }, { id: seeded.agentMessageId }],
@@ -550,7 +549,6 @@ describe('greenfield detail routes', () => {
     expect(snapshot.body).toMatchObject({
       ok: true,
       data: {
-        activeThreadId: talkId,
         talk: { workspaceId },
         messages: [{ id: seeded.userMessageId }, { id: seeded.agentMessageId }],
         runs: [{ id: seeded.runId }],

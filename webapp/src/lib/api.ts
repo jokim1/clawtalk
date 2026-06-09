@@ -77,7 +77,6 @@ export type TalkSidebarItem = TalkSidebarTalk | TalkSidebarFolder;
 export type ContentSidebarItem = {
   id: string;
   talkId: string;
-  threadId: string;
   title: string;
   updatedAt: string;
 };
@@ -93,7 +92,6 @@ export type NativeDocumentFormat = 'markdown' | 'html';
 export type TalkSnapshotDocument = {
   id: string;
   talkId: string;
-  threadId: string;
   title: string;
   format: NativeDocumentFormat;
   listVersion: number;
@@ -323,7 +321,6 @@ export type TalkMessageAttachment = {
 
 export type TalkMessage = {
   id: string;
-  threadId: string;
   role: 'user' | 'assistant' | 'system' | 'tool';
   content: string;
   createdBy: string | null;
@@ -337,7 +334,6 @@ export type TalkMessage = {
 
 export type TalkMessageSearchResult = {
   messageId: string;
-  threadId: string;
   threadTitle: string | null;
   role: 'user' | 'assistant' | 'system' | 'tool';
   createdAt: string;
@@ -458,7 +454,6 @@ export type BrowserSetupResult = {
 
 export type TalkRun = {
   id: string;
-  threadId: string;
   responseGroupId: string | null;
   sequenceIndex: number | null;
   status:
@@ -1107,7 +1102,6 @@ export type TalkSnapshotAgent = {
 
 export type TalkSnapshotRun = {
   id: string;
-  threadId: string;
   status: TalkRun['status'];
   responseGroupId: string | null;
   sequenceIndex: number | null;
@@ -1123,7 +1117,6 @@ export type TalkSnapshotRun = {
 export type TalkSnapshot = {
   talk: TalkSnapshotTalk;
   threads: TalkSnapshotThread[];
-  activeThreadId: string;
   messages: TalkMessage[];
   hasOlderMessages: boolean;
   primaryDocument: TalkSnapshotDocument | null;

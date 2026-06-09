@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type MutableRefObject } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 
 import {
   buildDefaultJobDraft,
@@ -10,13 +10,11 @@ import type { TalkJob, TalkJobRunSummary } from '../lib/api';
 
 type UseTalkJobsControllerInput = {
   talkId: string;
-  activeThreadIdRef: MutableRefObject<string | null>;
   resyncTalkState: (options?: { refreshThreads?: boolean }) => Promise<void>;
 };
 
 export function useTalkJobsController({
   talkId,
-  activeThreadIdRef,
   resyncTalkState,
 }: UseTalkJobsControllerInput) {
   // Page-owned Jobs state. TalkJobsPanel self-fetches only the read-only tool
@@ -48,17 +46,10 @@ export function useTalkJobsController({
     setSelectedJobRunsStatus({ status: 'idle' });
   }, [talkId]);
 
-  // After a Run-Now settles in TalkJobsPanel: if the job's thread is the active
-  // thread, resync the thread/run views. Encapsulates the page-private
-  // activeThreadIdRef + resyncTalkState so the panel needs neither.
-  const handleJobRunSettled = useCallback(
-    async (jobThreadId: string | null) => {
-      if (jobThreadId === activeThreadIdRef.current) {
-        await resyncTalkState({ refreshThreads: true });
-      }
-    },
-    [activeThreadIdRef, resyncTalkState],
-  );
+  // After a Run-Now settles in TalkJobsPanel, resync the Talk timeline and runs.
+  const handleJobRunSettled = useCallback(async () => {
+    await resyncTalkState({ refreshThreads: true });
+  }, [resyncTalkState]);
 
   return {
     talkJobs,
