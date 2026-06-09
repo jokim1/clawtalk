@@ -135,7 +135,7 @@ describe('buildToolExecutor runtime tool gates', () => {
     });
   });
 
-  it('fails closed for direct read_attachment calls on the greenfield runtime', async () => {
+  it('uses the generic unavailable-tool path for unknown tools', async () => {
     const executeTool = buildToolExecutor(
       TALK_ID,
       USER_ID,
@@ -143,13 +143,9 @@ describe('buildToolExecutor runtime tool gates', () => {
       new AbortController().signal,
     );
 
-    await expect(
-      executeTool('read_attachment', {
-        attachmentId: '00000000-0000-4000-8000-000000000aaa',
-      }),
-    ).resolves.toEqual({
+    await expect(executeTool('unknown_context_tool', {})).resolves.toEqual({
       result:
-        'Error: attachments_not_available: Message attachments are not available on the greenfield chat route yet.',
+        "Tool 'unknown_context_tool' is not available in Talk context execution",
       isError: true,
     });
   });

@@ -25,14 +25,6 @@ type WorkspaceContext = {
   workspace: WorkspaceSummaryRecord;
 };
 
-type NormalizedAttachment = {
-  id: string;
-  fileName: string;
-  fileSize: number;
-  mimeType: string;
-  extractionStatus: 'pending' | 'ready' | 'failed';
-};
-
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -172,7 +164,6 @@ function toMessageApi(message: GreenfieldMessageRecord): {
   agentId: string | null;
   agentNickname: string | null;
   metadata: Record<string, unknown> | null;
-  attachments: NormalizedAttachment[];
 } {
   return {
     id: message.id,
@@ -188,7 +179,6 @@ function toMessageApi(message: GreenfieldMessageRecord): {
       authorKind: message.author_kind,
       agentRole: message.agent_role_key,
     },
-    attachments: [],
   };
 }
 
@@ -256,7 +246,6 @@ export async function enqueueGreenfieldChatRoute(input: {
   talkId: string;
   content: unknown;
   targetAgentIds?: unknown;
-  attachmentIds?: unknown;
 }): Promise<
   RouteResult<{
     talkId: string;
@@ -297,25 +286,6 @@ export async function enqueueGreenfieldChatRoute(input: {
   if (!targetAgentIds.every(isUuid)) {
     return error(400, 'invalid_target_agent_id', 'Agent ids must be UUIDs.');
   }
-  const normalizedAttachmentIds = normalizeOptionalStringArray(
-    input.attachmentIds,
-  );
-  if (!normalizedAttachmentIds.ok) {
-    return error(
-      400,
-      'invalid_attachment_id',
-      'attachmentIds must be an array of strings.',
-    );
-  }
-  const attachmentIds = normalizedAttachmentIds.values;
-  if (attachmentIds.length > 0) {
-    return error(
-      400,
-      'attachments_not_available',
-      'Message attachments are not available on this route yet.',
-    );
-  }
-
   return withResolvedWorkspace(
     input.auth,
     input.workspaceId,

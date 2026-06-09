@@ -1971,26 +1971,24 @@ describe('GreenfieldTalkExecutor queue integration', () => {
     );
   });
 
-  it('rejects deferred retired context tool calls before legacy execution', async () => {
+  it('rejects unknown context tool calls before legacy execution', async () => {
     const { workspaceId, talkId, agentIds } = await createTalkFixture();
     const enqueued = await enqueueGreenfieldChatTurn({
       workspaceId,
       talkId,
       userId: USER_ID,
-      content: 'Try to read an attachment.',
+      content: 'Try to call unknown tools.',
       targetAgentIds: agentIds,
     });
     if (!enqueued.ok) throw new Error(`enqueue failed: ${enqueued.reason}`);
 
-    const { calls } = mockResolvedExecution('Attachment unavailable', {
+    const { calls } = mockResolvedExecution('Unknown tools unavailable', {
       onExecute: async (executeToolCall) => {
-        const result = await executeToolCall('read_attachment', {
-          attachmentId: '00000000-0000-4000-8000-000000000aaa',
-        });
+        const result = await executeToolCall('unknown_context_tool', {});
         expect(result).toEqual({
           isError: true,
           result:
-            'Error: attachments_not_available: Message attachments are not available on the greenfield chat route yet.',
+            "Tool 'unknown_context_tool' is not available in greenfield execution",
         });
         await expect(
           executeToolCall('update_state', {

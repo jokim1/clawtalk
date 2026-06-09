@@ -35,7 +35,6 @@ type UseTalkAgentsControllerOptions = {
   pageTalkId: string | null;
   activeTalkWorkspaceId: string | null;
   canEditAgents: boolean;
-  hasPendingImageAttachments: boolean;
   onUnauthorized: () => void;
 };
 
@@ -79,45 +78,6 @@ function getModelSuggestionsForSource(input: {
     displayName: model.displayName,
     supportsVision: model.supportsVision === true,
   }));
-}
-
-function talkAgentSupportsVision(
-  agent: Pick<TalkAgent, 'sourceKind' | 'providerId' | 'modelId'>,
-  registeredAgent:
-    | Pick<RegisteredAgent, 'providerId' | 'modelId' | 'supportsVision'>
-    | undefined,
-  aiAgents: AiAgentsPageData | null,
-): boolean {
-  // Main slot (modelId=null on the TalkAgent row): trust the registered
-  // agent's supportsVision, which is the backend's ground truth from
-  // resolveModelCapabilities. Avoids the modelSuggestions lookup, which
-  // can miss for subscription providers whose curated rows are not
-  // materialized as suggestions (for example, Codex's gpt-5.4).
-  if (!agent.modelId?.trim()) {
-    return registeredAgent?.supportsVision === true;
-  }
-
-  if (!aiAgents) return false;
-
-  // Provider-pinned agents (TalkAgent row has its own modelId): look up
-  // vision capability via the provider's modelSuggestions. Fall back to
-  // the registered agent's supportsVision when the suggestion list misses.
-  const provider = aiAgents.additionalProviders.find(
-    (entry) => entry.id === agent.providerId,
-  );
-  if (provider) {
-    const model = provider.modelSuggestions.find(
-      (entry) => entry.modelId === agent.modelId,
-    );
-    if (model) return model.supportsVision === true;
-  }
-  if (agent.providerId === 'provider.anthropic') {
-    const claudeModel = aiAgents.claudeModelSuggestions.find(
-      (entry) => entry.modelId === agent.modelId,
-    );
-    if (claudeModel) return claudeModel.supportsVision === true;
-  }
-  return registeredAgent?.supportsVision === true;
 }
 
 function buildAutoNicknameBase(input: {
@@ -253,7 +213,6 @@ export function useTalkAgentsController({
   pageTalkId,
   activeTalkWorkspaceId,
   canEditAgents,
-  hasPendingImageAttachments,
   onUnauthorized,
 }: UseTalkAgentsControllerOptions): {
   agents: TalkAgent[];
@@ -431,25 +390,6 @@ export function useTalkAgentsController({
       ),
     [selectedTargetAgents, talkAgentExecutionGuardrailsById],
   );
-  const selectedNonVisionAgents = useMemo(
-    () =>
-      hasPendingImageAttachments
-        ? selectedTargetAgents.filter(
-            (agent) =>
-              !talkAgentSupportsVision(
-                agent,
-                registeredAgentsById.get(agent.id),
-                aiAgentsData,
-              ),
-          )
-        : [],
-    [
-      aiAgentsData,
-      hasPendingImageAttachments,
-      registeredAgentsById,
-      selectedTargetAgents,
-    ],
-  );
   const composerGuardrailMessage = useMemo(() => {
     if (selectedUnavailableAgents.length > 0) {
       const labels = selectedUnavailableAgents.map((agent) =>
@@ -465,30 +405,14 @@ export function useTalkAgentsController({
       return `${summarizeAgentLabels(labels)} do not currently have a valid execution path. Adjust the selected agents before sending.`;
     }
 
-    if (selectedNonVisionAgents.length > 0) {
-      const labels = selectedNonVisionAgents.map((agent) =>
-        buildAgentLabel(agent),
-      );
-      if (labels.length === 1) {
-        return `${labels[0]} does not support image attachments. Switch to a vision-capable model or remove the images before sending.`;
-      }
-      return `${summarizeAgentLabels(labels)} do not support image attachments. Switch to vision-capable models or remove the images before sending.`;
-    }
-
     return null;
   }, [
-    selectedNonVisionAgents,
     selectedUnavailableAgents,
     talkAgentExecutionGuardrailsById,
   ]);
   const selectedGuardrailAgentIds = useMemo(
-    () =>
-      new Set(
-        [...selectedUnavailableAgents, ...selectedNonVisionAgents].map(
-          (agent) => agent.id,
-        ),
-      ),
-    [selectedNonVisionAgents, selectedUnavailableAgents],
+    () => new Set(selectedUnavailableAgents.map((agent) => agent.id)),
+    [selectedUnavailableAgents],
   );
   const sendBlockedByGuardrail = Boolean(composerGuardrailMessage);
   const hasVisionNonDocAgent = useMemo(

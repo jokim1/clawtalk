@@ -167,11 +167,10 @@ User sends a message. Triggers a run for each agent in the team (Ordered → seq
 
 Subscribe to the WebSocket stream (§9) to receive `run.update` events.
 
-Message attachments are not part of the active greenfield contract. The legacy
-`/talks/:id/attachments` compatibility routes return `attachments_not_available`
-until a future R2-backed attachment slice lands; use context file uploads for
-source material. Current compatibility code may still accept or emit synthetic
-`threadId`; native API consumers should not depend on it.
+Message attachments are not part of the active greenfield contract. There is
+no `/talks/:id/attachments` chat-message API in v1; use context file uploads for
+source material. Native Talk APIs are Talk-level and no longer accept or emit
+synthetic `threadId`.
 
 ### `POST /talks/:id/cancel-runs`
 

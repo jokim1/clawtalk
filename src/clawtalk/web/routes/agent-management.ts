@@ -65,12 +65,10 @@ export type RegisteredAgentApiSnapshot = RegisteredAgentSnapshot & {
   modelUpdateAvailable: { modelId: string; displayName: string | null } | null;
   // Vision capability is the agent's ground truth — sourced from
   // `resolveModelCapabilities(providerId, modelId)` on the backend. The
-  // frontend uses this for the composer's image-attachment guard on the
-  // Main slot, where the TalkAgent row stores modelId=null and the
-  // additionalProviders model lookup misses for subscription providers
-  // whose curated model row isn't materialized into modelSuggestions
-  // (e.g. Codex's gpt-5.4 capability is true even when the suggestion
-  // list omits it).
+  // frontend uses this for native source/document flows where the TalkAgent
+  // row stores modelId=null and additionalProviders model lookup can miss
+  // subscription providers whose curated model row is not materialized into
+  // modelSuggestions.
   supportsVision: boolean;
 };
 

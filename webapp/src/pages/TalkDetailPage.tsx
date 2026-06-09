@@ -362,12 +362,11 @@ export function TalkDetailPage({
 
   const composerInput = useTalkComposerInputController({
     pageKind,
-    pageTalk,
     activeConversationId,
     currentTab,
+    contextSources,
     sendState: state.sendState,
     dispatch,
-    contextSources,
     documentTitle: primaryDocumentId !== null ? primaryDocumentTitle : null,
   });
 
@@ -408,7 +407,6 @@ export function TalkDetailPage({
     pageTalkId: pageTalk?.id ?? null,
     activeTalkWorkspaceId,
     canEditAgents,
-    hasPendingImageAttachments: composerInput.hasPendingImageAttachments,
     onUnauthorized: handleUnauthorized,
   });
 
@@ -977,18 +975,7 @@ export function TalkDetailPage({
 
   return (
     <section className="page-shell talk-detail-shell">
-      <div
-        className={`talk-workspace${composerInput.isDragOver ? ' talk-workspace-drag-over' : ''}`}
-        onDragEnter={composerInput.handleDragEnter}
-        onDragLeave={composerInput.handleDragLeave}
-        onDragOver={composerInput.handleDragOver}
-        onDrop={composerInput.handleDrop}
-      >
-        {composerInput.isDragOver ? (
-          <div className="talk-workspace-drop-overlay">
-            Drop files to attach
-          </div>
-        ) : null}
+      <div className="talk-workspace">
         <TalkDetailShell
           talkId={talkId}
           displayedTitle={displayedTitle}
@@ -1167,7 +1154,6 @@ export function TalkDetailPage({
               timelineRef={timelineRef}
               endRef={endRef}
               setMessageElementRef={setMessageElementRef}
-              fileInputRef={composerInput.fileInputRef}
               textareaRef={composerInput.textareaRef}
               primaryDocumentId={primaryDocumentId}
               primaryDocumentTitle={primaryDocumentTitle}
@@ -1233,13 +1219,6 @@ export function TalkDetailPage({
               handleClearUnread={handleClearUnread}
               toolsRefreshKey={toolsRefreshKey}
               handleSend={composerSend.handleSend}
-              ALLOWED_ATTACHMENT_EXTENSIONS={
-                composerInput.ALLOWED_ATTACHMENT_EXTENSIONS
-              }
-              handleFileInputChange={composerInput.handleFileInputChange}
-              GREENFIELD_MESSAGE_ATTACHMENTS_ENABLED={
-                composerInput.GREENFIELD_MESSAGE_ATTACHMENTS_ENABLED
-              }
               effectiveAgents={effectiveAgents}
               targetAgentIds={targetAgentIds}
               talkAgentExecutionGuardrailsById={
@@ -1261,9 +1240,6 @@ export function TalkDetailPage({
               contextSources={contextSources}
               activeRound={activeRound}
               hasUnsavedAgentChanges={hasUnsavedAgentChanges}
-              pendingAttachments={composerInput.pendingAttachments}
-              handleRemoveAttachment={composerInput.handleRemoveAttachment}
-              handleAttachButtonClick={composerInput.handleAttachButtonClick}
               canEditAgents={canEditAgents}
               handleCancelRuns={composerSend.handleCancelRuns}
               cancelState={state.cancelState}

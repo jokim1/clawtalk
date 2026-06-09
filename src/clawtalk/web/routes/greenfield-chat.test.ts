@@ -394,37 +394,20 @@ describe('greenfield chat routes', () => {
       body: {
         content: unknown;
         targetAgentIds?: unknown;
-        attachmentIds?: unknown;
       };
       code: string;
     }> = [
       {
-        body: { content: 42, targetAgentIds: [], attachmentIds: [] },
+        body: { content: 42, targetAgentIds: [] },
         code: 'message_required',
       },
       {
-        body: { content: 'hello', targetAgentIds: 'bad', attachmentIds: [] },
+        body: { content: 'hello', targetAgentIds: 'bad' },
         code: 'invalid_target_agent_id',
       },
       {
-        body: { content: 'hello', targetAgentIds: [123], attachmentIds: [] },
+        body: { content: 'hello', targetAgentIds: [123] },
         code: 'invalid_target_agent_id',
-      },
-      {
-        body: { content: 'hello', targetAgentIds: [], attachmentIds: 'bad' },
-        code: 'invalid_attachment_id',
-      },
-      {
-        body: { content: 'hello', targetAgentIds: [], attachmentIds: [123] },
-        code: 'invalid_attachment_id',
-      },
-      {
-        body: {
-          content: 'hello',
-          targetAgentIds: [],
-          attachmentIds: ['00000000-0000-4000-8000-000000000abc'],
-        },
-        code: 'attachments_not_available',
       },
     ];
 

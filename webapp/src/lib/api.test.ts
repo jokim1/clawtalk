@@ -366,29 +366,6 @@ describe('api auth retry behavior', () => {
     );
   });
 
-  it('keeps message attachment helpers quarantined while greenfield storage is unavailable', async () => {
-    const fetchMock = vi.fn();
-    vi.stubGlobal('fetch', fetchMock);
-
-    const api = await loadApiModule();
-    await expect(
-      api.uploadTalkAttachment(
-        'talk-1',
-        new File(['hello'], 'notes.txt', { type: 'text/plain' }),
-      ),
-    ).rejects.toMatchObject({
-      status: 501,
-      code: 'attachments_not_available',
-    });
-    await expect(
-      api.deleteTalkAttachment('talk-1', 'attachment-1'),
-    ).rejects.toMatchObject({
-      status: 501,
-      code: 'attachments_not_available',
-    });
-    expect(fetchMock).not.toHaveBeenCalled();
-  });
-
   it('coalesces concurrent mutation refreshes and rebuilds fresh headers for both retries', async () => {
     const counts = new Map<string, number>();
     const createTalkHeaders: Array<Record<string, string>> = [];
@@ -617,7 +594,6 @@ describe('api auth retry behavior', () => {
       {
         content: 'Hello',
         targetAgentIds: ['agent-1'],
-        attachmentIds: [],
       },
       {},
     ]);

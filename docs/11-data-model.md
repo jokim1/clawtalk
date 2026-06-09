@@ -386,9 +386,9 @@ agent_feedback_events (
 ```
 
 Message attachments are intentionally absent from the active greenfield
-baseline. The legacy attachment endpoints are guarded by a structured
-`attachments_not_available` response until a future R2-backed attachment slice
-adds storage, DB rows, API contracts, and executor/tool consumption together.
+baseline. There are no chat-message attachment endpoints, DTO fields, composer
+affordances, or executor tools in v1; a future attachment slice must add
+storage, DB rows, API contracts, and executor/tool consumption together.
 
 Design notes:
 

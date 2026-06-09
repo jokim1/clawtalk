@@ -309,14 +309,6 @@ export type TalkConversation = {
   lastMessageAt: string | null;
 };
 
-export type TalkMessageAttachment = {
-  id: string;
-  fileName: string;
-  fileSize: number;
-  mimeType: string;
-  extractionStatus: 'pending' | 'ready' | 'failed';
-};
-
 export type TalkMessage = {
   id: string;
   role: 'user' | 'assistant' | 'system' | 'tool';
@@ -327,7 +319,6 @@ export type TalkMessage = {
   agentId?: string | null;
   agentNickname?: string | null;
   metadata?: Record<string, unknown> | null;
-  attachments?: TalkMessageAttachment[];
 };
 
 export type TalkMessageSearchResult = {
@@ -511,8 +502,7 @@ export type TalkResourceBinding = {
     | 'google_drive_folder'
     | 'google_drive_file'
     | 'data_connector'
-    | 'saved_source'
-    | 'message_attachment';
+    | 'saved_source';
   externalId: string;
   displayName: string;
   metadata: Record<string, unknown> | null;
@@ -1948,9 +1938,8 @@ export type RegisteredAgent = {
     ready: boolean;
     message: string;
   };
-  // Backend ground truth from resolveModelCapabilities. Used by the
-  // composer's image-attachment guard for the Main slot, where the
-  // TalkAgent row stores modelId=null.
+  // Backend ground truth from resolveModelCapabilities. Used by native
+  // source/document flows that need to know whether an agent can see images.
   supportsVision: boolean;
   // Model-lifecycle trail (backend PR #487 + run-time net). When
   // modelAutoUpgradedFrom is set, this agent was auto-moved off a RETIRED
@@ -2581,7 +2570,6 @@ export async function sendTalkMessage(input: {
   talkId: string;
   content: string;
   targetAgentIds?: string[];
-  attachmentIds?: string[];
 }): Promise<{ talkId: string; message: TalkMessage; runs: TalkRun[] }> {
   return apiMutationRequest<{
     talkId: string;
@@ -2598,31 +2586,8 @@ export async function sendTalkMessage(input: {
       body: JSON.stringify({
         content: input.content,
         targetAgentIds: input.targetAgentIds ?? [],
-        attachmentIds: input.attachmentIds ?? [],
       }),
     },
-  );
-}
-
-export async function uploadTalkAttachment(
-  _talkId: string,
-  _file: File,
-): Promise<{ attachment: TalkMessageAttachment }> {
-  throw new ApiError(
-    'Message attachments are not available on the greenfield chat route yet.',
-    501,
-    'attachments_not_available',
-  );
-}
-
-export async function deleteTalkAttachment(
-  _talkId: string,
-  _attachmentId: string,
-): Promise<void> {
-  throw new ApiError(
-    'Message attachments are not available on the greenfield chat route yet.',
-    501,
-    'attachments_not_available',
   );
 }
 

@@ -992,13 +992,6 @@ function buildGreenfieldToolExecutor(input: {
       }
       return result;
     }
-    if (toolName === 'read_attachment') {
-      return {
-        result:
-          'Error: attachments_not_available: Message attachments are not available on the greenfield chat route yet.',
-        isError: true,
-      };
-    }
     if (!input.advertisedToolNames.has(toolName)) {
       return {
         result: `Tool '${toolName}' is not available in greenfield execution`,
