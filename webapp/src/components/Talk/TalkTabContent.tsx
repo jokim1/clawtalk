@@ -19,6 +19,7 @@ import { ToolChipsBar } from '../ToolChipsBar';
 import type {
   ContextSource,
   NativeDocumentFormat,
+  SessionUser,
   TalkAgent,
   TalkMessage,
   TalkMessageSearchResult,
@@ -202,6 +203,7 @@ type TalkTabContentProps = {
   handleShowDocPane: () => void;
   handleHideDocPane: () => void;
   canEditDoc: boolean;
+  currentUser: Pick<SessionUser, 'id' | 'displayName'> | null;
 };
 
 export function TalkTabContent({
@@ -305,6 +307,7 @@ export function TalkTabContent({
   handleShowDocPane,
   handleHideDocPane,
   canEditDoc,
+  currentUser,
 }: TalkTabContentProps): JSX.Element {
   const hasDocument = primaryDocumentId !== null;
   return (
@@ -551,6 +554,7 @@ export function TalkTabContent({
               handleOpenRunHistory={handleOpenRunHistory}
               hasUnreadBelow={hasUnreadBelow}
               handleClearUnread={handleClearUnread}
+              currentUser={currentUser}
             />
 
             <ToolChipsBar talkId={talkId} refreshKey={toolsRefreshKey} />

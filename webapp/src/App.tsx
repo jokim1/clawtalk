@@ -1085,6 +1085,7 @@ export function App() {
               element={
                 <TalkDetailPage
                   userId={auth.user.id}
+                  currentUser={auth.user}
                   onUnauthorized={handleUnauthorized}
                   titleOverride={currentTalkTitle}
                   renameDraft={renameDraft}

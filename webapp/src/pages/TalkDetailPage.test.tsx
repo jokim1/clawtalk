@@ -910,6 +910,8 @@ describe('TalkDetailPage', () => {
     renderDetailPage('/app/talks/talk-1');
 
     await screen.findByText('Option A wins overall.');
+    expect(screen.getByText('Joseph Kim')).toBeTruthy();
+    expect(screen.getByText('JK')).toBeTruthy();
     const summary = screen.getByLabelText('Ordered round summary');
     expect(within(summary).getByText('Ordered round finished')).toBeTruthy();
     expect(
@@ -3969,6 +3971,10 @@ function renderDetailPage(
             element={
               <TalkDetailPage
                 userId="test-user"
+                currentUser={{
+                  id: 'test-user',
+                  displayName: 'Joseph Kim',
+                }}
                 onUnauthorized={vi.fn()}
                 renameDraft={null}
                 onRenameDraftChange={vi.fn()}
@@ -4012,6 +4018,10 @@ function renderDetailPageWithRenameHarness(
               element={
                 <TalkDetailPage
                   userId="test-user"
+                  currentUser={{
+                    id: 'test-user',
+                    displayName: 'Joseph Kim',
+                  }}
                   onUnauthorized={vi.fn()}
                   renameDraft={renameDraft}
                   onRenameDraftChange={(talkId, draft) =>

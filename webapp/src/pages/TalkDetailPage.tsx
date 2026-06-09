@@ -18,6 +18,7 @@ import {
   TalkRun,
   TalkSnapshot,
   UnauthorizedError,
+  type SessionUser,
 } from '../lib/api';
 import { TalkToolsPanel } from '../components/TalkToolsPanel';
 import { SavedSourcesPanel } from '../components/SavedSourcesPanel';
@@ -89,6 +90,7 @@ function snapshotRunsToTalkRuns(snapshotRuns: TalkSnapshot['runs']): TalkRun[] {
 
 export function TalkDetailPage({
   userId,
+  currentUser,
   onUnauthorized,
   titleOverride,
   renameDraft,
@@ -99,6 +101,7 @@ export function TalkDetailPage({
   sidebarContents,
 }: {
   userId: string;
+  currentUser: Pick<SessionUser, 'id' | 'displayName'> | null;
   onUnauthorized: () => void;
   titleOverride?: string | null;
   renameDraft: { talkId: string; draft: string } | null;
@@ -1261,6 +1264,7 @@ export function TalkDetailPage({
               handleShowDocPane={handleShowDocPane}
               handleHideDocPane={handleHideDocPane}
               canEditDoc={canEditDoc}
+              currentUser={currentUser}
             />
           ) : null}
         </div>
