@@ -137,7 +137,7 @@ async function findVisibleWorkspaceIdForScope(input: {
   return undefined;
 }
 
-function toSnapshotThreadApi(
+function toSnapshotConversationApi(
   talk: GreenfieldTalkRecord,
   metrics: GreenfieldThreadMetrics,
 ): {
@@ -737,7 +737,7 @@ export async function getGreenfieldSnapshotRoute(input: {
 }): Promise<
   RouteResult<{
     talk: ReturnType<typeof toSnapshotTalk>;
-    threads: ReturnType<typeof toSnapshotThreadApi>[];
+    conversations: ReturnType<typeof toSnapshotConversationApi>[];
     messages: ReturnType<typeof toMessageApi>[];
     hasOlderMessages: boolean;
     primaryDocument: ReturnType<typeof toPrimaryDocumentApi> | null;
@@ -802,7 +802,7 @@ export async function getGreenfieldSnapshotRoute(input: {
           workspace: ctx.workspace,
           userId: input.auth.userId,
         }),
-        threads: [toSnapshotThreadApi(talk, metrics)],
+        conversations: [toSnapshotConversationApi(talk, metrics)],
         messages: messages.map(toMessageApi),
         hasOlderMessages: rawMessages.length > 200,
         primaryDocument: documentPayload.primaryDocument,

@@ -103,7 +103,7 @@ type TalkDetailShellProps = {
     message?: string;
   };
   onOrchestrationModeChange: (mode: TalkOrchestrationMode) => void;
-  currentThreadHasContent: boolean;
+  currentConversationHasContent: boolean;
   openDocModal: () => void;
   effectiveAgents: TalkAgent[];
   talkAgentExecutionGuardrailsById: Record<string, TalkAgentExecutionGuardrail>;
@@ -128,7 +128,7 @@ export function TalkDetailShell({
   orchestrationMode,
   orchestrationState,
   onOrchestrationModeChange,
-  currentThreadHasContent,
+  currentConversationHasContent,
   openDocModal,
   effectiveAgents,
   talkAgentExecutionGuardrailsById,
@@ -181,7 +181,7 @@ export function TalkDetailShell({
               <div className="talk-tabs-row">
                 <nav className="talk-tabs" aria-label="Talk sections">
                   <Link
-                    to={tabLinks.threadAwareTalkTabHref}
+                    to={tabLinks.talkTabHref}
                     className={`talk-tab ${currentTab === 'talk' ? 'talk-tab-active' : ''}`}
                   >
                     Talk
@@ -306,13 +306,13 @@ export function TalkDetailShell({
                     ) : null}
                   </div>
                 ) : null}
-                {!currentThreadHasContent ? (
+                {!currentConversationHasContent ? (
                   <button
                     type="button"
                     className="talk-tabs-add-doc"
                     onClick={openDocModal}
-                    aria-label="Add a document to this thread"
-                    title="Add a document to this thread"
+                    aria-label="Add a document to this conversation"
+                    title="Add a document to this conversation"
                   >
                     + Doc
                   </button>

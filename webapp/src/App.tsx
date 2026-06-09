@@ -15,7 +15,7 @@ import { SecondaryList } from './components/shell/SecondaryList';
 import { SignInView } from './components/SignInView';
 import {
   ApiError,
-  ContentSidebarItem,
+  DocumentSidebarItem,
   createTalk,
   createTalkFolder,
   deleteTalk,
@@ -419,7 +419,7 @@ export function App() {
   const [auth, setAuth] = useState<AuthState>({ status: 'loading' });
   const [signOutBusy, setSignOutBusy] = useState(false);
   const [sidebarItems, setSidebarItems] = useState<TalkSidebarItem[]>([]);
-  const [sidebarContents, setSidebarContents] = useState<ContentSidebarItem[]>(
+  const [sidebarContents, setSidebarContents] = useState<DocumentSidebarItem[]>(
     [],
   );
   const [mainTalkId, setMainTalkId] = useState<string | null>(null);

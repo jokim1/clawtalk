@@ -404,7 +404,7 @@ export function detailReducer(
       // First snapshot hydration for a Talk. Seed runsById
       // from the snapshot's active runs while preserving any live-state
       // already accumulated from WS deltas that beat the snapshot. The
-      // first-paint scroll position is owned by threadScroll — the
+      // first-paint scroll position is owned by talkScroll — the
       // thread-show effect restores it on mount.
       const incoming = mapRunsById(action.runs);
       const merged = { ...incoming };

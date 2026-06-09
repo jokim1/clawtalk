@@ -398,7 +398,6 @@ describe('greenfield jobs compatibility routes', () => {
       prompt: 'Summarize the plan.',
       targetAgentId: agentIds[0],
       status: 'active',
-      threadId: talkId,
       sourceScope: { allowWeb: true, toolIds: [] },
     });
     expect(created.body.data.job.nextDueAt).toBeTruthy();

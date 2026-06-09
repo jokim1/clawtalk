@@ -5,7 +5,7 @@ import { MemoryRouter } from 'react-router-dom';
 
 import { SecondaryList } from './SecondaryList';
 import type {
-  ContentSidebarItem,
+  DocumentSidebarItem,
   TalkSidebarFolder,
   TalkSidebarItem,
 } from '../../lib/api';
@@ -217,7 +217,7 @@ describe('SecondaryList', () => {
   });
 
   it('renders Content rows linking to the owning thread with ?doc=1', () => {
-    const contents: ContentSidebarItem[] = [
+    const contents: DocumentSidebarItem[] = [
       {
         id: 'content-1',
         talkId: 'talk-with-doc',

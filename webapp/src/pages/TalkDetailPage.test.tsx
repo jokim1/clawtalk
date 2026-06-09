@@ -27,7 +27,7 @@ function buildTestQueryClient(): QueryClient {
 import { openTalkStream } from '../lib/talkStream';
 import type {
   AiAgentsPageData,
-  ContentSidebarItem,
+  DocumentSidebarItem,
   ContextRule,
   NativeDocument,
   NativeDocumentFormat,
@@ -43,7 +43,7 @@ import type {
   TalkRunContextDetails,
   TalkJob,
   TalkJobRunSummary,
-  TalkThread,
+  TalkConversation,
   TalkToolsState,
   RegisteredAgent,
   TalkSnapshotDocument,
@@ -228,7 +228,7 @@ describe('TalkDetailPage', () => {
     expect(screen.getByText('Agent: GPT-5 Mini')).toBeTruthy();
 
     await user.click(tabs.getByRole('link', { name: 'Talk' }));
-    await screen.findByPlaceholderText(/^Send a message to this thread/);
+    await screen.findByPlaceholderText(/^Send a message to this conversation/);
 
     expect(openTalkStreamMock).toHaveBeenCalledTimes(1);
   });
@@ -422,7 +422,7 @@ describe('TalkDetailPage', () => {
 
     renderDetailPage('/app/talks/talk-1');
 
-    await screen.findByPlaceholderText(/^Send a message to this thread/);
+    await screen.findByPlaceholderText(/^Send a message to this conversation/);
     expect(screen.queryByRole('button', { name: /Response mode/i })).toBeNull();
   });
 
@@ -439,14 +439,18 @@ describe('TalkDetailPage', () => {
 
     renderDetailPage('/app/talks/talk-1');
 
-    await screen.findByPlaceholderText(/^Send a message to this thread/);
+    await screen.findByPlaceholderText(/^Send a message to this conversation/);
 
-    const threadRail = await screen.findByLabelText('Talk threads');
+    const threadRail = await screen.findByLabelText('Talk conversations');
     expect(
-      within(threadRail).getByRole('button', { name: 'Start new thread' }),
+      within(threadRail).getByRole('button', {
+        name: 'Start new conversation',
+      }),
     ).toBeTruthy();
     await user.click(
-      within(threadRail).getByRole('button', { name: 'Start new thread' }),
+      within(threadRail).getByRole('button', {
+        name: 'Start new conversation',
+      }),
     );
     expect(
       await within(threadRail).findByText(
@@ -763,7 +767,7 @@ describe('TalkDetailPage', () => {
 
     renderDetailPage('/app/talks/talk-1');
 
-    await screen.findByPlaceholderText(/^Send a message to this thread/);
+    await screen.findByPlaceholderText(/^Send a message to this conversation/);
     expect(
       screen.getByText(
         'Wait for the current round to finish or cancel it before sending another message.',
@@ -785,7 +789,7 @@ describe('TalkDetailPage', () => {
     });
 
     renderDetailPage('/app/talks/talk-1');
-    await screen.findByPlaceholderText(/^Send a message to this thread/);
+    await screen.findByPlaceholderText(/^Send a message to this conversation/);
 
     const targetGroup = screen.getByRole('group', { name: 'Selected agents' });
     const refreshedTargetGroup = screen.getByRole('group', {
@@ -843,7 +847,7 @@ describe('TalkDetailPage', () => {
 
     renderDetailPage('/app/talks/talk-1');
 
-    await screen.findByPlaceholderText(/^Send a message to this thread/);
+    await screen.findByPlaceholderText(/^Send a message to this conversation/);
     expect(
       screen.getByText('Agent 1 of 2 · Claude Sonnet 4.6 responding…'),
     ).toBeTruthy();
@@ -1489,7 +1493,7 @@ describe('TalkDetailPage', () => {
       'disabled',
     );
     expect(
-      screen.getByPlaceholderText(/^Send a message to this thread/),
+      screen.getByPlaceholderText(/^Send a message to this conversation/),
     ).toHaveAttribute('disabled');
   });
 
@@ -1529,7 +1533,7 @@ describe('TalkDetailPage', () => {
     });
 
     renderDetailPage('/app/talks/talk-1');
-    await screen.findByPlaceholderText(/^Send a message to this thread/);
+    await screen.findByPlaceholderText(/^Send a message to this conversation/);
 
     const targetGroup = screen.getByRole('group', { name: 'Selected agents' });
     const claudeChip = within(targetGroup).getByRole('button', {
@@ -1549,7 +1553,7 @@ describe('TalkDetailPage', () => {
     expect(openAiChip.getAttribute('aria-pressed')).toBe('true');
 
     await user.type(
-      screen.getByPlaceholderText(/^Send a message to this thread/),
+      screen.getByPlaceholderText(/^Send a message to this conversation/),
       'Give me the latest take.',
     );
     await user.click(screen.getByRole('button', { name: 'Send' }));
@@ -1566,7 +1570,7 @@ describe('TalkDetailPage', () => {
       ),
     ).toBeTruthy();
     expect(
-      screen.getByPlaceholderText(/^Send a message to this thread/),
+      screen.getByPlaceholderText(/^Send a message to this conversation/),
     ).toHaveAttribute('disabled');
   });
 
@@ -1628,7 +1632,7 @@ describe('TalkDetailPage', () => {
 
     renderDetailPage('/app/talks/talk-1');
     const composer = await screen.findByPlaceholderText(
-      /^Send a message to this thread/,
+      /^Send a message to this conversation/,
     );
     const sendButton = screen.getByRole('button', { name: 'Send' });
 
@@ -1689,7 +1693,7 @@ describe('TalkDetailPage', () => {
 
     renderDetailPage('/app/talks/talk-1');
     const composer = await screen.findByPlaceholderText(
-      /^Send a message to this thread/,
+      /^Send a message to this conversation/,
     );
 
     await user.type(composer, 'Line 1');
@@ -1739,7 +1743,7 @@ describe('TalkDetailPage', () => {
 
       renderDetailPage('/app/talks/talk-1');
       const composer = (await screen.findByPlaceholderText(
-        /^Send a message to this thread/,
+        /^Send a message to this conversation/,
       )) as HTMLTextAreaElement;
 
       expect(composer).toHaveAttribute('rows', '1');
@@ -1806,7 +1810,7 @@ describe('TalkDetailPage', () => {
 
     renderDetailPage('/app/talks/talk-1');
     const composer = await screen.findByPlaceholderText(
-      /^Send a message to this thread/,
+      /^Send a message to this conversation/,
     );
     const workspace = composer.closest('.talk-workspace');
     if (!workspace) {
@@ -1868,7 +1872,7 @@ describe('TalkDetailPage', () => {
 
     renderDetailPage('/app/talks/talk-1');
     const composer = await screen.findByPlaceholderText(
-      /^Send a message to this thread/,
+      /^Send a message to this conversation/,
     );
 
     await waitFor(() => {
@@ -1925,7 +1929,7 @@ describe('TalkDetailPage', () => {
     });
 
     renderDetailPage('/app/talks/talk-1');
-    await screen.findByPlaceholderText(/^Send a message to this thread/);
+    await screen.findByPlaceholderText(/^Send a message to this conversation/);
     await user.click(screen.getByRole('button', { name: 'Cancel Runs' }));
 
     await waitFor(() =>
@@ -1946,7 +1950,7 @@ describe('TalkDetailPage', () => {
     installTalkDetailFetch();
 
     renderDetailPage('/app/talks/talk-1');
-    await screen.findByPlaceholderText(/^Send a message to this thread/);
+    await screen.findByPlaceholderText(/^Send a message to this conversation/);
 
     if (!streamInput) {
       throw new Error('Expected talk stream input');
@@ -2858,7 +2862,7 @@ describe('TalkDetailPage', () => {
 
     renderDetailPage('/app/talks/talk-1');
     const composer = await screen.findByPlaceholderText(
-      /^Send a message to this thread/,
+      /^Send a message to this conversation/,
     );
 
     // Type the command and submit in one awaited sequence. Separate
@@ -2937,7 +2941,7 @@ describe('TalkDetailPage', () => {
 
       renderDetailPage('/app/talks/talk-1');
       const composer = await screen.findByPlaceholderText(
-        /^Send a message to this thread/,
+        /^Send a message to this conversation/,
       );
 
       expect(streamInput).toBeTruthy();
@@ -3019,7 +3023,7 @@ describe('TalkDetailPage', () => {
 
     renderDetailPage('/app/talks/talk-1');
     const composer = await screen.findByPlaceholderText(
-      /^Send a message to this thread/,
+      /^Send a message to this conversation/,
     );
 
     // Type the command and submit in one awaited sequence. Separate
@@ -3132,7 +3136,7 @@ describe('TalkDetailPage', () => {
 
       renderDetailPage('/app/talks/talk-1');
       const composer = await screen.findByPlaceholderText(
-        /^Send a message to this thread/,
+        /^Send a message to this conversation/,
       );
 
       // Type the command and submit in one awaited sequence. Separate
@@ -3202,7 +3206,7 @@ describe('TalkDetailPage', () => {
       sidebarContents: [],
     });
 
-    await screen.findByPlaceholderText(/^Send a message to this thread/);
+    await screen.findByPlaceholderText(/^Send a message to this conversation/);
 
     // Open the + Doc modal via the existing add-doc button.
     const addDocButton = await screen.findByRole('button', {
@@ -3269,7 +3273,7 @@ describe('TalkDetailPage', () => {
     });
 
     renderDetailPage('/app/talks/talk-1/talk', { sidebarContents: [] });
-    await screen.findByPlaceholderText(/^Send a message to this thread/);
+    await screen.findByPlaceholderText(/^Send a message to this conversation/);
 
     // Kick off a snapshot refetch and leave it pending (in flight).
     expect(streamInput).toBeTruthy();
@@ -3594,7 +3598,7 @@ describe('TalkDetailPage', () => {
 
     renderDetailPage('/app/talks/talk-1');
     const composer = await screen.findByPlaceholderText(
-      /^Send a message to this thread\.$/,
+      /^Send a message to this conversation\.$/,
     );
 
     await user.click(composer);
@@ -4032,7 +4036,7 @@ describe('TalkDetailPage', () => {
 
 function renderDetailPage(
   initialEntry: string,
-  options?: { sidebarContents?: ContentSidebarItem[] },
+  options?: { sidebarContents?: DocumentSidebarItem[] },
 ): ReturnType<typeof render> {
   return render(
     <QueryClientProvider client={buildTestQueryClient()}>
@@ -4195,8 +4199,8 @@ function buildRegisteredAgent(
 }
 
 function buildThread(
-  input: Partial<TalkThread> & Pick<TalkThread, 'id'>,
-): TalkThread {
+  input: Partial<TalkConversation> & Pick<TalkConversation, 'id'>,
+): TalkConversation {
   return {
     id: input.id,
     talkId: input.talkId ?? 'talk-1',
@@ -4454,7 +4458,6 @@ function buildTalkJob(input?: Partial<TalkJob>): TalkJob {
       toolIds: [],
       allowWeb: false,
     },
-    threadId: input?.threadId ?? 'thread-job-1',
     lastRunAt: input?.lastRunAt ?? null,
     lastRunStatus: input?.lastRunStatus ?? null,
     nextDueAt: input?.nextDueAt ?? '2026-03-07T17:00:00.000Z',
@@ -4470,7 +4473,6 @@ function buildTalkJobRunSummary(
 ): TalkJobRunSummary {
   return {
     id: input?.id ?? 'job-run-1',
-    threadId: input?.threadId ?? 'thread-job-1',
     status: input?.status ?? 'completed',
     createdAt: input?.createdAt ?? '2026-03-06T09:00:00.000Z',
     startedAt: input?.startedAt ?? '2026-03-06T09:00:01.000Z',
@@ -4545,7 +4547,7 @@ function buildAiAgentsData(): AiAgentsPageData {
 function installTalkDetailFetch(input?: {
   workspaceId?: string;
   talk?: Talk;
-  threads?: TalkThread[];
+  threads?: TalkConversation[];
   messages?: TalkMessage[];
   runs?: TalkRun[];
   runContexts?: Record<string, TalkRunContextDetails | null>;
@@ -4744,12 +4746,8 @@ function installTalkDetailFetch(input?: {
       input?.onRequest?.(url, init);
 
       if (path === '/api/v1/talks/talk-1/snapshot' && method === 'GET') {
-        const activeThreadId =
-          threads.find((t) => t.isDefault)?.id ||
-          threads[0]?.id ||
-          DEFAULT_THREAD_ID;
         const baseMessages = messages;
-        const activeThreadMessages = input?.onListMessages
+        const activeConversationMessages = input?.onListMessages
           ? await input.onListMessages({
               visibleMessages: baseMessages,
             })
@@ -4774,7 +4772,7 @@ function installTalkDetailFetch(input?: {
               updatedAt: talk.updatedAt,
               accessRole: talk.accessRole,
             },
-            threads: threads.map((thread) => ({
+            conversations: threads.map((thread) => ({
               id: thread.id,
               talkId: thread.talkId,
               title: thread.title,
@@ -4786,7 +4784,7 @@ function installTalkDetailFetch(input?: {
               messageCount: thread.messageCount,
               lastMessageAt: thread.lastMessageAt,
             })),
-            messages: activeThreadMessages,
+            messages: activeConversationMessages,
             hasOlderMessages: false,
             primaryDocument:
               documentByTalkId[talk.id] ??
@@ -5224,7 +5222,6 @@ function installTalkDetailFetch(input?: {
             toolIds: [],
             allowWeb: false,
           },
-          threadId: `thread-job-${jobs.length + 1}`,
         });
         jobs = [created, ...jobs];
         jobRunsByJobId[created.id] = [];

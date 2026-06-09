@@ -128,7 +128,7 @@ type TalkComposerProps = {
   contextSources: ContextSource[];
   activeRound: boolean;
   hasUnsavedAgentChanges: boolean;
-  activeThreadId: string | null;
+  activeConversationId: string | null;
   pendingAttachments: ComposerPendingAttachment[];
   handleRemoveAttachment: (localId: string) => void;
   handleAttachButtonClick: () => void;
@@ -174,7 +174,7 @@ export function TalkComposer({
   contextSources,
   activeRound,
   hasUnsavedAgentChanges,
-  activeThreadId,
+  activeConversationId,
   pendingAttachments,
   handleRemoveAttachment,
   handleAttachButtonClick,
@@ -272,8 +272,8 @@ export function TalkComposer({
           onKeyDown={handleComposerKeyDown}
           placeholder={
             hasDocument || contextSources.some((s) => s.status === 'ready')
-              ? 'Send a message to this thread. Type @ to reference a saved source or the doc.'
-              : 'Send a message to this thread.'
+              ? 'Send a message to this conversation. Type @ to reference a saved source or the doc.'
+              : 'Send a message to this conversation.'
           }
           rows={1}
           maxLength={TALK_MESSAGE_MAX_CHARS}
@@ -281,7 +281,7 @@ export function TalkComposer({
             sendState.status === 'posting' ||
             activeRound ||
             hasUnsavedAgentChanges ||
-            !activeThreadId
+            !activeConversationId
           }
         />
 
@@ -333,7 +333,7 @@ export function TalkComposer({
                 sendState.status === 'posting' ||
                 activeRound ||
                 hasUnsavedAgentChanges ||
-                !activeThreadId ||
+                !activeConversationId ||
                 !GREENFIELD_MESSAGE_ATTACHMENTS_ENABLED
               }
               aria-label="Attach"
@@ -369,7 +369,7 @@ export function TalkComposer({
               sendState.status === 'posting' ||
               activeRound ||
               hasUnsavedAgentChanges ||
-              !activeThreadId ||
+              !activeConversationId ||
               sendBlockedByGuardrail
             }
             aria-label="Send"

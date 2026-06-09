@@ -25,7 +25,7 @@ import { NavLink, useLocation } from 'react-router-dom';
 
 import { CTIcon, salon } from '../../salon';
 import type {
-  ContentSidebarItem,
+  DocumentSidebarItem,
   Talk,
   TalkSidebarFolder,
   TalkSidebarItem,
@@ -56,7 +56,7 @@ type MenuPosition = {
 
 type Props = {
   items: TalkSidebarItemView[];
-  contents: ContentSidebarItem[];
+  contents: DocumentSidebarItem[];
   loading: boolean;
   error: string | null;
   mainTalkId: string | null;
@@ -935,7 +935,12 @@ export function SecondaryList({
             `ct-secondary-row-link${isActive ? ' active' : ''}`
           }
         >
-          <CTIcon name="clock" size={14} stroke={salon.ink2} strokeWidth={1.6} />
+          <CTIcon
+            name="clock"
+            size={14}
+            stroke={salon.ink2}
+            strokeWidth={1.6}
+          />
           Archive
         </NavLink>
       </div>

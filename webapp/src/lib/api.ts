@@ -74,7 +74,7 @@ export type TalkSidebarFolder = {
 
 export type TalkSidebarItem = TalkSidebarTalk | TalkSidebarFolder;
 
-export type ContentSidebarItem = {
+export type DocumentSidebarItem = {
   id: string;
   talkId: string;
   title: string;
@@ -84,7 +84,7 @@ export type ContentSidebarItem = {
 export type TalkSidebarTree = {
   items: TalkSidebarItem[];
   mainTalkId: string | null;
-  contents: ContentSidebarItem[];
+  contents: DocumentSidebarItem[];
 };
 
 export type NativeDocumentFormat = 'markdown' | 'html';
@@ -267,7 +267,6 @@ export type TalkJob = {
   schedule: TalkJobSchedule;
   timezone: string;
   sourceScope: TalkJobScope;
-  threadId: string;
   lastRunAt: string | null;
   lastRunStatus: string | null;
   nextDueAt: string | null;
@@ -279,7 +278,6 @@ export type TalkJob = {
 
 export type TalkJobRunSummary = {
   id: string;
-  threadId: string;
   status:
     | 'queued'
     | 'running'
@@ -299,7 +297,7 @@ export type TalkJobRunSummary = {
   executorModel: string | null;
 };
 
-export type TalkThread = {
+export type TalkConversation = {
   id: string;
   talkId: string;
   title: string | null;
@@ -1062,7 +1060,7 @@ export async function getTalk(talkId: string): Promise<Talk> {
   return envelope.talk;
 }
 
-export type TalkSnapshotThread = {
+export type TalkSnapshotConversation = {
   id: string;
   talkId: string;
   title: string | null;
@@ -1116,7 +1114,7 @@ export type TalkSnapshotRun = {
 
 export type TalkSnapshot = {
   talk: TalkSnapshotTalk;
-  threads: TalkSnapshotThread[];
+  conversations: TalkSnapshotConversation[];
   messages: TalkMessage[];
   hasOlderMessages: boolean;
   primaryDocument: TalkSnapshotDocument | null;

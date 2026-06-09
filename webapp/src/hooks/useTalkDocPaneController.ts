@@ -41,7 +41,7 @@ type UseTalkDocPaneControllerInput = {
   userId: string;
   currentTab: TalkDetailTabKey;
   locationParams: URLSearchParams;
-  currentThreadHasContent: boolean;
+  currentConversationHasContent: boolean;
   queryClient: QueryClient;
   navigate: NavigateFunction;
   onUnauthorized: () => void;
@@ -68,7 +68,7 @@ export function useTalkDocPaneController({
   userId,
   currentTab,
   locationParams,
-  currentThreadHasContent,
+  currentConversationHasContent,
   queryClient,
   navigate,
   onUnauthorized,
@@ -321,7 +321,7 @@ export function useTalkDocPaneController({
       handle.removeEventListener('pointerup', onPointerUp);
       handle.removeEventListener('pointercancel', onPointerUp);
     };
-  }, [applyChatRatio, currentThreadHasContent]);
+  }, [applyChatRatio, currentConversationHasContent]);
 
   return {
     // Create-document modal

@@ -54,7 +54,7 @@ export type UseTalkRunStreamParams = {
   handleUnauthorized: () => void;
   isNearBottom: () => boolean;
   rememberDeletedMessageIds: (messageIds: string[]) => void;
-  resyncTalkState: (options?: { refreshThreads?: boolean }) => Promise<void>;
+  resyncTalkState: () => Promise<void>;
   // Bump the native doc pane's reload signal when an agent content-edit
   // stream event lands, so `TalkDocumentView` refetches the native document.
   bumpDocReload: () => void;
@@ -110,7 +110,7 @@ export function useTalkRunStream({
         // exact across reloads even when no React consumer is mounted.
         applyMessageAppendedDelta({ queryClient, userId, event });
         if (!event.content || !event.createdAt) {
-          void resyncTalkState({ refreshThreads: true });
+          void resyncTalkState();
           return;
         }
         const nearBottom = isNearBottom();
@@ -208,7 +208,7 @@ export function useTalkRunStream({
           const timer = setTimeout(() => {
             pendingMessageRefetchTimersRef.current.delete(event.runId);
             if (persistedRunMessageIdsRef.current.has(event.runId)) return;
-            void resyncTalkState({ refreshThreads: false });
+            void resyncTalkState();
           }, MISSING_PERSISTED_MESSAGE_REFETCH_MS);
           pendingMessageRefetchTimersRef.current.set(event.runId, timer);
         }
@@ -249,15 +249,15 @@ export function useTalkRunStream({
       onHistoryEdited: (event: TalkHistoryEditedEvent) => {
         if (event.talkId !== talkId) return;
         rememberDeletedMessageIds(event.deletedMessageIds || []);
-        void resyncTalkState({ refreshThreads: true });
+        void resyncTalkState();
       },
       onBrowserBlocked: (event: TalkBrowserBlockedEvent) => {
         if (event.talkId !== talkId) return;
-        void resyncTalkState({ refreshThreads: true });
+        void resyncTalkState();
       },
       onBrowserUnblocked: (event: TalkBrowserUnblockedEvent) => {
         if (event.talkId !== talkId) return;
-        void resyncTalkState({ refreshThreads: true });
+        void resyncTalkState();
       },
       onContentUpdated: () => {
         // A document changed (title/blocks). Invalidate the shared cache and
@@ -307,7 +307,7 @@ export function useTalkRunStream({
         });
       },
       onReplayGap: async () => {
-        await resyncTalkState({ refreshThreads: true });
+        await resyncTalkState();
       },
       onStateChange: (streamState) => {
         switch (streamState) {

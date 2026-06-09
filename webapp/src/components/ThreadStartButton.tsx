@@ -6,7 +6,7 @@ type ThreadStartButtonProps = {
 
 export function ThreadStartButton({
   onClick,
-  label = 'Start new thread',
+  label = 'Start new conversation',
   className,
 }: ThreadStartButtonProps): JSX.Element {
   return (

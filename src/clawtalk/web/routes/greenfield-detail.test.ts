@@ -476,7 +476,7 @@ describe('greenfield detail routes', () => {
       ok: true,
       data: {
         talk: { accessRole: 'owner', workspaceId },
-        threads: [{ id: talkId, talkId, messageCount: 2 }],
+        conversations: [{ id: talkId, talkId, messageCount: 2 }],
         messages: [{ id: seeded.userMessageId }, { id: seeded.agentMessageId }],
         runs: [{ id: seeded.runId }],
         agents: [{ agentId: agentIds[0] }, { agentId: agentIds[1] }],

@@ -35,7 +35,6 @@ function makeRun(overrides: Partial<RunView> = {}): RunView {
   const base = {
     id: 'run-1',
     talkId: 'talk-1',
-    threadId: 'thread-1',
     status: 'queued',
     createdAt: '2026-05-21T00:00:00.000Z',
     startedAt: null,
