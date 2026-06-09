@@ -7024,8 +7024,33 @@ a {
 }
 
 .composer-target-chip-selected {
+  border-color: #d8cbb6;
   background: var(--salon-paper-2, #f4ecdb);
   color: var(--salon-ink, #1f1b16);
+  box-shadow: inset 0 0 0 1px rgba(31, 27, 22, 0.03);
+}
+
+.composer-target-chip-unselected {
+  border-color: #ece3d4;
+  border-style: dashed;
+  background: #fffefa;
+  color: #aaa094;
+}
+
+.composer-target-chip-unselected .talk-status-dot {
+  opacity: 0.32;
+}
+
+.composer-target-chip-unselected .talk-status-primary,
+.composer-target-chip-unselected .talk-status-constraint {
+  opacity: 0.62;
+}
+
+.composer-target-chip-unselected:hover:not(:disabled),
+.composer-target-chip-unselected:focus-visible {
+  border-color: #d8cbb6;
+  background: #fffaf1;
+  color: var(--salon-ink-2, #6b6660);
 }
 
 .composer-chip {
