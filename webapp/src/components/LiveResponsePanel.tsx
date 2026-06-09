@@ -1,7 +1,9 @@
 import { memo } from 'react';
 
 import type { LiveResponseView, RunView } from '../lib/talkRunReducer';
+import { renderMarkdown } from '../lib/renderMarkdown';
 import { ExecutionDecisionSummary } from './ExecutionDecisionSummary';
+import { AgentAvatar, RunPill, type RunStatus } from '../salon';
 
 export type PillState =
   | 'queued'
@@ -64,6 +66,11 @@ export function pillClassForState(state: PillState): string {
   }
 }
 
+function runStatusForPill(state: PillState): RunStatus {
+  if (state === 'reconnecting') return 'running';
+  return state;
+}
+
 export function formatElapsed(elapsedMs: number): string {
   const totalSec = Math.max(0, Math.floor(elapsedMs / 1000));
   if (totalSec < 60) return `${totalSec}s`;
@@ -91,6 +98,34 @@ export function bodyFallback(
     case 'cancelled':
       return null;
   }
+}
+
+function initialsFor(label: string): string {
+  const words = label
+    .replace(/\s*\([^)]*\)\s*/g, ' ')
+    .replace(/[^a-z0-9\s]/gi, ' ')
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+  if (words.length === 0) return 'AI';
+  if (words.length === 1) return words[0]!.slice(0, 2).toUpperCase();
+  return `${words[0]![0] ?? ''}${words[1]![0] ?? ''}`.toUpperCase();
+}
+
+function handleFor(label: string): string {
+  const slug = label
+    .replace(/\s*\([^)]*\)\s*/g, ' ')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-|-$/g, '');
+  return `@${slug || 'agent'}`;
+}
+
+function tokenLabel(run: RunView | undefined): string | null {
+  if (typeof run?.tokensIn !== 'number' || typeof run.tokensOut !== 'number') {
+    return null;
+  }
+  return `${run.tokensIn.toLocaleString()} in · ${run.tokensOut.toLocaleString()} out`;
 }
 
 export interface LiveResponsePanelProps {
@@ -137,12 +172,11 @@ function LiveResponsePanelImpl(props: LiveResponsePanelProps): JSX.Element {
   const pillLabel = isRetrying
     ? `Retrying ${response.retryAttempt}/${response.retryMaxRetries ?? 3}`
     : pillLabelForState(state);
-  const pillClass = pillClassForState(state);
   const body = isRetrying
     ? `Waiting on retry ${response.retryAttempt}/${response.retryMaxRetries ?? 3}…`
     : bodyFallback(state, response);
   const articleClass = [
-    'message message-assistant message-live',
+    'message message-assistant message-live salon-message',
     state === 'failed' ? 'message-error' : '',
     isDense && !isTerminal ? 'is-dense' : '',
   ]
@@ -153,19 +187,41 @@ function LiveResponsePanelImpl(props: LiveResponsePanelProps): JSX.Element {
 
   return (
     <article className={articleClass} aria-label={ariaLabel} aria-live="polite">
-      <header>
-        <strong title={agentLabel} className="message-live-label">
-          {agentLabel}
-        </strong>
-        <span className={pillClass}>
-          {pillLabel}
-          <span aria-hidden="true" className="elapsed">
-            {' · '}
-            {elapsedLabel}
-          </span>
-        </span>
-      </header>
-      {body ? <p>{body}</p> : null}
+      <div className="salon-message-grid">
+        <div className="salon-message-avatar">
+          <AgentAvatar initials={initialsFor(agentLabel)} size={40} />
+        </div>
+        <div className="salon-message-body salon-message-body-streaming">
+          <header className="salon-message-byline">
+            <strong title={agentLabel} className="message-live-label">
+              {agentLabel}
+            </strong>
+            <span className="salon-message-handle">{handleFor(agentLabel)}</span>
+            {response.modelId || run?.executorModel ? (
+              <span className="salon-message-model">
+                {response.modelId || run?.executorModel}
+              </span>
+            ) : null}
+            <RunPill
+              status={runStatusForPill(state)}
+              label={pillLabel}
+              title={elapsedLabel}
+            />
+            <span
+              aria-hidden="true"
+              className="salon-message-handle elapsed"
+            >
+              {elapsedLabel}
+            </span>
+            {tokenLabel(run) ? (
+              <span className="salon-message-tokens">{tokenLabel(run)}</span>
+            ) : null}
+          </header>
+          {body ? (
+            <div className="salon-message-markdown">{renderMarkdown(body)}</div>
+          ) : null}
+        </div>
+      </div>
       {response.errorMessage ? (
         <p className="run-history-error">{response.errorMessage}</p>
       ) : null}

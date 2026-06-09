@@ -80,6 +80,8 @@ type TalkComposerProps = {
   handleToggleTarget: (agentId: string) => void;
   sendState: ComposerSendState;
   composerTargetHelp: string;
+  composerModeLabel: string;
+  composerRoundsLabel: string;
   draft: string;
   TALK_MESSAGE_MAX_CHARS: number;
   composerGuardrailMessage: string | null;
@@ -119,6 +121,8 @@ export function TalkComposer({
   handleToggleTarget,
   sendState,
   composerTargetHelp,
+  composerModeLabel,
+  composerRoundsLabel,
   draft,
   TALK_MESSAGE_MAX_CHARS,
   composerGuardrailMessage,
@@ -147,6 +151,7 @@ export function TalkComposer({
         role="group"
         aria-label="Selected agents"
       >
+        <span className="composer-targets-label">Address to</span>
         {effectiveAgents.map((agent) => {
           const selected = targetAgentIds.includes(agent.id);
           const guardrail = talkAgentExecutionGuardrailsById[agent.id];
@@ -186,6 +191,12 @@ export function TalkComposer({
             </button>
           );
         })}
+        <span className="composer-chip composer-mode-chip">
+          {composerModeLabel}
+        </span>
+        <span className="composer-chip composer-rounds-chip">
+          {composerRoundsLabel}
+        </span>
       </div>
       <div className="composer-meta-row">
         <p className="composer-target-help">{composerTargetHelp}</p>
@@ -264,6 +275,7 @@ export function TalkComposer({
             aria-label="Send"
             title={sendState.status === 'posting' ? 'Sending…' : 'Send'}
           >
+            <span className="composer-send-label">Send to room</span>
             <ComposerSendIcon />
           </button>
         </div>

@@ -245,6 +245,8 @@ function toRunApi(run: GreenfieldRunRecord): {
   executorAlias: string | null;
   executorModel: string | null;
   providerId: string | null;
+  tokensIn: number | null;
+  tokensOut: number | null;
 } {
   const errorInfo =
     run.error_json && typeof run.error_json === 'object'
@@ -271,6 +273,8 @@ function toRunApi(run: GreenfieldRunRecord): {
     executorAlias: run.target_agent_name,
     executorModel: run.model_id,
     providerId: run.provider_id,
+    tokensIn: run.tokens_in,
+    tokensOut: run.tokens_out,
   };
 }
 
@@ -287,6 +291,8 @@ function toSnapshotRunApi(run: GreenfieldRunRecord): {
   executorAlias: string | null;
   executorModel: string | null;
   providerId: string | null;
+  tokensIn: number | null;
+  tokensOut: number | null;
 } {
   return {
     id: run.id,
@@ -301,6 +307,8 @@ function toSnapshotRunApi(run: GreenfieldRunRecord): {
     executorAlias: run.target_agent_name,
     executorModel: run.model_id,
     providerId: run.provider_id,
+    tokensIn: run.tokens_in,
+    tokensOut: run.tokens_out,
   };
 }
 
