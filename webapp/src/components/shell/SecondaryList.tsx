@@ -528,15 +528,20 @@ export function SecondaryList({
             >
               <span className="clawtalk-sidebar-tree-link-inner">
                 <span className="clawtalk-sidebar-tree-title-wrap">
-                  {talk.isResponding ? (
-                    <span
-                      className="clawtalk-sidebar-activity-indicator"
-                      aria-label="Response in progress"
-                      title="Response in progress"
-                    >
-                      *
-                    </span>
-                  ) : null}
+                  <span
+                    className={`clawtalk-sidebar-talk-dot${
+                      talk.isResponding
+                        ? ' clawtalk-sidebar-talk-dot-responding'
+                        : ''
+                    }`}
+                    aria-label={
+                      talk.isResponding ? 'Response in progress' : undefined
+                    }
+                    title={
+                      talk.isResponding ? 'Response in progress' : undefined
+                    }
+                    aria-hidden={talk.isResponding ? undefined : true}
+                  />
                   <span
                     className={`clawtalk-sidebar-tree-title${talk.isResponding ? ' clawtalk-sidebar-tree-title-responding' : ''}`}
                   >
@@ -713,7 +718,15 @@ export function SecondaryList({
                     }))
                   }
                 >
-                  {folder.title || 'Untitled folder'}
+                  <span className="clawtalk-sidebar-folder-title">
+                    {folder.title || 'Untitled folder'}
+                  </span>
+                  <span
+                    className="clawtalk-sidebar-folder-count"
+                    aria-label={`${folder.talks.length} talks`}
+                  >
+                    {folder.talks.length}
+                  </span>
                 </button>
               )}
               <div className="clawtalk-sidebar-tree-actions">
@@ -896,15 +909,17 @@ export function SecondaryList({
       </div>
 
       <div className="ct-secondary-content">
-        <div className="ct-secondary-content-label">Content</div>
+        <div className="ct-secondary-content-label">
+          Inbox <span>{contents.length}</span>
+        </div>
         {contents.length === 0 ? (
           <p className="clawtalk-sidebar-content-empty">
-            Promote a Talk to start creating documents.
+            No inbox items yet.
           </p>
         ) : (
           <div
             className="clawtalk-sidebar-content-list"
-            aria-label="Content documents"
+            aria-label="Inbox documents"
           >
             {contents.map((doc) => (
               <NavLink
@@ -914,14 +929,18 @@ export function SecondaryList({
                   `clawtalk-sidebar-content-row${isActive ? ' active' : ''}`
                 }
               >
-                <FileText
-                  size={12}
-                  className="clawtalk-sidebar-content-row-icon"
+                <span
+                  className="clawtalk-sidebar-content-dot"
                   aria-hidden="true"
                 />
                 <span className="clawtalk-sidebar-content-row-title">
                   {doc.title}
                 </span>
+                <FileText
+                  size={12}
+                  className="clawtalk-sidebar-content-row-icon"
+                  aria-hidden="true"
+                />
               </NavLink>
             ))}
           </div>

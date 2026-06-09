@@ -221,6 +221,27 @@ async function fulfillJson(route: Route, data: unknown, status = 200) {
 
 async function installMocks(page: Page, state: TalkState): Promise<void> {
   const agents = buildAgents();
+  const messageCount = buildMessages(state).length;
+  await page.addInitScript(
+    ({ activeTalkId, activeTalkMessageCount, now }) => {
+      window.localStorage.setItem(
+        'clawtalk.talkReadMarkers',
+        JSON.stringify({
+          [activeTalkId]: {
+            messageCount: activeTalkMessageCount,
+            lastMessageAt: now,
+          },
+          'launch-pricing': { messageCount: 8, lastMessageAt: now },
+          'launch-comms': {
+            messageCount: 10,
+            lastMessageAt: '2026-06-08T14:10:00.000Z',
+          },
+          'research-hiring': { messageCount: 2, lastMessageAt: now },
+        }),
+      );
+    },
+    { activeTalkId: TALK_ID, activeTalkMessageCount: messageCount, now: NOW },
+  );
   await page.route('**/api/v1/**', (route) => fulfillJson(route, {}));
   await page.route('**/api/v1/session/me*', (route) =>
     fulfillJson(route, buildSession()),
@@ -232,19 +253,82 @@ async function installMocks(page: Page, state: TalkState): Promise<void> {
     fulfillJson(route, {
       items: [
         {
-          type: 'talk',
-          id: TALK_ID,
-          title: state === 'empty' ? 'Empty Talk' : 'Notion AI teardown',
-          status: 'active',
+          type: 'folder',
+          id: 'folder-launches',
+          title: 'Q1 Launches',
           sortOrder: 0,
-          lastMessageAt: NOW,
-          messageCount: buildMessages(state).length,
-          hasActiveRun: state === 'active',
-          hasContent: false,
+          talks: [
+            {
+              type: 'talk',
+              id: 'launch-pricing',
+              title: 'Pricing & packaging for v2 launch',
+              status: 'active',
+              sortOrder: 0,
+              lastMessageAt: NOW,
+              messageCount: 8,
+              hasActiveRun: false,
+              hasContent: true,
+            },
+            {
+              type: 'talk',
+              id: 'launch-comms',
+              title: 'Launch week — comms checklist',
+              status: 'active',
+              sortOrder: 1,
+              lastMessageAt: NOW,
+              messageCount: 13,
+              unreadCount: 3,
+              hasActiveRun: false,
+              hasContent: true,
+            },
+          ],
+        },
+        {
+          type: 'folder',
+          id: 'folder-research',
+          title: 'Research & Longreads',
+          sortOrder: 1,
+          talks: [
+            {
+              type: 'talk',
+              id: TALK_ID,
+              title: state === 'empty' ? 'Empty Talk' : 'Notion AI teardown',
+              status: 'active',
+              sortOrder: 0,
+              lastMessageAt: NOW,
+              messageCount,
+              hasActiveRun: state === 'active',
+              hasContent: true,
+            },
+            {
+              type: 'talk',
+              id: 'research-hiring',
+              title: 'Eng hiring loop notes',
+              status: 'active',
+              sortOrder: 1,
+              lastMessageAt: NOW,
+              messageCount: 2,
+              hasActiveRun: false,
+              hasContent: false,
+            },
+          ],
         },
       ],
-      mainTalkId: TALK_ID,
-      contents: [],
+      mainTalkId: 'main-talk',
+      contents: [
+        {
+          id: 'content-weekly',
+          talkId: TALK_ID,
+          title: 'My weekly review',
+          updatedAt: NOW,
+        },
+        {
+          id: 'content-ideas',
+          talkId: 'research-hiring',
+          title: 'Scratchpad — ideas',
+          updatedAt: NOW,
+        },
+      ],
     }),
   );
   await page.route(`**/api/v1/talks/${TALK_ID}/snapshot*`, (route) =>
@@ -291,6 +375,16 @@ for (const state of ['populated', 'empty', 'active'] as const) {
       );
       await expect(page.getByRole('navigation', { name: 'Talk sections' }))
         .toBeVisible();
+
+      if (vp.width >= 1024) {
+        await expect(page.getByText('Q1 Launches')).toBeVisible();
+        await expect(page.getByText('Research & Longreads')).toBeVisible();
+        await expect(page.getByLabel('3 unread messages')).toBeVisible();
+        await expect(page.locator('.ct-secondary-content-label')).toContainText(
+          'Inbox 2',
+        );
+        await expect(page.getByText('Scratchpad — ideas')).toBeVisible();
+      }
 
       if (state === 'empty') {
         await expect(page.getByText('No messages yet.')).toBeVisible();

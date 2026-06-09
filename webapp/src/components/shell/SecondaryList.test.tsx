@@ -111,8 +111,27 @@ describe('SecondaryList', () => {
     });
 
     expect(screen.getByText('2 active · 1 streaming')).toBeTruthy();
+    expect(screen.getByText('Folder')).toBeTruthy();
+    expect(screen.getByLabelText('1 talks')).toBeTruthy();
     const archive = screen.getByRole('link', { name: /Archive/ });
     expect(archive.getAttribute('href')).toBe('/app/archive');
+  });
+
+  it('renders unread talk counts as compact new-message badges', () => {
+    renderList({
+      items: [
+        {
+          type: 'talk',
+          id: 'talk-1',
+          title: 'D1 Retro',
+          status: 'active',
+          sortOrder: 0,
+          unreadCount: 1,
+        },
+      ],
+    });
+
+    expect(screen.getByLabelText('1 unread messages')).toHaveTextContent('1');
   });
 
   it('opens the command palette from the search trigger', async () => {
@@ -198,7 +217,7 @@ describe('SecondaryList', () => {
     expect(screen.getByRole('button', { name: 'Rename Talk' })).toBeTruthy();
   });
 
-  it('renders the Content section empty-state hint when no documents exist', () => {
+  it('renders the Inbox section empty-state hint when no documents exist', () => {
     renderList({
       items: [
         {
@@ -210,13 +229,12 @@ describe('SecondaryList', () => {
         },
       ],
     });
-    expect(screen.getByText('Content')).toBeTruthy();
-    expect(
-      screen.getByText('Promote a Talk to start creating documents.'),
-    ).toBeTruthy();
+    expect(screen.getByText('Inbox')).toBeTruthy();
+    expect(screen.getByText('0')).toBeTruthy();
+    expect(screen.getByText('No inbox items yet.')).toBeTruthy();
   });
 
-  it('renders Content rows linking to the owning thread with ?doc=1', () => {
+  it('renders Inbox rows linking to the owning thread with ?doc=1', () => {
     const contents: DocumentSidebarItem[] = [
       {
         id: 'content-1',
@@ -239,7 +257,7 @@ describe('SecondaryList', () => {
       contents,
     });
 
-    const docList = screen.getByLabelText('Content documents');
+    const docList = screen.getByLabelText('Inbox documents');
     const links = docList.querySelectorAll('a');
     expect(links).toHaveLength(1);
     expect(links[0].getAttribute('href')).toBe(
