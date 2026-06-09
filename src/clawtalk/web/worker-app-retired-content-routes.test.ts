@@ -70,6 +70,99 @@ beforeEach(() => {
 });
 
 describe('worker-app retired flat-content compatibility routes', () => {
+  it('falls through deleted connector compatibility routes to the worker catch-all', async () => {
+    const app = getWorkerApp();
+    const jwt = await mintJwt();
+    const routeChecks = [
+      { method: 'GET', path: '/api/v1/workspace/channels' },
+      { method: 'POST', path: '/api/v1/workspace/channels' },
+      {
+        method: 'PATCH',
+        path: '/api/v1/workspace/channels/10000000-0000-4000-8000-000000000aaa',
+      },
+      {
+        method: 'DELETE',
+        path: '/api/v1/workspace/channels/10000000-0000-4000-8000-000000000aaa',
+      },
+      {
+        method: 'PUT',
+        path: '/api/v1/workspace/channels/10000000-0000-4000-8000-000000000aaa/credential',
+      },
+      { method: 'GET', path: '/api/v1/workspace/data-connectors' },
+      { method: 'POST', path: '/api/v1/workspace/data-connectors' },
+      {
+        method: 'PATCH',
+        path: '/api/v1/workspace/data-connectors/10000000-0000-4000-8000-000000000bbb',
+      },
+      {
+        method: 'DELETE',
+        path: '/api/v1/workspace/data-connectors/10000000-0000-4000-8000-000000000bbb',
+      },
+      {
+        method: 'PUT',
+        path: '/api/v1/workspace/data-connectors/10000000-0000-4000-8000-000000000bbb/credential',
+      },
+      {
+        method: 'GET',
+        path: '/api/v1/talks/10000000-0000-4000-8000-000000000aaa/connectors',
+      },
+      {
+        method: 'PUT',
+        path: '/api/v1/talks/10000000-0000-4000-8000-000000000aaa/connectors/channels/10000000-0000-4000-8000-000000000bbb',
+      },
+      {
+        method: 'DELETE',
+        path: '/api/v1/talks/10000000-0000-4000-8000-000000000aaa/connectors/channels/10000000-0000-4000-8000-000000000bbb',
+      },
+      {
+        method: 'PUT',
+        path: '/api/v1/talks/10000000-0000-4000-8000-000000000aaa/connectors/data-connectors/10000000-0000-4000-8000-000000000ccc',
+      },
+      {
+        method: 'DELETE',
+        path: '/api/v1/talks/10000000-0000-4000-8000-000000000aaa/connectors/data-connectors/10000000-0000-4000-8000-000000000ccc',
+      },
+    ] as const;
+
+    for (const check of routeChecks) {
+      const res = await app.request(
+        new Request(`https://app.test${check.path}`, {
+          method: check.method,
+          headers: { authorization: `Bearer ${jwt}` },
+        }),
+        undefined,
+        envForWorker(),
+      );
+      expect(res.status, `${check.method} ${check.path}`).toBe(501);
+      const body = (await res.json()) as {
+        ok: boolean;
+        error?: { code?: string };
+      };
+      expect(body.error?.code, `${check.method} ${check.path}`).toBe(
+        'not_implemented_in_worker',
+      );
+    }
+  });
+
+  it('keeps the native connector bindings route mounted', async () => {
+    const app = getWorkerApp();
+    const jwt = await mintJwt();
+    const res = await app.request(
+      new Request(
+        'https://app.test/api/v1/talks/not-a-uuid/connector-bindings',
+        {
+          headers: { authorization: `Bearer ${jwt}` },
+        },
+      ),
+      undefined,
+      envForWorker(),
+    );
+
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error?: { code?: string } };
+    expect(body.error?.code).toBe('invalid_talk_id');
+  });
+
   it('falls through deleted flat-content routes to the worker catch-all', async () => {
     const app = getWorkerApp();
     const jwt = await mintJwt();

@@ -3193,7 +3193,10 @@ export async function listWorkspaceChannels(
   input?: WorkspaceScopedRequest,
 ): Promise<WorkspaceChannel[]> {
   const envelope = await apiRequest<{ channels: WorkspaceChannel[] }>(
-    withWorkspaceQuery('/api/v1/workspace/channels', input?.workspaceId),
+    withWorkspaceQuery(
+      '/api/v1/workspace/connector-channels',
+      input?.workspaceId,
+    ),
   );
   return envelope.channels;
 }
@@ -3207,7 +3210,7 @@ export async function createWorkspaceChannel(input: {
 }): Promise<WorkspaceChannel> {
   const { workspaceId, ...body } = input;
   const envelope = await apiMutationRequest<{ channel: WorkspaceChannel }>(
-    withWorkspaceQuery('/api/v1/workspace/channels', workspaceId),
+    withWorkspaceQuery('/api/v1/workspace/connector-channels', workspaceId),
     {
       method: 'POST',
       includeJson: true,
@@ -3227,7 +3230,7 @@ export async function updateWorkspaceChannel(input: {
   const { workspaceId, channelId, ...patch } = input;
   const envelope = await apiMutationRequest<{ channel: WorkspaceChannel }>(
     withWorkspaceQuery(
-      `/api/v1/workspace/channels/${encodeURIComponent(channelId)}`,
+      `/api/v1/workspace/connector-channels/${encodeURIComponent(channelId)}`,
       workspaceId,
     ),
     {
@@ -3245,7 +3248,7 @@ export async function deleteWorkspaceChannel(
 ): Promise<void> {
   await apiMutationRequest<{ deleted: true }>(
     withWorkspaceQuery(
-      `/api/v1/workspace/channels/${encodeURIComponent(channelId)}`,
+      `/api/v1/workspace/connector-channels/${encodeURIComponent(channelId)}`,
       input?.workspaceId,
     ),
     {
@@ -3262,7 +3265,7 @@ export async function setWorkspaceChannelCredential(input: {
 }): Promise<WorkspaceChannel> {
   const envelope = await apiMutationRequest<{ channel: WorkspaceChannel }>(
     withWorkspaceQuery(
-      `/api/v1/workspace/channels/${encodeURIComponent(input.channelId)}/credential`,
+      `/api/v1/workspace/connector-channels/${encodeURIComponent(input.channelId)}/credential`,
       input.workspaceId,
     ),
     {
@@ -3285,7 +3288,10 @@ export async function listWorkspaceDataConnectors(
   const envelope = await apiRequest<{
     dataConnectors: WorkspaceDataConnector[];
   }>(
-    withWorkspaceQuery('/api/v1/workspace/data-connectors', input?.workspaceId),
+    withWorkspaceQuery(
+      '/api/v1/workspace/connector-sources',
+      input?.workspaceId,
+    ),
   );
   return envelope.dataConnectors;
 }
@@ -3300,7 +3306,7 @@ export async function createWorkspaceDataConnector(input: {
   const { workspaceId, ...body } = input;
   const envelope = await apiMutationRequest<{
     dataConnector: WorkspaceDataConnector;
-  }>(withWorkspaceQuery('/api/v1/workspace/data-connectors', workspaceId), {
+  }>(withWorkspaceQuery('/api/v1/workspace/connector-sources', workspaceId), {
     method: 'POST',
     includeJson: true,
     body: JSON.stringify(body),
@@ -3320,7 +3326,7 @@ export async function updateWorkspaceDataConnector(input: {
     dataConnector: WorkspaceDataConnector;
   }>(
     withWorkspaceQuery(
-      `/api/v1/workspace/data-connectors/${encodeURIComponent(connectorId)}`,
+      `/api/v1/workspace/connector-sources/${encodeURIComponent(connectorId)}`,
       workspaceId,
     ),
     {
@@ -3338,7 +3344,7 @@ export async function deleteWorkspaceDataConnector(
 ): Promise<void> {
   await apiMutationRequest<{ deleted: true }>(
     withWorkspaceQuery(
-      `/api/v1/workspace/data-connectors/${encodeURIComponent(connectorId)}`,
+      `/api/v1/workspace/connector-sources/${encodeURIComponent(connectorId)}`,
       input?.workspaceId,
     ),
     {
@@ -3357,7 +3363,7 @@ export async function setWorkspaceDataConnectorCredential(input: {
     dataConnector: WorkspaceDataConnector;
   }>(
     withWorkspaceQuery(
-      `/api/v1/workspace/data-connectors/${encodeURIComponent(input.connectorId)}/credential`,
+      `/api/v1/workspace/connector-sources/${encodeURIComponent(input.connectorId)}/credential`,
       input.workspaceId,
     ),
     {
@@ -3378,7 +3384,7 @@ export async function getTalkConnectors(
   talkId: string,
 ): Promise<TalkConnectorsView> {
   return apiRequest<TalkConnectorsView>(
-    `/api/v1/talks/${encodeURIComponent(talkId)}/connectors`,
+    `/api/v1/talks/${encodeURIComponent(talkId)}/connector-bindings`,
   );
 }
 
@@ -3488,7 +3494,7 @@ export async function setTalkChannelLink(input: {
   channelId: string;
 }): Promise<void> {
   await apiMutationRequest<{ linked: true }>(
-    `/api/v1/talks/${encodeURIComponent(input.talkId)}/connectors/channels/${encodeURIComponent(input.channelId)}`,
+    `/api/v1/talks/${encodeURIComponent(input.talkId)}/channel-bindings/${encodeURIComponent(input.channelId)}`,
     {
       method: 'PUT',
     },
@@ -3500,7 +3506,7 @@ export async function deleteTalkChannelLink(input: {
   channelId: string;
 }): Promise<void> {
   await apiMutationRequest<{ unlinked: true }>(
-    `/api/v1/talks/${encodeURIComponent(input.talkId)}/connectors/channels/${encodeURIComponent(input.channelId)}`,
+    `/api/v1/talks/${encodeURIComponent(input.talkId)}/channel-bindings/${encodeURIComponent(input.channelId)}`,
     {
       method: 'DELETE',
     },
@@ -3512,7 +3518,7 @@ export async function setTalkDataConnectorLink(input: {
   connectorId: string;
 }): Promise<void> {
   await apiMutationRequest<{ linked: true }>(
-    `/api/v1/talks/${encodeURIComponent(input.talkId)}/connectors/data-connectors/${encodeURIComponent(input.connectorId)}`,
+    `/api/v1/talks/${encodeURIComponent(input.talkId)}/source-bindings/${encodeURIComponent(input.connectorId)}`,
     {
       method: 'PUT',
     },
@@ -3524,7 +3530,7 @@ export async function deleteTalkDataConnectorLink(input: {
   connectorId: string;
 }): Promise<void> {
   await apiMutationRequest<{ unlinked: true }>(
-    `/api/v1/talks/${encodeURIComponent(input.talkId)}/connectors/data-connectors/${encodeURIComponent(input.connectorId)}`,
+    `/api/v1/talks/${encodeURIComponent(input.talkId)}/source-bindings/${encodeURIComponent(input.connectorId)}`,
     {
       method: 'DELETE',
     },

@@ -61,8 +61,8 @@
 // routes in the not-yet-mounted bucket (above) plus genuinely
 // unknown paths.
 //
-// Connectors refactor PR 1: /api/v1/workspace/channels +
-// /api/v1/workspace/data-connectors + /api/v1/talks/:talkId/connectors
+// Connectors refactor PR 1: /api/v1/workspace/connector-channels +
+// /api/v1/workspace/connector-sources + /api/v1/talks/:talkId/connector-bindings
 // land here on the new workspace-global schema.
 
 import { Hono } from 'hono';
@@ -364,7 +364,7 @@ function buildApp(): Hono<{ Variables: Variables }> {
   });
 
   // ── Workspace channels (admin-managed pool, talk picker reads) ──
-  app.get('/api/v1/workspace/channels', async (c) => {
+  app.get('/api/v1/workspace/connector-channels', async (c) => {
     const auth = c.get('auth');
     const rl = checkRateLimit({ principalId: auth.userId, bucket: 'read' });
     if (!rl.allowed) return rateLimitedResponse(c, rl);
@@ -375,7 +375,7 @@ function buildApp(): Hono<{ Variables: Variables }> {
     return jsonResponse(result);
   });
 
-  app.post('/api/v1/workspace/channels', async (c) => {
+  app.post('/api/v1/workspace/connector-channels', async (c) => {
     const auth = c.get('auth');
     const rl = checkRateLimit({ principalId: auth.userId, bucket: 'write' });
     if (!rl.allowed) return rateLimitedResponse(c, rl);
@@ -391,7 +391,7 @@ function buildApp(): Hono<{ Variables: Variables }> {
     return jsonResponse(result);
   });
 
-  app.patch('/api/v1/workspace/channels/:channelId', async (c) => {
+  app.patch('/api/v1/workspace/connector-channels/:channelId', async (c) => {
     const auth = c.get('auth');
     const rl = checkRateLimit({ principalId: auth.userId, bucket: 'write' });
     if (!rl.allowed) return rateLimitedResponse(c, rl);
@@ -408,7 +408,7 @@ function buildApp(): Hono<{ Variables: Variables }> {
     return jsonResponse(result);
   });
 
-  app.delete('/api/v1/workspace/channels/:channelId', async (c) => {
+  app.delete('/api/v1/workspace/connector-channels/:channelId', async (c) => {
     const auth = c.get('auth');
     const rl = checkRateLimit({ principalId: auth.userId, bucket: 'write' });
     if (!rl.allowed) return rateLimitedResponse(c, rl);
@@ -422,25 +422,28 @@ function buildApp(): Hono<{ Variables: Variables }> {
     return jsonResponse(result);
   });
 
-  app.put('/api/v1/workspace/channels/:channelId/credential', async (c) => {
-    const auth = c.get('auth');
-    const rl = checkRateLimit({ principalId: auth.userId, bucket: 'write' });
-    if (!rl.allowed) return rateLimitedResponse(c, rl);
-    const csrfFail = checkCsrf(c, auth);
-    if (csrfFail) return csrfFail;
-    const payload = await readJsonBody(c);
-    if (!payload.ok) return invalidJsonResponse(c, payload.error);
-    const result = await setWorkspaceChannelCredentialRoute({
-      auth,
-      requestedWorkspaceId: requestedWorkspaceId(c),
-      channelId: c.req.param('channelId'),
-      body: payload.data as any,
-    });
-    return jsonResponse(result);
-  });
+  app.put(
+    '/api/v1/workspace/connector-channels/:channelId/credential',
+    async (c) => {
+      const auth = c.get('auth');
+      const rl = checkRateLimit({ principalId: auth.userId, bucket: 'write' });
+      if (!rl.allowed) return rateLimitedResponse(c, rl);
+      const csrfFail = checkCsrf(c, auth);
+      if (csrfFail) return csrfFail;
+      const payload = await readJsonBody(c);
+      if (!payload.ok) return invalidJsonResponse(c, payload.error);
+      const result = await setWorkspaceChannelCredentialRoute({
+        auth,
+        requestedWorkspaceId: requestedWorkspaceId(c),
+        channelId: c.req.param('channelId'),
+        body: payload.data as any,
+      });
+      return jsonResponse(result);
+    },
+  );
 
   // ── Workspace data connectors ───────────────────────────────────
-  app.get('/api/v1/workspace/data-connectors', async (c) => {
+  app.get('/api/v1/workspace/connector-sources', async (c) => {
     const auth = c.get('auth');
     const rl = checkRateLimit({ principalId: auth.userId, bucket: 'read' });
     if (!rl.allowed) return rateLimitedResponse(c, rl);
@@ -451,7 +454,7 @@ function buildApp(): Hono<{ Variables: Variables }> {
     return jsonResponse(result);
   });
 
-  app.post('/api/v1/workspace/data-connectors', async (c) => {
+  app.post('/api/v1/workspace/connector-sources', async (c) => {
     const auth = c.get('auth');
     const rl = checkRateLimit({ principalId: auth.userId, bucket: 'write' });
     if (!rl.allowed) return rateLimitedResponse(c, rl);
@@ -467,7 +470,7 @@ function buildApp(): Hono<{ Variables: Variables }> {
     return jsonResponse(result);
   });
 
-  app.patch('/api/v1/workspace/data-connectors/:connectorId', async (c) => {
+  app.patch('/api/v1/workspace/connector-sources/:connectorId', async (c) => {
     const auth = c.get('auth');
     const rl = checkRateLimit({ principalId: auth.userId, bucket: 'write' });
     if (!rl.allowed) return rateLimitedResponse(c, rl);
@@ -484,7 +487,7 @@ function buildApp(): Hono<{ Variables: Variables }> {
     return jsonResponse(result);
   });
 
-  app.delete('/api/v1/workspace/data-connectors/:connectorId', async (c) => {
+  app.delete('/api/v1/workspace/connector-sources/:connectorId', async (c) => {
     const auth = c.get('auth');
     const rl = checkRateLimit({ principalId: auth.userId, bucket: 'write' });
     if (!rl.allowed) return rateLimitedResponse(c, rl);
@@ -499,7 +502,7 @@ function buildApp(): Hono<{ Variables: Variables }> {
   });
 
   app.put(
-    '/api/v1/workspace/data-connectors/:connectorId/credential',
+    '/api/v1/workspace/connector-sources/:connectorId/credential',
     async (c) => {
       const auth = c.get('auth');
       const rl = checkRateLimit({ principalId: auth.userId, bucket: 'write' });
@@ -519,7 +522,7 @@ function buildApp(): Hono<{ Variables: Variables }> {
   );
 
   // ── Per-Talk connector picker + toggles ─────────────────────────
-  app.get('/api/v1/talks/:talkId/connectors', async (c) => {
+  app.get('/api/v1/talks/:talkId/connector-bindings', async (c) => {
     const auth = c.get('auth');
     const rl = checkRateLimit({ principalId: auth.userId, bucket: 'read' });
     if (!rl.allowed) return rateLimitedResponse(c, rl);
@@ -530,7 +533,7 @@ function buildApp(): Hono<{ Variables: Variables }> {
     return jsonResponse(result);
   });
 
-  app.put('/api/v1/talks/:talkId/connectors/channels/:channelId', async (c) => {
+  app.put('/api/v1/talks/:talkId/channel-bindings/:channelId', async (c) => {
     const auth = c.get('auth');
     const rl = checkRateLimit({ principalId: auth.userId, bucket: 'write' });
     if (!rl.allowed) return rateLimitedResponse(c, rl);
@@ -544,42 +547,36 @@ function buildApp(): Hono<{ Variables: Variables }> {
     return jsonResponse(result);
   });
 
-  app.delete(
-    '/api/v1/talks/:talkId/connectors/channels/:channelId',
-    async (c) => {
-      const auth = c.get('auth');
-      const rl = checkRateLimit({ principalId: auth.userId, bucket: 'write' });
-      if (!rl.allowed) return rateLimitedResponse(c, rl);
-      const csrfFail = checkCsrf(c, auth);
-      if (csrfFail) return csrfFail;
-      const result = await deleteTalkChannelLinkRoute({
-        auth,
-        talkId: c.req.param('talkId'),
-        channelId: c.req.param('channelId'),
-      });
-      return jsonResponse(result);
-    },
-  );
+  app.delete('/api/v1/talks/:talkId/channel-bindings/:channelId', async (c) => {
+    const auth = c.get('auth');
+    const rl = checkRateLimit({ principalId: auth.userId, bucket: 'write' });
+    if (!rl.allowed) return rateLimitedResponse(c, rl);
+    const csrfFail = checkCsrf(c, auth);
+    if (csrfFail) return csrfFail;
+    const result = await deleteTalkChannelLinkRoute({
+      auth,
+      talkId: c.req.param('talkId'),
+      channelId: c.req.param('channelId'),
+    });
+    return jsonResponse(result);
+  });
 
-  app.put(
-    '/api/v1/talks/:talkId/connectors/data-connectors/:connectorId',
-    async (c) => {
-      const auth = c.get('auth');
-      const rl = checkRateLimit({ principalId: auth.userId, bucket: 'write' });
-      if (!rl.allowed) return rateLimitedResponse(c, rl);
-      const csrfFail = checkCsrf(c, auth);
-      if (csrfFail) return csrfFail;
-      const result = await setTalkDataConnectorLinkRoute({
-        auth,
-        talkId: c.req.param('talkId'),
-        connectorId: c.req.param('connectorId'),
-      });
-      return jsonResponse(result);
-    },
-  );
+  app.put('/api/v1/talks/:talkId/source-bindings/:connectorId', async (c) => {
+    const auth = c.get('auth');
+    const rl = checkRateLimit({ principalId: auth.userId, bucket: 'write' });
+    if (!rl.allowed) return rateLimitedResponse(c, rl);
+    const csrfFail = checkCsrf(c, auth);
+    if (csrfFail) return csrfFail;
+    const result = await setTalkDataConnectorLinkRoute({
+      auth,
+      talkId: c.req.param('talkId'),
+      connectorId: c.req.param('connectorId'),
+    });
+    return jsonResponse(result);
+  });
 
   app.delete(
-    '/api/v1/talks/:talkId/connectors/data-connectors/:connectorId',
+    '/api/v1/talks/:talkId/source-bindings/:connectorId',
     async (c) => {
       const auth = c.get('auth');
       const rl = checkRateLimit({ principalId: auth.userId, bucket: 'write' });

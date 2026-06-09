@@ -459,7 +459,9 @@ describe('SettingsPage', () => {
     );
 
     await screen.findByRole('heading', { name: 'Personal API Keys' });
-    await user.click(screen.getByRole('button', { name: 'Connect with Claude' }));
+    await user.click(
+      screen.getByRole('button', { name: 'Connect with Claude' }),
+    );
 
     expect(openSpy).toHaveBeenCalledWith(
       'https://claude.example/oauth',
@@ -1218,10 +1220,7 @@ describe('GoogleAccountSection (flag-gated)', () => {
             data: { googleAccount: account },
           });
         }
-        if (
-          path === '/api/v1/me/google-account/connect' &&
-          method === 'POST'
-        ) {
+        if (path === '/api/v1/me/google-account/connect' && method === 'POST') {
           const body = JSON.parse(String(init?.body || '{}')) as {
             scopes?: string[];
           };
@@ -1396,13 +1395,17 @@ describe('GoogleAccountSection (flag-gated)', () => {
       }),
     );
 
-    expect(await within(section).findByText('Google account connected.')).toBeTruthy();
+    expect(
+      await within(section).findByText('Google account connected.'),
+    ).toBeTruthy();
     expect(helpers.getGoogleConnectCalls()).toEqual([
       { scopes: ['drive.readonly', 'documents', 'spreadsheets'] },
     ]);
     expect(within(section).getByText(/tester@example.com/)).toBeTruthy();
 
-    await user.click(within(section).getByRole('button', { name: /Disconnect/i }));
+    await user.click(
+      within(section).getByRole('button', { name: /Disconnect/i }),
+    );
 
     expect(
       await within(section).findByText('Google account disconnected.'),
@@ -1435,7 +1438,9 @@ describe('GoogleAccountSection (flag-gated)', () => {
 
     const section = await screen.findByTestId('google-account-section');
     expect(
-      within(section).getByText(/Missing required scopes for Google Drive tools/),
+      within(section).getByText(
+        /Missing required scopes for Google Drive tools/,
+      ),
     ).toBeTruthy();
     await user.click(
       within(section).getByRole('button', { name: /Re-request scopes/i }),
@@ -1882,13 +1887,13 @@ function installConnectorsFetch(seed: {
       const path = parsed.pathname;
       expect(parsed.searchParams.get('workspaceId')).toBe(TEST_WORKSPACE_ID);
 
-      if (path === '/api/v1/workspace/channels' && method === 'GET') {
+      if (path === '/api/v1/workspace/connector-channels' && method === 'GET') {
         return jsonResponse(200, {
           ok: true,
           data: { channels },
         });
       }
-      if (path === '/api/v1/workspace/data-connectors' && method === 'GET') {
+      if (path === '/api/v1/workspace/connector-sources' && method === 'GET') {
         return jsonResponse(200, {
           ok: true,
           data: { dataConnectors },
@@ -1901,7 +1906,7 @@ function installConnectorsFetch(seed: {
         return jsonResponse(200, { ok: true, data: { installs: [] } });
       }
       const deleteChannelMatch = path.match(
-        /\/api\/v1\/workspace\/channels\/([^/?]+)$/,
+        /\/api\/v1\/workspace\/connector-channels\/([^/?]+)$/,
       );
       if (deleteChannelMatch && method === 'DELETE') {
         const id = decodeURIComponent(deleteChannelMatch[1]);
@@ -1910,7 +1915,7 @@ function installConnectorsFetch(seed: {
         return jsonResponse(200, { ok: true, data: { deleted: true } });
       }
       const deleteDcMatch = path.match(
-        /\/api\/v1\/workspace\/data-connectors\/([^/?]+)$/,
+        /\/api\/v1\/workspace\/connector-sources\/([^/?]+)$/,
       );
       if (deleteDcMatch && method === 'DELETE') {
         const id = decodeURIComponent(deleteDcMatch[1]);
@@ -1967,13 +1972,13 @@ function installConnectorsFetchByWorkspace(
         throw new Error(`Unexpected workspaceId: ${workspaceId}`);
       }
 
-      if (path === '/api/v1/workspace/channels' && method === 'GET') {
+      if (path === '/api/v1/workspace/connector-channels' && method === 'GET') {
         return jsonResponse(200, {
           ok: true,
           data: { channels: dataset.channels },
         });
       }
-      if (path === '/api/v1/workspace/data-connectors' && method === 'GET') {
+      if (path === '/api/v1/workspace/connector-sources' && method === 'GET') {
         return jsonResponse(200, {
           ok: true,
           data: { dataConnectors: dataset.dataConnectors },
