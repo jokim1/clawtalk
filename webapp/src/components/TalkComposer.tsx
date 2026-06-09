@@ -156,22 +156,33 @@ export function TalkComposer({
           const selected = targetAgentIds.includes(agent.id);
           const guardrail = talkAgentExecutionGuardrailsById[agent.id];
           const hasGuardrailViolation = selectedGuardrailAgentIds.has(agent.id);
+          const agentLabel = buildAgentLabel(agent);
+          const chipStateLabel = selected
+            ? `Addressed to ${agentLabel}`
+            : `Not addressed to ${agentLabel}. Click to include this agent.`;
           return (
             <button
               key={agent.id}
               type="button"
               className={`composer-target-chip${
-                selected ? ' composer-target-chip-selected' : ''
+                selected
+                  ? ' composer-target-chip-selected'
+                  : ' composer-target-chip-unselected'
               }${hasGuardrailViolation ? ' composer-target-chip-warning' : ''}`}
               onClick={() => handleToggleTarget(agent.id)}
               disabled={sendState.status === 'posting'}
               aria-pressed={selected}
               aria-label={
                 agent.isPrimary
-                  ? `${buildAgentLabel(agent)} Primary`
-                  : buildAgentLabel(agent)
+                  ? `${chipStateLabel} Primary`
+                  : chipStateLabel
               }
-              title={guardrail?.message || undefined}
+              title={
+                guardrail?.message ||
+                (selected
+                  ? 'This agent is addressed for the next message.'
+                  : 'This agent is not addressed. Click to include it.')
+              }
             >
               <span
                 className={`talk-status-dot talk-status-dot-${agent.health}`}
