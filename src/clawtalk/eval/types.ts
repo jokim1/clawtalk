@@ -28,6 +28,7 @@ export type DefaultAgentRole = (typeof DEFAULT_AGENT_ROLES)[number];
 export type EvalMode = 'dry-run' | 'live';
 export type EvalStatus = 'pass' | 'fail' | 'blocked';
 export type EvalScenarioCategory = (typeof EVAL_SCENARIO_CATEGORIES)[number];
+export type EvalObservationSource = 'fixture' | 'live';
 
 export interface SignalExpectation {
   requiredSignals: string[];
@@ -68,10 +69,10 @@ export interface DryRunObservation {
   [key: string]: unknown;
 }
 
-export interface DryRunFixture {
+export interface EvalObservationFixture {
   scenarioId: string;
   observedAt: string;
-  source: 'fixture';
+  source: EvalObservationSource;
   transcript?: string[];
   agentReplies?: Partial<
     Record<

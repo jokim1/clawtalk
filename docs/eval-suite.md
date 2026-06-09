@@ -1,6 +1,6 @@
 # ClawTalk MVP Eval Suite
 
-> **Status:** MVP dry-run harness implemented and CI-gated · **Updated:** 2026-06-07
+> **Status:** MVP dry-run harness implemented and CI-gated; persisted live-observation scoring available · **Updated:** 2026-06-08
 > Implements the Phase 13 offline eval gate shape from [`05-build-plan.md`](./05-build-plan.md) Phase 13 and [`06-agent-system-design.md`](./06-agent-system-design.md) §14.2.
 
 ## What Runs
@@ -13,13 +13,13 @@ npm run eval
 
 The default mode is deterministic `dry-run`. It reads scenario contracts from `eval/scenarios/*.json`, derives observed signals from nested fixture events/records/agent replies in `eval/fixtures/*.json`, validates grader prompt contracts from `eval/graders/*.json`, and prints a pretty report. Top-level fixture `signals` are rejected so the gate cannot pass by simply copying required signals into a flat array. Use `--output=<path>` for machine-readable reports, or `npm --silent run eval -- --format=json` when piping JSON stdout.
 
-Live evaluator-model grading is deliberately not claimed yet. `npm run eval -- --mode=live` exits blocked until a provider/backend adapter is wired. This keeps local launch-gate proof separate from future model-scored coverage.
+Live evaluator-model grading is deliberately not claimed yet. `npm run eval -- --mode=live` exits blocked unless a persisted live observation directory is supplied with `--live-root=<dir>`. This keeps local launch-gate proof separate from future provider-scored coverage while allowing captured Worker/workspace runs to be scored against the same launch-critical signal contracts.
 
 ## CI Policy
 
 Pull-request CI runs the deterministic dry-run gate with `npm run eval` after root typecheck and before the Supabase-backed test phase. That makes scenario/fixture/grader drift a required merge signal without needing Joseph secrets, external providers, or local Supabase.
 
-Live eval remains manual and intentionally blocked in CI. Do not make `--mode=live` required until the Worker/workspace fixture adapter and evaluator-model credentials are implemented with stable launch thresholds.
+Live eval remains manual and intentionally outside CI. Do not make `--mode=live --live-root=<dir>` required until the Worker/workspace capture path, evaluator-model credentials, and stable launch thresholds are implemented.
 
 ## Launch-Critical Scenarios
 
@@ -34,7 +34,7 @@ Live eval remains manual and intentionally blocked in CI. Do not make `--mode=li
 
 These are launch-useful MVP scenarios, not replacements for unit or integration tests. The dry-run fixtures prove the gate contract, report shape, thresholds, nested observation derivation, and local execution path without requiring Joseph secrets or external model calls.
 
-All dry-run fixture observations are contract placeholders until live Worker/integration execution lands. A green dry-run proves the invariants are represented in the eval set, that signals are backed by structured fixture observations, and that threshold mechanics work; it does not prove backend enforcement of Talk failure handling, native document conflicts, Jobs output, Home lifecycle actions, non-member denial, cross-workspace rejection, or OAuth credential privacy.
+All dry-run fixture observations are contract placeholders until live Worker/integration execution lands. A green dry-run proves the invariants are represented in the eval set, that signals are backed by structured fixture observations, and that threshold mechanics work; it does not prove backend enforcement of Talk failure handling, native document conflicts, Jobs output, Home lifecycle actions, non-member denial, cross-workspace rejection, or OAuth credential privacy. Persisted live observations must use the same per-scenario filenames as `eval/scenarios/*.json`, set `source: "live"`, and attach signals only to nested events, records, or agent replies.
 
 ## Scoring And Thresholds
 
@@ -66,12 +66,14 @@ npm run eval -- --help
 npm run eval -- --list
 npm run eval -- --scenarios=s-talk-pricing-launch
 npm run eval -- --output=eval-report.json
+npm run eval -- --mode=live --live-root=tmp/eval-live-observations
 npm --silent run eval -- --format=json
 ```
 
 Options:
 
-- `--mode=dry-run|live` - dry-run is local and deterministic; live is currently blocked by design.
+- `--mode=dry-run|live` - dry-run is local and deterministic; live requires `--live-root`.
+- `--live-root=<path>` - directory containing persisted live observation JSON files, one per selected scenario using that scenario's `fixture` filename and `source: "live"`.
 - `--scenarios=all|id,id` - run all scenarios or a comma-separated subset.
 - `--format=pretty|json` - print a readable table or JSON report. Use `npm --silent` for parseable JSON stdout.
 - `--output=path` - write the JSON report to disk. This avoids npm's script banner on stdout.
@@ -81,7 +83,7 @@ Exit codes:
 
 - `0` - suite passed.
 - `1` - suite ran but failed thresholds.
-- `2` - suite is blocked, currently only for unwired live mode.
+- `2` - suite is blocked, currently only for live mode without `--live-root`.
 
 ## Grader Prompts
 
@@ -107,4 +109,4 @@ type AgentAuditResult = {
 
 ## Next Up
 
-The next eval hardening step is live execution: run scenarios against a local Worker/workspace fixture, capture real Talk/Documents/Jobs/Home events, and then call evaluator-model graders. Until that lands, `npm run eval` is a local MVP gate that proves coverage shape and threshold mechanics, not live model quality.
+The next eval hardening step is live capture and model grading: run scenarios against a local Worker/workspace fixture, persist real Talk/Documents/Jobs/Home observations into a `--live-root` directory, and then call evaluator-model graders. Until that lands, `npm run eval` is a local MVP gate that proves coverage shape and threshold mechanics, and `--mode=live --live-root=<dir>` proves captured observations satisfy the deterministic contracts, not live model quality.
