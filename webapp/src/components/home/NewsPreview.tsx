@@ -1,25 +1,31 @@
 /**
  * News preview — topic-matched items for monitored Talks (docs/07 §8). Ported
  * from NewsCard in prototype/home-shared.jsx. "Open" links out to the source;
- * "Add to context" is disabled until the Home write API lands.
+ * "Add to context" and "Not relevant" are Home lifecycle writes owned by the
+ * parent so optimistic removal and failure rollback stay page-scoped.
  */
-import { salon, salonFont } from '../../salon';
+import { CTIcon, salon, salonFont } from '../../salon';
 import type { HomeNewsItem, HomeNewsPayload } from '../../lib/api';
 import {
   ActionButton,
   Card,
   clampLines,
   HomeEmpty,
+  LifecycleIconButton,
   SectionHeader,
   TalkChip,
 } from './HomeKit';
-import {
-  HOME_WRITE_PENDING_REASON,
-  isSafeHttpUrl,
-  newsImpactLabel,
-} from './homeFormat';
+import { isSafeHttpUrl, newsImpactLabel } from './homeFormat';
 
-function NewsCard({ item }: { item: HomeNewsItem }): JSX.Element {
+function NewsCard({
+  item,
+  onAddToContext,
+  onNotRelevant,
+}: {
+  item: HomeNewsItem;
+  onAddToContext: (id: string) => void;
+  onNotRelevant: (id: string) => void;
+}): JSX.Element {
   return (
     <Card>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
@@ -134,14 +140,30 @@ function NewsCard({ item }: { item: HomeNewsItem }): JSX.Element {
               gap: 8,
             }}
           >
-            <ActionButton
-              behavior={{
-                kind: 'disabled',
-                reason: HOME_WRITE_PENDING_REASON,
-                label: 'Add to context',
+            <button
+              type="button"
+              className="salon-btn"
+              onClick={() => onAddToContext(item.id)}
+              style={{
+                height: 28,
+                padding: '0 12px',
+                display: 'inline-flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                gap: 6,
+                borderRadius: 9999,
+                border: `1px solid ${salon.line}`,
+                background: 'var(--salon-card, #ffffff)',
+                color: salon.ink,
+                fontFamily: salonFont.sans,
+                fontSize: 12,
+                fontWeight: 500,
+                cursor: 'pointer',
               }}
-              variant="secondary"
-            />
+            >
+              Add to context
+              <CTIcon name="check" size={12} stroke={salon.ink2} />
+            </button>
             <ActionButton
               behavior={
                 isSafeHttpUrl(item.url)
@@ -154,6 +176,11 @@ function NewsCard({ item }: { item: HomeNewsItem }): JSX.Element {
               }
               variant="secondary"
             />
+            <LifecycleIconButton
+              icon="x"
+              label="Not relevant"
+              onClick={() => onNotRelevant(item.id)}
+            />
           </div>
         </div>
       </div>
@@ -163,8 +190,12 @@ function NewsCard({ item }: { item: HomeNewsItem }): JSX.Element {
 
 export function NewsPreview({
   payload,
+  onAddToContext,
+  onNotRelevant,
 }: {
   payload: HomeNewsPayload;
+  onAddToContext: (id: string) => void;
+  onNotRelevant: (id: string) => void;
 }): JSX.Element {
   const items = payload.items.slice(0, 6);
   return (
@@ -182,7 +213,12 @@ export function NewsPreview({
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
           {items.map((item) => (
-            <NewsCard key={item.id} item={item} />
+            <NewsCard
+              key={item.id}
+              item={item}
+              onAddToContext={onAddToContext}
+              onNotRelevant={onNotRelevant}
+            />
           ))}
         </div>
       )}

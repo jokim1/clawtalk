@@ -28,8 +28,12 @@ vi.mock('../lib/api', async (importActual) => {
     listHomeInbox: vi.fn(),
     listHomeRecommendations: vi.fn(),
     listHomeNews: vi.fn(),
+    addHomeNewsToContext: vi.fn(),
     dismissHomeInboxItem: vi.fn(),
     snoozeHomeInboxItem: vi.fn(),
+    markHomeInboxItemRead: vi.fn(),
+    resolveHomeInboxItem: vi.fn(),
+    markHomeNewsNotRelevant: vi.fn(),
     dismissHomeRecommendation: vi.fn(),
   };
 });
@@ -344,6 +348,39 @@ describe('HomePage', () => {
     expect(typeof mockApi.snoozeHomeInboxItem.mock.calls[0][1]).toBe('string');
   });
 
+  it('marks an inbox item read without removing the row', async () => {
+    mockApi.markHomeInboxItemRead.mockResolvedValue({
+      id: 'i1',
+      status: 'read',
+    });
+    await renderPopulated();
+
+    expect(screen.getByText('3 unread · 1 blocking')).toBeTruthy();
+    fireEvent.click(screen.getByLabelText('Mark read'));
+
+    await waitFor(() =>
+      expect(screen.getByText('Critic replied in Pricing v2')).toBeTruthy(),
+    );
+    expect(screen.getByText('2 unread · 1 blocking')).toBeTruthy();
+    expect(screen.queryByLabelText('Mark read')).toBeNull();
+    expect(mockApi.markHomeInboxItemRead).toHaveBeenCalledWith('i1');
+  });
+
+  it('resolves an inbox item optimistically', async () => {
+    mockApi.resolveHomeInboxItem.mockResolvedValue({
+      id: 'i1',
+      status: 'resolved',
+    });
+    await renderPopulated();
+
+    fireEvent.click(screen.getByLabelText('Resolve'));
+
+    await waitFor(() =>
+      expect(screen.queryByText('Critic replied in Pricing v2')).toBeNull(),
+    );
+    expect(mockApi.resolveHomeInboxItem).toHaveBeenCalledWith('i1');
+  });
+
   it('keeps the curator in sync when snoozing the current inbox item', async () => {
     mockApi.snoozeHomeInboxItem.mockResolvedValue({
       id: 'i1',
@@ -428,5 +465,69 @@ describe('HomePage', () => {
       screen.getAllByText('Notion raises Business pricing 10%'),
     ).toHaveLength(2);
     expect(mockApi.dismissHomeInboxItem).toHaveBeenCalledWith('i1');
+  });
+
+  it('adds a News card to context and removes it from Home', async () => {
+    mockApi.addHomeNewsToContext.mockResolvedValue({
+      id: 'n1',
+      status: 'added_to_context',
+      sourceId: 'source-1',
+    });
+    await renderHomeData({
+      summary: {
+        ...SUMMARY,
+        curator: {
+          kind: 'news',
+          title: 'Notion raises Business pricing 10%',
+          summary: 'Direct comp for your pricing model.',
+          itemId: 'n1',
+          target: { kind: 'news', talkId: 't-pricing' },
+        },
+      },
+      inbox: EMPTY_INBOX,
+      recommendations: EMPTY_RECS,
+      news: NEWS,
+      waitForText: 'Notion raises Business pricing 10%',
+    });
+
+    fireEvent.click(screen.getByText('Add to context'));
+
+    await waitFor(() =>
+      expect(
+        screen.queryByText('Notion raises Business pricing 10%'),
+      ).toBeNull(),
+    );
+    expect(screen.getByText('Start a Talk')).toBeTruthy();
+    expect(mockApi.addHomeNewsToContext).toHaveBeenCalledWith('n1');
+  });
+
+  it('restores a News card when not-relevant fails', async () => {
+    mockApi.markHomeNewsNotRelevant.mockRejectedValue(new Error('boom'));
+    await renderHomeData({
+      summary: {
+        ...SUMMARY,
+        curator: {
+          kind: 'news',
+          title: 'Notion raises Business pricing 10%',
+          summary: 'Direct comp for your pricing model.',
+          itemId: 'n1',
+          target: { kind: 'news', talkId: 't-pricing' },
+        },
+      },
+      inbox: EMPTY_INBOX,
+      recommendations: EMPTY_RECS,
+      news: NEWS,
+      waitForText: 'Notion raises Business pricing 10%',
+    });
+
+    fireEvent.click(screen.getByLabelText('Not relevant'));
+
+    await waitFor(() =>
+      expect(
+        screen.getAllByText('Notion raises Business pricing 10%'),
+      ).toHaveLength(2),
+    );
+    expect(screen.getByRole('alert')).toBeTruthy();
+    expect(mockApi.markHomeNewsNotRelevant).toHaveBeenCalledWith('n1');
   });
 });

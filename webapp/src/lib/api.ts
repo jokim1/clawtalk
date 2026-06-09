@@ -3502,10 +3502,9 @@ export async function deleteTalkDataConnectorLink(input: {
   );
 }
 
-// ─── Home (read-only attention surface) ─────────────────────────────────
-// Mirrors src/clawtalk/db/home-accessors.ts payload types. Only the read API
-// (GET /api/v1/home/*) exists today; inbox/recommendation/news lifecycle write
-// endpoints are not implemented yet, so this client is read-only.
+// ─── Home attention surface ──────────────────────────────────────────────
+// Mirrors src/clawtalk/db/home-accessors.ts payload types plus the Home
+// lifecycle writes.
 
 export type HomeInboxType =
   | 'agent_replied'
@@ -3747,12 +3746,45 @@ export type HomeRecommendationMutationResult = {
   status: HomeRecommendationStatus;
 };
 
+export type HomeNewsStatus =
+  | 'active'
+  | 'snoozed'
+  | 'added_to_context'
+  | 'not_relevant'
+  | 'expired';
+
+export type HomeNewsMutationResult = {
+  id: string;
+  status: HomeNewsStatus;
+  sourceId: string | null;
+};
+
 /** Dismiss an Inbox item so it leaves the active Home Inbox. */
 export async function dismissHomeInboxItem(
   itemId: string,
 ): Promise<HomeInboxMutationResult> {
   return apiMutationRequest<HomeInboxMutationResult>(
     `/api/v1/home/inbox/${encodeURIComponent(itemId)}/dismiss`,
+    { method: 'POST' },
+  );
+}
+
+/** Mark an Inbox item read; it stays visible but no longer counts as unread. */
+export async function markHomeInboxItemRead(
+  itemId: string,
+): Promise<HomeInboxMutationResult> {
+  return apiMutationRequest<HomeInboxMutationResult>(
+    `/api/v1/home/inbox/${encodeURIComponent(itemId)}/read`,
+    { method: 'POST' },
+  );
+}
+
+/** Resolve an Inbox item so it leaves active Home. */
+export async function resolveHomeInboxItem(
+  itemId: string,
+): Promise<HomeInboxMutationResult> {
+  return apiMutationRequest<HomeInboxMutationResult>(
+    `/api/v1/home/inbox/${encodeURIComponent(itemId)}/resolve`,
     { method: 'POST' },
   );
 }
@@ -3765,6 +3797,26 @@ export async function snoozeHomeInboxItem(
   return apiMutationRequest<HomeInboxMutationResult>(
     `/api/v1/home/inbox/${encodeURIComponent(itemId)}/snooze`,
     { method: 'POST', includeJson: true, body: JSON.stringify({ until }) },
+  );
+}
+
+/** Add a matched News card to its Talk context as a native news source. */
+export async function addHomeNewsToContext(
+  matchId: string,
+): Promise<HomeNewsMutationResult> {
+  return apiMutationRequest<HomeNewsMutationResult>(
+    `/api/v1/home/news/${encodeURIComponent(matchId)}/add-to-context`,
+    { method: 'POST' },
+  );
+}
+
+/** Mark a News card not relevant so it leaves active Home. */
+export async function markHomeNewsNotRelevant(
+  matchId: string,
+): Promise<HomeNewsMutationResult> {
+  return apiMutationRequest<HomeNewsMutationResult>(
+    `/api/v1/home/news/${encodeURIComponent(matchId)}/not-relevant`,
+    { method: 'POST' },
   );
 }
 

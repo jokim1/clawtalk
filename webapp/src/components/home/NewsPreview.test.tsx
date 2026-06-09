@@ -44,7 +44,11 @@ const POPULATED: HomeNewsPayload = {
 function renderNews(payload: HomeNewsPayload): void {
   render(
     <MemoryRouter>
-      <NewsPreview payload={payload} />
+      <NewsPreview
+        payload={payload}
+        onAddToContext={() => undefined}
+        onNotRelevant={() => undefined}
+      />
     </MemoryRouter>,
   );
 }

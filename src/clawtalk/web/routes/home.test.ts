@@ -21,12 +21,16 @@ import { DEV_USER_ID } from '../middleware/auth.js';
 import type { AuthContext } from '../types.js';
 import { _resetWorkerAppForTests, getWorkerApp } from '../worker-app.js';
 import {
+  addHomeNewsToContextRoute,
   dismissHomeInboxRoute,
   dismissHomeRecommendationRoute,
   getHomeSummaryRoute,
   listHomeInboxRoute,
   listHomeNewsRoute,
   listHomeRecommendationsRoute,
+  markHomeInboxReadRoute,
+  markHomeNewsNotRelevantRoute,
+  resolveHomeInboxRoute,
   snoozeHomeInboxRoute,
 } from './home.js';
 
@@ -87,6 +91,7 @@ async function seedInboxItem(input: {
   targetJson?: Record<string, unknown>;
   primaryActionJson?: Record<string, unknown>;
   storeTalkId?: boolean;
+  newsItemId?: string | null;
 }): Promise<string> {
   const db = getDbPg();
   const targetJson = input.targetJson ?? {
@@ -100,9 +105,9 @@ async function seedInboxItem(input: {
   };
   const rows = await db<Array<{ id: string }>>`
     insert into public.home_inbox_items (
-      workspace_id, type, target_kind, target_json, talk_id, severity, status,
-      title, summary, reason, primary_action_json, score, algorithm_version,
-      created_at
+      workspace_id, type, target_kind, target_json, talk_id, news_item_id,
+      severity, status, title, summary, reason, primary_action_json, score,
+      algorithm_version, created_at
     )
     values (
       ${input.workspaceId}::uuid,
@@ -110,6 +115,7 @@ async function seedInboxItem(input: {
       'talk',
       ${db.json(targetJson as never)},
       ${input.storeTalkId === false ? null : input.talkId}::uuid,
+      ${input.newsItemId ?? null}::uuid,
       ${input.severity},
       ${input.status ?? 'unread'},
       ${input.title},
@@ -1474,6 +1480,13 @@ async function recommendationIds(workspaceId: string): Promise<string[]> {
   );
 }
 
+async function newsIds(workspaceId: string): Promise<string[]> {
+  const result = await listHomeNewsRoute({ auth: auth(), workspaceId });
+  return dataOf<{ items: Array<{ id: string }> }>(result).items.map(
+    (i) => i.id,
+  );
+}
+
 describe('Home write routes', () => {
   it('dismisses an Inbox item and removes it from the Inbox list', async () => {
     const { workspaceId, talkId } = await createWorkspaceFixture();
@@ -1519,6 +1532,69 @@ describe('Home write routes', () => {
       ok: true,
       data: { id: itemId, status: 'dismissed' },
     });
+  });
+
+  it('marks an Inbox item read without removing it from the list', async () => {
+    const { workspaceId, talkId } = await createWorkspaceFixture();
+    const itemId = await seedInboxItem({
+      workspaceId,
+      talkId,
+      type: 'agent_replied',
+      title: 'Agent replied',
+      severity: 'action',
+    });
+    const before = dataOf<{ counts: { unread: number } }>(
+      await listHomeInboxRoute({ auth: auth(), workspaceId }),
+    );
+    expect(before.counts.unread).toBe(1);
+
+    const result = await markHomeInboxReadRoute({
+      auth: auth(),
+      workspaceId,
+      itemId,
+    });
+
+    expect(result.statusCode).toBe(200);
+    expect(result.body).toMatchObject({
+      ok: true,
+      data: { id: itemId, status: 'read' },
+    });
+    expect(await inboxIds(workspaceId)).toContain(itemId);
+    const after = dataOf<{ counts: { unread: number } }>(
+      await listHomeInboxRoute({ auth: auth(), workspaceId }),
+    );
+    expect(after.counts.unread).toBe(0);
+  });
+
+  it('resolves an Inbox item and removes it from the Inbox list', async () => {
+    const { workspaceId, talkId } = await createWorkspaceFixture();
+    const itemId = await seedInboxItem({
+      workspaceId,
+      talkId,
+      type: 'agent_replied',
+      title: 'Agent replied',
+      severity: 'action',
+    });
+    expect(await inboxIds(workspaceId)).toContain(itemId);
+
+    const result = await resolveHomeInboxRoute({
+      auth: auth(),
+      workspaceId,
+      itemId,
+    });
+
+    expect(result.statusCode).toBe(200);
+    expect(result.body).toMatchObject({
+      ok: true,
+      data: { id: itemId, status: 'resolved' },
+    });
+    expect(await inboxIds(workspaceId)).not.toContain(itemId);
+    const rows = await getDbPg()<Array<{ resolved_at: string | null }>>`
+      select resolved_at
+      from public.home_inbox_items
+      where id = ${itemId}::uuid
+    `;
+    expect(rows[0]?.resolved_at).toBeTruthy();
   });
 
   it('returns 404 dismissing an unknown Inbox item', async () => {
@@ -1679,6 +1755,129 @@ describe('Home write routes', () => {
     expect(await recommendationIds(workspaceId)).not.toContain(recId);
   });
 
+  it('adds a news match to native Talk context and resolves related inbox', async () => {
+    const { workspaceId, talkId } = await createWorkspaceFixture();
+    const matchId = await seedNewsMatch({
+      workspaceId,
+      talkId,
+      title: 'Pricing changed',
+      score: 90,
+    });
+    const matchRows = await getDbPg()<Array<{ news_item_id: string }>>`
+      select news_item_id
+      from public.home_news_matches
+      where id = ${matchId}::uuid
+    `;
+    const inboxId = await seedInboxItem({
+      workspaceId,
+      talkId,
+      type: 'news_context_added',
+      title: 'News available',
+      severity: 'action',
+      newsItemId: matchRows[0].news_item_id,
+      targetJson: {
+        kind: 'news',
+        talkId,
+        newsItemId: matchRows[0].news_item_id,
+      },
+    });
+    expect(await newsIds(workspaceId)).toContain(matchId);
+    expect(await inboxIds(workspaceId)).toContain(inboxId);
+
+    const result = await addHomeNewsToContextRoute({
+      auth: auth(),
+      workspaceId,
+      matchId,
+    });
+
+    expect(result.statusCode).toBe(200);
+    expect(result.body).toMatchObject({
+      ok: true,
+      data: { id: matchId, status: 'added_to_context' },
+    });
+    expect(await newsIds(workspaceId)).not.toContain(matchId);
+    expect(await inboxIds(workspaceId)).not.toContain(inboxId);
+
+    const sources = await getDbPg()<
+      Array<{
+        id: string;
+        kind: string;
+        payload_ref: string | null;
+        meta_json: Record<string, unknown>;
+      }>
+    >`
+      select id, kind, payload_ref, meta_json
+      from public.context_sources
+      where workspace_id = ${workspaceId}::uuid
+        and talk_id = ${talkId}::uuid
+        and kind = 'news'
+    `;
+    expect(sources).toHaveLength(1);
+    expect(sources[0].payload_ref).toBe('https://news.example/pricing-changed');
+    expect(sources[0].meta_json).toMatchObject({
+      homeNewsMatchId: matchId,
+      homeNewsItemId: matchRows[0].news_item_id,
+      sourceType: 'url',
+      status: 'ready',
+    });
+  });
+
+  it('treats repeated news add-to-context as idempotent', async () => {
+    const { workspaceId, talkId } = await createWorkspaceFixture();
+    const matchId = await seedNewsMatch({
+      workspaceId,
+      talkId,
+      title: 'Same news twice',
+    });
+
+    const first = await addHomeNewsToContextRoute({
+      auth: auth(),
+      workspaceId,
+      matchId,
+    });
+    const second = await addHomeNewsToContextRoute({
+      auth: auth(),
+      workspaceId,
+      matchId,
+    });
+
+    expect(first.statusCode).toBe(200);
+    expect(second.statusCode).toBe(200);
+    expect(second.body).toEqual(first.body);
+    const sources = await getDbPg()<Array<{ count: number }>>`
+      select count(*)::int as count
+      from public.context_sources
+      where workspace_id = ${workspaceId}::uuid
+        and talk_id = ${talkId}::uuid
+        and kind = 'news'
+        and meta_json->>'homeNewsMatchId' = ${matchId}
+    `;
+    expect(sources[0].count).toBe(1);
+  });
+
+  it('marks a news match not relevant and removes it from News', async () => {
+    const { workspaceId, talkId } = await createWorkspaceFixture();
+    const matchId = await seedNewsMatch({
+      workspaceId,
+      talkId,
+      title: 'Irrelevant signal',
+    });
+    expect(await newsIds(workspaceId)).toContain(matchId);
+
+    const result = await markHomeNewsNotRelevantRoute({
+      auth: auth(),
+      workspaceId,
+      matchId,
+    });
+
+    expect(result.statusCode).toBe(200);
+    expect(result.body).toMatchObject({
+      ok: true,
+      data: { id: matchId, status: 'not_relevant', sourceId: null },
+    });
+    expect(await newsIds(workspaceId)).not.toContain(matchId);
+  });
+
   it('returns 404 dismissing an unknown recommendation', async () => {
     const { workspaceId } = await createWorkspaceFixture();
     const result = await dismissHomeRecommendationRoute({
@@ -1725,6 +1924,11 @@ describe('Home write routes', () => {
       priority: 'decide',
       score: 90,
     });
+    const newsMatchId = await seedNewsMatch({
+      workspaceId,
+      talkId,
+      title: 'Guest-visible news',
+    });
     const until = new Date(Date.now() + 60 * 60 * 1000).toISOString();
 
     const dismissInbox = await dismissHomeInboxRoute({
@@ -1743,8 +1947,36 @@ describe('Home write routes', () => {
       workspaceId,
       recommendationId,
     });
+    const markRead = await markHomeInboxReadRoute({
+      auth: auth(GUEST_USER_ID),
+      workspaceId,
+      itemId,
+    });
+    const resolveInbox = await resolveHomeInboxRoute({
+      auth: auth(GUEST_USER_ID),
+      workspaceId,
+      itemId,
+    });
+    const addNews = await addHomeNewsToContextRoute({
+      auth: auth(GUEST_USER_ID),
+      workspaceId,
+      matchId: newsMatchId,
+    });
+    const notRelevant = await markHomeNewsNotRelevantRoute({
+      auth: auth(GUEST_USER_ID),
+      workspaceId,
+      matchId: newsMatchId,
+    });
 
-    for (const result of [dismissInbox, snoozeInbox, dismissRecommendation]) {
+    for (const result of [
+      dismissInbox,
+      snoozeInbox,
+      dismissRecommendation,
+      markRead,
+      resolveInbox,
+      addNews,
+      notRelevant,
+    ]) {
       expect(result.statusCode).toBe(403);
       expect(result.body).toMatchObject({
         ok: false,
@@ -1753,5 +1985,6 @@ describe('Home write routes', () => {
     }
     expect(await inboxIds(workspaceId)).toContain(itemId);
     expect(await recommendationIds(workspaceId)).toContain(recommendationId);
+    expect(await newsIds(workspaceId)).toContain(newsMatchId);
   });
 });
