@@ -5,9 +5,7 @@
  * each row also carries Mark-read, Resolve, Snooze, and Dismiss lifecycle
  * controls wired to the Home write API (the parent owns optimistic state).
  */
-import { useRef, useState } from 'react';
-
-import { CTIcon, Popover, salon, salonFont } from '../../salon';
+import { CTIcon, salon, salonFont } from '../../salon';
 import type { HomeInboxItem, HomeInboxPayload } from '../../lib/api';
 import {
   ActionButton,
@@ -16,76 +14,16 @@ import {
   HomeEmpty,
   LifecycleIconButton,
   SectionHeader,
+  SnoozeControl,
   TalkChip,
 } from './HomeKit';
 import {
   classifyAction,
   INBOX_SEVERITY_BADGE,
   INBOX_TYPE_ICON,
-  snoozePresets,
   talkRef,
   targetToPath,
 } from './homeFormat';
-
-/** Snooze trigger + preset popover (1 hour / Tomorrow / Next week). */
-function SnoozeControl({
-  onSnooze,
-}: {
-  onSnooze: (until: string) => void;
-}): JSX.Element {
-  const [open, setOpen] = useState(false);
-  const ref = useRef<HTMLButtonElement>(null);
-  return (
-    <>
-      <LifecycleIconButton
-        icon="clock"
-        label="Snooze"
-        buttonRef={ref}
-        onClick={() => setOpen((value) => !value)}
-      />
-      {open ? (
-        <Popover
-          anchorRect={ref.current?.getBoundingClientRect() ?? null}
-          onClose={() => setOpen(false)}
-          width={196}
-          align="right"
-          ariaLabel="Snooze options"
-        >
-          <div style={{ padding: 6, display: 'flex', flexDirection: 'column' }}>
-            {snoozePresets(new Date()).map((preset) => (
-              <button
-                key={preset.label}
-                type="button"
-                className="salon-btn"
-                onClick={() => {
-                  setOpen(false);
-                  onSnooze(preset.until);
-                }}
-                style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: 8,
-                  textAlign: 'left',
-                  padding: '8px 10px',
-                  borderRadius: 8,
-                  background: 'transparent',
-                  border: 'none',
-                  cursor: 'pointer',
-                  fontFamily: salonFont.sans,
-                  fontSize: 13,
-                  color: salon.ink,
-                }}
-              >
-                <CTIcon name="clock" size={13} stroke={salon.ink2} />
-                {preset.label}
-              </button>
-            ))}
-          </div>
-        </Popover>
-      ) : null}
-    </>
-  );
-}
 
 function InboxRow({
   item,

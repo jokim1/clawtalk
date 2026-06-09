@@ -31,6 +31,7 @@ vi.mock('../lib/api', async (importActual) => {
     addHomeNewsToContext: vi.fn(),
     dismissHomeInboxItem: vi.fn(),
     snoozeHomeInboxItem: vi.fn(),
+    snoozeHomeNews: vi.fn(),
     markHomeInboxItemRead: vi.fn(),
     resolveHomeInboxItem: vi.fn(),
     markHomeNewsNotRelevant: vi.fn(),
@@ -337,7 +338,7 @@ describe('HomePage', () => {
     });
     await renderPopulated();
 
-    fireEvent.click(screen.getByLabelText('Snooze'));
+    fireEvent.click(screen.getAllByLabelText('Snooze')[0]);
     fireEvent.click(await screen.findByText('Tomorrow'));
 
     await waitFor(() =>
@@ -403,7 +404,7 @@ describe('HomePage', () => {
       waitForText: 'Critic replied in Pricing v2',
     });
 
-    fireEvent.click(screen.getByLabelText('Snooze'));
+    fireEvent.click(screen.getAllByLabelText('Snooze')[0]);
     fireEvent.click(await screen.findByText('Tomorrow'));
 
     await waitFor(() =>
@@ -499,6 +500,43 @@ describe('HomePage', () => {
     );
     expect(screen.getByText('Start a Talk')).toBeTruthy();
     expect(mockApi.addHomeNewsToContext).toHaveBeenCalledWith('n1');
+  });
+
+  it('snoozes a News card via a preset', async () => {
+    mockApi.snoozeHomeNews.mockResolvedValue({
+      id: 'n1',
+      status: 'snoozed',
+      sourceId: null,
+    });
+    await renderHomeData({
+      summary: {
+        ...SUMMARY,
+        curator: {
+          kind: 'news',
+          title: 'Notion raises Business pricing 10%',
+          summary: 'Direct comp for your pricing model.',
+          itemId: 'n1',
+          target: { kind: 'news', talkId: 't-pricing' },
+        },
+      },
+      inbox: EMPTY_INBOX,
+      recommendations: EMPTY_RECS,
+      news: NEWS,
+      waitForText: 'Notion raises Business pricing 10%',
+    });
+
+    fireEvent.click(screen.getByLabelText('Snooze'));
+    fireEvent.click(await screen.findByText('Tomorrow'));
+
+    await waitFor(() =>
+      expect(
+        screen.queryByText('Notion raises Business pricing 10%'),
+      ).toBeNull(),
+    );
+    expect(screen.getByText('Start a Talk')).toBeTruthy();
+    expect(mockApi.snoozeHomeNews).toHaveBeenCalledTimes(1);
+    expect(mockApi.snoozeHomeNews.mock.calls[0][0]).toBe('n1');
+    expect(typeof mockApi.snoozeHomeNews.mock.calls[0][1]).toBe('string');
   });
 
   it('restores a News card when not-relevant fails', async () => {

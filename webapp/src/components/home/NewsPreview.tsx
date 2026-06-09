@@ -1,8 +1,9 @@
 /**
  * News preview — topic-matched items for monitored Talks (docs/07 §8). Ported
  * from NewsCard in prototype/home-shared.jsx. "Open" links out to the source;
- * "Add to context" and "Not relevant" are Home lifecycle writes owned by the
- * parent so optimistic removal and failure rollback stay page-scoped.
+ * "Add to context", "Snooze", and "Not relevant" are Home lifecycle writes
+ * owned by the parent so optimistic removal and failure rollback stays
+ * page-scoped.
  */
 import { CTIcon, salon, salonFont } from '../../salon';
 import type { HomeNewsItem, HomeNewsPayload } from '../../lib/api';
@@ -13,6 +14,7 @@ import {
   HomeEmpty,
   LifecycleIconButton,
   SectionHeader,
+  SnoozeControl,
   TalkChip,
 } from './HomeKit';
 import { isSafeHttpUrl, newsImpactLabel } from './homeFormat';
@@ -20,10 +22,12 @@ import { isSafeHttpUrl, newsImpactLabel } from './homeFormat';
 function NewsCard({
   item,
   onAddToContext,
+  onSnooze,
   onNotRelevant,
 }: {
   item: HomeNewsItem;
   onAddToContext: (id: string) => void;
+  onSnooze: (id: string, until: string) => void;
   onNotRelevant: (id: string) => void;
 }): JSX.Element {
   return (
@@ -176,6 +180,7 @@ function NewsCard({
               }
               variant="secondary"
             />
+            <SnoozeControl onSnooze={(until) => onSnooze(item.id, until)} />
             <LifecycleIconButton
               icon="x"
               label="Not relevant"
@@ -191,10 +196,12 @@ function NewsCard({
 export function NewsPreview({
   payload,
   onAddToContext,
+  onSnooze,
   onNotRelevant,
 }: {
   payload: HomeNewsPayload;
   onAddToContext: (id: string) => void;
+  onSnooze: (id: string, until: string) => void;
   onNotRelevant: (id: string) => void;
 }): JSX.Element {
   const items = payload.items.slice(0, 6);
@@ -217,6 +224,7 @@ export function NewsPreview({
               key={item.id}
               item={item}
               onAddToContext={onAddToContext}
+              onSnooze={onSnooze}
               onNotRelevant={onNotRelevant}
             />
           ))}

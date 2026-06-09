@@ -25,6 +25,7 @@ import {
   markHomeNewsNotRelevant,
   resolveHomeInboxItem,
   snoozeHomeInboxItem,
+  snoozeHomeNews,
   type HomeInboxItem,
   type HomeInboxPayload,
   type HomeNewsItem,
@@ -601,6 +602,12 @@ export function HomePage(): JSX.Element {
     [mutateNews],
   );
 
+  const handleSnoozeNews = useCallback(
+    (id: string, until: string) =>
+      void mutateNews(id, () => snoozeHomeNews(id, until)),
+    [mutateNews],
+  );
+
   return (
     <div
       className="ct-screen-enter ct-thin-scroll"
@@ -681,6 +688,7 @@ export function HomePage(): JSX.Element {
           onResolveInbox={handleResolveInbox}
           onDismissRecommendation={handleDismissRecommendation}
           onAddNewsToContext={handleAddNewsToContext}
+          onSnoozeNews={handleSnoozeNews}
           onMarkNewsNotRelevant={handleMarkNewsNotRelevant}
         />
       ) : null}
@@ -696,6 +704,7 @@ function HomeContent({
   onResolveInbox,
   onDismissRecommendation,
   onAddNewsToContext,
+  onSnoozeNews,
   onMarkNewsNotRelevant,
 }: {
   data: HomeData;
@@ -705,6 +714,7 @@ function HomeContent({
   onResolveInbox: (id: string) => void;
   onDismissRecommendation: (id: string) => void;
   onAddNewsToContext: (id: string) => void;
+  onSnoozeNews: (id: string, until: string) => void;
   onMarkNewsNotRelevant: (id: string) => void;
 }): JSX.Element {
   const recs = data.recommendations;
@@ -771,6 +781,7 @@ function HomeContent({
       <NewsPreview
         payload={data.news ?? EMPTY_NEWS}
         onAddToContext={onAddNewsToContext}
+        onSnooze={onSnoozeNews}
         onNotRelevant={onMarkNewsNotRelevant}
       />
     </>
