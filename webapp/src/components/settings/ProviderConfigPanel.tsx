@@ -253,7 +253,7 @@ export function ProviderConfigPanel({
   };
 
   return (
-    <>
+    <div className="settings-salon-panel settings-api-panel">
       <div
         className="settings-subtabs"
         role="tablist"
@@ -349,7 +349,14 @@ export function ProviderConfigPanel({
         onStartOpenAiCodexSubscription={onStartOpenAiCodexSubscription}
         onCancelOpenAiCodexSubscription={onCancelOpenAiCodexSubscription}
       />
-    </>
+      <div className="settings-api-note">
+        <span aria-hidden="true">↯</span>
+        <p>
+          Provider credentials are scoped to the selected tab. Personal keys
+          override workspace defaults when both are configured.
+        </p>
+      </div>
+    </div>
   );
 }
 

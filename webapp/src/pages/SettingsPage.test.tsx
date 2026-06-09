@@ -49,10 +49,8 @@ describe('SettingsPage', () => {
       </MemoryRouter>,
     );
 
-    await screen.findByRole('heading', { name: 'My Profile' });
-    expect(
-      screen.getByRole('heading', { name: 'Personal Information' }),
-    ).toBeTruthy();
+    await screen.findByRole('heading', { level: 1, name: 'Profile' });
+    expect(screen.getByLabelText('Display name')).toBeTruthy();
   });
 
   it('saves Profile display-name changes through the session API', async () => {
@@ -71,8 +69,8 @@ describe('SettingsPage', () => {
       </MemoryRouter>,
     );
 
-    await screen.findByRole('heading', { name: 'My Profile' });
-    const nameInput = screen.getByLabelText('Full name');
+    await screen.findByRole('heading', { level: 1, name: 'Profile' });
+    const nameInput = screen.getByLabelText('Display name');
     await user.clear(nameInput);
     await user.type(nameInput, 'Owner Renamed');
     await user.click(screen.getByRole('button', { name: 'Save changes' }));
@@ -572,7 +570,7 @@ describe('SettingsPage', () => {
     // Agent cards + the Main Agent section render after the async agents
     // fetch completes; the panel heading shows up first while the rest is
     // still loading, so wait for both pieces explicitly.
-    expect(await screen.findByText('Claude Main')).toBeTruthy();
+    expect(await screen.findAllByText('Claude Main')).not.toHaveLength(0);
     expect(
       await screen.findByRole('heading', { name: 'Main Agent' }),
     ).toBeTruthy();
