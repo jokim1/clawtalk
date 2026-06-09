@@ -29,11 +29,7 @@ export function getTabFromPath(
   if (pathname === `${base}/documents`) return 'documents';
   if (pathname === `${base}/agents`) return 'agents';
   if (pathname === `${base}/context`) return 'context';
-  if (
-    pathname === `${base}/connectors` ||
-    pathname === `${base}/channels` ||
-    pathname === `${base}/data-connectors`
-  ) {
+  if (pathname === `${base}/connectors`) {
     return 'connectors';
   }
   if (pathname === `${base}/jobs`) return 'jobs';

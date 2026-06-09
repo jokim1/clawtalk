@@ -1,6 +1,5 @@
-// Greenfield-backed compatibility handlers for the existing workspace
-// channels/data-connectors UI. Responses keep the existing public shape while
-// filtering server-owned connector metadata out of config payloads.
+// Greenfield-backed connector handlers. Responses keep server-owned connector
+// metadata out of public config payloads.
 
 import { getDbPg, withUserContext } from '../../../db.js';
 import {

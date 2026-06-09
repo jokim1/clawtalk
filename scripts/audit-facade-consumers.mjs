@@ -75,16 +75,16 @@ const facades = [
     dynamic: 'talkPolicy|/api/v1/talks/.*/policy|invalid_agents',
   },
   {
-    id: 'tool-connectors-facades',
-    name: 'Tool/connectors facades',
+    id: 'connector-route-compat',
+    name: 'Connector route compatibility',
     tokens:
-      'active_tool_families|talk_tools|toolFamily|toolFamilies|/workspace/channels|/workspace/data-connectors|/connectors|TalkConnectorsPanel|ConnectorsSettingsPanel',
+      '/workspace/channels|/workspace/data-connectors|/api/v1/talks/.+/connectors|connectors/channels|connectors/data-connectors',
     imports:
-      'TalkConnectorsPanel|ConnectorsSettingsPanel|WorkspaceChannel|WorkspaceDataConnector|TalkConnectorDataConnectorRow|ToolChipsBar|tool-catalog',
+      '/workspace/channels|/workspace/data-connectors|connectors/channels|connectors/data-connectors',
     routes:
-      '/api/v1/workspace/channels|/api/v1/workspace/data-connectors|/api/v1/talks/:talkId/connectors|talk_tools|toolFamily',
+      '/api/v1/workspace/channels|/api/v1/workspace/data-connectors|/api/v1/talks/:talkId/connectors|/api/v1/talks/:talkId/connectors/channels|/api/v1/talks/:talkId/connectors/data-connectors',
     dynamic:
-      'talk_tools_changed|activeToolFamilies|toolFamily|toolFamilies|connectors|dataConnectors|channels',
+      '/workspace/channels|/workspace/data-connectors|connectors/channels|connectors/data-connectors',
   },
   {
     id: 'duplicate-hono-mounts',
@@ -129,7 +129,7 @@ const modalities = [
     name: 'route registration trace',
     patternKey: 'routes',
     scopes: WEB_ROUTE_SCOPE,
-    globs: [],
+    globs: NON_TEST_GLOBS,
   },
   {
     name: 'test fixture/assertion trace',
@@ -141,7 +141,7 @@ const modalities = [
     name: 'dynamic/string-key/cache-router trace',
     patternKey: 'dynamic',
     scopes: SRC_SCOPES,
-    globs: [],
+    globs: NON_TEST_GLOBS,
   },
 ];
 

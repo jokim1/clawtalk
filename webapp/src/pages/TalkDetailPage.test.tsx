@@ -3499,19 +3499,6 @@ describe('TalkDetailPage', () => {
     await waitFor(() => expect(docFetchCount()).toBeGreaterThan(before));
   });
 
-  it.each(['/app/talks/talk-1/channels', '/app/talks/talk-1/data-connectors'])(
-    'opens the Connectors tab for legacy connector path %s',
-    async (path) => {
-      installTalkDetailFetch();
-
-      renderDetailPage(path);
-
-      await screen.findByRole('heading', { name: 'Connectors for this talk' });
-      expect(screen.getByText('Cal Football Chat')).toBeTruthy();
-      expect(screen.getByText('FTUE PostHog')).toBeTruthy();
-    },
-  );
-
   it('opens the Jobs tab and saves greenfield job tool scope', async () => {
     const user = userEvent.setup();
     const patchBodies: Array<{ sourceScope?: TalkJob['sourceScope'] }> = [];
@@ -5414,7 +5401,10 @@ function installTalkDetailFetch(input?: {
         });
       }
 
-      if (path === '/api/v1/talks/talk-1/connectors' && method === 'GET') {
+      if (
+        path === '/api/v1/talks/talk-1/connector-bindings' &&
+        method === 'GET'
+      ) {
         return jsonResponse(200, {
           ok: true,
           data: {

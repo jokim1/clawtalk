@@ -61,7 +61,7 @@ function installFetch(seed: {
       const method = init?.method || 'GET';
 
       const connectorsMatch = url.match(
-        /\/api\/v1\/talks\/([^/?]+)\/connectors$/,
+        /\/api\/v1\/talks\/([^/?]+)\/connector-bindings$/,
       );
       if (connectorsMatch && method === 'GET') {
         return jsonResponse(200, {
@@ -71,7 +71,7 @@ function installFetch(seed: {
       }
 
       const channelLinkMatch = url.match(
-        /\/api\/v1\/talks\/([^/?]+)\/connectors\/channels\/([^/?]+)$/,
+        /\/api\/v1\/talks\/([^/?]+)\/channel-bindings\/([^/?]+)$/,
       );
       if (channelLinkMatch && method === 'PUT') {
         channelPutCalls.push({
@@ -89,7 +89,7 @@ function installFetch(seed: {
       }
 
       const dcLinkMatch = url.match(
-        /\/api\/v1\/talks\/([^/?]+)\/connectors\/data-connectors\/([^/?]+)$/,
+        /\/api\/v1\/talks\/([^/?]+)\/source-bindings\/([^/?]+)$/,
       );
       if (dcLinkMatch && method === 'PUT') {
         dataConnectorPutCalls.push({
