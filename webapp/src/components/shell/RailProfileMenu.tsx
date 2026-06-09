@@ -25,6 +25,7 @@ type AccountLink = { label: string; to: string; icon: CTIconName };
 const ACCOUNT_LINKS: AccountLink[] = [
   { label: 'Profile', to: '/app/settings?tab=profile', icon: 'settings' },
   { label: 'API keys', to: '/app/settings?tab=api-keys', icon: 'bolt' },
+  { label: 'Members', to: '/app/settings?tab=members', icon: 'settings' },
   { label: 'AI agents', to: '/app/settings?tab=agents', icon: 'sparkle' },
   { label: 'Tools', to: '/app/settings?tab=tools', icon: 'globe' },
   { label: 'Connectors', to: '/app/settings?tab=connectors', icon: 'folder' },
@@ -192,7 +193,9 @@ export function RailProfileMenu({
         {/* Workspaces */}
         {workspaces.length > 0 ? (
           <>
-            <div style={{ height: 1, margin: '0 12px', background: salon.line }} />
+            <div
+              style={{ height: 1, margin: '0 12px', background: salon.line }}
+            />
             <div style={{ padding: '8px 8px 4px' }}>
               <div
                 style={{
@@ -289,7 +292,9 @@ export function RailProfileMenu({
         ) : null}
 
         {/* Account links */}
-        <div style={{ height: 1, margin: '4px 12px', background: salon.line }} />
+        <div
+          style={{ height: 1, margin: '4px 12px', background: salon.line }}
+        />
         <div style={{ padding: '4px 0' }}>
           {ACCOUNT_LINKS.map((link) => (
             <button
@@ -300,7 +305,12 @@ export function RailProfileMenu({
               className="ct-rail-menu-row"
               style={menuRowStyle}
             >
-              <CTIcon name={link.icon} size={14} stroke={salon.ink2} strokeWidth={1.6} />
+              <CTIcon
+                name={link.icon}
+                size={14}
+                stroke={salon.ink2}
+                strokeWidth={1.6}
+              />
               {link.label}
             </button>
           ))}
@@ -313,12 +323,19 @@ export function RailProfileMenu({
             className="ct-rail-menu-row"
             style={{ ...menuRowStyle, textDecoration: 'none' }}
           >
-            <CTIcon name="globe" size={14} stroke={salon.ink2} strokeWidth={1.6} />
+            <CTIcon
+              name="globe"
+              size={14}
+              stroke={salon.ink2}
+              strokeWidth={1.6}
+            />
             Help
           </a>
         </div>
 
-        <div style={{ height: 1, margin: '4px 12px', background: salon.line }} />
+        <div
+          style={{ height: 1, margin: '4px 12px', background: salon.line }}
+        />
         <div style={{ padding: '4px 0 8px' }}>
           <button
             type="button"
@@ -335,7 +352,12 @@ export function RailProfileMenu({
               cursor: signOutBusy ? 'default' : 'pointer',
             }}
           >
-            <CTIcon name="logout" size={14} stroke="#a8434a" strokeWidth={1.7} />
+            <CTIcon
+              name="logout"
+              size={14}
+              stroke="#a8434a"
+              strokeWidth={1.7}
+            />
             {signOutBusy ? 'Signing out…' : 'Log out'}
           </button>
         </div>

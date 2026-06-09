@@ -809,6 +809,11 @@ a {
   color: #047857;
 }
 
+.profile-role-badge-guest {
+  background: #f3f4f6;
+  color: #4b5563;
+}
+
 .profile-meta-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -938,6 +943,8 @@ a {
 }
 
 .settings-form-grid input,
+.settings-form-grid select,
+.workspace-member-role-select select,
 .settings-field-span input,
 .settings-field-span select,
 .settings-alias-row input {
@@ -945,6 +952,83 @@ a {
   border-radius: 9px;
   padding: 0.62rem 0.72rem;
   font-size: 0.95rem;
+}
+
+.workspace-members-list {
+  display: grid;
+  gap: 0.65rem;
+}
+
+.workspace-member-row {
+  display: grid;
+  grid-template-columns: 40px minmax(0, 1fr) auto;
+  gap: 0.75rem;
+  align-items: center;
+  min-height: 56px;
+  padding: 0.65rem;
+  border: 1px solid #e1e7f2;
+  border-radius: 10px;
+  background: #fff;
+}
+
+.workspace-member-avatar {
+  display: grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  border-radius: 999px;
+  background: #edf3ff;
+  color: #1f4f9a;
+  font-weight: 700;
+}
+
+.workspace-member-identity {
+  min-width: 0;
+  display: grid;
+  gap: 0.15rem;
+}
+
+.workspace-member-identity strong,
+.workspace-member-identity span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workspace-member-identity span {
+  color: #5d6882;
+  font-size: 0.9rem;
+}
+
+.workspace-member-controls {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.45rem;
+}
+
+.workspace-member-role-select select {
+  min-width: 112px;
+  padding: 0.48rem 0.56rem;
+}
+
+.workspace-member-icon-btn {
+  display: inline-grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+}
+
+.workspace-members-invite {
+  grid-template-columns: minmax(180px, 1fr) minmax(132px, 180px) auto;
+}
+
+.workspace-members-add-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  white-space: nowrap;
 }
 
 .settings-alias-list {
@@ -3371,11 +3455,21 @@ a {
   }
 
   .settings-form-grid,
+  .workspace-members-invite,
   .settings-alias-row,
   .talk-llm-toolbar,
   .connector-credential-row,
   .connector-attach-row {
     grid-template-columns: 1fr;
+  }
+
+  .workspace-member-row {
+    grid-template-columns: 40px minmax(0, 1fr);
+  }
+
+  .workspace-member-controls {
+    grid-column: 1 / -1;
+    justify-content: flex-start;
   }
 
   .policy-agent-grid {

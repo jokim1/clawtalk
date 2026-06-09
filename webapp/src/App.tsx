@@ -743,6 +743,13 @@ export function App() {
         run: () => navigate('/app/settings?tab=api-keys'),
       },
       {
+        id: 'nav-settings-members',
+        label: 'Settings · Members',
+        hint: 'Go to',
+        keywords: 'workspace team roles ownership',
+        run: () => navigate('/app/settings?tab=members'),
+      },
+      {
         id: 'nav-settings-agents',
         label: 'Settings · Agents',
         hint: 'Go to',

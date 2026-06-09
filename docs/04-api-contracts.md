@@ -39,7 +39,7 @@ Framework-agnostic backend contracts derived from the prototype's behavior. Tran
 ```ts
 {
   user: { id, name, email, avatarColor, initials },
-  workspaces: [{ id, name, role: 'owner' | 'admin' | 'member', initials }],
+  workspaces: [{ id, name, role: 'owner' | 'admin' | 'member' | 'guest', initials }],
   currentWorkspaceId: string
 }
 ```
@@ -56,9 +56,9 @@ Framework-agnostic backend contracts derived from the prototype's behavior. Tran
 | `PATCH /workspaces/:id`                   | Update name/settings                                                                                                                                                                                                                     |
 | `DELETE /workspaces/:id`                  | Hard-delete workspace (owner-only; rejects with 409 `WORKSPACE_HAS_JOBS_WITH_HISTORY` if any job has `run_count > 0` per §11 §8).                                                                                                        |
 | `POST /workspaces/switch`                 | `{ workspaceId }` → validate membership and return `{ currentWorkspaceId }`. The client stores that marker locally and sends `X-Workspace-Id` on workspace-scoped requests; the session token itself is not re-minted for the workspace. |
-| `POST /workspaces/:id/invite`             | Invite member by email                                                                                                                                                                                                                   |
+| `POST /workspaces/:id/invite`             | Add an existing signed-in user by email in v1; pending external email invitations need a future invite/mail lifecycle.                                                                                                                   |
 | `GET /workspaces/:id/members`             | List members                                                                                                                                                                                                                             |
-| `PATCH /workspaces/:id/members/:userId`   | `{ role: 'owner' \| 'admin' \| 'member' }` — role update (admin-only; cannot demote the last owner).                                                                                                                                     |
+| `PATCH /workspaces/:id/members/:userId`   | `{ role: 'admin' \| 'member' \| 'guest' }` — role update (admin-only; use transfer ownership for `owner`).                                                                                                                               |
 | `DELETE /workspaces/:id/members/:userId`  | Remove member (admin-only; cannot remove the owner).                                                                                                                                                                                     |
 | `POST /workspaces/:id/transfer-ownership` | `{ newOwnerUserId }` — single atomic txn that flips the prior owner to `admin` and promotes the target to `owner`. Owner-only.                                                                                                           |
 

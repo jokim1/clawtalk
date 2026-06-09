@@ -37,6 +37,19 @@ export type SessionWorkspace = {
   initials: string;
 };
 
+export type WorkspaceRole = 'owner' | 'admin' | 'member' | 'guest';
+
+export type WorkspaceMember = {
+  workspaceId: string;
+  userId: string;
+  email: string;
+  name: string;
+  avatarColor: string | null;
+  initials: string | null;
+  role: WorkspaceRole;
+  createdAt: string;
+};
+
 export type Talk = {
   id: string;
   ownerId: string;
@@ -875,6 +888,79 @@ export async function switchWorkspace(
       method: 'POST',
       includeJson: true,
       body: JSON.stringify({ workspaceId }),
+    },
+  );
+}
+
+export async function listWorkspaceMembers(input: {
+  workspaceId: string;
+}): Promise<WorkspaceMember[]> {
+  const envelope = await apiRequest<{ members: WorkspaceMember[] }>(
+    `/api/v1/workspaces/${encodeURIComponent(input.workspaceId)}/members`,
+  );
+  return envelope.members;
+}
+
+export async function inviteWorkspaceMember(input: {
+  workspaceId: string;
+  email: string;
+  role: Exclude<WorkspaceRole, 'owner'>;
+}): Promise<WorkspaceMember> {
+  const envelope = await apiMutationRequest<{ member: WorkspaceMember }>(
+    `/api/v1/workspaces/${encodeURIComponent(input.workspaceId)}/invite`,
+    {
+      method: 'POST',
+      includeJson: true,
+      body: JSON.stringify({ email: input.email, role: input.role }),
+    },
+  );
+  return envelope.member;
+}
+
+export async function updateWorkspaceMemberRole(input: {
+  workspaceId: string;
+  userId: string;
+  role: Exclude<WorkspaceRole, 'owner'>;
+}): Promise<WorkspaceMember> {
+  const envelope = await apiMutationRequest<{ member: WorkspaceMember }>(
+    `/api/v1/workspaces/${encodeURIComponent(input.workspaceId)}/members/${encodeURIComponent(input.userId)}`,
+    {
+      method: 'PATCH',
+      includeJson: true,
+      body: JSON.stringify({ role: input.role }),
+    },
+  );
+  return envelope.member;
+}
+
+export async function removeWorkspaceMember(input: {
+  workspaceId: string;
+  userId: string;
+}): Promise<void> {
+  await apiMutationRequest<{ removed: true }>(
+    `/api/v1/workspaces/${encodeURIComponent(input.workspaceId)}/members/${encodeURIComponent(input.userId)}`,
+    { method: 'DELETE' },
+  );
+}
+
+export async function transferWorkspaceOwnership(input: {
+  workspaceId: string;
+  newOwnerUserId: string;
+}): Promise<{
+  workspaceId: string;
+  newOwnerUserId: string;
+  members: WorkspaceMember[];
+}> {
+  return apiMutationRequest<{
+    workspaceId: string;
+    newOwnerUserId: string;
+    members: WorkspaceMember[];
+  }>(
+    `/api/v1/workspaces/${encodeURIComponent(input.workspaceId)}/transfer-ownership`,
+    {
+      method: 'POST',
+      includeJson: true,
+      body: JSON.stringify({ newOwnerUserId: input.newOwnerUserId }),
     },
   );
 }

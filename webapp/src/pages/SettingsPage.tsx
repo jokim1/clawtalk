@@ -54,6 +54,7 @@ import {
   type ConnectorSlackBusy,
 } from '../components/settings/ConnectorsSettingsPanel';
 import { ToolsSettingsPanel } from '../components/settings/ToolsSettingsPanel';
+import { WorkspaceMembersPanel } from '../components/settings/WorkspaceMembersPanel';
 import {
   settingsPageNavigation,
   useProviderSubscriptionOauth,
@@ -68,11 +69,18 @@ type Props = {
   onUserUpdated: (user: SessionUser) => void;
 };
 
-type SettingsTab = 'profile' | 'api-keys' | 'agents' | 'tools' | 'connectors';
+type SettingsTab =
+  | 'profile'
+  | 'api-keys'
+  | 'members'
+  | 'agents'
+  | 'tools'
+  | 'connectors';
 
 const TAB_VALUES: readonly SettingsTab[] = [
   'profile',
   'api-keys',
+  'members',
   'agents',
   'tools',
   'connectors',
@@ -90,6 +98,10 @@ const TAB_PAGE_HEADERS: Record<
     title: 'API Keys',
     subtitle:
       'Workspace-shared and personal AI provider credentials used by your agents.',
+  },
+  members: {
+    title: 'Members',
+    subtitle: 'Manage workspace access and ownership.',
   },
   agents: {
     title: 'AI Agents',
@@ -192,6 +204,14 @@ export function SettingsPage({
           onUnauthorized={onUnauthorized}
           userRole={userRole}
           workspaceId={user.currentWorkspaceId}
+        />
+      ) : null}
+
+      {tab === 'members' ? (
+        <WorkspaceMembersPanel
+          user={user}
+          onUnauthorized={onUnauthorized}
+          onUserUpdated={onUserUpdated}
         />
       ) : null}
 
@@ -503,7 +523,10 @@ function ApiKeysTab({
           void subscriptionOauth.startAnthropicSubscription(scope, providerId)
         }
         onCompleteAnthropicSubscription={(scope, providerId) =>
-          void subscriptionOauth.completeAnthropicSubscription(scope, providerId)
+          void subscriptionOauth.completeAnthropicSubscription(
+            scope,
+            providerId,
+          )
         }
         onCancelAnthropicSubscription={
           subscriptionOauth.cancelAnthropicSubscription
