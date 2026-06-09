@@ -5,8 +5,9 @@ import { BrowserBlockedRunCard } from './BrowserBlockedRunCard';
 import { InlineEditableTitle } from './InlineEditableTitle';
 import { LiveResponsePanel } from './LiveResponsePanel';
 import { AgentAvatar, RunPill, type RunStatus } from '../salon';
+import { getUserAvatar } from './shell/userAvatar';
 import { stripInternalAssistantText } from '../lib/assistantText';
-import type { TalkMessage, TalkConversation } from '../lib/api';
+import type { SessionUser, TalkMessage, TalkConversation } from '../lib/api';
 import { formatConversationLabel } from '../lib/conversationLabels';
 import { renderMarkdown } from '../lib/renderMarkdown';
 import type {
@@ -170,6 +171,7 @@ interface TalkTimelineViewProps {
   handleOpenRunHistory: (runId: string) => void;
   hasUnreadBelow: boolean;
   handleClearUnread: () => void;
+  currentUser: Pick<SessionUser, 'id' | 'displayName'> | null;
 }
 
 export function TalkTimelineView({
@@ -202,6 +204,7 @@ export function TalkTimelineView({
   handleOpenRunHistory,
   hasUnreadBelow,
   handleClearUnread,
+  currentUser,
 }: TalkTimelineViewProps) {
   const triggerGroupByMessageId = Object.values(runsById).reduce<
     Record<string, string>
@@ -211,6 +214,8 @@ export function TalkTimelineView({
     }
     return groups;
   }, {});
+  const currentUserName = currentUser?.displayName.trim() || null;
+  const currentUserAvatar = currentUser ? getUserAvatar(currentUser) : null;
 
   return (
     <div
@@ -384,12 +389,11 @@ export function TalkTimelineView({
                 message.agentNickname ||
                 null;
               const actorLabel =
-                metadataString(message, 'author') ||
-                (message.role === 'assistant' && agentLabel
-                  ? agentLabel
-                  : message.role === 'user'
-                    ? 'You'
-                    : agentLabel || message.role);
+                message.role === 'user'
+                  ? currentUserName || metadataString(message, 'author') || 'You'
+                  : message.role === 'assistant' && agentLabel
+                    ? agentLabel
+                    : agentLabel || message.role;
               const modelLabel =
                 orderedRun?.executorModel ||
                 metadataString(message, 'modelId') ||
@@ -416,10 +420,14 @@ export function TalkTimelineView({
                   <div className="salon-message-grid">
                     <div className="salon-message-avatar">
                       <AgentAvatar
-                        initials={initialsFor(actorLabel)}
+                        initials={
+                          message.role === 'user' && currentUserAvatar
+                            ? currentUserAvatar.initials
+                            : initialsFor(actorLabel)
+                        }
                         accent={
                           message.role === 'user'
-                            ? '#1f1b16'
+                            ? currentUserAvatar?.color || '#1f1b16'
                             : agentAccent(message.agentId, actorLabel)
                         }
                         size={40}
