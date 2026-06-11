@@ -278,7 +278,7 @@ describe('DocumentDetailPage', () => {
     renderDetail();
     await screen.findByText('Pending edits');
 
-    fireEvent.click(screen.getByRole('button', { name: 'Accept all' }));
+    fireEvent.click(screen.getAllByRole('button', { name: 'Accept all' })[0]);
 
     await waitFor(() =>
       expect(mockApi.acceptAllDocumentEdits).toHaveBeenCalledWith({
@@ -372,11 +372,9 @@ describe('DocumentDetailPage', () => {
     // One action in flight => Accept all (and every other control) is locked.
     await waitFor(() =>
       expect(
-        (
-          screen.getByRole('button', {
-            name: 'Accept all',
-          }) as HTMLButtonElement
-        ).disabled,
+        screen
+          .getAllByRole('button', { name: 'Accept all' })
+          .every((el) => (el as HTMLButtonElement).disabled),
       ).toBe(true),
     );
 
@@ -442,7 +440,7 @@ describe('DocumentDetailPage', () => {
     renderDetail();
     await screen.findByText('Pending edits');
 
-    fireEvent.click(screen.getByRole('button', { name: 'Accept all' }));
+    fireEvent.click(screen.getAllByRole('button', { name: 'Accept all' })[0]);
 
     // Recoverable: a notice appears, the list is refetched, and the previously
     // unseen edit is now on screen for re-review — nothing was applied.

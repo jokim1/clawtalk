@@ -347,18 +347,67 @@ export function DocumentDetailPage(): JSX.Element {
           </article>
 
           {doc.pendingEdits.length > 0 ? (
-            <PendingEditList
-              doc={doc}
-              busyEditIds={busyEditIds}
-              busyRunIds={busyRunIds}
-              allBusy={allBusy}
-              onAcceptEdit={(edit) => void acceptEdit(edit)}
-              onRejectEdit={(edit) => void rejectEdit(edit)}
-              onAcceptRun={(group) => void acceptRun(group)}
-              onRejectRun={(group) => void rejectRun(group)}
-              onAcceptAll={() => void acceptAll()}
-              onRejectAll={() => void rejectAll()}
-            />
+            <>
+              <PendingEditList
+                doc={doc}
+                busyEditIds={busyEditIds}
+                busyRunIds={busyRunIds}
+                allBusy={allBusy}
+                onAcceptEdit={(edit) => void acceptEdit(edit)}
+                onRejectEdit={(edit) => void rejectEdit(edit)}
+                onAcceptRun={(group) => void acceptRun(group)}
+                onRejectRun={(group) => void rejectRun(group)}
+                onAcceptAll={() => void acceptAll()}
+                onRejectAll={() => void rejectAll()}
+              />
+              {/* Design's floating review bar: the bulk controls ride the
+                  viewport bottom so a long edit list never hides them. */}
+              <div
+                role="region"
+                aria-label="Pending edit actions"
+                style={{
+                  position: 'sticky',
+                  bottom: 12,
+                  zIndex: 5,
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 10,
+                  padding: '10px 14px',
+                  borderRadius: 12,
+                  background: salon.card,
+                  border: `1px solid ${salon.line}`,
+                  boxShadow: '0 8px 24px rgba(31, 27, 22, 0.1)',
+                }}
+              >
+                <span
+                  style={{
+                    flex: 1,
+                    fontFamily: salonFont.mono,
+                    fontSize: 11.5,
+                    textTransform: 'uppercase',
+                    letterSpacing: '0.1em',
+                    color: salon.ink2,
+                  }}
+                >
+                  {doc.pendingEdits.length} pending edit
+                  {doc.pendingEdits.length === 1 ? '' : 's'}
+                </span>
+                <Button
+                  variant="secondary"
+                  disabled={allBusy || busyEditIds.size > 0 || busyRunIds.size > 0}
+                  onClick={() => void rejectAll()}
+                >
+                  Reject all
+                </Button>
+                <Button
+                  variant="primary"
+                  disabled={allBusy || busyEditIds.size > 0 || busyRunIds.size > 0}
+                  onClick={() => void acceptAll()}
+                >
+                  {allBusy ? 'Working…' : 'Accept all'}
+                </Button>
+              </div>
+            </>
           ) : (
             <div style={{ fontSize: 13, color: salon.ink2 }}>
               No pending edits. Agent proposals will appear here for review.
