@@ -2,7 +2,7 @@
 
 ClawTalk is a web product where users invite different LLM personas into "Talks", context-bound rooms, and watch them discuss together.
 
-**Status:** greenfield backend/runtime cutover is merged. The current work is frontend/product completion: Salon visual system, native Documents, Home, de-facade, eval gate, and remaining surfaces. Deploy target: `clawtalk.app` on Cloudflare Workers + Supabase Postgres.
+**Status:** the greenfield backend/runtime cutover and the Phase 5 refactor train are merged: Salon visual system across the shell, Home, Talk, Documents, Agents, Archive, and Settings; native Documents; Home read/write surfaces; full de-facade (readiness scout counts at zero); and an MVP dry-run eval CI gate. Current work: final Talk visual polish against the Salon prototype (`docs/prototypes/`), eval live capture + provider-backed grading, and post-MVP surfaces (Forge, email invitations). Deploy target: `clawtalk.app` on Cloudflare Workers + Supabase Postgres.
 
 ## What's inside
 
@@ -15,18 +15,29 @@ src/
     talks/                   Greenfield Talk runtime, executor, queue consumer,
                              scheduler, jobs, context/source ingestion
     agents/                  Agent registry, router, execution resolver
+    documents/               Native Documents accessors + edit locks
     llm/                     Provider catalog, secret store, direct-HTTP
                              streaming dispatcher
     db/                      Postgres/RLS helpers and shared accessors
+    workspaces/              Workspace bootstrap + member management
+    connectors/              Slack OAuth + channel/source connectors
     identity/                Google OAuth, device auth, sessions
     web/                     Hono worker app + greenfield route modules
+    web-search/              Web-search provider adapters
+    eval/, schema/, r2/      Eval harness types, schema tests, R2 image helpers
     secrets/, security/      Keychain bridge, hashing
 
 webapp/
-  src/                       Vite + React app
+  src/                       Vite + React app — Salon design system in src/salon/;
+                             pages: Home, Talks, Talk detail, Documents, Agents,
+                             Archive, Settings
+
+eval/
+  scenarios/, fixtures/,     Launch-critical dry-run eval gate (npm run eval),
+  graders/, run.ts           wired into PR CI
 
 supabase/
-  migrations/0001_clawtalk_greenfield.sql
+  migrations/                0001_clawtalk_greenfield.sql baseline + follow-ups
 ```
 
 ## Quick Start
@@ -50,8 +61,6 @@ npm --prefix webapp run test
 npm --prefix webapp run build
 npm run build
 ```
-
-If you're on Node < 24 locally, set `CLAWTALK_ALLOW_UNSUPPORTED_NODE=1` to bypass the vitest version guard.
 
 ## Vision
 

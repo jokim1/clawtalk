@@ -1,6 +1,6 @@
 # Talk Salon 3-Round Pilot Report
 
-Status: implementation pilot on `codex/talk-salon-pilot`.
+Status: merged via PR #586; follow-up polish merged in PRs #587–#591 (address chips, user-message identity, Talk sidebar, profile menu, Settings pages). The remaining-gaps list below feeds the final Talk visual polish pass.
 
 ## Scope
 
@@ -8,7 +8,7 @@ This lane only moves the Talk conversation screen toward the Claude Salon mock. 
 
 Reference inputs:
 
-- `/Users/josephkim/dev/clawtalk/docs/talk-salon-gap-analysis.md`
+- [talk-salon-gap-analysis.md](./talk-salon-gap-analysis.md)
 - `docs/prototypes/prototype/shell.jsx`
 - User-provided Claude mock screenshot from 2026-06-08.
 

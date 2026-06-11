@@ -1,6 +1,6 @@
 # De-Facade Readiness Ledger
 
-> **Status:** deletion blocked by live consumers · **Updated:** 2026-06-08
+> **Status:** all tracked facades retired — keep scout counts at zero · **Updated:** 2026-06-11
 > **Scout command:** `scripts/de-facade-readiness.sh`
 
 This ledger is a deletion-precondition tracker, not an approval to delete. Every

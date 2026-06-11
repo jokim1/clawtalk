@@ -10,7 +10,7 @@ ClawTalk is a web product where users invite different LLM personas into context
 
 - **Backend:** Hono worker in `src/worker.ts` (Cloudflare entry) → `src/clawtalk/web/worker-app.ts` (route mounts). Postgres via `src/db.ts` (postgres.js + `withUserContext` for RLS) → Supabase migrations in `supabase/migrations/`.
 - **Talk runtime:** `src/clawtalk/talks/` — `/chat` enqueues onto `TALK_RUN_QUEUE`; the queue consumer in `queue-consumer.ts` runs `CleanTalkExecutor` per message and streams events to the per-user `UserEventHub` Durable Object. The cron-triggered `scheduler.ts` fans out due jobs onto the same queue every minute and sweeps stuck runs.
-- **Frontend:** Vite + React under `webapp/`. TalkList → TalkDetail flow, AiAgents page for provider/agent config, Settings, Profile.
+- **Frontend:** Vite + React under `webapp/`, with the Salon design system in `webapp/src/salon/` (CSS-variable tokens + primitives). Pages: Home, Talks list → Talk detail, Documents index/detail, Registered Agents + standalone agent profile, Archive, Settings, plus a ⌘K command palette.
 - **Identity:** Google OAuth + device-code auth in `src/clawtalk/identity/`. RBAC (`owner`, `admin`, `member`). HttpOnly access/refresh cookies + double-submit CSRF.
 
 ## Parallel-agent discipline
@@ -61,7 +61,7 @@ When finishing autonomous work, lead the handoff with an explicit "What you're a
 | `src/db.ts`                                                                                   | postgres.js connection + `withUserContext` / Hyperdrive on Workers |
 | `src/clawtalk/config.ts`                                                                      | Auth + provider env config                                         |
 | `supabase/migrations/*.sql`                                                                   | Postgres schema + RLS policies + grants                            |
-| `src/clawtalk/db/accessors.ts`, `agent-accessors.ts`, etc.                                    | Typed async pg accessors (tagged-template SQL, RLS-scoped)         |
+| `src/clawtalk/db/core-accessors.ts`, `agent-accessors.ts`, `home-accessors.ts`, etc.          | Typed async pg accessors (tagged-template SQL, RLS-scoped)         |
 | `src/clawtalk/talks/new-executor.ts`                                                          | CleanTalkExecutor — orchestrates a single Talk run                 |
 | `src/clawtalk/talks/queue-consumer.ts`, `queue-producer.ts`, `scheduler.ts`                   | Queue dispatch: per-message run executor, run-id producer, cron tick |
 | `src/clawtalk/talks/user-event-hub.ts`                                                        | Per-user Durable Object — WebSocket Hibernation event hub          |
@@ -69,6 +69,7 @@ When finishing autonomous work, lead the handoff with an explicit "What you're a
 | `src/clawtalk/llm/`                                                                           | Provider catalog, secret store, LLM client                         |
 | `src/clawtalk/web/worker-app.ts`                                                              | Hono app + route registration for the Worker bundle                |
 | `webapp/src/pages/TalkDetailPage.tsx`                                                         | Talk UI (agent targeting + streaming)                              |
+| `webapp/src/salon/`                                                                           | Salon design system — `--salon-*` tokens, fonts, primitives        |
 
 ## Development Commands
 
