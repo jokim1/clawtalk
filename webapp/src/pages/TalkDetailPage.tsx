@@ -93,6 +93,7 @@ export function TalkDetailPage({
   currentUser,
   onUnauthorized,
   titleOverride,
+  folderTitle,
   renameDraft,
   onRenameDraftChange,
   onRenameDraftCancel,
@@ -104,6 +105,7 @@ export function TalkDetailPage({
   currentUser: Pick<SessionUser, 'id' | 'displayName'> | null;
   onUnauthorized: () => void;
   titleOverride?: string | null;
+  folderTitle?: string | null;
   renameDraft: { talkId: string; draft: string } | null;
   onRenameDraftChange: (talkId: string, draft: string) => void;
   onRenameDraftCancel: (talkId: string) => void;
@@ -985,6 +987,8 @@ export function TalkDetailPage({
         <TalkDetailShell
           talkId={talkId}
           displayedTitle={displayedTitle}
+          folderTitle={folderTitle ?? null}
+          toolsRefreshKey={toolsRefreshKey}
           isRenaming={isRenaming}
           renameDraft={renameDraft}
           titleInputRef={titleInputRef}
@@ -1235,9 +1239,7 @@ export function TalkDetailPage({
               sendState={state.sendState}
               composerTargetHelp={composerTargetHelp}
               composerModeLabel={
-                pageTalk?.orchestrationMode === 'panel'
-                  ? 'Parallel'
-                  : 'Ordered'
+                pageTalk?.orchestrationMode === 'panel' ? 'Parallel' : 'Ordered'
               }
               composerRoundsLabel={
                 latestOrderedRound

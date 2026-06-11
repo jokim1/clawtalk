@@ -2,6 +2,7 @@ import type {
   Dispatch,
   FormEvent,
   KeyboardEvent as ReactKeyboardEvent,
+  ReactNode,
   RefObject,
   SetStateAction,
 } from 'react';
@@ -73,6 +74,9 @@ function buildAgentChipLabel(agent: Pick<TalkAgent, 'nickname'>): string {
 
 type TalkComposerProps = {
   handleSend: (event: FormEvent) => void;
+  /** Talk tool toggle chips, rendered inside the composer card so the whole
+   *  message surface reads as one card (the design's single composer card). */
+  toolChips?: ReactNode;
   effectiveAgents: TalkAgent[];
   targetAgentIds: string[];
   talkAgentExecutionGuardrailsById: Record<string, TalkAgentExecutionGuardrail>;
@@ -114,6 +118,7 @@ type TalkComposerProps = {
  */
 export function TalkComposer({
   handleSend,
+  toolChips,
   effectiveAgents,
   targetAgentIds,
   talkAgentExecutionGuardrailsById,
@@ -146,6 +151,7 @@ export function TalkComposer({
 }: TalkComposerProps): JSX.Element {
   return (
     <form className="composer talk-workspace-composer" onSubmit={handleSend}>
+      {toolChips}
       <div
         className="composer-targets"
         role="group"
@@ -173,9 +179,7 @@ export function TalkComposer({
               disabled={sendState.status === 'posting'}
               aria-pressed={selected}
               aria-label={
-                agent.isPrimary
-                  ? `${chipStateLabel} Primary`
-                  : chipStateLabel
+                agent.isPrimary ? `${chipStateLabel} Primary` : chipStateLabel
               }
               title={
                 guardrail?.message ||
