@@ -39,6 +39,7 @@ import { StatStrip } from '../components/home/StatStrip';
 import { RecommendationCard } from '../components/home/RecommendationCard';
 import { InboxPreview } from '../components/home/InboxPreview';
 import { NewsPreview } from '../components/home/NewsPreview';
+import { relativeAge } from '../components/home/homeFormat';
 import {
   Card,
   HomeEmpty,
@@ -731,13 +732,24 @@ function HomeContent({
       <section aria-label="Do this next">
         <SectionHeader
           title="Do this next"
-          count={hero ? 'curator pick' : undefined}
+          count={
+            hero
+              ? ['curator pick', relativeAge(hero.createdAt)]
+                  .filter(Boolean)
+                  .join(' · ')
+              : undefined
+          }
         />
         {hero ? (
           <RecommendationCard
             rec={hero}
             variant="hero"
             onDismiss={onDismissRecommendation}
+            curatorSummary={
+              data.summary && data.summary.curator.itemId === hero.id
+                ? data.summary.curator.summary
+                : null
+            }
           />
         ) : data.summary ? (
           <CuratorCard curator={data.summary.curator} />

@@ -7,7 +7,9 @@ import {
   INBOX_SEVERITY_BADGE,
   isSafeHttpUrl,
   newsImpactLabel,
+  newsThumbPalette,
   REC_PRIORITY_BADGE,
+  relativeAge,
   snoozePresets,
   talkRef,
   targetToPath,
@@ -203,5 +205,39 @@ describe('snoozePresets', () => {
     expect(times[1]).toBeLessThan(times[2]);
     // "In 1 hour" is exactly one hour out.
     expect(times[0]).toBe(now.getTime() + 60 * 60 * 1000);
+  });
+});
+
+describe('relativeAge', () => {
+  const now = new Date('2026-06-11T12:00:00.000Z');
+
+  it('formats minutes, hours, days, and weeks', () => {
+    expect(relativeAge('2026-06-11T11:59:40.000Z', now)).toBe('now');
+    expect(relativeAge('2026-06-11T11:55:00.000Z', now)).toBe('5 m ago');
+    expect(relativeAge('2026-06-11T09:00:00.000Z', now)).toBe('3 h ago');
+    expect(relativeAge('2026-06-09T12:00:00.000Z', now)).toBe('2 d ago');
+    expect(relativeAge('2026-05-28T12:00:00.000Z', now)).toBe('2 w ago');
+  });
+
+  it('returns null for missing or invalid timestamps', () => {
+    expect(relativeAge(null, now)).toBeNull();
+    expect(relativeAge(undefined, now)).toBeNull();
+    expect(relativeAge('not-a-date', now)).toBeNull();
+  });
+});
+
+describe('newsThumbPalette', () => {
+  it('is deterministic per source', () => {
+    const a = newsThumbPalette('TechCrunch', null);
+    const b = newsThumbPalette('TechCrunch', null);
+    expect(a).toEqual(b);
+    expect(a.bg).toMatch(/^#/);
+    expect(a.fg).toMatch(/^#/);
+  });
+
+  it('prefers the favicon mark and falls back to source initials', () => {
+    expect(newsThumbPalette('TechCrunch', 'TC').mark).toBe('TC');
+    expect(newsThumbPalette('Hacker News', null).mark).toBe('HN');
+    expect(newsThumbPalette(null, null).mark).toBe('·');
   });
 });

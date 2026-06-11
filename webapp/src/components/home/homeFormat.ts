@@ -238,3 +238,54 @@ export function initials(text: string, max = 1): string {
     .map((p) => p[0]?.toUpperCase() ?? '')
     .join('');
 }
+
+/** Relative age ("now" / "5 m ago" / "3 h ago" / "2 d ago" / "1 w ago"). */
+export function relativeAge(
+  iso: string | null | undefined,
+  now: Date = new Date(),
+): string | null {
+  if (!iso) return null;
+  const then = Date.parse(iso);
+  if (!Number.isFinite(then)) return null;
+  const minutes = Math.floor((now.getTime() - then) / 60_000);
+  if (minutes < 1) return 'now';
+  if (minutes < 60) return `${minutes} m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours} h ago`;
+  const days = Math.floor(hours / 24);
+  if (days < 7) return `${days} d ago`;
+  return `${Math.floor(days / 7)} w ago`;
+}
+
+export type NewsThumbPalette = { bg: string; fg: string; mark: string };
+
+/**
+ * Editorial block palettes for the news thumbnail (prototype/home-focus.jsx
+ * NEWS_PALETTE keys real sources; the live feed has arbitrary sources, so the
+ * palette is picked by a deterministic hash of the source name instead).
+ */
+const NEWS_THUMB_PALETTES: Array<{ bg: string; fg: string }> = [
+  { bg: '#0f9f4f', fg: '#ffffff' },
+  { bg: '#1f1b16', fg: '#f4c75a' },
+  { bg: '#ff6600', fg: '#ffffff' },
+  { bg: '#1f1b16', fg: '#fbf7ef' },
+  { bg: '#ff6719', fg: '#ffffff' },
+  { bg: '#fbf7ef', fg: '#1f1b16' },
+];
+
+export function newsThumbPalette(
+  source: string | null | undefined,
+  favicon: string | null | undefined,
+): NewsThumbPalette {
+  const name = (source ?? '').trim();
+  let hash = 0;
+  for (let i = 0; i < name.length; i += 1) {
+    hash = (hash * 31 + name.charCodeAt(i)) >>> 0;
+  }
+  const palette = name
+    ? NEWS_THUMB_PALETTES[hash % NEWS_THUMB_PALETTES.length]
+    : NEWS_THUMB_PALETTES[NEWS_THUMB_PALETTES.length - 1];
+  const mark =
+    (favicon ?? '').trim().slice(0, 3) || (name ? initials(name, 2) : '·');
+  return { ...palette, mark };
+}
