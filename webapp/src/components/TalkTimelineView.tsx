@@ -4,7 +4,8 @@ import { Link } from 'react-router-dom';
 import { BrowserBlockedRunCard } from './BrowserBlockedRunCard';
 import { InlineEditableTitle } from './InlineEditableTitle';
 import { LiveResponsePanel } from './LiveResponsePanel';
-import { AgentAvatar, RunPill, type RunStatus } from '../salon';
+import { AgentAvatar, CTIcon, RunPill, type RunStatus } from '../salon';
+import { agentAccent } from './agents/agentFormat';
 import { getUserAvatar } from './shell/userAvatar';
 import { stripInternalAssistantText } from '../lib/assistantText';
 import type { SessionUser, TalkMessage, TalkConversation } from '../lib/api';
@@ -15,14 +16,6 @@ import type {
   RunView,
   TalkTimelineEntry,
 } from '../lib/talkRunReducer';
-
-const AGENT_ACCENTS = [
-  '#3f6b5c',
-  '#8e3b59',
-  '#3d5688',
-  '#c8643a',
-  '#2a6f7e',
-];
 
 function compactDateTime(value: string): string {
   const parsed = new Date(value);
@@ -60,13 +53,6 @@ function relativeDayLabel(value: string): string {
   });
 }
 
-function agentAccent(id: string | null | undefined, label: string): string {
-  const source = id || label;
-  let hash = 0;
-  for (const char of source) hash = (hash * 31 + char.charCodeAt(0)) | 0;
-  return AGENT_ACCENTS[Math.abs(hash) % AGENT_ACCENTS.length]!;
-}
-
 function initialsFor(label: string): string {
   const words = label
     .replace(/\s*\([^)]*\)\s*/g, ' ')
@@ -100,10 +86,7 @@ function tokenLabel(run: RunView | null | undefined): string | null {
   return `${input.toLocaleString()} in · ${output.toLocaleString()} out`;
 }
 
-function metadataString(
-  message: TalkMessage,
-  key: string,
-): string | null {
+function metadataString(message: TalkMessage, key: string): string | null {
   const value = message.metadata?.[key];
   return typeof value === 'string' && value.trim() ? value.trim() : null;
 }
@@ -214,6 +197,18 @@ export function TalkTimelineView({
     }
     return groups;
   }, {});
+  // Response groups with an in-flight run, computed once per render so the
+  // per-entry "· live" divider check is O(1) (streaming rerenders this view
+  // on every token delta).
+  const liveResponseGroupIds = new Set<string>();
+  for (const run of Object.values(runsById)) {
+    if (
+      run.responseGroupId &&
+      (run.status === 'running' || run.status === 'queued')
+    ) {
+      liveResponseGroupIds.add(run.responseGroupId);
+    }
+  }
   const currentUserName = currentUser?.displayName.trim() || null;
   const currentUserAvatar = currentUser ? getUserAvatar(currentUser) : null;
 
@@ -342,13 +337,16 @@ export function TalkTimelineView({
           <p className="page-state">No conversation selected.</p>
         ) : talkTimeline.length === 0 ? (
           <div className="talk-onboarding-banner">
+            <span className="talk-empty-icon" aria-hidden="true">
+              <CTIcon name="chat" size={18} />
+            </span>
+            <h3 className="talk-empty-headline">No messages yet.</h3>
             <p>
               This Talk is using the default agent with all tools enabled.{' '}
               <Link to={agentsTabHref} className="talk-onboarding-link">
                 Customize →
               </Link>
             </p>
-            <p className="page-state">No messages yet.</p>
           </div>
         ) : (
           (() => {
@@ -367,189 +365,204 @@ export function TalkTimelineView({
                 roundCount += 1;
               }
               lastGroupKey = groupKey;
+              // Design (screens.jsx RoundList): a round with in-flight runs
+              // reads "Round N · live".
+              const roundIsLive =
+                entryGroupKey != null &&
+                liveResponseGroupIds.has(entryGroupKey);
               const round = shouldShowRound ? (
-                <RoundDivider label={`Round ${roundCount}`} />
+                <RoundDivider
+                  label={`Round ${roundCount}${roundIsLive ? ' · live' : ''}`}
+                />
               ) : null;
 
-            if (entry.kind === 'message') {
-              const { message } = entry;
-              const isSynthesis = message.metadata?.isSynthesis === true;
-              const orderedRun = message.runId ? runsById[message.runId] : null;
-              const orderedGroupSize = orderedRun?.responseGroupId
-                ? (orderedGroupSizesById[orderedRun.responseGroupId] ?? null)
-                : null;
-              const orderedStepLabel =
-                orderedRun?.sequenceIndex != null &&
-                orderedGroupSize &&
-                orderedGroupSize > 1
-                  ? `Step ${orderedRun.sequenceIndex + 1} of ${orderedGroupSize}`
+              if (entry.kind === 'message') {
+                const { message } = entry;
+                const isSynthesis = message.metadata?.isSynthesis === true;
+                const orderedRun = message.runId
+                  ? runsById[message.runId]
                   : null;
-              const agentLabel =
-                (message.agentId && agentLabelById[message.agentId]) ||
-                message.agentNickname ||
-                null;
-              const actorLabel =
-                message.role === 'user'
-                  ? currentUserName || metadataString(message, 'author') || 'You'
-                  : message.role === 'assistant' && agentLabel
+                const orderedGroupSize = orderedRun?.responseGroupId
+                  ? (orderedGroupSizesById[orderedRun.responseGroupId] ?? null)
+                  : null;
+                const orderedStepLabel =
+                  orderedRun?.sequenceIndex != null &&
+                  orderedGroupSize &&
+                  orderedGroupSize > 1
+                    ? `Step ${orderedRun.sequenceIndex + 1} of ${orderedGroupSize}`
+                    : null;
+                const agentLabel =
+                  (message.agentId && agentLabelById[message.agentId]) ||
+                  message.agentNickname ||
+                  null;
+                const actorLabel =
+                  message.role === 'user'
+                    ? currentUserName ||
+                      metadataString(message, 'author') ||
+                      'You'
+                    : message.role === 'assistant' && agentLabel
+                      ? agentLabel
+                      : agentLabel || message.role;
+                const modelLabel =
+                  orderedRun?.executorModel ||
+                  metadataString(message, 'modelId') ||
+                  metadataString(message, 'model') ||
+                  null;
+                const status = runStatus(orderedRun?.status);
+                const tokens = tokenLabel(orderedRun);
+                const headerActorLabel =
+                  message.role === 'assistant' && agentLabel
                     ? agentLabel
-                    : agentLabel || message.role;
-              const modelLabel =
-                orderedRun?.executorModel ||
-                metadataString(message, 'modelId') ||
-                metadataString(message, 'model') ||
-                null;
-              const status = runStatus(orderedRun?.status);
-              const tokens = tokenLabel(orderedRun);
-              const headerActorLabel =
-                message.role === 'assistant' && agentLabel
-                  ? agentLabel
-                  : agentLabel
-                    ? `${agentLabel} · ${message.role}`
-                    : message.role;
-              return (
-                <article
-                  key={entry.key}
-                  id={`message-${message.id}`}
-                  ref={(element) => setMessageElementRef(message.id, element)}
-                  className={`message message-${message.role}${
-                    isSynthesis ? ' message-synthesis' : ''
-                  } salon-message`}
-                >
-                  {round}
-                  <div className="salon-message-grid">
-                    <div className="salon-message-avatar">
-                      <AgentAvatar
-                        initials={
-                          message.role === 'user' && currentUserAvatar
-                            ? currentUserAvatar.initials
-                            : initialsFor(actorLabel)
-                        }
-                        accent={
-                          message.role === 'user'
-                            ? currentUserAvatar?.color || '#1f1b16'
-                            : agentAccent(message.agentId, actorLabel)
-                        }
-                        size={40}
-                        title={actorLabel}
-                      />
-                    </div>
-                    <div className="salon-message-body">
-                      <header className="salon-message-byline">
-                        <strong>{actorLabel}</strong>
-                        {message.role === 'assistant' ? (
-                          <span className="salon-message-handle">
-                            {handleFor(headerActorLabel)}
-                          </span>
-                        ) : (
-                          <>
+                    : agentLabel
+                      ? `${agentLabel} · ${message.role}`
+                      : message.role;
+                return (
+                  <article
+                    key={entry.key}
+                    id={`message-${message.id}`}
+                    ref={(element) => setMessageElementRef(message.id, element)}
+                    className={`message message-${message.role}${
+                      isSynthesis ? ' message-synthesis' : ''
+                    } salon-message`}
+                  >
+                    {round}
+                    <div className="salon-message-grid">
+                      <div className="salon-message-avatar">
+                        <AgentAvatar
+                          initials={
+                            message.role === 'user' && currentUserAvatar
+                              ? currentUserAvatar.initials
+                              : initialsFor(actorLabel)
+                          }
+                          accent={
+                            message.role === 'user'
+                              ? currentUserAvatar?.color || '#1f1b16'
+                              : agentAccent(message.agentId || actorLabel)
+                          }
+                          size={40}
+                          title={actorLabel}
+                        />
+                      </div>
+                      <div className="salon-message-body">
+                        <header className="salon-message-byline">
+                          <strong>{actorLabel}</strong>
+                          {message.role === 'assistant' ? (
                             <span className="salon-message-handle">
-                              {relativeDayLabel(message.createdAt)}
+                              {handleFor(headerActorLabel)}
                             </span>
-                            <span className="salon-message-handle">
-                              @all-agents
+                          ) : (
+                            <>
+                              <span className="salon-message-handle">
+                                {relativeDayLabel(message.createdAt)}
+                              </span>
+                              <span className="salon-message-target-chip">
+                                @all-agents
+                              </span>
+                            </>
+                          )}
+                          {modelLabel ? (
+                            <span className="salon-message-model">
+                              {modelLabel}
                             </span>
-                          </>
-                        )}
-                        {modelLabel ? (
-                          <span className="salon-message-model">
-                            {modelLabel}
-                          </span>
-                        ) : null}
-                        {status ? <RunPill status={status} /> : null}
-                        {orderedStepLabel ? (
-                          <span className="message-sequence-badge">
-                            {orderedStepLabel}
-                          </span>
-                        ) : null}
-                        {isSynthesis ? (
-                          <span className="message-synthesis-badge">
-                            Synthesis
-                          </span>
-                        ) : null}
-                        {message.role === 'assistant' ? (
-                          <time>{compactDateTime(message.createdAt)}</time>
-                        ) : null}
-                        {tokens ? (
-                          <span className="salon-message-tokens">{tokens}</span>
-                        ) : null}
-                      </header>
-                      <div className="salon-message-markdown">
-                        {renderMarkdown(
-                          message.role === 'assistant'
-                            ? stripInternalAssistantText(message.content)
-                            : message.content,
-                        )}
+                          ) : null}
+                          {status ? <RunPill status={status} /> : null}
+                          {orderedStepLabel ? (
+                            <span className="message-sequence-badge">
+                              {orderedStepLabel}
+                            </span>
+                          ) : null}
+                          {isSynthesis ? (
+                            <span className="message-synthesis-badge">
+                              Synthesis
+                            </span>
+                          ) : null}
+                          {message.role === 'assistant' ? (
+                            <time>{compactDateTime(message.createdAt)}</time>
+                          ) : null}
+                          {tokens ? (
+                            <span className="salon-message-tokens">
+                              {tokens}
+                            </span>
+                          ) : null}
+                        </header>
+                        <div className="salon-message-markdown">
+                          {renderMarkdown(
+                            message.role === 'assistant'
+                              ? stripInternalAssistantText(message.content)
+                              : message.content,
+                          )}
+                        </div>
                       </div>
                     </div>
-                  </div>
-                </article>
-              );
-            }
+                  </article>
+                );
+              }
 
-            if (entry.kind === 'browser-run') {
-              const { run } = entry;
-              return run.browserBlock ? (
-                <article
-                  key={entry.key}
-                  className="message message-system main-run-chip"
-                >
-                  <header>
-                    <strong>{run.targetAgentNickname || 'Browser'}</strong>
-                    <time>
-                      {new Date(
-                        run.browserBlock.updatedAt || run.createdAt,
-                      ).toLocaleString()}
-                    </time>
-                  </header>
-                  <BrowserBlockedRunCard
-                    runId={run.id}
-                    browserBlock={run.browserBlock}
-                    executionDecision={run.executionDecision}
-                    talkId={talkId}
-                    onUnauthorized={handleUnauthorized}
-                    onStateChanged={refreshBrowserRuns}
+              if (entry.kind === 'browser-run') {
+                const { run } = entry;
+                return run.browserBlock ? (
+                  <article
+                    key={entry.key}
+                    className="message message-system main-run-chip"
+                  >
+                    <header>
+                      <strong>{run.targetAgentNickname || 'Browser'}</strong>
+                      <time>
+                        {new Date(
+                          run.browserBlock.updatedAt || run.createdAt,
+                        ).toLocaleString()}
+                      </time>
+                    </header>
+                    <BrowserBlockedRunCard
+                      runId={run.id}
+                      browserBlock={run.browserBlock}
+                      executionDecision={run.executionDecision}
+                      talkId={talkId}
+                      onUnauthorized={handleUnauthorized}
+                      onStateChanged={refreshBrowserRuns}
+                    />
+                  </article>
+                ) : null;
+              }
+
+              const { response } = entry;
+              const label =
+                (response.agentId && agentLabelById[response.agentId]) ||
+                response.agentNickname ||
+                'Assistant';
+              const failedRun = runsById[response.runId];
+              const canRetryAgent =
+                response.terminalStatus === 'failed' &&
+                failedRun?.errorCode === 'incomplete_response' &&
+                Boolean(failedRun.triggerMessageId && failedRun.targetAgentId);
+              const retryPosting =
+                retryRunState?.runId === response.runId &&
+                retryRunState.status === 'posting';
+              const retryError =
+                retryRunState?.runId === response.runId &&
+                retryRunState.status === 'error'
+                  ? retryRunState.message
+                  : null;
+              return (
+                <div key={entry.key}>
+                  {round}
+                  <LiveResponsePanel
+                    panelKey={entry.key}
+                    response={response}
+                    run={failedRun}
+                    agentLabel={label}
+                    isDense={isDenseRound}
+                    now={nowTick}
+                    canRetryAgent={canRetryAgent}
+                    retryPosting={retryPosting}
+                    retryError={retryError}
+                    onRetry={() => void handleRetryAgentRun(response.runId)}
+                    onOpenRunHistory={() =>
+                      handleOpenRunHistory(response.runId)
+                    }
                   />
-                </article>
-              ) : null;
-            }
-
-            const { response } = entry;
-            const label =
-              (response.agentId && agentLabelById[response.agentId]) ||
-              response.agentNickname ||
-              'Assistant';
-            const failedRun = runsById[response.runId];
-            const canRetryAgent =
-              response.terminalStatus === 'failed' &&
-              failedRun?.errorCode === 'incomplete_response' &&
-              Boolean(failedRun.triggerMessageId && failedRun.targetAgentId);
-            const retryPosting =
-              retryRunState?.runId === response.runId &&
-              retryRunState.status === 'posting';
-            const retryError =
-              retryRunState?.runId === response.runId &&
-              retryRunState.status === 'error'
-                ? retryRunState.message
-                : null;
-            return (
-              <div key={entry.key}>
-                {round}
-                <LiveResponsePanel
-                  panelKey={entry.key}
-                  response={response}
-                  run={failedRun}
-                  agentLabel={label}
-                  isDense={isDenseRound}
-                  now={nowTick}
-                  canRetryAgent={canRetryAgent}
-                  retryPosting={retryPosting}
-                  retryError={retryError}
-                  onRetry={() => void handleRetryAgentRun(response.runId)}
-                  onOpenRunHistory={() => handleOpenRunHistory(response.runId)}
-                />
-              </div>
-            );
+                </div>
+              );
             });
           })()
         )}

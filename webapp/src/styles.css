@@ -7013,7 +7013,11 @@ a {
 
 .talk-page-header {
   margin: 0;
-  padding: 0.55rem 1.25rem 0.6rem;
+  padding: 0.5rem 1.25rem 0.5rem;
+}
+
+.talk-page-heading {
+  gap: 0.3rem;
 }
 
 .talk-page-topbar {
@@ -7021,9 +7025,42 @@ a {
   gap: 1.25rem;
 }
 
+/* Breadcrumb row above the talk title (screens.jsx TalkScreen header):
+   `{folder} › {MODE} MODE · {N} AGENTS` in the uppercase-mono micro style
+   (docs/02-visual-system.md). */
+.talk-breadcrumb {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  margin-bottom: 0;
+  color: var(--salon-ink-2, #6b6660);
+  font-family: var(--salon-font-mono, 'Geist Mono', ui-monospace, monospace);
+  font-size: 0.67rem;
+  letter-spacing: 0.16em;
+  line-height: 1.3;
+  text-transform: uppercase;
+}
+
+.talk-breadcrumb svg {
+  flex: 0 0 auto;
+}
+
+.talk-breadcrumb-folder {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.talk-breadcrumb-meta {
+  color: var(--salon-ink, #1f1b16);
+  white-space: nowrap;
+}
+
 .talk-title-button {
   font-family: var(--salon-font-serif, 'Newsreader', Georgia, serif);
-  font-size: clamp(1.55rem, 2vw, 2rem);
+  /* 22px per the design header (screens.jsx TalkScreen `text-[22px]`). */
+  font-size: 1.375rem;
   font-weight: 500;
   color: var(--salon-ink, #1f1b16);
   letter-spacing: 0;
@@ -7032,6 +7069,14 @@ a {
 .talk-title-button:hover,
 .talk-title-button:focus-visible {
   color: var(--salon-accent-strong, #b05530);
+}
+
+.talk-title-input {
+  border-color: var(--salon-line, #e6e0d1);
+  font-family: var(--salon-font-serif, 'Newsreader', Georgia, serif);
+  font-size: 1.375rem;
+  font-weight: 500;
+  color: var(--salon-ink, #1f1b16);
 }
 
 .talk-tabs {
@@ -7069,6 +7114,146 @@ a {
 
 .talk-tab-badge {
   background: var(--salon-paper-2, #f4ecdb);
+  color: var(--salon-ink-2, #6b6660);
+}
+
+/* Count badge flips to the accent while any tool is on (screens.jsx
+   ToolsHeaderButton). */
+.talk-tools-pill .talk-tab-badge-on {
+  background: var(--salon-accent, #c8643a);
+  color: #ffffff;
+}
+
+/* Salon re-tokens for pre-Salon blues that surface on the Talk screen. */
+.talk-status-primary {
+  background: var(--salon-paper-2, #f4ecdb);
+  color: var(--salon-ink-2, #6b6660);
+  border: 1px solid var(--salon-line, #e6e0d1);
+  font-family: var(--salon-font-mono, ui-monospace, monospace);
+  font-size: 0.68rem;
+  font-weight: 500;
+}
+
+.talk-onboarding-banner p {
+  color: var(--salon-ink-2, #6b6660);
+}
+
+.talk-onboarding-link {
+  color: var(--salon-accent-strong, #b05530);
+}
+
+/* Salon empty pattern: icon bubble + serif headline + muted caption
+   (shell.jsx DocPane empty tab). */
+.talk-onboarding-banner {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.55rem;
+  padding: 3.5rem 1rem 0.5rem;
+}
+
+.talk-empty-icon {
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  border-radius: 999px;
+  background: var(--salon-paper-2, #f4ecdb);
+  border: 1px solid var(--salon-line, #e6e0d1);
+  color: var(--salon-ink-2, #6b6660);
+}
+
+.talk-empty-headline {
+  margin: 0;
+  font-family: var(--salon-font-serif, 'Newsreader', Georgia, serif);
+  font-size: 1rem;
+  font-weight: 500;
+  color: var(--salon-ink, #1f1b16);
+}
+
+/* Read-only tools summary (TalkToolsPill) — popover body after the design's
+   ToolsPopover (prototype/tools.jsx), minus the switches. */
+.talk-tools-popover {
+  display: flex;
+  flex-direction: column;
+}
+
+.talk-tools-popover-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.85rem 1rem 0.6rem;
+}
+
+.talk-tools-popover-title {
+  font-family: var(--salon-font-serif, 'Newsreader', Georgia, serif);
+  font-size: 1rem;
+  color: var(--salon-ink, #1f1b16);
+}
+
+.talk-tools-popover-count {
+  margin-left: auto;
+  font-family: var(--salon-font-mono, 'Geist Mono', ui-monospace, monospace);
+  font-size: 0.67rem;
+  letter-spacing: 0.16em;
+  line-height: 1.3;
+  text-transform: uppercase;
+  color: var(--salon-ink-2, #6b6660);
+}
+
+.talk-tools-popover-list {
+  margin: 0;
+  padding: 0 0 0.35rem;
+  list-style: none;
+}
+
+.talk-tools-popover-row {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.45rem 1rem;
+}
+
+.talk-tools-popover-row-off {
+  opacity: 0.55;
+}
+
+.talk-tools-popover-row-text {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+}
+
+.talk-tools-popover-row-name {
+  font-size: 0.82rem;
+  font-weight: 500;
+  color: var(--salon-ink, #1f1b16);
+}
+
+.talk-tools-popover-row-hint {
+  font-size: 0.72rem;
+  color: var(--salon-ink-2, #6b6660);
+}
+
+.talk-tools-popover-state {
+  margin-left: auto;
+  font-family: var(--salon-font-mono, 'Geist Mono', ui-monospace, monospace);
+  font-size: 0.67rem;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--salon-ink-2, #6b6660);
+}
+
+.talk-tools-popover-state-on {
+  color: var(--salon-accent-strong, #b05530);
+}
+
+.talk-tools-popover-footer {
+  padding: 0.6rem 1rem 0.75rem;
+  border-top: 1px solid var(--salon-line, #e6e0d1);
+  background: var(--salon-paper, #fbf7ef);
+  font-size: 0.74rem;
   color: var(--salon-ink-2, #6b6660);
 }
 
@@ -7217,13 +7402,41 @@ a {
   border-left: 2px solid var(--salon-line, #e6e0d1);
 }
 
-.salon-message-body-streaming {
-  border-left-color: #3f6b5c;
+/* Streaming border color comes inline from LiveResponsePanel (the agent's
+   accent), matching shell.jsx's streaming AgentMessage. */
+
+/* While streaming, the final paragraph renders inline so the caret sits at
+   the typing position (design: text ends in the agent-accent caret). Lists
+   and code blocks degrade gracefully — the caret drops below the block. */
+.salon-message-markdown-streaming > p:last-of-type {
+  display: inline;
 }
 
-.salon-message-byline {
+/* Accent progress row under streaming text (design: pulsing dot +
+   "Composing" mono line in the streaming AgentMessage). */
+.message-live-progress {
   display: flex;
   align-items: center;
+  gap: 0.45rem;
+  margin-top: 0.45rem;
+  font-family: var(--salon-font-mono, ui-monospace, monospace);
+  font-size: 0.74rem;
+}
+
+.message-live-progress-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  flex: 0 0 auto;
+}
+
+/* Scoped under .salon-message to outrank the base `.message header`
+   space-between/gap rule; Salon bylines left-cluster (shell.jsx
+   UserMessage/AgentMessage), tokens keep ml-auto. */
+.salon-message .salon-message-byline {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
   flex-wrap: wrap;
   gap: 0.35rem 0.55rem;
   margin: 0 0 0.45rem;
@@ -7255,6 +7468,19 @@ a {
 
 .salon-message-tokens {
   margin-left: auto;
+}
+
+/* Ghost chip for the user message's target (design: `@all-agents` Chip
+   tone="ghost" in shell.jsx UserMessage). */
+.salon-message-target-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.05rem 0.5rem;
+  border: 1px solid var(--salon-line, #e6e0d1);
+  border-radius: 999px;
+  font-family: var(--salon-font-mono, ui-monospace, monospace);
+  font-size: 0.7rem;
+  color: var(--salon-ink-2, #6b6660);
 }
 
 .salon-message-markdown {
@@ -7296,10 +7522,12 @@ a {
   font-size: 0.68rem;
 }
 
+/* Lives inside the composer card (TalkComposer `toolChips` slot) so the chips
+   and message input read as one card, like the design's single composer. */
 .tool-chips-bar-wrap {
-  width: min(900px, calc(100% - 2rem));
-  margin: 0 auto;
-  padding: 0 0.4rem;
+  padding: 0 0.1rem 0.2rem;
+  border-bottom: 1px solid var(--salon-line, #e6e0d1);
+  margin-bottom: 0.5rem;
 }
 
 .talk-workspace-composer {
@@ -7454,7 +7682,7 @@ a {
   }
 
   .talk-title-button {
-    font-size: 1.45rem;
+    font-size: 1.3rem;
   }
 
   .talk-tabs-stack {
@@ -7486,7 +7714,12 @@ a {
 
   .talk-tabs .talk-tab:not(.talk-tab-active),
   .talk-orchestration-menu,
+  .talk-tools-pill,
   .talk-tabs-add-doc {
+    display: none;
+  }
+
+  .talk-breadcrumb {
     display: none;
   }
 
@@ -7549,6 +7782,15 @@ a {
     bottom: 0.75rem;
     min-width: 2.35rem;
     padding-inline: 0;
+  }
+}
+
+@media (max-width: 480px) {
+  /* The pre-Salon ≤480 live-byline rule stacks rows in a column; the salon
+     byline's align-items: center would center each row — keep them
+     left-clustered like the settled messages (shell.jsx wrapping byline). */
+  .salon-message.message-live .salon-message-byline {
+    align-items: flex-start;
   }
 }
 
@@ -7723,7 +7965,8 @@ a {
 }
 
 .settings-salon .secondary-btn,
-.settings-salon .btn:not(.btn-primary):not(.btn-danger):not(.btn-danger-outline),
+.settings-salon
+  .btn:not(.btn-primary):not(.btn-danger):not(.btn-danger-outline),
 .settings-salon .talk-llm-eye-toggle {
   border: 1px solid var(--salon-line, #e6e0d1);
   border-radius: 999px;

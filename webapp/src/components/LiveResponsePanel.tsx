@@ -4,6 +4,7 @@ import type { LiveResponseView, RunView } from '../lib/talkRunReducer';
 import { renderMarkdown } from '../lib/renderMarkdown';
 import { ExecutionDecisionSummary } from './ExecutionDecisionSummary';
 import { AgentAvatar, RunPill, type RunStatus } from '../salon';
+import { agentAccent } from './agents/agentFormat';
 
 export type PillState =
   | 'queued'
@@ -172,9 +173,20 @@ function LiveResponsePanelImpl(props: LiveResponsePanelProps): JSX.Element {
   const pillLabel = isRetrying
     ? `Retrying ${response.retryAttempt}/${response.retryMaxRetries ?? 3}`
     : pillLabelForState(state);
+  // While live-streaming, the body shows only real text (plus a caret) and the
+  // status placeholder moves to an accent progress row below, per the design's
+  // streaming AgentMessage (shell.jsx: caret + "Composing" pulse line).
+  const isLiveStreaming =
+    !isRetrying && (state === 'running' || state === 'reconnecting');
   const body = isRetrying
     ? `Waiting on retry ${response.retryAttempt}/${response.retryMaxRetries ?? 3}…`
-    : bodyFallback(state, response);
+    : isLiveStreaming
+      ? response.text || null
+      : bodyFallback(state, response);
+  const progressLabel = isLiveStreaming
+    ? response.progressMessage ||
+      (response.text ? 'Composing' : bodyFallback(state, response))
+    : null;
   const articleClass = [
     'message message-assistant message-live salon-message',
     state === 'failed' ? 'message-error' : '',
@@ -184,19 +196,32 @@ function LiveResponsePanelImpl(props: LiveResponsePanelProps): JSX.Element {
     .join(' ');
 
   const ariaLabel = `${agentLabel}, ${pillLabel.toLowerCase()}`;
+  // Same seed as the persisted-message avatar in TalkTimelineView, so an
+  // agent keeps one accent from streaming through persistence (design:
+  // shell.jsx AgentMessage streams with the agent's own accent).
+  const accent = agentAccent(response.agentId || agentLabel);
 
   return (
     <article className={articleClass} aria-label={ariaLabel} aria-live="polite">
       <div className="salon-message-grid">
         <div className="salon-message-avatar">
-          <AgentAvatar initials={initialsFor(agentLabel)} size={40} />
+          <AgentAvatar
+            initials={initialsFor(agentLabel)}
+            accent={accent}
+            size={40}
+          />
         </div>
-        <div className="salon-message-body salon-message-body-streaming">
+        <div
+          className="salon-message-body"
+          style={{ borderLeftColor: accent }}
+        >
           <header className="salon-message-byline">
             <strong title={agentLabel} className="message-live-label">
               {agentLabel}
             </strong>
-            <span className="salon-message-handle">{handleFor(agentLabel)}</span>
+            <span className="salon-message-handle">
+              {handleFor(agentLabel)}
+            </span>
             {response.modelId || run?.executorModel ? (
               <span className="salon-message-model">
                 {response.modelId || run?.executorModel}
@@ -207,10 +232,7 @@ function LiveResponsePanelImpl(props: LiveResponsePanelProps): JSX.Element {
               label={pillLabel}
               title={elapsedLabel}
             />
-            <span
-              aria-hidden="true"
-              className="salon-message-handle elapsed"
-            >
+            <span aria-hidden="true" className="salon-message-handle elapsed">
               {elapsedLabel}
             </span>
             {tokenLabel(run) ? (
@@ -218,7 +240,33 @@ function LiveResponsePanelImpl(props: LiveResponsePanelProps): JSX.Element {
             ) : null}
           </header>
           {body ? (
-            <div className="salon-message-markdown">{renderMarkdown(body)}</div>
+            <div
+              className={`salon-message-markdown${
+                isLiveStreaming ? ' salon-message-markdown-streaming' : ''
+              }`}
+            >
+              {renderMarkdown(body)}
+              {isLiveStreaming ? (
+                <span
+                  className="ct-caret"
+                  style={{ color: accent }}
+                  aria-hidden="true"
+                />
+              ) : null}
+            </div>
+          ) : null}
+          {isLiveStreaming ? (
+            <div
+              className="message-live-progress"
+              style={{ color: accent }}
+              aria-hidden="true"
+            >
+              <span
+                className="message-live-progress-dot ct-pulse"
+                style={{ background: accent }}
+              />
+              {progressLabel}
+            </div>
           ) : null}
         </div>
       </div>

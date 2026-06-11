@@ -10,6 +10,8 @@ import type {
   TalkDetailTabKey,
   TalkDetailTabLinks,
 } from '../../hooks/useTalkDetailTabs';
+import { CTIcon } from '../../salon';
+import { TalkToolsPill } from './TalkToolsPill';
 
 type TalkOrchestrationMode = Talk['orchestrationMode'];
 
@@ -84,6 +86,9 @@ function OrchestrationCheckIcon(): JSX.Element {
 type TalkDetailShellProps = {
   talkId: string;
   displayedTitle: string;
+  /** Sidebar folder containing this talk; null = loose (Inbox). */
+  folderTitle: string | null;
+  toolsRefreshKey: number;
   isRenaming: boolean;
   renameDraft: { talkId: string; draft: string } | null;
   titleInputRef: RefObject<HTMLInputElement>;
@@ -112,6 +117,8 @@ type TalkDetailShellProps = {
 export function TalkDetailShell({
   talkId,
   displayedTitle,
+  folderTitle,
+  toolsRefreshKey,
   isRenaming,
   renameDraft,
   titleInputRef,
@@ -139,6 +146,17 @@ export function TalkDetailShell({
     <div className="talk-workspace-header">
       <header className="page-header talk-page-header">
         <div className="talk-page-heading">
+          <div className="talk-breadcrumb" aria-label="Talk location">
+            <CTIcon name="folder" size={12} strokeWidth={1.6} />
+            <span className="talk-breadcrumb-folder">
+              {folderTitle ?? 'Inbox'}
+            </span>
+            <CTIcon name="chevron-r" size={10} strokeWidth={1.8} />
+            <span className="talk-breadcrumb-meta">
+              {orchestrationModeLabel} mode · {effectiveAgents.length}{' '}
+              {effectiveAgents.length === 1 ? 'agent' : 'agents'}
+            </span>
+          </div>
           <div className="talk-page-topbar">
             {isRenaming ? (
               <input
@@ -306,6 +324,13 @@ export function TalkDetailShell({
                     ) : null}
                   </div>
                 ) : null}
+                {/* key remounts per talk so a slow fetch can't show the
+                    previous talk's tool count. */}
+                <TalkToolsPill
+                  key={talkId}
+                  talkId={talkId}
+                  refreshKey={toolsRefreshKey}
+                />
                 {!currentConversationHasContent ? (
                   <button
                     type="button"

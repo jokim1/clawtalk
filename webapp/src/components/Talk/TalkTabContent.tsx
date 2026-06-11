@@ -557,10 +557,11 @@ export function TalkTabContent({
               currentUser={currentUser}
             />
 
-            <ToolChipsBar talkId={talkId} refreshKey={toolsRefreshKey} />
-
             <TalkComposer
               handleSend={handleSend}
+              toolChips={
+                <ToolChipsBar talkId={talkId} refreshKey={toolsRefreshKey} />
+              }
               effectiveAgents={effectiveAgents}
               targetAgentIds={targetAgentIds}
               talkAgentExecutionGuardrailsById={

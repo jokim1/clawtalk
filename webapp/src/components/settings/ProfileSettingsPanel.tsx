@@ -6,41 +6,13 @@ import {
   UnauthorizedError,
   updateSessionMe,
 } from '../../lib/api';
+import { getUserAvatarColor, getUserInitials } from '../shell/userAvatar';
 
 type ProfileSettingsPanelProps = {
   user: SessionUser;
   onUnauthorized: () => void;
   onUserUpdated: (user: SessionUser) => void;
 };
-
-const PROFILE_AVATAR_GRADIENTS = [
-  '#3f6b5c',
-  '#8e3b59',
-  '#3d5688',
-  '#c8643a',
-  '#2a6f7e',
-  '#5e5645',
-  '#6d5b3f',
-  '#9a4d38',
-];
-
-function getProfileInitials(name: string): string {
-  const parts = name.trim().split(/\s+/);
-  if (parts.length >= 2) {
-    return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
-  }
-  return name.trim().slice(0, 2).toUpperCase() || '?';
-}
-
-function getProfileGradient(userId: string): string {
-  let hash = 0;
-  for (let i = 0; i < userId.length; i++) {
-    hash = (hash * 31 + userId.charCodeAt(i)) | 0;
-  }
-  return PROFILE_AVATAR_GRADIENTS[
-    Math.abs(hash) % PROFILE_AVATAR_GRADIENTS.length
-  ];
-}
 
 function formatProfileDate(iso: string): string {
   const date = new Date(iso);
@@ -130,11 +102,12 @@ export function ProfileSettingsPanel({
     }
   };
 
-  const initials = getProfileInitials(user.displayName);
-  const gradient = getProfileGradient(user.id);
+  const initials = getUserInitials(user.displayName);
+  const gradient = getUserAvatarColor(user.id);
   const currentWorkspace =
-    user.workspaces?.find((workspace) => workspace.id === user.currentWorkspaceId)
-      ?.name ?? 'Workspace';
+    user.workspaces?.find(
+      (workspace) => workspace.id === user.currentWorkspaceId,
+    )?.name ?? 'Workspace';
   const handle = deriveProfileHandle(user);
 
   return (

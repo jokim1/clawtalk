@@ -313,6 +313,19 @@ function findTalkTitle(
   return null;
 }
 
+/** Title of the folder containing the talk; null for loose (Inbox) talks. */
+function findTalkFolderTitle(
+  items: TalkSidebarItem[],
+  talkId: string,
+): string | null {
+  for (const item of items) {
+    if (item.type === 'folder' && item.talks.some((t) => t.id === talkId)) {
+      return item.title;
+    }
+  }
+  return null;
+}
+
 function buildOptimisticReorder(
   items: TalkSidebarItem[],
   input: {
@@ -951,6 +964,9 @@ export function App() {
   const currentTalkTitle = currentTalkId
     ? findTalkTitle(sidebarItems, currentTalkId)
     : null;
+  const currentTalkFolderTitle = currentTalkId
+    ? findTalkFolderTitle(sidebarItems, currentTalkId)
+    : null;
   const isTalkRoute =
     location.pathname.startsWith('/app/talks/') &&
     location.pathname !== '/app/talks';
@@ -1099,6 +1115,7 @@ export function App() {
                   currentUser={auth.user}
                   onUnauthorized={handleUnauthorized}
                   titleOverride={currentTalkTitle}
+                  folderTitle={currentTalkFolderTitle}
                   renameDraft={renameDraft}
                   onRenameDraftChange={handleRenameDraftChange}
                   onRenameDraftCancel={handleRenameDraftCancel}

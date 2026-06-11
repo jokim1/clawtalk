@@ -136,7 +136,7 @@ function buildRuns(state: TalkState) {
       startedAt: '2026-06-08T14:17:01.000Z',
       completedAt: null,
       endedAt: null,
-      triggerMessageId: 'msg-user',
+      triggerMessageId: 'msg-user-2',
       targetAgentId: 'agent-research',
       targetAgentNickname: 'Researcher',
       errorCode: null,
@@ -153,6 +153,20 @@ function buildRuns(state: TalkState) {
 
 function buildMessages(state: TalkState) {
   if (state === 'empty') return [];
+  const followUp =
+    state === 'active'
+      ? [
+          {
+            id: 'msg-user-2',
+            role: 'user',
+            content: 'Keep going — pull the actual latency comparison next.',
+            createdBy: USER_ID,
+            createdAt: '2026-06-08T14:17:00.000Z',
+            runId: null,
+            metadata: { author: 'Samira' },
+          },
+        ]
+      : [];
   return [
     {
       id: 'msg-user',
@@ -188,6 +202,7 @@ function buildMessages(state: TalkState) {
       agentNickname: "Devil's Advocate",
       metadata: { modelId: 'gpt-5-pro' },
     },
+    ...followUp,
   ];
 }
 
@@ -243,6 +258,9 @@ async function fulfillJson(route: Route, data: unknown, status = 200) {
 async function installMocks(page: Page, state: TalkState): Promise<void> {
   const agents = buildAgents();
   const messageCount = buildMessages(state).length;
+  // Freeze wall-clock just after the live run starts so elapsed labels render
+  // a realistic "0:30" instead of the days since the fixture's NOW.
+  await page.clock.setFixedTime(new Date('2026-06-08T14:17:30.000Z'));
   await page.addInitScript(
     ({ activeTalkId, activeTalkMessageCount, now }) => {
       window.localStorage.setItem(
@@ -365,7 +383,11 @@ async function installMocks(page: Page, state: TalkState): Promise<void> {
     fulfillJson(route, { goal: null, rules: [], sources: [] }),
   );
   await page.route(`**/api/v1/talks/${TALK_ID}/tools*`, (route) =>
-    fulfillJson(route, { tools: [] }),
+    fulfillJson(route, {
+      talkId: TALK_ID,
+      active: { web: true, connectors: true },
+      available: ['web', 'connectors', 'google_read', 'gmail_read'],
+    }),
   );
   await page.route('**/api/v1/agents*', (route) =>
     fulfillJson(route, {
@@ -394,17 +416,34 @@ for (const state of ['populated', 'empty', 'active'] as const) {
       await expect(page.locator('.talk-title-button')).toContainText(
         state === 'empty' ? 'Empty Talk' : 'Notion AI teardown',
       );
-      await expect(page.getByRole('navigation', { name: 'Talk sections' }))
-        .toBeVisible();
+      await expect(
+        page.getByRole('navigation', { name: 'Talk sections' }),
+      ).toBeVisible();
 
       if (vp.width >= 1024) {
         await expect(page.getByText('Q1 Launches')).toBeVisible();
-        await expect(page.getByText('Research & Longreads')).toBeVisible();
+        // Scoped to the sidebar — the header breadcrumb names the folder too.
+        await expect(
+          page
+            .locator('.clawtalk-sidebar-folder-title')
+            .getByText('Research & Longreads'),
+        ).toBeVisible();
         await expect(page.getByLabel('3 unread messages')).toBeVisible();
         await expect(page.locator('.ct-secondary-content-label')).toContainText(
           'Inbox 2',
         );
         await expect(page.getByText('Scratchpad — ideas')).toBeVisible();
+        // Breadcrumb row: folder › mode · agent count (uppercased via CSS).
+        await expect(page.locator('.talk-breadcrumb')).toContainText(
+          'Research & Longreads',
+        );
+        await expect(page.locator('.talk-breadcrumb')).toContainText(
+          'Ordered mode · 2 agents',
+        );
+        // Read-only Tools pill reflecting the mocked 2-of-4 active families.
+        await expect(
+          page.getByRole('button', { name: 'Tools, 2 of 4 on' }),
+        ).toBeVisible();
       }
 
       if (state === 'empty') {
@@ -421,6 +460,13 @@ for (const state of ['populated', 'empty', 'active'] as const) {
       if (state === 'active') {
         await expect(page.getByText('Running')).toBeVisible();
         await expect(page.getByText('Starting up…')).toBeVisible();
+        await expect(page.getByText('Round 2 · live')).toBeVisible();
+        // Bring the live panel into frame (scrolls whichever ancestor is the
+        // real scroller at this viewport) and assert it actually made it —
+        // an out-of-frame capture silently hides streaming-chrome regressions.
+        await page.locator('.message-live').scrollIntoViewIfNeeded();
+        await page.waitForTimeout(250);
+        await expect(page.locator('.message-live')).toBeInViewport();
       }
 
       await page.screenshot({
@@ -447,19 +493,22 @@ for (const vp of [
     await expect(
       page.getByRole('menu', { name: 'Account and workspace menu' }),
     ).toBeVisible();
-    await expect(page.getByRole('heading', { name: 'Workspaces' }))
-      .toBeVisible();
+    await expect(
+      page.getByRole('heading', { name: 'Workspaces' }),
+    ).toBeVisible();
     await expect(page.getByLabel('3 workspaces')).toBeVisible();
     await expect(
       page.getByRole('menuitemradio', { name: /Samira's workspace/ }),
     ).toHaveAttribute('aria-checked', 'true');
     await expect(
-      page.getByRole('menuitem', { name: "Invite people to Samira's workspace" }),
+      page.getByRole('menuitem', {
+        name: "Invite people to Samira's workspace",
+      }),
     ).toBeVisible();
-    await expect(page.getByRole('menuitem', { name: 'API keys' }))
-      .toBeVisible();
-    await expect(page.getByRole('menuitem', { name: 'Log out' }))
-      .toBeVisible();
+    await expect(
+      page.getByRole('menuitem', { name: 'API keys' }),
+    ).toBeVisible();
+    await expect(page.getByRole('menuitem', { name: 'Log out' })).toBeVisible();
 
     await page.screenshot({
       path: `${SCREENS_DIR}/profile-menu-${vp.label}.png`,

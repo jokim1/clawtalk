@@ -2,18 +2,19 @@ import type { SessionUser } from '../../lib/api';
 
 /**
  * Initials + a deterministic avatar fill for a session user. Shared by the
- * icon rail's profile button and the rail profile popover so the same face
- * renders in both places. Ported from the former SidebarProfileMenu.
+ * icon rail's profile button, the rail profile popover, the Talk timeline,
+ * and Settings' profile card so the same face renders everywhere.
  */
-const AVATAR_GRADIENTS = [
-  'linear-gradient(135deg, #6366f1, #8b5cf6)',
-  'linear-gradient(135deg, #3b82f6, #06b6d4)',
-  'linear-gradient(135deg, #10b981, #34d399)',
-  'linear-gradient(135deg, #f59e0b, #f97316)',
-  'linear-gradient(135deg, #ef4444, #f43f5e)',
-  'linear-gradient(135deg, #8b5cf6, #ec4899)',
-  'linear-gradient(135deg, #14b8a6, #3b82f6)',
-  'linear-gradient(135deg, #f97316, #ef4444)',
+// Solid Salon-family hues (02-visual-system palette + earth-tone extensions).
+const AVATAR_COLORS = [
+  '#3f6b5c',
+  '#8e3b59',
+  '#3d5688',
+  '#c8643a',
+  '#2a6f7e',
+  '#5e5645',
+  '#6d5b3f',
+  '#9a4d38',
 ];
 
 export function getUserInitials(name: string): string {
@@ -29,7 +30,7 @@ export function getUserAvatarColor(userId: string): string {
   for (let i = 0; i < userId.length; i++) {
     hash = (hash * 31 + userId.charCodeAt(i)) | 0;
   }
-  return AVATAR_GRADIENTS[Math.abs(hash) % AVATAR_GRADIENTS.length];
+  return AVATAR_COLORS[Math.abs(hash) % AVATAR_COLORS.length];
 }
 
 // Solid Salon-family hues for the small workspace squares in the profile menu
