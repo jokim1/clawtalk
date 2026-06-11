@@ -7,6 +7,7 @@
  * failed) they fall back to humanized ids so the page still renders.
  */
 import type { AiAgentsPageData, RegisteredAgent } from '../../lib/api';
+import { AGENT_ACCENTS } from '../../salon/tokens';
 
 /**
  * "provider.anthropic" → "Anthropic", "kimi_k2" → "Kimi K2". Generic fallback
@@ -65,4 +66,28 @@ export function credentialModeLabel(
   if (mode === 'api_key') return 'API key';
   if (mode === 'subscription') return 'Subscription';
   return 'Auto';
+}
+
+/**
+ * Deterministic Salon accent for an agent. App roles are free-form strings
+ * (not the design's fixed five), so the accent is hashed over the five design
+ * accent values instead of indexing AGENT_ACCENTS by role.
+ */
+export function agentAccent(seed: string): string {
+  const accents = Object.values(AGENT_ACCENTS);
+  let hash = 0;
+  for (let i = 0; i < seed.length; i += 1) {
+    hash = (hash * 31 + seed.charCodeAt(i)) >>> 0;
+  }
+  return accents[hash % accents.length]?.accent ?? '#3f6b5c';
+}
+
+/** Serif avatar initials (max 2) from the agent name. */
+export function agentInitials(name: string): string {
+  const parts = name.trim().split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return '·';
+  return parts
+    .slice(0, 2)
+    .map((part) => part[0]?.toUpperCase() ?? '')
+    .join('');
 }

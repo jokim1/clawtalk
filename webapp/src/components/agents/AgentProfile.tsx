@@ -15,6 +15,7 @@ import { salon, salonFont } from '../../salon/tokens';
 import { credentialModeLabel, formatAgentDate } from './agentFormat';
 
 const AGENTS_TAB_PATH = '/app/settings?tab=agents';
+const AGENTS_ROSTER_PATH = '/app/agents';
 
 const CARD: CSSProperties = {
   background: salon.card,
@@ -110,7 +111,7 @@ export function AgentProfile({
     <article style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
       <div>
         <Link
-          to={AGENTS_TAB_PATH}
+          to={AGENTS_ROSTER_PATH}
           className="salon-btn"
           style={{
             display: 'inline-flex',
