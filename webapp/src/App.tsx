@@ -47,6 +47,7 @@ import { SettingsPage } from './pages/SettingsPage';
 import { HomePage } from './pages/HomePage';
 import { ArchivePage } from './pages/ArchivePage';
 import { AgentProfilePage } from './pages/AgentProfilePage';
+import { AgentsPage } from './pages/AgentsPage';
 import { DocumentsPage } from './pages/DocumentsPage';
 import { DocumentDetailPage } from './pages/DocumentDetailPage';
 
@@ -1109,7 +1110,12 @@ export function App() {
             />
             <Route
               path="/app/agents"
-              element={<Navigate to="/app/settings?tab=agents" replace />}
+              element={
+                <AgentsPage
+                  workspaceId={auth.user.currentWorkspaceId}
+                  onUnauthorized={handleUnauthorized}
+                />
+              }
             />
             <Route
               path="/app/agents/:agentId"

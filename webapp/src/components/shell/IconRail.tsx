@@ -55,7 +55,7 @@ const NAV_ITEMS: NavItem[] = [
     id: 'agents',
     label: 'Agents',
     icon: 'sparkle',
-    to: '/app/settings?tab=agents',
+    to: '/app/agents',
     isActive: (p, tab) =>
       p.startsWith('/app/agents') ||
       (p.startsWith('/app/settings') && tab === 'agents'),

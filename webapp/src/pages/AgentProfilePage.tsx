@@ -183,7 +183,7 @@ function MessageCard({
 function AgentsBackLink(): JSX.Element {
   return (
     <Link
-      to="/app/settings?tab=agents"
+      to="/app/agents"
       className="salon-btn"
       style={{
         display: 'inline-flex',
