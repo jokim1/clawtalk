@@ -140,7 +140,7 @@ for (const vp of [
     await expect(
       page.getByRole('heading', { name: 'Documents' }),
     ).toBeVisible();
-    await expect(page.getByText('Launch brief')).toBeVisible();
+    await expect(page.getByRole('link', { name: 'Launch brief' })).toBeVisible();
     await expect(page.getByText('1 pending')).toBeVisible();
     await page.screenshot({
       path: testInfo.outputPath(`documents-index-${vp.label}.png`),
@@ -150,7 +150,7 @@ for (const vp of [
     // Viewer: native blocks + the pending-edit review console. The block text
     // appears both in the body article and as the edit's "Current" preview, so
     // scope the body assertion to the article to stay unambiguous.
-    await page.getByText('Launch brief').first().click();
+    await page.getByRole('link', { name: 'Launch brief' }).click();
     await expect(
       page.locator('article').getByText('Original paragraph about the launch.'),
     ).toBeVisible();
