@@ -8207,3 +8207,28 @@ a {
     overflow-x: auto;
   }
 }
+
+/* Home (Salon) — design-fidelity layout helpers (prototype/home-focus.jsx).
+   The hero recommendation is two-column with a context pane; news cards carry
+   a right-side editorial thumbnail. Both collapse for phone widths. */
+.home-hero-grid {
+  display: grid;
+  grid-template-columns: 1.35fr 1fr;
+  gap: 24px;
+}
+
+/* Display lives here (not inline) so the phone media rule below can win. */
+.home-news-thumb {
+  display: grid;
+  place-items: center;
+}
+
+@media (max-width: 760px) {
+  .home-hero-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .home-news-thumb {
+    display: none;
+  }
+}
