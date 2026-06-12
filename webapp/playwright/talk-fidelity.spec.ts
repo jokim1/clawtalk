@@ -488,9 +488,9 @@ for (const state of ['populated', 'empty', 'active'] as const) {
         await expect(page.locator('.talk-breadcrumb')).toContainText(
           'Ordered mode · 2 agents',
         );
-        // Read-only Tools pill reflecting the mocked 2-of-4 active families.
+        // Tools pill reflecting the mocked families expanded into menu items.
         await expect(
-          page.getByRole('button', { name: 'Tools, 2 of 4 on' }),
+          page.getByRole('button', { name: 'Tools, 5 of 7 on' }),
         ).toBeVisible();
         const connectorsButton = page.getByRole('button', {
           name: 'Connectors, 2 of 5 bound',
