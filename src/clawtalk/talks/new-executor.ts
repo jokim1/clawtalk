@@ -79,8 +79,11 @@ async function executeWebSearch(
       return { result: `web_search error: ${err.message}`, isError: true };
     }
     if (timeoutController.signal.aborted && !signal.aborted) {
+      // The timer spans credential resolution AND the provider fetch, so
+      // don't blame the provider — a stalled credential leg can also eat
+      // the budget. The registry's per-leg breadcrumbs say which one hung.
       return {
-        result: `web_search error: the search provider did not respond within ${WEB_SEARCH_TIMEOUT_MS / 1000} seconds and the request was aborted. Continue with any results you already have, or retry the search once.`,
+        result: `web_search error: the search did not complete within ${WEB_SEARCH_TIMEOUT_MS / 1000} seconds and was aborted. Continue with any results you already have, or retry the search once.`,
         isError: true,
       };
     }

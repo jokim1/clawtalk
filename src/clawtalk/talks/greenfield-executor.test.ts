@@ -1929,12 +1929,17 @@ describe('GreenfieldTalkExecutor queue integration', () => {
       insert into public.talk_tools (workspace_id, talk_id, tool_id, enabled)
       values (${workspaceId}::uuid, ${talkId}::uuid, 'web-search', true)
     `;
+    // Observations are CAPTURED here and ASSERTED at top level below.
+    // Asserting inside the mock or inside onExecute is NOT load-bearing:
+    // an AssertionError thrown in the mock is swallowed by
+    // executeWebSearch's generic catch (it becomes an error tool result),
+    // and an onExecute rejection is caught by processTalkRunMessage's
+    // failRun path — mutation-verified that the wrapped-in-withUserContext
+    // regression stayed green under the old in-mock assertion shape.
+    let observedUserContext: string | null | 'uncalled' = 'uncalled';
     runWebSearchForUserMock.mockImplementation(
       async (_userId: string, query: string) => {
-        // The registry owns its own short committed credential tx; the
-        // executor must NOT wrap the call (a wrapper would keep a tx —
-        // and the max:1 connection — open across the provider fetch).
-        expect(getCurrentUserId()).toBeNull();
+        observedUserContext = getCurrentUserId();
         return {
           query,
           providerId: 'web_search.tavily',
@@ -1952,18 +1957,11 @@ describe('GreenfieldTalkExecutor queue integration', () => {
     });
     if (!enqueued.ok) throw new Error(`enqueue failed: ${enqueued.reason}`);
 
+    let toolResult: unknown = 'tool-never-executed';
     mockResolvedExecution('Search answer', {
       onExecute: async (executeToolCall) => {
-        const result = await executeToolCall('web_search', {
+        toolResult = await executeToolCall('web_search', {
           query: 'current clawtalk status',
-        });
-        expect(result).toEqual({
-          result: JSON.stringify({
-            provider: 'web_search.tavily',
-            query: 'current clawtalk status',
-            results: [],
-            note: 'No results returned by the provider.',
-          }),
         });
       },
     });
@@ -1973,6 +1971,18 @@ describe('GreenfieldTalkExecutor queue integration', () => {
       cancelPollIntervalMs: 10_000,
     });
 
+    // The registry owns its own short committed credential tx; the
+    // executor must NOT wrap the call (a wrapper would keep a tx — and
+    // the max:1 connection — open across the provider fetch).
+    expect(observedUserContext).toBeNull();
+    expect(toolResult).toEqual({
+      result: JSON.stringify({
+        provider: 'web_search.tavily',
+        query: 'current clawtalk status',
+        results: [],
+        note: 'No results returned by the provider.',
+      }),
+    });
     expect(runWebSearchForUserMock).toHaveBeenCalledWith(
       USER_ID,
       'current clawtalk status',

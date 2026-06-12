@@ -25,6 +25,7 @@ import {
   getDbPg,
   initPgDatabase,
   withRequestScopedDb,
+  withUserContext,
 } from '../../db.js';
 import type { AuthContext } from '../web/types.js';
 import { putWebSearchCredentialRoute } from '../web/routes/web-search.js';
@@ -171,6 +172,61 @@ describe('runWebSearchForUser transaction split', () => {
       'padded query',
       undefined,
     );
+  });
+
+  it('refuses to run inside an enclosing user context (would undo the P1-0 split)', async () => {
+    await seedActiveTavilyKey('tvly-reentrant-key');
+    await expect(
+      withUserContext(USER_ID, () =>
+        runWebSearchForUser(USER_ID, 'reentrant call'),
+      ),
+    ).rejects.toThrow(/must not be called inside withUserContext/);
+    expect(tavilySearch).not.toHaveBeenCalled();
+  });
+
+  it('maps a stale preferred provider id to the pick-another error', async () => {
+    // Catalog/code drift: the provider exists in the DB catalog (FK
+    // target) but has no adapter in ADAPTERS — e.g. a retired provider.
+    const db = getDbPg();
+    await db`
+      insert into public.web_search_providers (id, name, base_url)
+      values ('web_search.retired', 'Retired Provider', 'https://retired.example')
+      on conflict (id) do nothing
+    `;
+    try {
+      await db`
+        update public.users
+        set preferred_web_search_provider_id = 'web_search.retired'
+        where id = ${USER_ID}::uuid
+      `;
+      await expect(
+        runWebSearchForUser(USER_ID, 'stale provider'),
+      ).rejects.toMatchObject({
+        statusCode: 0,
+        message: expect.stringContaining('Unknown web search provider'),
+      });
+      expect(tavilySearch).not.toHaveBeenCalled();
+    } finally {
+      await db`
+        update public.users
+        set preferred_web_search_provider_id = null
+        where id = ${USER_ID}::uuid
+      `;
+      await db`delete from public.web_search_providers where id = 'web_search.retired'`;
+    }
+  });
+
+  it('maps an active provider with no stored key to the add-a-key error', async () => {
+    await seedActiveTavilyKey('tvly-doomed-key');
+    const db = getDbPg();
+    await db`delete from public.web_search_provider_secrets where owner_id = ${USER_ID}::uuid`;
+    await expect(
+      runWebSearchForUser(USER_ID, 'missing key'),
+    ).rejects.toMatchObject({
+      statusCode: 0,
+      message: expect.stringContaining('No API key stored'),
+    });
+    expect(tavilySearch).not.toHaveBeenCalled();
   });
 
   it('throws the configure-first WebSearchError when no provider is active', async () => {
