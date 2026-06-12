@@ -151,83 +151,91 @@ export function TalkComposer({
 }: TalkComposerProps): JSX.Element {
   return (
     <form className="composer talk-workspace-composer" onSubmit={handleSend}>
-      {toolChips}
-      <div
-        className="composer-targets"
-        role="group"
-        aria-label="Selected agents"
-      >
-        <span className="composer-targets-label">Address to</span>
-        {effectiveAgents.map((agent) => {
-          const selected = targetAgentIds.includes(agent.id);
-          const guardrail = talkAgentExecutionGuardrailsById[agent.id];
-          const hasGuardrailViolation = selectedGuardrailAgentIds.has(agent.id);
-          const agentLabel = buildAgentLabel(agent);
-          const chipStateLabel = selected
-            ? `Addressed to ${agentLabel}`
-            : `Not addressed to ${agentLabel}. Click to include this agent.`;
-          return (
-            <button
-              key={agent.id}
-              type="button"
-              className={`composer-target-chip${
-                selected
-                  ? ' composer-target-chip-selected'
-                  : ' composer-target-chip-unselected'
-              }${hasGuardrailViolation ? ' composer-target-chip-warning' : ''}`}
-              onClick={() => handleToggleTarget(agent.id)}
-              disabled={sendState.status === 'posting'}
-              aria-pressed={selected}
-              aria-label={
-                agent.isPrimary ? `${chipStateLabel} Primary` : chipStateLabel
-              }
-              title={
-                guardrail?.message ||
-                (selected
-                  ? 'This agent is addressed for the next message.'
-                  : 'This agent is not addressed. Click to include it.')
-              }
-            >
-              <span
-                className={`talk-status-dot talk-status-dot-${agent.health}`}
-                aria-hidden="true"
-              />
-              <span>{buildAgentChipLabel(agent)}</span>
-              {guardrail?.badgeLabel ? (
-                <span
-                  className={`talk-status-constraint talk-status-constraint-${guardrail.kind}`}
-                >
-                  {guardrail.badgeLabel}
-                </span>
-              ) : null}
-              {agent.isPrimary ? (
-                <span className="talk-status-primary">Primary</span>
-              ) : null}
-            </button>
-          );
-        })}
-        <span className="composer-chip composer-mode-chip">
-          {composerModeLabel}
-        </span>
-        <span className="composer-chip composer-rounds-chip">
-          {composerRoundsLabel}
-        </span>
-      </div>
-      <div className="composer-meta-row">
-        <p className="composer-target-help">{composerTargetHelp}</p>
-        <span className="composer-count">
-          {draft.length}/{TALK_MESSAGE_MAX_CHARS}
-        </span>
-      </div>
-      {composerGuardrailMessage ? (
+      {/* Chrome (tool chips, agent targeting, help, guardrail) scrolls within
+          this region when the viewport is too short to show the whole
+          composer, so the textarea + Send below stay pinned and visible.
+          Without it a short window clips the input you're typing into. */}
+      <div className="composer-chrome">
+        {toolChips}
         <div
-          className="inline-banner inline-banner-warning"
-          role="status"
-          aria-live="polite"
+          className="composer-targets"
+          role="group"
+          aria-label="Selected agents"
         >
-          {composerGuardrailMessage}
+          <span className="composer-targets-label">Address to</span>
+          {effectiveAgents.map((agent) => {
+            const selected = targetAgentIds.includes(agent.id);
+            const guardrail = talkAgentExecutionGuardrailsById[agent.id];
+            const hasGuardrailViolation = selectedGuardrailAgentIds.has(
+              agent.id,
+            );
+            const agentLabel = buildAgentLabel(agent);
+            const chipStateLabel = selected
+              ? `Addressed to ${agentLabel}`
+              : `Not addressed to ${agentLabel}. Click to include this agent.`;
+            return (
+              <button
+                key={agent.id}
+                type="button"
+                className={`composer-target-chip${
+                  selected
+                    ? ' composer-target-chip-selected'
+                    : ' composer-target-chip-unselected'
+                }${hasGuardrailViolation ? ' composer-target-chip-warning' : ''}`}
+                onClick={() => handleToggleTarget(agent.id)}
+                disabled={sendState.status === 'posting'}
+                aria-pressed={selected}
+                aria-label={
+                  agent.isPrimary ? `${chipStateLabel} Primary` : chipStateLabel
+                }
+                title={
+                  guardrail?.message ||
+                  (selected
+                    ? 'This agent is addressed for the next message.'
+                    : 'This agent is not addressed. Click to include it.')
+                }
+              >
+                <span
+                  className={`talk-status-dot talk-status-dot-${agent.health}`}
+                  aria-hidden="true"
+                />
+                <span>{buildAgentChipLabel(agent)}</span>
+                {guardrail?.badgeLabel ? (
+                  <span
+                    className={`talk-status-constraint talk-status-constraint-${guardrail.kind}`}
+                  >
+                    {guardrail.badgeLabel}
+                  </span>
+                ) : null}
+                {agent.isPrimary ? (
+                  <span className="talk-status-primary">Primary</span>
+                ) : null}
+              </button>
+            );
+          })}
+          <span className="composer-chip composer-mode-chip">
+            {composerModeLabel}
+          </span>
+          <span className="composer-chip composer-rounds-chip">
+            {composerRoundsLabel}
+          </span>
         </div>
-      ) : null}
+        <div className="composer-meta-row">
+          <p className="composer-target-help">{composerTargetHelp}</p>
+          <span className="composer-count">
+            {draft.length}/{TALK_MESSAGE_MAX_CHARS}
+          </span>
+        </div>
+        {composerGuardrailMessage ? (
+          <div
+            className="inline-banner inline-banner-warning"
+            role="status"
+            aria-live="polite"
+          >
+            {composerGuardrailMessage}
+          </div>
+        ) : null}
+      </div>
 
       <div className="composer-input-shell" style={{ position: 'relative' }}>
         {mentionState && mentionOptions.length > 0 ? (
