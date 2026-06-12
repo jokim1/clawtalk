@@ -1118,8 +1118,20 @@ function buildContext(input: {
   documentSection: string | null;
   contextTools: LlmToolDefinition[];
 }): ExecutionContext {
+  // Talk tool toggles change between rounds, but earlier assistant turns in
+  // the history assert the OLD toolset ("my only tool is read_source") and
+  // models anchor on that self-narrative over the silent tools array —
+  // observed with claude-opus-4-8 denying an advertised web_search for three
+  // consecutive rounds after the Web toggle flipped mid-Talk. Enumerating the
+  // live toolset in prose is what breaks the anchor.
+  const toolNames = input.contextTools.map((tool) => tool.name);
+  const toolsSection =
+    toolNames.length > 0
+      ? `Tools available in this run: ${toolNames.join(', ')}. This list is authoritative for the current run and overrides any earlier turn that claimed a tool was unavailable.`
+      : 'No tools are available in this run.';
   const systemPrompt = [
     `Talk: ${input.run.talk_title}`,
+    toolsSection,
     input.documentSection,
     input.sourceSection,
   ]
