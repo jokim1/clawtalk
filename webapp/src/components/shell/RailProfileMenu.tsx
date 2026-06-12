@@ -206,46 +206,23 @@ export function RailProfileMenu({
       >
         <section className="ct-rail-profile-workspaces">
           <div className="ct-rail-profile-section-head">
-            <h2>Workspaces</h2>
-            <span aria-label={`${workspaces.length} workspaces`}>
-              {workspaces.length}
-            </span>
-          </div>
-
-          <div className="ct-rail-profile-workspace-list">
-            {workspaces.map((workspace) => {
-              const active = workspace.id === activeWorkspace?.id;
-              return (
-                <button
-                  key={workspace.id}
-                  type="button"
-                  role="menuitemradio"
-                  aria-checked={active}
-                  disabled={switching || createBusy}
-                  onClick={() => void handleSwitch(workspace.id)}
-                  className={`ct-rail-profile-workspace${active ? ' active' : ''}`}
-                >
-                  <span
-                    className="ct-rail-profile-workspace-avatar"
-                    style={{ background: getWorkspaceColor(workspace.id) }}
-                    aria-hidden="true"
-                  >
-                    {workspace.initials}
-                  </span>
-                  <span className="ct-rail-profile-workspace-name">
-                    {workspace.name}
-                  </span>
-                  {active ? (
-                    <CTIcon
-                      name="check"
-                      size={13}
-                      className="ct-rail-profile-workspace-check"
-                      strokeWidth={2.4}
-                    />
-                  ) : null}
-                </button>
-              );
-            })}
+            <div className="ct-rail-profile-section-title">
+              <h2>Workspaces</h2>
+              <span aria-label={`${workspaces.length} workspaces`}>
+                {workspaces.length}
+              </span>
+            </div>
+            <button
+              type="button"
+              role="menuitem"
+              aria-label="+ Workspace"
+              disabled={switching || createBusy || creating}
+              onClick={startCreate}
+              className="ct-rail-profile-workspace-add"
+            >
+              <CTIcon name="plus" size={13} strokeWidth={2} />
+              <span>Workspace</span>
+            </button>
           </div>
 
           {creating ? (
@@ -285,18 +262,43 @@ export function RailProfileMenu({
                 </button>
               </div>
             </form>
-          ) : (
-            <button
-              type="button"
-              role="menuitem"
-              disabled={switching || createBusy}
-              onClick={startCreate}
-              className="ct-rail-profile-create-btn"
-            >
-              <CTIcon name="plus" size={14} strokeWidth={1.9} />
-              Add workspace
-            </button>
-          )}
+          ) : null}
+
+          <div className="ct-rail-profile-workspace-list">
+            {workspaces.map((workspace) => {
+              const active = workspace.id === activeWorkspace?.id;
+              return (
+                <button
+                  key={workspace.id}
+                  type="button"
+                  role="menuitemradio"
+                  aria-checked={active}
+                  disabled={switching || createBusy}
+                  onClick={() => void handleSwitch(workspace.id)}
+                  className={`ct-rail-profile-workspace${active ? ' active' : ''}`}
+                >
+                  <span
+                    className="ct-rail-profile-workspace-avatar"
+                    style={{ background: getWorkspaceColor(workspace.id) }}
+                    aria-hidden="true"
+                  >
+                    {workspace.initials}
+                  </span>
+                  <span className="ct-rail-profile-workspace-name">
+                    {workspace.name}
+                  </span>
+                  {active ? (
+                    <CTIcon
+                      name="check"
+                      size={13}
+                      className="ct-rail-profile-workspace-check"
+                      strokeWidth={2.4}
+                    />
+                  ) : null}
+                </button>
+              );
+            })}
+          </div>
 
           {error ? (
             <p className="ct-rail-profile-error" role="alert">
