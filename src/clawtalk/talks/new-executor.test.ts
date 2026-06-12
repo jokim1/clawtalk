@@ -9,7 +9,7 @@ vi.mock('../web-search/registry.js', () => ({
   // its abort signal, with the signal's reason, mirroring real fetch
   // semantics (including immediate rejection on an already-aborted signal).
   runWebSearchForUser: vi.fn(
-    (_query: string, options?: { signal?: AbortSignal }) =>
+    (_userId: string, _query: string, options?: { signal?: AbortSignal }) =>
       new Promise((_resolve, reject) => {
         const abortSignal = options?.signal;
         const rejectAborted = () =>
@@ -40,7 +40,7 @@ const WEB_TOOL_ACCESS = [
 ];
 
 const TIMEOUT_RESULT = {
-  result: `web_search error: the search provider did not respond within ${WEB_SEARCH_TIMEOUT_MS / 1000} seconds and the request was aborted. Continue with any results you already have, or retry the search once.`,
+  result: `web_search error: the search did not complete within ${WEB_SEARCH_TIMEOUT_MS / 1000} seconds and was aborted. Continue with any results you already have, or retry the search once.`,
   isError: true,
 };
 
@@ -79,7 +79,7 @@ describe('web_search timeout', () => {
 
     const result = await resultPromise;
     expect(result.isError).toBe(true);
-    expect(result.result).not.toContain('did not respond within');
+    expect(result.result).not.toContain('did not complete within');
     expect(result.result).toContain('cancelled');
   });
 
@@ -106,7 +106,7 @@ describe('web_search timeout', () => {
     // Rejection arrives a beat after abort, leaving a window for the run
     // signal to abort after the timeout already fired.
     vi.mocked(runWebSearchForUser).mockImplementationOnce(
-      (_query: string, options?: { signal?: AbortSignal }) =>
+      (_userId: string, _query: string, options?: { signal?: AbortSignal }) =>
         new Promise((_resolve, reject) => {
           const abortSignal = options?.signal;
           abortSignal?.addEventListener('abort', () => {
@@ -124,7 +124,7 @@ describe('web_search timeout', () => {
 
     const result = await resultPromise;
     expect(result.isError).toBe(true);
-    expect(result.result).not.toContain('did not respond within');
+    expect(result.result).not.toContain('did not complete within');
   });
 });
 

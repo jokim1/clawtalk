@@ -1,4 +1,4 @@
-import { getDbPg, withTrustedDbWrites, withUserContext } from '../../db.js';
+import { getDbPg, withTrustedDbWrites } from '../../db.js';
 import { logger } from '../../logger.js';
 import {
   executeWithResolvedAgent,
@@ -917,11 +917,18 @@ function hasGreenfieldDocumentEditIds(result: string): boolean {
   }
 }
 
-// Outer deadline on the whole web_search tool call, including the per-call
-// withUserContext transaction ACQUISITION — the 2026-06-12 wedge sat in
-// db.begin on a dead connection, before executeWebSearch (and its 20s fetch
-// timer) ever ran. Wider than the inner fetch timeout so the inner path wins
-// whenever it is functioning.
+// Outer deadline on the whole web_search tool call, including the registry's
+// short credential-tx ACQUISITION — the 2026-06-12 wedge sat in db.begin on a
+// dead connection, before executeWebSearch (and its 20s fetch timer) ever
+// ran. Since the P1-0 tx split, the registry commits its credential tx before
+// the provider fetch starts, so abandoning a hung FETCH here no longer leaks
+// an open transaction. A wedged BEGIN/acquisition leg, however, still holds
+// the max:1 connection past abandonment (postgres.js queries are not
+// cancellable) — the run then wedges one step later at its next DB call; the
+// #609 queue watchdog is the backstop for that leg. Wider than the inner
+// fetch timeout so the inner path wins whenever it is functioning.
+// TODO(T6): absorb into the DeadlineBudget primitive
+// (docs/13-talk-runtime-v2.md, P1-c).
 const WEB_SEARCH_TOOL_CALL_DEADLINE_MS = 30_000;
 
 /** @internal Exported for tests. */
@@ -932,9 +939,21 @@ export function raceToolCallDeadline(
 ): Promise<{ result: string; isError?: boolean }> {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
-      // Abandon the wedged call; swallow its eventual settle so it can't
-      // surface as an unhandled rejection.
-      call.catch(() => {});
+      // Abandon the wedged call. Log its eventual settle instead of bare
+      // swallowing — a late success means real results were discarded and
+      // the "wedged I/O" warning below was a misdiagnosis (slow, not dead).
+      call.then(
+        (late) =>
+          logger.warn(
+            { toolName, deadlineMs, isError: !!late.isError },
+            'abandoned tool call settled after the deadline',
+          ),
+        (err) =>
+          logger.warn(
+            { toolName, deadlineMs, err },
+            'abandoned tool call rejected after the deadline',
+          ),
+      );
       logger.warn(
         { toolName, deadlineMs },
         'tool call abandoned by deadline (wedged I/O suspected)',
@@ -1039,16 +1058,14 @@ function buildGreenfieldToolExecutor(input: {
       };
     }
     if (toolName === 'web_search') {
+      // P1-0: no withUserContext wrapper here — the registry opens its own
+      // short credential tx and commits it before the provider fetch, so the
+      // fetch never runs inside a transaction.
       logger.info(
         { runId: input.run.id, toolName },
-        'web_search tool call: acquiring user-context tx',
+        'web_search tool call: dispatching',
       );
-      return raceToolCallDeadline(
-        withUserContext(input.run.requested_by, () =>
-          baseExecutor(toolName, args),
-        ),
-        toolName,
-      );
+      return raceToolCallDeadline(baseExecutor(toolName, args), toolName);
     }
     return baseExecutor(toolName, args);
   };
