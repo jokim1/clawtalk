@@ -894,7 +894,9 @@ describe('switchWorkspace', () => {
     expect(captured).toHaveLength(1);
     expect(captured[0].path).toBe('/api/v1/workspaces/switch');
     expect(captured[0].init?.method).toBe('POST');
-    expect(captured[0].init?.body).toBe(JSON.stringify({ workspaceId: 'ws-2' }));
+    expect(captured[0].init?.body).toBe(
+      JSON.stringify({ workspaceId: 'ws-2' }),
+    );
     const headers = readHeaders(captured[0].init);
     expect(headers['content-type']).toBe('application/json');
     expect(headers['x-csrf-token']).toBe('test-csrf-token');
@@ -941,7 +943,7 @@ describe('active workspace header', () => {
         captured.push({ path: normalizePath(input), init });
         return jsonResponse(200, {
           ok: true,
-          data: { items: [], mainTalkId: null, contents: [] },
+          data: { items: [], buddyTalkId: null, contents: [] },
         });
       },
     );
@@ -960,7 +962,7 @@ describe('active workspace header', () => {
         captured.push({ path: normalizePath(input), init });
         return jsonResponse(200, {
           ok: true,
-          data: { items: [], mainTalkId: null, contents: [] },
+          data: { items: [], buddyTalkId: null, contents: [] },
         });
       },
     );
@@ -1018,7 +1020,12 @@ describe('active workspace header', () => {
               createdAt: '',
             },
             workspaces: [
-              { id: 'ws-default', name: 'Default', role: 'owner', initials: 'DE' },
+              {
+                id: 'ws-default',
+                name: 'Default',
+                role: 'owner',
+                initials: 'DE',
+              },
             ],
             currentWorkspaceId: 'ws-default',
           },

@@ -154,7 +154,10 @@ async function withResolvedWorkspace<T>(
   }
   try {
     await ensureWorkspaceBootstrapForUser(auth.userId);
-  } catch {
+  } catch (err) {
+    // A bootstrap bug locks the user out of every route as a fake auth
+    // failure — keep the real cause in the logs.
+    console.error('[workspace-bootstrap] failed', err);
     return error(401, 'unauthorized', 'Session is not active.');
   }
 
@@ -273,7 +276,8 @@ export async function getGreenfieldMeRoute(input: {
 }): Promise<RouteResult<SessionMePayload>> {
   try {
     await ensureWorkspaceBootstrapForUser(input.auth.userId);
-  } catch {
+  } catch (err) {
+    console.error('[workspace-bootstrap] failed', err);
     return error(401, 'unauthorized', 'Session is not active.');
   }
 
@@ -348,6 +352,7 @@ function toTalkApiRecord(input: {
   lastActivityAt: string;
   primaryDocumentId: string | null;
   messageCount: number;
+  isSystem: boolean;
 } {
   const { talk } = input;
   return {
@@ -372,6 +377,7 @@ function toTalkApiRecord(input: {
     lastActivityAt: talk.last_activity_at,
     primaryDocumentId: talk.primary_document_id,
     messageCount: talk.message_count,
+    isSystem: talk.is_system,
   };
 }
 
@@ -874,11 +880,14 @@ export async function listGreenfieldTalksRoute(input: {
   }>
 > {
   return withResolvedWorkspace(input.auth, input.workspaceId, async (ctx) => {
-    const talks = await listGreenfieldTalks({
+    const allTalks = await listGreenfieldTalks({
       workspaceId: ctx.workspace.id,
       folderId: input.folderId ?? 'all',
       includeArchived: input.includeArchived,
     });
+    // The system talk (Buddy) lives behind the sidebar's pinned row, not in
+    // the Talks index.
+    const talks = allTalks.filter((talk) => !talk.is_system);
     return ok({
       talks: talks.map((talk) =>
         toTalkApiRecord({
@@ -1189,15 +1198,19 @@ export async function listGreenfieldTalkSidebarRoute(input: {
       | ({ type: 'talk' } & ReturnType<typeof toSidebarTalkApiRecord>)
       | ({ type: 'folder' } & ReturnType<typeof toFolderApiRecord>)
     >;
-    mainTalkId: string | null;
+    buddyTalkId: string | null;
     contents: [];
   }>
 > {
   return withResolvedWorkspace(input.auth, input.workspaceId, async (ctx) => {
-    const [folders, talks] = await Promise.all([
+    const [folders, allTalks] = await Promise.all([
       listGreenfieldFolders({ workspaceId: ctx.workspace.id }),
       listGreenfieldTalks({ workspaceId: ctx.workspace.id }),
     ]);
+    // The system talk (Buddy) renders as the pinned row above the tree, so
+    // keep it out of the regular items.
+    const buddyTalk = allTalks.find((talk) => talk.is_system) ?? null;
+    const talks = allTalks.filter((talk) => !talk.is_system);
     const rootTalks = talks.filter((talk) => talk.folder_id === null);
     const folderItems = folders.map((folder) => ({
       type: 'folder' as const,
@@ -1215,7 +1228,7 @@ export async function listGreenfieldTalkSidebarRoute(input: {
     ].sort((a, b) => a.sortOrder - b.sortOrder || a.id.localeCompare(b.id));
     return ok({
       items,
-      mainTalkId: talks[0]?.id ?? null,
+      buddyTalkId: buddyTalk?.id ?? null,
       contents: [],
     });
   });

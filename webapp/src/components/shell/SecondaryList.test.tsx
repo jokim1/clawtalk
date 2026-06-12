@@ -36,13 +36,13 @@ function rect(input: Partial<DOMRect> = {}): DOMRect {
 
 type Overrides = Partial<React.ComponentProps<typeof SecondaryList>>;
 
-function renderList(props: Overrides = {}) {
+function renderList(props: Overrides = {}, route = '/') {
   const base: React.ComponentProps<typeof SecondaryList> = {
     items: [],
     contents: [],
     loading: false,
     error: null,
-    mainTalkId: null,
+    buddyTalkId: null,
     onNewTalk: vi.fn(),
     onCreateFolder: vi.fn(async () => buildFolder()),
     onRenameTalk: vi.fn(),
@@ -57,7 +57,7 @@ function renderList(props: Overrides = {}) {
   };
   const merged = { ...base, ...props };
   render(
-    <MemoryRouter>
+    <MemoryRouter initialEntries={[route]}>
       <SecondaryList {...merged} />
     </MemoryRouter>,
   );
@@ -68,6 +68,19 @@ describe('SecondaryList', () => {
   afterEach(() => {
     cleanup();
     vi.restoreAllMocks();
+  });
+
+  it('pins a Buddy row linking to /app/buddy, highlighted on the system talk route', () => {
+    renderList({ buddyTalkId: 'talk-buddy' }, '/app/talks/talk-buddy');
+    const link = screen.getByRole('link', { name: /buddy/i });
+    expect(link).toHaveAttribute('href', '/app/buddy');
+    expect(link.className).toContain('active');
+  });
+
+  it('does not highlight the Buddy row while another talk is open', () => {
+    renderList({ buddyTalkId: 'talk-buddy' }, '/app/talks/talk-other');
+    const link = screen.getByRole('link', { name: /buddy/i });
+    expect(link.className).not.toContain('active');
   });
 
   it('renders the talk count summary and an Archive link', () => {

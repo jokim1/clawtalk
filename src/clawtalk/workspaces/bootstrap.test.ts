@@ -75,9 +75,10 @@ describe('workspace bootstrap', () => {
       where workspace_id = ${firstWorkspaceId}::uuid
       order by role_key asc
     `;
-    expect(agents).toHaveLength(7);
-    expect(agents.filter((agent) => agent.is_system)).toHaveLength(2);
+    expect(agents).toHaveLength(8);
+    expect(agents.filter((agent) => agent.is_system)).toHaveLength(3);
     expect(agents.map((agent) => agent.role_key).sort()).toEqual([
+      'buddy',
       'critic',
       'editor',
       'forge_critic',
@@ -86,6 +87,42 @@ describe('workspace bootstrap', () => {
       'researcher',
       'strategist',
     ]);
+
+    // Buddy speaks in the system talk, so its persona must carry the template
+    // prompt (run snapshots read agents.persona, not the template).
+    const buddyAgents = await db<
+      { persona: string | null; is_system: boolean }[]
+    >`
+      select persona, is_system
+      from public.agents
+      where workspace_id = ${firstWorkspaceId}::uuid
+        and role_key = 'buddy'
+    `;
+    expect(buddyAgents).toHaveLength(1);
+    expect(buddyAgents[0]?.is_system).toBe(true);
+    expect(buddyAgents[0]?.persona).toContain('Buddy');
+
+    const buddyTalks = await db<
+      { id: string; title: string; roster_roles: string[] }[]
+    >`
+      select
+        t.id,
+        t.title,
+        coalesce((
+          select array_agg(a.role_key order by ta.sort_order asc)
+          from public.talk_agents ta
+          join public.agents a
+            on a.workspace_id = ta.workspace_id
+           and a.id = ta.agent_id
+          where ta.talk_id = t.id
+        ), '{}'::text[]) as roster_roles
+      from public.talks t
+      where t.workspace_id = ${firstWorkspaceId}::uuid
+        and t.is_system = true
+    `;
+    expect(buddyTalks).toHaveLength(1);
+    expect(buddyTalks[0]?.title).toBe('Buddy');
+    expect(buddyTalks[0]?.roster_roles).toEqual(['buddy']);
 
     const teamRows = await db<{ name: string; roles: string[] }[]>`
       select
@@ -124,7 +161,94 @@ describe('workspace bootstrap', () => {
         (select count(*)::int from public.agents where workspace_id = ${firstWorkspaceId}::uuid) as agents,
         (select count(*)::int from public.team_compositions where workspace_id = ${firstWorkspaceId}::uuid) as teams
     `;
-    expect(counts[0]).toEqual({ workspaces: 1, agents: 7, teams: 3 });
+    expect(counts[0]).toEqual({ workspaces: 1, agents: 8, teams: 3 });
+  });
+
+  it('reseeds the Buddy agent and system talk after both are deleted', async () => {
+    await seedAuthUser();
+
+    const workspaceId = await ensureWorkspaceBootstrapForUser(USER_ID);
+    const db = getDbPg();
+    await db`
+      delete from public.talks
+      where workspace_id = ${workspaceId}::uuid
+        and is_system = true
+    `;
+    await db`
+      delete from public.agents
+      where workspace_id = ${workspaceId}::uuid
+        and role_key = 'buddy'
+    `;
+
+    await ensureWorkspaceBootstrapForUser(USER_ID);
+
+    const rows = await db<{ title: string; role_key: string }[]>`
+      select t.title, a.role_key
+      from public.talks t
+      join public.talk_agents ta
+        on ta.workspace_id = t.workspace_id
+       and ta.talk_id = t.id
+      join public.agents a
+        on a.workspace_id = ta.workspace_id
+       and a.id = ta.agent_id
+      where t.workspace_id = ${workspaceId}::uuid
+        and t.is_system = true
+    `;
+    expect(rows).toEqual([{ title: 'Buddy', role_key: 'buddy' }]);
+  });
+
+  it('unarchives the system talk if direct writes archived it', async () => {
+    await seedAuthUser();
+
+    const workspaceId = await ensureWorkspaceBootstrapForUser(USER_ID);
+    const db = getDbPg();
+    await db`
+      update public.talks
+      set archived_at = now()
+      where workspace_id = ${workspaceId}::uuid
+        and is_system = true
+    `;
+
+    await ensureWorkspaceBootstrapForUser(USER_ID);
+
+    const rows = await db<{ archived_at: string | null }[]>`
+      select archived_at
+      from public.talks
+      where workspace_id = ${workspaceId}::uuid
+        and is_system = true
+    `;
+    expect(rows).toEqual([{ archived_at: null }]);
+  });
+
+  it('re-attaches Buddy to the system talk if the roster row goes missing', async () => {
+    await seedAuthUser();
+
+    const workspaceId = await ensureWorkspaceBootstrapForUser(USER_ID);
+    const db = getDbPg();
+    await db`
+      delete from public.talk_agents ta
+      using public.talks t
+      where t.workspace_id = ta.workspace_id
+        and t.id = ta.talk_id
+        and t.workspace_id = ${workspaceId}::uuid
+        and t.is_system = true
+    `;
+
+    await ensureWorkspaceBootstrapForUser(USER_ID);
+
+    const rows = await db<{ role_key: string }[]>`
+      select a.role_key
+      from public.talks t
+      join public.talk_agents ta
+        on ta.workspace_id = t.workspace_id
+       and ta.talk_id = t.id
+      join public.agents a
+        on a.workspace_id = ta.workspace_id
+       and a.id = ta.agent_id
+      where t.workspace_id = ${workspaceId}::uuid
+        and t.is_system = true
+    `;
+    expect(rows).toEqual([{ role_key: 'buddy' }]);
   });
 
   it('serializes concurrent first bootstrap calls into one owned workspace', async () => {

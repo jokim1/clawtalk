@@ -63,6 +63,8 @@ export type Talk = {
   createdAt: string;
   updatedAt: string;
   accessRole: 'owner' | 'admin' | 'editor' | 'viewer';
+  /** The per-workspace Buddy system talk; bootstrap-managed, not user-mutable. */
+  isSystem?: boolean;
 };
 
 export type TalkSidebarTalk = {
@@ -97,7 +99,7 @@ export type DocumentSidebarItem = {
 
 export type TalkSidebarTree = {
   items: TalkSidebarItem[];
-  mainTalkId: string | null;
+  buddyTalkId: string | null;
   contents: DocumentSidebarItem[];
 };
 
@@ -2639,8 +2641,9 @@ export async function updateTalkLlmSettings(
 
 // ---------------------------------------------------------------------------
 // (Main Channel removed — the legacy Nanoclaw routes were retired during
-// the Phase 5 cloud port. The new Main is a regular Talk addressed via
-// /app/main; the sidebar tree endpoint exposes mainTalkId for routing.)
+// the Phase 5 cloud port. Its successor is Buddy, the per-workspace system
+// Talk addressed via /app/buddy; the sidebar tree endpoint exposes
+// buddyTalkId for routing.)
 // ---------------------------------------------------------------------------
 
 export async function getHealthStatus(): Promise<boolean> {

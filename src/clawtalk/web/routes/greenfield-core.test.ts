@@ -376,6 +376,76 @@ describe('greenfield core routes', () => {
     });
   });
 
+  it('seeds the Buddy system talk: pinned id, hidden from lists, immutable', async () => {
+    const workspaceId = await currentWorkspaceId();
+
+    const sidebar = await listGreenfieldTalkSidebarRoute({
+      auth: auth(),
+      workspaceId,
+    });
+    expect(sidebar.statusCode).toBe(200);
+    if (!sidebar.body.ok) throw new Error('Expected sidebar route to succeed');
+    const buddyTalkId = sidebar.body.data.buddyTalkId;
+    if (!buddyTalkId) throw new Error('Expected a seeded Buddy talk id');
+    expect(
+      sidebar.body.data.items.some((item) => item.id === buddyTalkId),
+    ).toBe(false);
+
+    const talks = await listGreenfieldTalksRoute({ auth: auth(), workspaceId });
+    if (!talks.body.ok) throw new Error('Expected talks route to succeed');
+    expect(talks.body.data.talks.some((talk) => talk.id === buddyTalkId)).toBe(
+      false,
+    );
+
+    const detail = await getGreenfieldTalkRoute({
+      auth: auth(),
+      workspaceId,
+      talkId: buddyTalkId,
+    });
+    expect(detail.body).toMatchObject({
+      ok: true,
+      data: { talk: { id: buddyTalkId, title: 'Buddy' } },
+    });
+
+    const roster = await listGreenfieldTalkAgentsRoute({
+      auth: auth(),
+      workspaceId,
+      talkId: buddyTalkId,
+    });
+    expect(roster.statusCode).toBe(200);
+    if (!roster.body.ok) throw new Error('Expected roster route to succeed');
+    expect(roster.body.data.agents).toHaveLength(1);
+    expect(roster.body.data.agents[0]).toMatchObject({ nickname: 'Buddy' });
+
+    const archived = await archiveGreenfieldTalkRoute({
+      auth: auth(),
+      workspaceId,
+      talkId: buddyTalkId,
+    });
+    expect(archived.statusCode).toBe(404);
+
+    const agents = await listGreenfieldAgentsRoute({
+      auth: auth(),
+      workspaceId,
+    });
+    if (!agents.body.ok) throw new Error('Expected agent route to succeed');
+    const replaced = await updateGreenfieldTalkAgentsRoute({
+      auth: auth(),
+      workspaceId,
+      talkId: buddyTalkId,
+      agents: [agents.body.data.agents[0]!.id],
+    });
+    expect(replaced.statusCode).toBe(404);
+
+    const renamed = await patchGreenfieldTalkRoute({
+      auth: auth(),
+      workspaceId,
+      talkId: buddyTalkId,
+      body: { title: 'Not Buddy' },
+    });
+    expect(renamed.statusCode).toBe(404);
+  });
+
   it('returns 404 unarchiving an unknown talk and 400 on a bad id', async () => {
     const workspaceId = await currentWorkspaceId();
     const missing = await unarchiveGreenfieldTalkRoute({
@@ -799,6 +869,45 @@ describe('greenfield core routes', () => {
       id: folderA.body.data.folder.id,
       talks: [{ id: nestedTalk.body.data.talk.id, title: 'Nested Talk' }],
     });
+
+    // Root-level drops use indices computed against the visible list — the
+    // hidden Buddy system talk (seeded at root sort_order 0) must neither
+    // shift them nor get renumbered by the reorder.
+    const rootTwo = await createGreenfieldTalkRoute({
+      auth: auth(),
+      workspaceId,
+      body: { title: 'Root Two', team },
+    });
+    if (!rootTwo.body.ok) throw new Error('Expected talk route to succeed');
+    const midList = await reorderGreenfieldTalkSidebarRoute({
+      auth: auth(),
+      workspaceId,
+      itemType: 'talk',
+      itemId: rootTwo.body.data.talk.id,
+      destinationFolderId: null,
+      destinationIndex: 1,
+    });
+    expect(midList.body).toEqual({ ok: true, data: { reordered: true } });
+    const reorderedSidebar = await listGreenfieldTalkSidebarRoute({
+      auth: auth(),
+      workspaceId,
+    });
+    if (!reorderedSidebar.body.ok) {
+      throw new Error('Expected sidebar route to succeed');
+    }
+    expect(reorderedSidebar.body.data.items[1]?.id).toBe(
+      rootTwo.body.data.talk.id,
+    );
+    const db = getDbPg();
+    const buddyRows = await db<
+      { folder_id: string | null; sort_order: number }[]
+    >`
+      select folder_id, sort_order
+      from public.talks
+      where workspace_id = ${workspaceId}::uuid
+        and is_system = true
+    `;
+    expect(buddyRows).toEqual([{ folder_id: null, sort_order: 0 }]);
 
     const invalidFolderNest = await reorderGreenfieldTalkSidebarRoute({
       auth: auth(),
