@@ -296,6 +296,81 @@ describe('api auth retry behavior', () => {
     );
   });
 
+  it('includes the target folder when creating a talk in a folder', async () => {
+    const captured: { path: string; init?: RequestInit }[] = [];
+    vi.stubGlobal(
+      'fetch',
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        captured.push({ path: normalizePath(input), init });
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            talk: {
+              id: 'talk-folder-1',
+              ownerId: 'u1',
+              title: 'Folder Talk',
+              agents: [],
+              status: 'active',
+              folderId: 'folder-1',
+              sortOrder: 0,
+              version: 1,
+              createdAt: '2026-03-08T00:00:00.000Z',
+              updatedAt: '2026-03-08T00:00:00.000Z',
+              accessRole: 'owner',
+            },
+          },
+        });
+      },
+    );
+
+    const api = await loadApiModule();
+    const talk = await api.createTalk('Folder Talk', { folderId: 'folder-1' });
+
+    expect(talk.folderId).toBe('folder-1');
+    expect(captured).toHaveLength(1);
+    expect(captured[0].path).toBe('/api/v1/talks');
+    expect(captured[0].init?.body).toBe(
+      JSON.stringify({ title: 'Folder Talk', folderId: 'folder-1' }),
+    );
+  });
+
+  it('keeps top-level talk creation payloads distinct for omitted and null folder ids', async () => {
+    const captured: Array<{ body?: BodyInit | null }> = [];
+    vi.stubGlobal(
+      'fetch',
+      async (_input: RequestInfo | URL, init?: RequestInit) => {
+        captured.push({ body: init?.body });
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            talk: {
+              id: `talk-${captured.length}`,
+              ownerId: 'u1',
+              title: 'Top Level Talk',
+              agents: [],
+              status: 'active',
+              folderId: null,
+              sortOrder: 0,
+              version: 1,
+              createdAt: '2026-03-08T00:00:00.000Z',
+              updatedAt: '2026-03-08T00:00:00.000Z',
+              accessRole: 'owner',
+            },
+          },
+        });
+      },
+    );
+
+    const api = await loadApiModule();
+    await api.createTalk('Top Level Talk');
+    await api.createTalk('Top Level Talk', { folderId: null });
+
+    expect(captured.map((entry) => entry.body)).toEqual([
+      JSON.stringify({ title: 'Top Level Talk' }),
+      JSON.stringify({ title: 'Top Level Talk', folderId: null }),
+    ]);
+  });
+
   it('retries csrf_failed mutations once after refreshing session with fresh headers', async () => {
     const mutationHeaders: Array<Record<string, string>> = [];
 

@@ -256,6 +256,29 @@ function insertTopLevelTalk(
   return [toSidebarTalk(talk, null), ...items];
 }
 
+function insertFolderTalk(
+  items: TalkSidebarItem[],
+  talk: Talk,
+): TalkSidebarItem[] {
+  if (!talk.folderId) return insertTopLevelTalk(items, talk);
+  const sidebarTalk = toSidebarTalk(talk, null);
+  let inserted = false;
+  const next = items.map((item) => {
+    if (item.type !== 'folder' || item.id !== talk.folderId) return item;
+    inserted = true;
+    return {
+      ...item,
+      talks: [
+        ...item.talks.filter((child) => child.id !== sidebarTalk.id),
+        sidebarTalk,
+      ].sort(
+        (a, b) => a.sortOrder - b.sortOrder || a.id.localeCompare(b.id),
+      ),
+    };
+  });
+  return inserted ? next : insertTopLevelTalk(items, talk);
+}
+
 function replaceSidebarFolder(
   items: TalkSidebarItem[],
   folder: Pick<TalkSidebarFolder, 'id' | 'title' | 'sortOrder' | 'talks'>,
@@ -455,6 +478,7 @@ export function App() {
   const [secondaryCollapsed, setSecondaryCollapsed] = useState(false);
   const [secondaryDrawerOpen, setSecondaryDrawerOpen] = useState(false);
   const [newTalkOpen, setNewTalkOpen] = useState(false);
+  const [newTalkFolderId, setNewTalkFolderId] = useState<string | null>(null);
   // Element to restore focus to when the New Talk sheet is dismissed without
   // creating — captured at open-time, before the sheet's portal steals focus.
   const newTalkRestoreRef = useRef<Element | null>(null);
@@ -627,9 +651,9 @@ export function App() {
   );
 
   const handleCreateTalk = useCallback(
-    async (title: string) => {
-      const talk = await createTalk(title);
-      setSidebarItems((current) => insertTopLevelTalk(current, talk));
+    async (title: string, folderId: string | null = null) => {
+      const talk = await createTalk(title, { folderId });
+      setSidebarItems((current) => insertFolderTalk(current, talk));
       setSidebarError(null);
       navigate(`/app/talks/${talk.id}`);
       void refreshSidebar();
@@ -638,8 +662,9 @@ export function App() {
     [navigate, refreshSidebar],
   );
 
-  const openNewTalk = useCallback(() => {
+  const openNewTalk = useCallback((folderId: string | null = null) => {
     newTalkRestoreRef.current = document.activeElement;
+    setNewTalkFolderId(folderId);
     setNewTalkOpen(true);
   }, []);
 
@@ -648,11 +673,13 @@ export function App() {
   // otherwise cancelling the sheet would land focus on <body>.
   const openNewTalkFromCommand = useCallback(() => {
     newTalkRestoreRef.current = paletteRestoreRef.current;
+    setNewTalkFolderId(null);
     setNewTalkOpen(true);
   }, []);
 
   const closeNewTalk = useCallback(() => {
     setNewTalkOpen(false);
+    setNewTalkFolderId(null);
     const target = newTalkRestoreRef.current;
     newTalkRestoreRef.current = null;
     if (target instanceof HTMLElement) {
@@ -1068,10 +1095,11 @@ export function App() {
       {newTalkOpen ? (
         <NewTalkSheet
           onCreate={async (title) => {
-            await handleCreateTalk(title);
+            await handleCreateTalk(title, newTalkFolderId);
             // Success navigates into the new Talk; close without restoring
             // focus to the (now off-screen) trigger.
             setNewTalkOpen(false);
+            setNewTalkFolderId(null);
           }}
           onClose={closeNewTalk}
         />
