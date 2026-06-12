@@ -11,6 +11,7 @@ import {
   openGoogleDrivePicker,
   type GoogleDrivePickerMode,
 } from '../lib/googlePicker';
+import { Button, CTIcon } from '../salon';
 
 type DriveBinding = TalkResourceBinding & {
   kind: 'google_drive_folder' | 'google_drive_file';
@@ -123,30 +124,32 @@ export function TalkToolsPanel({ talkId }: TalkToolsPanelProps): JSX.Element {
   );
 
   return (
-    <section className="talk-tools-panel">
-      <header className="talk-tools-panel-header">
+    <section className="talk-context-card talk-tools-panel">
+      <header className="talk-context-card-header talk-tools-panel-header">
         <div>
           <h2>Bound Drive Resources</h2>
-          <p className="talk-tools-panel-meta">
+          <p className="talk-context-card-copy talk-tools-panel-meta">
             Attach Google Drive folders or Docs so agents in this Talk can read
             or update them. Bindings are shared with editors of this Talk.
           </p>
         </div>
         <div className="talk-tools-panel-actions">
-          <button
-            type="button"
+          <Button
+            variant="secondary"
             disabled={busy}
             onClick={() => void handleAddFromDrive('file')}
           >
+            <CTIcon name="doc" size={14} strokeWidth={1.7} />
             Add file from Drive
-          </button>
-          <button
-            type="button"
+          </Button>
+          <Button
+            variant="secondary"
             disabled={busy}
             onClick={() => void handleAddFromDrive('folder')}
           >
+            <CTIcon name="folder" size={14} strokeWidth={1.7} />
             Add folder from Drive
-          </button>
+          </Button>
         </div>
       </header>
 
@@ -157,9 +160,9 @@ export function TalkToolsPanel({ talkId }: TalkToolsPanelProps): JSX.Element {
       ) : null}
 
       {loading ? (
-        <p className="talk-tools-panel-meta">Loading bindings…</p>
+        <p className="talk-context-empty">Loading bindings…</p>
       ) : bindings.length === 0 ? (
-        <p className="talk-tools-panel-empty">
+        <p className="talk-context-empty talk-tools-panel-empty">
           No Drive resources bound yet. Use the buttons above to attach a Doc
           or folder; agents will then be able to read or update it.
         </p>
@@ -187,14 +190,15 @@ export function TalkToolsPanel({ talkId }: TalkToolsPanelProps): JSX.Element {
                     </a>
                   ) : null}
                 </div>
-                <button
-                  type="button"
+                <Button
+                  variant="ghost"
                   className="talk-tools-binding-remove"
                   disabled={busy}
                   onClick={() => void handleRemove(binding)}
+                  style={{ height: 30, padding: '0 12px' }}
                 >
                   Remove
-                </button>
+                </Button>
               </li>
             );
           })}

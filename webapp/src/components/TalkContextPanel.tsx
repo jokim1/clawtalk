@@ -25,6 +25,7 @@ import {
   type ContextGoal,
   type ContextRule,
 } from '../lib/api';
+import { Button, Chip, Textarea } from '../salon';
 
 function sortRulesByOrder(rules: ContextRule[]): ContextRule[] {
   return [...rules].sort((left, right) => {
@@ -357,11 +358,11 @@ export function TalkContextPanel({
   return (
     <>
       {/* Goal */}
-      <div className="talk-llm-card">
-        <div className="connector-card-header">
+      <section className="talk-context-card">
+        <div className="talk-context-card-header">
           <div>
             <h3>Goal</h3>
-            <p className="talk-llm-meta">
+            <p className="talk-context-card-copy">
               What is this talk for? Describe the overall objective so agents
               share a frame for every discussion.
             </p>
@@ -369,48 +370,44 @@ export function TalkContextPanel({
         </div>
         {canEdit ? (
           <>
-            <label style={{ display: 'block' }}>
+            <label className="talk-context-field">
               <span className="sr-only">Talk goal</span>
-              <textarea
+              <Textarea
                 maxLength={1000}
                 rows={4}
                 value={goalDraft ?? goal?.goalText ?? ''}
                 onChange={(e) => setGoalDraft(e.target.value)}
                 placeholder="e.g. Track and discuss Cal Football news each week — scores, key plays, injury reports, and how the team is trending toward bowl eligibility."
                 disabled={status.status === 'saving'}
-                style={{ width: '100%' }}
+                className="talk-context-textarea talk-context-goal-textarea"
               />
             </label>
-            <div
-              className="connector-attach-row"
-              style={{ justifyContent: 'space-between' }}
-            >
-              <p className="talk-llm-meta">
+            <div className="talk-context-card-footer">
+              <p className="talk-context-count">
                 {(goalDraft ?? goal?.goalText ?? '').length}/1000
               </p>
-              <button
-                type="button"
-                className="secondary-btn"
+              <Button
+                variant="secondary"
                 onClick={() => void handleSaveGoal()}
                 disabled={status.status === 'saving'}
               >
                 Save
-              </button>
+              </Button>
             </div>
           </>
         ) : (
-          <p className="talk-llm-meta">
+          <p className="talk-context-readonly">
             {goal?.goalText || <em>No goal set.</em>}
           </p>
         )}
-      </div>
+      </section>
 
       {/* Rules */}
-      <div className="talk-llm-card">
-        <div className="connector-card-header">
+      <section className="talk-context-card">
+        <div className="talk-context-card-header">
           <div>
             <h3>Rules</h3>
-            <p className="talk-llm-meta">
+            <p className="talk-context-card-copy">
               Specific formats and constraints — e.g. an output shape to follow,
               or sources to avoid. Up to 8 active rules, applied in order.
               Inactive rules stay editable without affecting prompt injection.
@@ -441,10 +438,13 @@ export function TalkContextPanel({
                       }`}
                     >
                       <div className="talk-rule-card-top">
-                        <span className="talk-agent-chip">
+                        <Chip
+                          tone={rule.isActive ? 'paper' : 'ghost'}
+                          active={rule.isActive}
+                        >
                           {rule.isActive ? 'Active' : 'Inactive'}
-                        </span>
-                        <span className="talk-llm-meta">
+                        </Chip>
+                        <span className="talk-context-rule-position">
                           Position {rule.sortOrder + 1}
                         </span>
                       </div>
@@ -452,7 +452,7 @@ export function TalkContextPanel({
                         <>
                           <label className="talk-rule-edit-field">
                             <span className="sr-only">Rule text</span>
-                            <textarea
+                            <Textarea
                               maxLength={800}
                               rows={2}
                               value={draft}
@@ -464,34 +464,31 @@ export function TalkContextPanel({
                               }
                               onBlur={() => void handleSaveRuleText(rule)}
                               disabled={status.status === 'saving'}
-                              style={{ width: '100%' }}
+                              className="talk-context-textarea talk-context-rule-textarea"
                             />
                           </label>
                           <div className="talk-rule-actions">
-                            <button
-                              type="button"
-                              className="secondary-btn"
+                            <Button
+                              variant="secondary"
                               onClick={() => void handleToggleRule(rule)}
                             >
                               {rule.isActive ? 'Pause' : 'Activate'}
-                            </button>
-                            <button
-                              type="button"
-                              className="secondary-btn"
+                            </Button>
+                            <Button
+                              variant="secondary"
                               onClick={() => void handleSaveRuleText(rule)}
                               disabled={
                                 status.status === 'saving' || !hasTextChange
                               }
                             >
                               Save
-                            </button>
-                            <button
-                              type="button"
-                              className="secondary-btn"
+                            </Button>
+                            <Button
+                              variant="danger"
                               onClick={() => void handleDeleteRule(rule.id)}
                             >
                               Delete
-                            </button>
+                            </Button>
                           </div>
                         </>
                       ) : (
@@ -504,33 +501,32 @@ export function TalkContextPanel({
             </div>
           </DndContext>
         ) : (
-          <p className="page-state">No rules yet.</p>
+          <p className="talk-context-empty">No rules yet.</p>
         )}
         {canEdit ? (
           <div className="talk-rule-create-row">
-            <label style={{ flex: 1 }}>
+            <label className="talk-context-field talk-context-field-fill">
               <span className="sr-only">New rule text</span>
-              <textarea
+              <Textarea
                 maxLength={800}
                 rows={2}
                 value={newRuleText}
                 onChange={(e) => setNewRuleText(e.target.value)}
                 placeholder="e.g. When summarizing Cal Football news, use: ⟨headline⟩ — ⟨score⟩ — three bullets of key plays."
                 disabled={status.status === 'saving'}
-                style={{ width: '100%' }}
+                className="talk-context-textarea talk-context-rule-textarea"
               />
             </label>
-            <button
-              type="button"
-              className="secondary-btn"
+            <Button
+              variant="secondary"
               onClick={() => void handleAddRule()}
               disabled={status.status === 'saving' || !newRuleText.trim()}
             >
               Add Rule
-            </button>
+            </Button>
           </div>
         ) : null}
-      </div>
+      </section>
     </>
   );
 }

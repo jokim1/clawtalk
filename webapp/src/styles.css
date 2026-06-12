@@ -2376,6 +2376,224 @@ a {
   margin-top: 0.75rem;
 }
 
+/* ---------------------------------------------------------------------------
+   Talk Context tab · Salon refresh
+   --------------------------------------------------------------------------- */
+
+.talk-context-shell {
+  width: min(100%, 920px);
+  margin: 0 auto;
+  padding: 20px 20px 56px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  color: var(--salon-ink, #1f1b16);
+  font-family: var(--salon-font-sans, 'Geist', system-ui, sans-serif);
+}
+
+.talk-context-card {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 20px;
+  border: 1px solid var(--salon-line, #e6e0d1);
+  border-radius: 16px;
+  background: var(--salon-card, #fff);
+}
+
+.talk-context-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+
+.talk-context-card h2,
+.talk-context-card h3 {
+  margin: 0;
+  color: var(--salon-ink, #1f1b16);
+  font-family: var(--salon-font-serif, 'Newsreader', Georgia, serif);
+  font-size: 22px;
+  line-height: 1.15;
+  font-weight: 600;
+}
+
+.talk-context-card-copy {
+  margin: 7px 0 0;
+  max-width: 74ch;
+  color: var(--salon-ink-2, #6b6660);
+  font-size: 13.5px;
+  line-height: 1.5;
+}
+
+.talk-context-card-copy code {
+  padding: 1px 5px;
+  border: 1px solid var(--salon-line, #e6e0d1);
+  border-radius: 6px;
+  background: var(--salon-paper-2, #f4ecdb);
+  color: var(--salon-ink, #1f1b16);
+  font-family: var(--salon-font-mono, ui-monospace, monospace);
+  font-size: 12px;
+}
+
+.talk-context-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.talk-context-field-fill {
+  flex: 1 1 280px;
+}
+
+.talk-context-field-label {
+  color: var(--salon-ink-2, #6b6660);
+  font-size: 12.5px;
+  font-weight: 500;
+}
+
+.talk-context-textarea {
+  background: var(--salon-paper, #fbf7ef);
+}
+
+.talk-context-goal-textarea {
+  min-height: 118px;
+}
+
+.talk-context-rule-textarea {
+  min-height: 78px;
+  font-size: 14.5px;
+  line-height: 1.45;
+}
+
+.talk-context-card-footer,
+.talk-context-actions-row {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.talk-context-card-footer {
+  justify-content: space-between;
+}
+
+.talk-context-count,
+.talk-context-rule-position {
+  margin: 0;
+  color: var(--salon-ink-2, #6b6660);
+  font-family: var(--salon-font-mono, ui-monospace, monospace);
+  font-size: 12px;
+}
+
+.talk-context-readonly {
+  margin: 0;
+  color: var(--salon-ink-2, #6b6660);
+  font-family: var(--salon-font-serif, 'Newsreader', Georgia, serif);
+  font-size: 15px;
+  line-height: 1.5;
+}
+
+.talk-context-empty {
+  margin: 0;
+  padding: 18px 14px;
+  border: 1px dashed var(--salon-line, #e6e0d1);
+  border-radius: 12px;
+  background: var(--salon-paper, #fbf7ef);
+  color: var(--salon-ink-2, #6b6660);
+  font-size: 13.5px;
+  text-align: center;
+}
+
+.talk-context-status {
+  margin: 0;
+  padding: 10px 14px;
+  border: 1px solid var(--salon-line, #e6e0d1);
+  border-radius: 12px;
+  background: var(--salon-paper-2, #f4ecdb);
+  color: var(--salon-ink, #1f1b16);
+  font-size: 13px;
+}
+
+.talk-context-status-error {
+  border-color: #ecc4c7;
+  background: #fbecec;
+  color: #7b2a30;
+}
+
+.talk-context-shell .talk-rule-list {
+  gap: 10px;
+}
+
+.talk-context-shell .talk-rule-row {
+  grid-template-columns: 34px minmax(0, 1fr);
+  gap: 10px;
+}
+
+.talk-context-shell .talk-rule-row-over .talk-rule-card {
+  border-color: var(--salon-accent, #c8643a);
+  box-shadow: 0 12px 28px rgba(200, 100, 58, 0.12);
+}
+
+.talk-context-shell .talk-rule-handle {
+  min-width: 34px;
+  height: 34px;
+  padding: 0;
+  border-color: var(--salon-line, #e6e0d1);
+  border-radius: 999px;
+  background: var(--salon-paper, #fbf7ef);
+  color: var(--salon-ink-2, #6b6660);
+  font-family: var(--salon-font-mono, ui-monospace, monospace);
+  font-size: 14px;
+}
+
+.talk-context-shell .talk-rule-card {
+  gap: 12px;
+  padding: 14px;
+  border-color: var(--salon-line, #e6e0d1);
+  border-radius: 14px;
+  background: var(--salon-card, #fff);
+}
+
+.talk-context-shell .talk-rule-card-inactive {
+  background: var(--salon-paper, #fbf7ef);
+  opacity: 0.76;
+}
+
+.talk-context-shell .talk-rule-actions {
+  justify-content: flex-end;
+}
+
+.talk-context-shell .talk-rule-readonly {
+  margin: 0;
+  color: var(--salon-ink, #1f1b16);
+  font-family: var(--salon-font-serif, 'Newsreader', Georgia, serif);
+  font-size: 14.5px;
+  line-height: 1.45;
+}
+
+.talk-context-shell .talk-rule-create-row {
+  align-items: flex-end;
+  gap: 12px;
+  margin-top: 0;
+}
+
+.talk-context-source-create {
+  display: grid;
+  gap: 12px;
+  padding-top: 16px;
+  border-top: 1px solid var(--salon-line, #e6e0d1);
+}
+
+.talk-context-source-mode-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 12px;
+}
+
 .talk-outputs-layout {
   display: grid;
   grid-template-columns: minmax(240px, 320px) minmax(0, 1fr);
@@ -4964,14 +5182,6 @@ a {
   opacity: 0.6;
 }
 
-.context-source-type-badge {
-  font-size: 0.65rem;
-  font-weight: 600;
-  text-transform: uppercase;
-  opacity: 0.5;
-  letter-spacing: 0.03em;
-}
-
 .context-source-file-meta {
   font-size: 0.7rem;
   text-transform: uppercase;
@@ -5021,6 +5231,232 @@ a {
 .saved-sources-inline-edit-wrap {
   display: inline-block;
   width: 100%;
+}
+
+.talk-context-shell .context-source-dropzone {
+  gap: 6px;
+  margin: 0;
+  padding: 18px 16px;
+  border: 1.5px dashed var(--salon-line, #e6e0d1);
+  border-radius: 14px;
+  background: var(--salon-paper, #fbf7ef);
+  color: var(--salon-ink, #1f1b16);
+  font-size: 13.5px;
+}
+
+.talk-context-shell .context-source-dropzone:hover,
+.talk-context-shell .context-source-dropzone:focus-visible,
+.talk-context-shell .context-source-dropzone-active {
+  border-color: var(--salon-accent, #c8643a);
+  background: rgba(200, 100, 58, 0.06);
+  box-shadow: 0 0 0 3px rgba(200, 100, 58, 0.12);
+}
+
+.talk-context-shell .context-source-dropzone-hint {
+  color: var(--salon-ink-2, #6b6660);
+  font-size: 12px;
+  opacity: 1;
+}
+
+.talk-context-shell .context-source-upload-progress {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+}
+
+.talk-context-shell .context-source-upload-item {
+  justify-content: space-between;
+  padding: 8px 10px;
+  border: 1px solid var(--salon-line, #e6e0d1);
+  border-radius: 10px;
+  background: var(--salon-paper, #fbf7ef);
+  color: var(--salon-ink, #1f1b16);
+}
+
+.talk-context-shell .context-source-upload-status {
+  color: var(--salon-ink-2, #6b6660);
+  font-size: 12px;
+  opacity: 1;
+}
+
+.talk-context-shell .context-source-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.talk-context-shell .context-source-item {
+  padding: 12px;
+  border: 1px solid var(--salon-line, #e6e0d1);
+  border-radius: 14px;
+  background: var(--salon-card, #fff);
+}
+
+.talk-context-shell .context-source-item-row {
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.talk-context-shell .context-source-ref {
+  padding: 2px 8px;
+  border: 1px solid var(--salon-line, #e6e0d1);
+  border-radius: 999px;
+  background: var(--salon-paper-2, #f4ecdb);
+  color: var(--salon-ink-2, #6b6660);
+  font-family: var(--salon-font-mono, ui-monospace, monospace);
+  font-size: 11.5px;
+  opacity: 1;
+}
+
+.talk-context-shell .context-source-title {
+  flex: 1 1 220px;
+  min-width: 160px;
+}
+
+.talk-context-shell .context-source-row-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-left: auto;
+}
+
+.talk-context-shell .context-source-file-meta {
+  color: var(--salon-ink-2, #6b6660);
+  font-family: var(--salon-font-mono, ui-monospace, monospace);
+  font-size: 11.5px;
+  text-transform: none;
+  opacity: 1;
+}
+
+.talk-context-shell .context-source-status {
+  display: inline-flex;
+  align-items: center;
+  min-height: 22px;
+  padding: 2px 8px;
+  border: 1px solid var(--salon-line, #e6e0d1);
+  border-radius: 999px;
+  background: var(--salon-paper, #fbf7ef);
+  color: var(--salon-ink-2, #6b6660);
+  font-family: var(--salon-font-mono, ui-monospace, monospace);
+  font-size: 11.5px;
+}
+
+.talk-context-shell .context-source-status-ready {
+  border-color: #c9dfd3;
+  background: #eaf3ee;
+  color: #235041;
+}
+
+.talk-context-shell .context-source-status-failed {
+  border-color: #ecc4c7;
+  background: #fbecec;
+  color: #7b2a30;
+}
+
+.talk-context-shell .context-source-status-pending {
+  border-color: #ead7a4;
+  background: #faf1de;
+  color: #7e5418;
+}
+
+.talk-context-shell .context-source-note {
+  margin-top: 8px;
+  color: var(--salon-ink-2, #6b6660);
+  font-size: 13px;
+}
+
+.talk-context-shell .context-source-detail {
+  margin: 6px 0 0;
+  color: var(--salon-ink-2, #6b6660);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.talk-context-shell .context-source-error {
+  margin: 8px 0 0;
+  color: #7b2a30;
+  font-size: 12.5px;
+  line-height: 1.4;
+}
+
+.talk-context-shell .context-source-warning {
+  color: #7e5418;
+}
+
+.talk-context-shell .context-source-inline-action {
+  margin-left: 8px;
+}
+
+.talk-context-shell .saved-sources-inline-edit-button {
+  width: 100%;
+  min-height: 24px;
+  padding: 2px 4px;
+  border: 1px dashed transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: inherit;
+  font-family: inherit;
+  font-size: inherit;
+  text-align: left;
+}
+
+.talk-context-shell .saved-sources-inline-edit-button:hover:not(:disabled),
+.talk-context-shell .saved-sources-inline-edit-button:focus-visible {
+  border-color: var(--salon-line, #e6e0d1);
+  background: var(--salon-paper, #fbf7ef);
+}
+
+.talk-context-shell .saved-sources-inline-edit-button:disabled {
+  cursor: default;
+  opacity: 1;
+}
+
+.talk-context-shell .saved-sources-inline-edit-input {
+  height: 32px;
+  padding: 0 9px;
+  border-radius: 8px;
+  color: var(--salon-ink, #1f1b16);
+  font-family: var(--salon-font-sans, 'Geist', system-ui, sans-serif);
+  font-size: 13px;
+}
+
+@media (max-width: 700px) {
+  .talk-context-shell {
+    padding: 14px 12px 40px;
+  }
+
+  .talk-context-card {
+    padding: 16px;
+  }
+
+  .talk-context-source-mode-row,
+  .talk-context-shell .talk-rule-create-row {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .talk-context-shell .talk-rule-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .talk-context-shell .talk-rule-handle {
+    width: 100%;
+    height: 44px;
+  }
+
+  .talk-context-shell .context-source-row-meta {
+    margin-left: 0;
+  }
+
+  .talk-context-shell .context-source-inline-action {
+    margin-top: 6px;
+    margin-left: 0;
+  }
 }
 
 /* Source mention picker — composer popover that lists ready sources
@@ -5199,6 +5635,81 @@ a {
 
 .talk-tools-binding-remove {
   font-size: 0.85rem;
+}
+
+.talk-context-shell .talk-tools-panel {
+  padding: 20px;
+}
+
+.talk-context-shell .talk-tools-panel-header {
+  margin-bottom: 0;
+}
+
+.talk-context-shell .talk-tools-panel-actions {
+  align-items: center;
+}
+
+.talk-context-shell .talk-tools-panel-error {
+  margin: 0;
+  padding: 10px 14px;
+  border: 1px solid #ecc4c7;
+  border-radius: 12px;
+  background: #fbecec;
+  color: #7b2a30;
+  font-size: 13px;
+}
+
+.talk-context-shell .talk-tools-panel-empty {
+  max-width: none;
+}
+
+.talk-context-shell .talk-tools-binding-list {
+  gap: 10px;
+}
+
+.talk-context-shell .talk-tools-binding {
+  padding: 12px;
+  border-color: var(--salon-line, #e6e0d1);
+  border-radius: 14px;
+  background: var(--salon-card, #fff);
+}
+
+.talk-context-shell .talk-tools-binding-meta {
+  align-items: center;
+  gap: 8px;
+}
+
+.talk-context-shell .talk-tools-binding-kind {
+  padding: 2px 8px;
+  border: 1px solid var(--salon-line, #e6e0d1);
+  border-radius: 999px;
+  background: var(--salon-paper-2, #f4ecdb);
+  color: var(--salon-ink-2, #6b6660);
+  font-family: var(--salon-font-mono, ui-monospace, monospace);
+  font-size: 11.5px;
+  font-weight: 500;
+  letter-spacing: 0;
+  text-transform: none;
+  opacity: 1;
+}
+
+.talk-context-shell .talk-tools-binding-name {
+  color: var(--salon-ink, #1f1b16);
+  font-size: 14px;
+}
+
+.talk-context-shell .talk-tools-binding-link {
+  color: var(--salon-accent-strong, #b05530);
+  font-size: 12.5px;
+  text-decoration: none;
+}
+
+.talk-context-shell .talk-tools-binding-link:hover {
+  text-decoration: underline;
+}
+
+.talk-context-shell .talk-tools-binding-remove {
+  font-size: 12.5px;
 }
 
 .talk-tabs-add-doc {
