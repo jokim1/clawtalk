@@ -239,6 +239,10 @@ async function installMocks(page: Page): Promise<void> {
   await page.route(`**/api/v1/talks/${TALK_ID}/tools*`, (route) =>
     fulfillJson(route, { tools: [] }),
   );
+  await page.route(
+    `**/api/v1/talks/${TALK_ID}/connector-bindings*`,
+    (route) => fulfillJson(route, { channels: [], dataConnectors: [] }),
+  );
   await page.route('**/api/v1/agents*', (route) =>
     fulfillJson(route, {
       defaultClaudeModelId: '',

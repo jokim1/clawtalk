@@ -350,15 +350,16 @@ export function useTalkSendController({
     ],
   );
 
-  const submitDraft = useCallback(async () => {
+  const submitDraft = useCallback(async (draftOverride?: string) => {
     if (pageKind !== 'ready' || !pageTalk || !activeConversationId) return;
 
-    const content = composer.draft.trim();
+    const draft = draftOverride ?? composer.draft;
+    const content = draft.trim();
     if (!content) {
       dispatch({
         type: 'SEND_FAILED',
         message: 'Message content is required.',
-        lastDraft: composer.draft,
+        lastDraft: draft,
       });
       return;
     }
@@ -563,7 +564,7 @@ export function useTalkSendController({
         return;
       }
       event.preventDefault();
-      void submitDraft();
+      void submitDraft(event.currentTarget.value);
     },
     [composer, submitDraft],
   );
