@@ -80,7 +80,7 @@ export async function runWebSearchForUser(
   const preferredId = userRows[0]?.preferred_web_search_provider_id ?? null;
   if (!preferredId) {
     throw new WebSearchError(
-      'No web search provider is configured. Choose one in Settings → API Keys → Web Search.',
+      'No web search provider is configured. Add a key under Settings → Tools → Web Search (your first key is activated automatically).',
       'web_search.tavily',
       0,
     );
@@ -102,7 +102,7 @@ export async function runWebSearchForUser(
   const ciphertext = secretRows[0]?.ciphertext ?? null;
   if (!ciphertext) {
     throw new WebSearchError(
-      `No API key stored for ${preferredId}. Add one in Settings → API Keys → Web Search.`,
+      `No API key stored for ${preferredId}. Add one under Settings → Tools → Web Search.`,
       preferredId,
       0,
     );

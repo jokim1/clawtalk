@@ -476,8 +476,9 @@ function WebSearchProvidersSection({
       <h2>Web Search</h2>
       <p className="settings-copy">
         Agents call <code>web_search</code> to look things up on the live web.
-        Add a key for at least one provider, then pick which one is active for
-        your account. Keys are personal — they aren't shared with the workspace.
+        Add a key for any provider below — your first key becomes active
+        automatically, and you can switch the active provider anytime. Keys are
+        personal — they aren't shared with the workspace.
       </p>
 
       {error ? (

@@ -139,7 +139,13 @@ export async function putWebSearchCredentialRoute(
   auth: AuthContext,
   providerId: string,
   body: Record<string, unknown> | null,
-): Promise<{ statusCode: number; body: ApiEnvelope<{ saved: true }> }> {
+): Promise<{
+  statusCode: number;
+  body: ApiEnvelope<{
+    saved: true;
+    activeProviderId: WebSearchProviderId | null;
+  }>;
+}> {
   if (!isKnownWebSearchProviderId(providerId)) {
     return envelopeError(
       404,
@@ -154,6 +160,18 @@ export async function putWebSearchCredentialRoute(
   const ciphertext = await encryptProviderSecret({ apiKey });
   return withUserContext(auth.userId, async () => {
     const db = getDbPg();
+    // Auto-activate ONLY on the user's genuine first credential. The old
+    // two-step flow silently trapped users: a stored but un-activated key
+    // still fails the tool with "no provider configured". Gating on the
+    // before-save credential count (not merely a null active provider)
+    // means we never override an intentionally-cleared "disabled" state or
+    // hijack the active choice when a second key is added.
+    const existing = await db<Array<{ count: number }>>`
+      select count(*)::int as count
+      from public.web_search_provider_secrets
+      where owner_id = ${auth.userId}::uuid
+    `;
+    const isFirstCredential = (existing[0]?.count ?? 0) === 0;
     await db`
       insert into public.web_search_provider_secrets
         (owner_id, provider_id, ciphertext)
@@ -163,7 +181,26 @@ export async function putWebSearchCredentialRoute(
         ciphertext = excluded.ciphertext,
         updated_at = now()
     `;
-    return envelopeOk({ saved: true as const });
+    if (isFirstCredential) {
+      await db`
+        update public.users
+        set preferred_web_search_provider_id = ${providerId}
+        where id = ${auth.userId}::uuid
+          and preferred_web_search_provider_id is null
+      `;
+    }
+    const userRows = await db<
+      Array<{ preferred_web_search_provider_id: string | null }>
+    >`
+      select preferred_web_search_provider_id
+      from public.users
+      where id = ${auth.userId}::uuid
+      limit 1
+    `;
+    const activeRaw = userRows[0]?.preferred_web_search_provider_id ?? null;
+    const activeProviderId =
+      activeRaw && isKnownWebSearchProviderId(activeRaw) ? activeRaw : null;
+    return envelopeOk({ saved: true as const, activeProviderId });
   });
 }
 
