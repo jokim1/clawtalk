@@ -399,7 +399,6 @@ export function TalkDetailPage({
   const {
     agents,
     agentDrafts,
-    setAgentDrafts,
     newAgentDraft,
     setNewAgentDraft,
     agentState,
@@ -421,10 +420,7 @@ export function TalkDetailPage({
     resetTalkAgents,
     hydrateTalkAgents,
     toggleTargetAgent,
-    handleAgentNicknameChange,
-    handleAgentRoleChange,
     handleSetPrimaryAgent,
-    handleResetNickname,
     handleRemoveAgent,
     handleAddAgent,
     handleSaveAgents,
@@ -1036,10 +1032,9 @@ export function TalkDetailPage({
 
   const talk = pageTalk;
   const displayedTitle = titleOverride || talk.title;
-  const renderAgentsPanel = () => (
+  const renderAgentsPanel = (options?: { sidePanel?: boolean }) => (
     <TalkAgentsPanel
       agentDrafts={agentDrafts}
-      setAgentDrafts={setAgentDrafts}
       newAgentDraft={newAgentDraft}
       setNewAgentDraft={setNewAgentDraft}
       agentState={agentState}
@@ -1049,10 +1044,8 @@ export function TalkDetailPage({
       canEditAgents={canEditAgents}
       hasPendingFooterAgentSelection={hasPendingFooterAgentSelection}
       manageAgentsHref={manageAgentsHref}
-      handleAgentNicknameChange={handleAgentNicknameChange}
-      handleAgentRoleChange={handleAgentRoleChange}
+      showPanelHeader={options?.sidePanel !== true}
       handleSetPrimaryAgent={handleSetPrimaryAgent}
-      handleResetNickname={handleResetNickname}
       handleRemoveAgent={handleRemoveAgent}
       handleAddAgent={handleAddAgent}
       handleSaveAgents={handleSaveAgents}
@@ -1127,7 +1120,7 @@ export function TalkDetailPage({
             effectiveAgents.length === 1 ? 'agent' : 'agents'
           } in this Talk`,
           icon: 'sparkle' as const,
-          content: renderAgentsPanel(),
+          content: renderAgentsPanel({ sidePanel: true }),
         }
       : sidePanel === 'context'
         ? {

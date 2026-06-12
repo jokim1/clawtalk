@@ -7,6 +7,7 @@ import {
   formatTalkRole,
   type AgentCreationDraft,
 } from '../lib/talkAgents';
+import { CTIcon } from '../salon';
 
 type AgentSaveState = {
   status: 'idle' | 'saving' | 'error' | 'success';
@@ -15,7 +16,6 @@ type AgentSaveState = {
 
 type TalkAgentsPanelProps = {
   agentDrafts: TalkAgent[];
-  setAgentDrafts: Dispatch<SetStateAction<TalkAgent[]>>;
   newAgentDraft: AgentCreationDraft;
   setNewAgentDraft: Dispatch<SetStateAction<AgentCreationDraft>>;
   agentState: AgentSaveState;
@@ -25,27 +25,50 @@ type TalkAgentsPanelProps = {
   canEditAgents: boolean;
   hasPendingFooterAgentSelection: boolean;
   manageAgentsHref: string;
-  handleAgentNicknameChange: (agentId: string, nickname: string) => void;
-  handleAgentRoleChange: (agentId: string, role: TalkAgent['role']) => void;
+  showPanelHeader?: boolean;
   handleSetPrimaryAgent: (agentId: string) => void;
-  handleResetNickname: (agentId: string) => void;
   handleRemoveAgent: (agentId: string) => void;
   handleAddAgent: () => void;
   handleSaveAgents: () => void;
 };
 
-/**
- * Presentational Talk Agents tab (registered-agent roster editor + add-agent
- * footer). All mutation-written state (agentDrafts, the add-agent footer
- * draft, the save status) is page-owned and threaded in — this tab unmounts on
- * every tab switch, so panel-local copies would orphan an in-flight save
- * (cf. TalkContextPanel / TalkJobsPanel). The page keeps the handlers because
- * they reach page-only state (targetAgentIds, the registered-agent catalog,
- * nickname helpers).
- */
+function coerceTalkRole(role: string | null | undefined): TalkAgent['role'] {
+  return TALK_AGENT_ROLE_OPTIONS.includes(role as TalkAgent['role'])
+    ? (role as TalkAgent['role'])
+    : 'assistant';
+}
+
+function buildInitials(name: string): string {
+  const words = name
+    .replace(/[^a-zA-Z0-9 ]/g, ' ')
+    .split(/\s+/)
+    .filter(Boolean);
+  if (words.length === 0) return 'AI';
+  if (words.length === 1) return words[0]!.slice(0, 2).toUpperCase();
+  return `${words[0]![0]}${words[1]![0]}`.toUpperCase();
+}
+
+function agentDisplayName(
+  agent: TalkAgent,
+  registeredAgent: RegisteredAgent | undefined,
+): string {
+  return registeredAgent?.name || agent.nickname || 'Unknown agent';
+}
+
+function agentModelLabel(
+  agent: TalkAgent,
+  registeredAgent: RegisteredAgent | undefined,
+): string {
+  return (
+    registeredAgent?.modelId ||
+    agent.modelDisplayName ||
+    agent.modelId ||
+    'Model pending'
+  );
+}
+
 export function TalkAgentsPanel({
   agentDrafts,
-  setAgentDrafts,
   newAgentDraft,
   setNewAgentDraft,
   agentState,
@@ -55,240 +78,183 @@ export function TalkAgentsPanel({
   canEditAgents,
   hasPendingFooterAgentSelection,
   manageAgentsHref,
-  handleAgentNicknameChange,
-  handleAgentRoleChange,
+  showPanelHeader = true,
   handleSetPrimaryAgent,
-  handleResetNickname,
   handleRemoveAgent,
   handleAddAgent,
   handleSaveAgents,
 }: TalkAgentsPanelProps): JSX.Element {
-  return (
-    <section className="talk-tab-panel" aria-label="Talk agents">
-      <div className="agents-panel-header">
-        <h2>Agents</h2>
-        <Link className="secondary-btn" to={manageAgentsHref}>
-          Manage AI Agents
-        </Link>
-      </div>
-      <p className="policy-muted">
-        Nicknames are local to this talk. The primary agent responds to normal
-        user messages by default.
-      </p>
-      {agentDrafts.map((agent) => (
-        <div key={agent.id} className="agent-editor-card">
-          <label>
-            <span>Registered Agent</span>
-            <select
-              value={agent.id}
-              onChange={(event) => {
-                const regAgent = registeredAgentsCatalog.find(
-                  (ra) => ra.id === event.target.value,
-                );
-                if (!regAgent) return;
-                setAgentDrafts((current) =>
-                  current.map((a) =>
-                    a.id === agent.id
-                      ? {
-                          ...a,
-                          id: regAgent.id,
-                          sourceKind: 'provider',
-                          providerId: regAgent.providerId,
-                          modelId: regAgent.modelId,
-                          modelDisplayName: null,
-                          nickname:
-                            a.nicknameMode === 'auto'
-                              ? regAgent.name
-                              : a.nickname,
-                          health: 'ready',
-                        }
-                      : a,
-                  ),
-                );
-                setAgentState({ status: 'idle' });
-              }}
-              disabled={!canEditAgents || agentState.status === 'saving'}
-            >
-              <option
-                value={agent.id}
-                disabled={
-                  !registeredAgentsCatalog.some((ra) => ra.id === agent.id)
-                }
-              >
-                {registeredAgentsCatalog.find((ra) => ra.id === agent.id)
-                  ?.name ||
-                  agent.nickname ||
-                  'Unknown agent'}
-              </option>
-              {registeredAgentsCatalog
-                .filter(
-                  (ra) =>
-                    ra.enabled &&
-                    ra.id !== agent.id &&
-                    !agentDrafts.some((d) => d.id === ra.id),
-                )
-                .map((ra) => (
-                  <option key={ra.id} value={ra.id}>
-                    {ra.name}
-                    {ra.personaRole ? ` · ${ra.personaRole}` : ''} ({ra.modelId}
-                    )
-                  </option>
-                ))}
-            </select>
-          </label>
-          {(() => {
-            const persona = registeredAgentsCatalog.find(
-              (ra) => ra.id === agent.id,
-            );
-            return persona?.description ? (
-              <p className="talk-llm-meta talk-agent-persona-blurb">
-                {persona.description}
-              </p>
-            ) : null;
-          })()}
-          <label>
-            <span>Nickname</span>
-            <input
-              type="text"
-              value={agent.nickname}
-              onChange={(event) =>
-                handleAgentNicknameChange(agent.id, event.target.value)
-              }
-              disabled={!canEditAgents || agentState.status === 'saving'}
-            />
-          </label>
-          <label>
-            <span>Role</span>
-            <select
-              value={agent.role}
-              onChange={(event) =>
-                handleAgentRoleChange(
-                  agent.id,
-                  event.target.value as TalkAgent['role'],
-                )
-              }
-              disabled={!canEditAgents || agentState.status === 'saving'}
-            >
-              {TALK_AGENT_ROLE_OPTIONS.map((role) => (
-                <option key={role} value={role}>
-                  {formatTalkRole(role)}
-                </option>
-              ))}
-            </select>
-          </label>
-          <div className="agent-editor-actions">
-            <label className="policy-primary-toggle">
-              <input
-                type="radio"
-                name="primary-talk-agent"
-                checked={agent.isPrimary}
-                onChange={() => handleSetPrimaryAgent(agent.id)}
-                disabled={!canEditAgents || agentState.status === 'saving'}
-              />
-              <span>Primary Agent</span>
-            </label>
-            <button
-              type="button"
-              className="secondary-btn"
-              onClick={() => handleResetNickname(agent.id)}
-              disabled={!canEditAgents || agentState.status === 'saving'}
-            >
-              Reset name
-            </button>
-            <button
-              type="button"
-              className="secondary-btn"
-              onClick={() => handleRemoveAgent(agent.id)}
-              disabled={
-                !canEditAgents ||
-                agentState.status === 'saving' ||
-                agentDrafts.length <= 1
-              }
-            >
-              Remove
-            </button>
-          </div>
-        </div>
-      ))}
+  const assignedAgentIds = new Set(agentDrafts.map((agent) => agent.id));
+  const availableRegisteredAgents = registeredAgentsCatalog.filter(
+    (agent) => agent.enabled && !assignedAgentIds.has(agent.id),
+  );
+  const registeredAgentsById = new Map(
+    registeredAgentsCatalog.map((agent) => [agent.id, agent] as const),
+  );
+  const saving = agentState.status === 'saving';
 
-      <div className="agent-editor-footer">
-        <label>
-          <span>Agent</span>
+  return (
+    <section
+      className="talk-tab-panel talk-room-panel"
+      aria-label="Talk agents"
+    >
+      {showPanelHeader ? (
+        <header className="agents-panel-header talk-room-panel-header">
+          <div>
+            <p className="talk-room-kicker">Speaking order</p>
+            <h2>The Room</h2>
+          </div>
+          <Link className="secondary-btn" to={manageAgentsHref}>
+            Manage AI Agents
+          </Link>
+        </header>
+      ) : (
+        <div className="talk-room-panel-toolbar">
+          <p className="talk-room-kicker">Speaking order</p>
+          <Link className="secondary-btn" to={manageAgentsHref}>
+            Manage AI Agents
+          </Link>
+        </div>
+      )}
+
+      <div
+        className="talk-room-list"
+        role="list"
+        aria-label="Agents in this talk"
+      >
+        {agentDrafts.map((agent, index) => {
+          const registeredAgent = registeredAgentsById.get(agent.id);
+          const displayName = agentDisplayName(agent, registeredAgent);
+          const roleLabel = formatTalkRole(agent.role);
+          const healthLabel =
+            agent.health === 'ready'
+              ? 'Ready'
+              : agent.health === 'invalid'
+                ? 'Needs setup'
+                : 'Pending';
+
+          return (
+            <article
+              key={agent.id}
+              className="talk-room-agent-card"
+              role="listitem"
+              aria-label={`${displayName}, ${roleLabel}`}
+            >
+              <span
+                className="talk-room-order"
+                aria-label={`Order ${index + 1}`}
+              >
+                {index + 1}
+              </span>
+              <span className="talk-room-avatar" aria-hidden="true">
+                {buildInitials(displayName)}
+              </span>
+              <div className="talk-room-agent-main">
+                <div className="talk-room-agent-title">
+                  <strong>{displayName}</strong>
+                  <span className="talk-room-role-badge">{roleLabel}</span>
+                </div>
+                <div className="talk-room-agent-meta">
+                  <span>{agentModelLabel(agent, registeredAgent)}</span>
+                  <span>{healthLabel}</span>
+                </div>
+                {registeredAgent?.description ? (
+                  <p className="talk-room-agent-description">
+                    {registeredAgent.description}
+                  </p>
+                ) : null}
+              </div>
+              <div className="talk-room-agent-actions">
+                <label className="policy-primary-toggle talk-room-primary-toggle">
+                  <input
+                    type="radio"
+                    name="primary-talk-agent"
+                    checked={agent.isPrimary}
+                    onChange={() => handleSetPrimaryAgent(agent.id)}
+                    disabled={!canEditAgents || saving}
+                  />
+                  <span>Primary</span>
+                </label>
+                <button
+                  type="button"
+                  className="talk-room-text-button"
+                  onClick={() => handleRemoveAgent(agent.id)}
+                  disabled={!canEditAgents || saving || agentDrafts.length <= 1}
+                >
+                  Remove
+                </button>
+              </div>
+            </article>
+          );
+        })}
+      </div>
+
+      <div className="talk-room-add-card">
+        <span className="talk-room-add-icon" aria-hidden="true">
+          <CTIcon name="plus" size={14} strokeWidth={1.8} />
+        </span>
+        <label className="talk-room-add-select">
+          <span>Add an agent to the room</span>
           <select
             value={newAgentDraft.modelId}
             onChange={(event) => {
-              const ra = registeredAgentsCatalog.find(
-                (a) => a.id === event.target.value,
+              const agent = registeredAgentsCatalog.find(
+                (entry) => entry.id === event.target.value,
               );
-              if (!ra) return;
+              if (!agent) return;
               setNewAgentDraft({
                 sourceKind: 'provider',
-                providerId: ra.providerId,
-                modelId: ra.id,
-                role: (ra.personaRole as TalkAgent['role']) || 'assistant',
+                providerId: agent.providerId,
+                modelId: agent.id,
+                role: coerceTalkRole(agent.personaRole),
               });
+              setAgentState({ status: 'idle' });
             }}
-            disabled={!canEditAgents || agentState.status === 'saving'}
+            disabled={
+              !canEditAgents || saving || availableRegisteredAgents.length === 0
+            }
           >
             <option value="" disabled>
-              Choose a registered agent…
+              {availableRegisteredAgents.length === 0
+                ? 'No available registered agents'
+                : 'Choose a registered agent...'}
             </option>
-            {registeredAgentsCatalog
-              .filter(
-                (ra) => ra.enabled && !agentDrafts.some((d) => d.id === ra.id),
-              )
-              .map((ra) => (
-                <option key={ra.id} value={ra.id}>
-                  {ra.name}
-                  {ra.personaRole ? ` · ${ra.personaRole}` : ''} ({ra.modelId})
-                </option>
-              ))}
-          </select>
-        </label>
-        <label>
-          <span>Role</span>
-          <select
-            value={newAgentDraft.role}
-            onChange={(event) =>
-              setNewAgentDraft((current) => ({
-                ...current,
-                role: event.target.value as TalkAgent['role'],
-              }))
-            }
-            disabled={!canEditAgents || agentState.status === 'saving'}
-          >
-            {TALK_AGENT_ROLE_OPTIONS.map((role) => (
-              <option key={role} value={role}>
-                {formatTalkRole(role)}
+            {availableRegisteredAgents.map((agent) => (
+              <option key={agent.id} value={agent.id}>
+                {agent.name}
+                {agent.personaRole ? ` · ${agent.personaRole}` : ''} (
+                {agent.modelId})
               </option>
             ))}
           </select>
         </label>
-        <button
-          type="button"
-          className="secondary-btn"
-          onClick={handleAddAgent}
-          disabled={
-            !canEditAgents ||
-            agentState.status === 'saving' ||
-            !newAgentDraft.modelId
-          }
-        >
-          Add Agent
-        </button>
-        <button
-          type="button"
-          className="secondary-btn"
-          onClick={handleSaveAgents}
-          disabled={!canEditAgents || agentState.status === 'saving'}
-        >
-          {agentState.status === 'saving'
-            ? 'Saving…'
-            : hasPendingFooterAgentSelection
-              ? 'Add + Save Agents'
-              : 'Save Agents'}
-        </button>
+        <span className="talk-room-available-count">
+          {availableRegisteredAgents.length} available
+        </span>
+        <div className="talk-room-add-actions">
+          <button
+            type="button"
+            className="secondary-btn"
+            onClick={handleAddAgent}
+            disabled={!canEditAgents || saving || !newAgentDraft.modelId}
+          >
+            Add to room
+          </button>
+          <button
+            type="button"
+            className="secondary-btn"
+            onClick={handleSaveAgents}
+            disabled={!canEditAgents || saving}
+          >
+            {saving
+              ? 'Saving...'
+              : hasPendingFooterAgentSelection
+                ? 'Add + Save room'
+                : 'Save room'}
+          </button>
+        </div>
       </div>
+
       {agentsCatalogError ? (
         <div className="inline-banner inline-banner-error" role="alert">
           {agentsCatalogError}
