@@ -542,14 +542,15 @@ a {
 }
 
 .ct-secondary-tree {
-  flex: 1 1 auto;
+  /* Natural height (not flex-grow) so the Inbox section hugs the last talk;
+     when talks overflow, the tree shrinks and scrolls while Inbox stays put. */
+  flex: 0 1 auto;
   min-height: 0;
   overflow-y: auto;
   padding: 0.45rem 0.5rem 0.2rem;
 }
 .ct-secondary-content {
-  flex: 0 1 auto;
-  min-height: 0;
+  flex: none;
   display: flex;
   flex-direction: column;
   gap: 0.35rem;
@@ -574,6 +575,7 @@ a {
   letter-spacing: 0;
 }
 .ct-secondary-foot {
+  margin-top: auto;
   padding: 0.4rem 0 0.6rem;
 }
 
