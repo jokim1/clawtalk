@@ -265,4 +265,84 @@ describe('agent-router', () => {
 
     expect(capturedToolNames).not.toContain('web_search');
   });
+
+  it('stamps durationMs on tool_result emits for both resolved and thrown tools (P1-f)', async () => {
+    vi.useFakeTimers();
+    try {
+      let llmCall = 0;
+      vi.mocked(streamLlmResponse).mockImplementation(async function* () {
+        llmCall += 1;
+        if (llmCall === 1) {
+          yield {
+            type: 'tool_call_start',
+            toolCall: { id: 'tc-1', name: 'web_search' },
+          };
+          yield {
+            type: 'tool_call_delta',
+            toolCall: { id: 'tc-1', arguments: '{"query":"news"}' },
+          };
+          yield { type: 'done', stopReason: 'tool_calls' };
+        } else if (llmCall === 2) {
+          yield {
+            type: 'tool_call_start',
+            toolCall: { id: 'tc-2', name: 'read_source' },
+          };
+          yield {
+            type: 'tool_call_delta',
+            toolCall: { id: 'tc-2', arguments: '{"sourceRef":"s-1"}' },
+          };
+          yield { type: 'done', stopReason: 'tool_calls' };
+        } else {
+          yield { type: 'text_delta', text: 'done' };
+          yield { type: 'done', stopReason: 'stop' };
+        }
+      } as typeof streamLlmResponse);
+
+      const context = {
+        systemPrompt: 'Talk system prompt',
+        contextTools: [{ name: 'web_search' }, { name: 'read_source' }],
+        connectorTools: [],
+        history: [],
+      };
+      const events: Array<Record<string, unknown>> = [];
+      await executeWithAgent('agent-1', context as never, 'use tools', {
+        runId: 'run-durations',
+        userId: 'owner-1',
+        emit: (event) => events.push(event as Record<string, unknown>),
+        effectiveTools: [
+          {
+            toolFamily: 'web',
+            runtimeTools: ['web_search', 'read_source'],
+            enabled: true,
+            requiresApproval: false,
+          },
+        ] as never,
+        executeToolCall: async (toolName: string) => {
+          // Fake timers: advance the mocked clock "during" the call so
+          // the router's Date.now() span is deterministic.
+          vi.advanceTimersByTime(250);
+          if (toolName === 'read_source') {
+            throw new Error('source unavailable');
+          }
+          return { result: 'ok', isError: false };
+        },
+      });
+
+      const toolResults = events.filter((e) => e.type === 'tool_result');
+      expect(toolResults).toHaveLength(2);
+      expect(toolResults[0]).toMatchObject({
+        toolName: 'web_search',
+        isError: false,
+        durationMs: 250,
+      });
+      expect(toolResults[1]).toMatchObject({
+        toolName: 'read_source',
+        isError: true,
+        durationMs: 250,
+      });
+      expect(String(toolResults[1]?.result)).toContain('source unavailable');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

@@ -46,6 +46,7 @@ import {
 } from './greenfield-job-accessors.js';
 import {
   buildGreenfieldStepUserMessageText,
+  mapExecutionEvent,
   raceToolCallDeadline,
 } from './greenfield-executor.js';
 import { processTalkRunMessage } from './queue-consumer.js';
@@ -3226,5 +3227,160 @@ describe('raceToolCallDeadline', () => {
         1_000,
       ),
     ).rejects.toThrow('boom');
+  });
+});
+
+// P1-f (Talk Runtime v2): tool_result events must reach the outbox —
+// they previously mapped to null, which blinded wedge diagnosis twice
+// on 2026-06-12. mapExecutionEvent is @internal-exported for these.
+describe('mapExecutionEvent tool_result (P1-f)', () => {
+  const RUN_ROW = {
+    id: 'run-map-1',
+    workspace_id: 'ws-1',
+    talk_id: 'talk-map-1',
+    source_agent_id: 'agent-1',
+    agent_snapshot_id: 'snapshot-1',
+    agent_name: 'Researcher',
+    provider_id: 'anthropic',
+    model_id: 'claude-opus-4-8',
+  } as Parameters<typeof mapExecutionEvent>[2];
+  const EXEC_INPUT = {
+    runId: 'run-map-1',
+    talkId: 'talk-map-1',
+    requestedBy: USER_ID,
+    triggerMessageId: 'msg-1',
+    triggerContent: 'search something',
+    responseGroupId: 'group-1',
+    sequenceIndex: 0,
+  } as Parameters<typeof mapExecutionEvent>[1];
+
+  it('maps tool_result with shared run fields, isError, and durationMs', () => {
+    const mapped = mapExecutionEvent(
+      {
+        type: 'tool_result',
+        toolName: 'web_search',
+        result: '{"provider":"web_search.tavily","results":[]}',
+        isError: false,
+        durationMs: 1234,
+      },
+      EXEC_INPUT,
+      RUN_ROW,
+    );
+    expect(mapped).toEqual({
+      type: 'tool_result',
+      runId: 'run-map-1',
+      talkId: 'talk-map-1',
+      agentId: 'agent-1',
+      agentNickname: 'Researcher',
+      responseGroupId: 'group-1',
+      sequenceIndex: 0,
+      providerId: 'anthropic',
+      modelId: 'claude-opus-4-8',
+      toolName: 'web_search',
+      result: '{"provider":"web_search.tavily","results":[]}',
+      isError: false,
+      durationMs: 1234,
+    });
+  });
+
+  it('truncates results beyond 500 chars with a visible marker', () => {
+    const longResult = 'x'.repeat(501);
+    const mapped = mapExecutionEvent(
+      {
+        type: 'tool_result',
+        toolName: 'read_source',
+        result: longResult,
+        isError: false,
+      },
+      EXEC_INPUT,
+      RUN_ROW,
+    );
+    expect(mapped?.type).toBe('tool_result');
+    if (mapped?.type !== 'tool_result') return;
+    expect(mapped.result).toHaveLength(500 + '… [truncated]'.length);
+    expect(mapped.result.endsWith('… [truncated]')).toBe(true);
+    expect(mapped.result.startsWith('x'.repeat(500))).toBe(true);
+  });
+
+  it('keeps exactly-500-char results untouched', () => {
+    const exact = 'y'.repeat(500);
+    const mapped = mapExecutionEvent(
+      { type: 'tool_result', toolName: 'web_search', result: exact },
+      EXEC_INPUT,
+      RUN_ROW,
+    );
+    if (mapped?.type !== 'tool_result') throw new Error('expected tool_result');
+    expect(mapped.result).toBe(exact);
+  });
+
+  it('never cuts through a surrogate pair (jsonb rejects lone surrogates)', () => {
+    // The emoji is two UTF-16 code units; placing it so the 500-cut
+    // lands mid-pair previously produced an unpaired high surrogate
+    // that Postgres jsonb rejects - the outbox INSERT threw and the
+    // event was silently dropped.
+    const straddling = `${'x'.repeat(499)}\u{1f600}${'z'.repeat(50)}`;
+    const mapped = mapExecutionEvent(
+      { type: 'tool_result', toolName: 'web_search', result: straddling },
+      EXEC_INPUT,
+      RUN_ROW,
+    );
+    if (mapped?.type !== 'tool_result') throw new Error('expected tool_result');
+    const body = mapped.result.replace('\u2026 [truncated]', '');
+    const lastCode = body.charCodeAt(body.length - 1);
+    expect(lastCode >= 0xd800 && lastCode <= 0xdbff).toBe(false);
+    expect(body).toBe('x'.repeat(499));
+  });
+
+  it('strips NUL characters jsonb would reject outright', () => {
+    const mapped = mapExecutionEvent(
+      {
+        type: 'tool_result',
+        toolName: 'read_source',
+        result: 'before\u0000after',
+        isError: false,
+      },
+      EXEC_INPUT,
+      RUN_ROW,
+    );
+    if (mapped?.type !== 'tool_result') throw new Error('expected tool_result');
+    expect(mapped.result).toBe('beforeafter');
+  });
+
+  it('normalizes a missing isError to false and an error to true', () => {
+    const noFlag = mapExecutionEvent(
+      { type: 'tool_result', toolName: 'web_search', result: 'ok' },
+      EXEC_INPUT,
+      RUN_ROW,
+    );
+    if (noFlag?.type !== 'tool_result') throw new Error('expected tool_result');
+    expect(noFlag.isError).toBe(false);
+    const flagged = mapExecutionEvent(
+      {
+        type: 'tool_result',
+        toolName: 'web_search',
+        result: 'web_search error: 401',
+        isError: true,
+        durationMs: 5,
+      },
+      EXEC_INPUT,
+      RUN_ROW,
+    );
+    if (flagged?.type !== 'tool_result')
+      throw new Error('expected tool_result');
+    expect(flagged.isError).toBe(true);
+  });
+
+  it('still drops awaiting_confirmation', () => {
+    const mapped = mapExecutionEvent(
+      {
+        type: 'awaiting_confirmation',
+        confirmationId: 'c1',
+        toolName: 'web_search',
+        actionSummary: 'pending',
+      },
+      EXEC_INPUT,
+      RUN_ROW,
+    );
+    expect(mapped).toBeNull();
   });
 });
