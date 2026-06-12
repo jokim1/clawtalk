@@ -293,8 +293,6 @@ export function TalkDetailPage({
   // format only, never a flat content body read.
   const primaryDocumentId = talkSnapshot?.primaryDocument?.id ?? null;
   const primaryDocumentTitle = talkSnapshot?.primaryDocument?.title ?? '';
-  const primaryDocumentFormat =
-    talkSnapshot?.primaryDocument?.format ?? 'markdown';
 
   // Bumped on each content-edit stream event so the native doc pane reloads
   // its blocks/pending edits in place (replaces the legacy content refetch).
@@ -1170,8 +1168,7 @@ export function TalkDetailPage({
           documentsOpen={
             currentTab === 'talk' &&
             !docPaneSuppressed &&
-            primaryDocumentId !== null &&
-            (isNarrowViewport ? mobilePane === 'doc' : !docPaneHidden)
+            primaryDocumentId !== null
           }
           activeRuleCount={activeRuleCount}
           showOrchestrationSelector={showOrchestrationSelector}
@@ -1261,8 +1258,6 @@ export function TalkDetailPage({
                 setMessageElementRef={setMessageElementRef}
                 textareaRef={composerInput.textareaRef}
                 primaryDocumentId={primaryDocumentId}
-                primaryDocumentTitle={primaryDocumentTitle}
-                primaryDocumentFormat={primaryDocumentFormat}
                 workspaceId={activeTalkWorkspaceId}
                 docReloadSignal={docReloadSignal}
                 isNarrowViewport={isNarrowViewport}

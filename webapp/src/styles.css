@@ -46,13 +46,6 @@
   --format-pill-html-fg: #8a5a14;
   --format-pill-html-border: #ecd9b2;
 
-  /* Doc-pane edge-tab tokens (sticky right-edge button shown when
-     the doc pane is hidden — picks up the warm cream end of the
-     body gradient so it reads as "the doc panel is over here"). */
-  --edge-tab-bg: #fdfbf6;
-  --edge-tab-border: #d8dfec;
-  --edge-tab-hover-bg: #f3eee1;
-  --edge-tab-fg: #1d2433;
 }
 
 * {
@@ -7290,7 +7283,6 @@ a {
    - .doc-pane-header-mode-toggle — Preview / Source segmented control
    - .copy-export-menu-* — Copy / Export dropdown
    - .doc-pane-hide-btn — chevron button that hides the doc pane
-   - .doc-pane-edge-tab — sticky right-edge button shown when pane hidden
    - .doc-pane-sanitize-warning — banner shown for stripped tags
    - .html-source-editor — CodeMirror Source mode wrapper
    - .safe-html — SafeHtml render wrapper
@@ -7587,64 +7579,6 @@ a {
   /* Inherits .talk-tab-doc-conflict-button base styling. */
 }
 
-/* Edge tab — sticky right-edge button shown when doc pane is hidden.
-   Min-width / min-height enforce ≥44×44 touch target. The vertical
-   label uses writing-mode so the title reads top-to-bottom. */
-.doc-pane-edge-tab {
-  position: sticky;
-  top: 1rem;
-  align-self: flex-start;
-  flex: none;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 0.5rem;
-  min-width: 44px;
-  min-height: 44px;
-  width: 44px;
-  padding: 0.85rem 0.35rem;
-  background: var(--edge-tab-bg);
-  border: 1px solid var(--edge-tab-border);
-  border-radius: 12px;
-  color: var(--edge-tab-fg);
-  cursor: pointer;
-  font: inherit;
-  font-size: 0.85rem;
-  font-weight: 600;
-  transition:
-    background 140ms ease,
-    border-color 140ms ease,
-    box-shadow 140ms ease;
-}
-
-.doc-pane-edge-tab:hover {
-  background: var(--edge-tab-hover-bg);
-  border-color: #c8d2e6;
-  box-shadow: 0 6px 14px rgba(31, 52, 88, 0.06);
-}
-
-.doc-pane-edge-tab:focus-visible {
-  outline: 2px solid #2b63d9;
-  outline-offset: 2px;
-}
-
-.doc-pane-edge-tab-label {
-  writing-mode: vertical-rl;
-  transform: rotate(180deg);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  max-height: 11rem;
-  color: var(--edge-tab-fg);
-}
-
-.doc-pane-edge-tab-pill {
-  /* Slightly smaller in the edge-tab context */
-  font-size: 0.62rem;
-  padding: 1px 5px;
-}
-
 /* HTML source editor (CodeMirror wrapper) */
 .html-source-editor {
   position: relative;
@@ -7758,11 +7692,6 @@ a {
     padding: 0 0.35rem;
   }
 
-  .doc-pane-edge-tab-label {
-    /* On very narrow viewports the title may not fit; truncation
-       handled by overflow ellipsis above. */
-    font-size: 0.78rem;
-  }
 }
 
 /* ---------------------------------------------------------------------------

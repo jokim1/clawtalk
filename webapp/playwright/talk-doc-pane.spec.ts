@@ -162,6 +162,32 @@ async function fulfillJson(route: Route, data: unknown, status = 200) {
   });
 }
 
+test('desktop doc pane hides without rendering a floating edge tab', async ({
+  page,
+}) => {
+  await installMocks(page);
+  await page.setViewportSize({ width: 1512, height: 982 });
+  await page.goto(`/app/talks/${TALK_ID}/talk?thread=${THREAD_ID}&doc=1`);
+
+  const docPane = page.getByRole('region', { name: /talk document/i });
+  await expect(docPane).toBeVisible();
+
+  await page.getByRole('button', { name: /hide document pane/i }).click();
+
+  await expect(docPane).toBeHidden();
+  await expect(
+    page.getByRole('button', { name: /show launch brief document/i }),
+  ).toHaveCount(0);
+
+  const documentsButton = page
+    .getByRole('navigation', { name: 'Talk controls' })
+    .getByRole('button', { name: 'Documents' });
+  await expect(documentsButton).toHaveAttribute('aria-pressed', 'true');
+
+  await documentsButton.click();
+  await expect(docPane).toBeVisible();
+});
+
 async function installMocks(page: Page): Promise<void> {
   // LIFO: catch-all first, specific handlers below win.
   await page.route('**/api/v1/**', (route) => fulfillJson(route, {}));

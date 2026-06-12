@@ -3071,7 +3071,7 @@ describe('TalkDetailPage', () => {
   // execution + retries. It still runs locally so the behavior stays covered.
   // TODO: stabilize for CI (likely needs the onReplayGap dispatch awaited
   // inside act, or the dialog flow decoupled from the in-flight snapshot).
-  it.skipIf(!!process.env.CI)(
+  it.skipIf(Boolean(import.meta.env.CI))(
     'keeps the Talk timeline in sync when a stale replay-gap snapshot resolves after deleting history',
     async () => {
       const user = userEvent.setup();
@@ -3260,7 +3260,7 @@ describe('TalkDetailPage', () => {
   // not in CI's timing. The product behavior it guards (deleted messages stay
   // hidden when a resync re-adds them) is fixed via the deletedIdsVersion bump
   // in TalkDetailPage and verified locally. TODO: stabilize for CI.
-  it.skipIf(!!process.env.CI)(
+  it.skipIf(Boolean(import.meta.env.CI))(
     'keeps deleted prompt messages hidden when an execution resync returns stale rows',
     async () => {
       const user = userEvent.setup();
@@ -3482,7 +3482,7 @@ describe('TalkDetailPage', () => {
     );
   });
 
-  it('hides the doc pane via the hide button, shows it via the edge tab, and persists state in localStorage', async () => {
+  it('hides the doc pane via the hide button, restores it from Documents, and persists state in localStorage', async () => {
     const user = userEvent.setup();
     window.localStorage.clear();
     installTalkDetailFetch({
@@ -3510,23 +3510,32 @@ describe('TalkDetailPage', () => {
     });
     await user.click(hideBtn);
 
-    // Edge tab appears with the doc title.
-    const edgeTab = await screen.findByRole('button', {
-      name: /show hide me document/i,
-    });
-    expect(edgeTab).toBeInTheDocument();
+    await waitFor(() =>
+      expect(screen.getByLabelText('Talk document')).toHaveClass(
+        'talk-tab-pane-hidden',
+      ),
+    );
+    expect(
+      screen.queryByRole('button', { name: /show hide me document/i }),
+    ).not.toBeInTheDocument();
+    const talkControls = within(
+      screen.getByRole('navigation', { name: 'Talk controls' }),
+    );
+    expect(
+      talkControls.getByRole('button', { name: 'Documents' }),
+    ).toHaveAttribute('aria-pressed', 'true');
 
     // Persisted to localStorage.
     const raw = window.localStorage.getItem('clawtalk_doc_pane:talk-1');
     expect(raw).not.toBeNull();
     expect(JSON.parse(raw as string)).toMatchObject({ hidden: true });
 
-    // Click edge tab restores the pane.
-    await user.click(edgeTab);
+    // The header Documents control is the restore affordance.
+    await user.click(talkControls.getByRole('button', { name: 'Documents' }));
     await waitFor(() =>
-      expect(
-        screen.queryByRole('button', { name: /show hide me document/i }),
-      ).not.toBeInTheDocument(),
+      expect(screen.getByLabelText('Talk document')).not.toHaveClass(
+        'talk-tab-pane-hidden',
+      ),
     );
   });
 
@@ -3648,7 +3657,7 @@ describe('TalkDetailPage', () => {
     const doc = await screen.findByLabelText('Talk document');
     expect(await within(doc).findByText('# Resync body')).toBeInTheDocument();
 
-    const fetchMock = global.fetch as unknown as ReturnType<typeof vi.fn>;
+    const fetchMock = globalThis.fetch as unknown as ReturnType<typeof vi.fn>;
     const docFetchCount = () =>
       fetchMock.mock.calls.filter((call) => {
         const u =
