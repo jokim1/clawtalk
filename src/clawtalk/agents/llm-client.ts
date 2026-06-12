@@ -1261,6 +1261,17 @@ export async function* streamLlmResponse(
         credentialKind,
         options?.forceToolUse ?? false,
       );
+      // TEMP websearch-trace instrumentation (remove after P0 triage).
+      console.log(
+        '[websearch-trace] anthropic request',
+        JSON.stringify({
+          model: modelId,
+          credentialKind,
+          baseUrl: provider.baseUrl,
+          toolNames: (options?.tools ?? []).map((tool) => tool.name),
+          bodyToolNames: (requestBody.tools ?? []).map((tool) => tool.name),
+        }),
+      );
 
       // Subscription requests need Claude Code's user-agent + OAuth betas.
       // The identity-prefixed system prompt is already baked into
