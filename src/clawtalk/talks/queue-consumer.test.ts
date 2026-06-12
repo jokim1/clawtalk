@@ -431,6 +431,55 @@ describe('processTalkRunMessage', () => {
     });
   });
 
+  it('suppresses zombie emits from an abandoned executor after watchdog failure', async () => {
+    const { runIds, talkId } = await setupRun();
+    const { ctx, drain } = makeMockCtx();
+    const { env } = makeMockEventHub();
+
+    // A wedged executor that wakes up AFTER the watchdog has failed the
+    // run and tries to stream — the guard must drop the late delta.
+    let emitLate: (() => void) | null = null;
+    const wedgedExecutor: TalkExecutor = {
+      execute(
+        _input: TalkExecutorInput,
+        _signal: AbortSignal,
+        emit?: (event: TalkExecutionEvent) => void,
+      ): Promise<TalkExecutorOutput> {
+        emitLate = () =>
+          emit?.({
+            type: 'talk_response_delta',
+            runId: runIds[0]!,
+            talkId,
+            deltaText: 'zombie text after failure',
+          });
+        return new Promise(() => {});
+      },
+    };
+
+    await withRequestScopedDb(TEST_DB_URL, ctx, env, async () => {
+      await withNotifyQueueScope(env, ctx, () =>
+        processTalkRunMessage({
+          runId: runIds[0]!,
+          executor: wedgedExecutor,
+          cancelPollIntervalMs: 50_000,
+          watchdogTimeoutMs: 120,
+        }),
+      );
+      emitLate?.();
+    });
+    await drain();
+
+    const events = await getOutboxEventsForTopics([`talk:${talkId}`], 0);
+    expect(events.some((e) => e.event_type === 'talk_run_failed')).toBe(true);
+    const zombieDeltas = events.filter(
+      (e) =>
+        e.event_type === 'talk_response_delta' &&
+        (e.payload as { deltaText?: string }).deltaText ===
+          'zombie text after failure',
+    );
+    expect(zombieDeltas).toHaveLength(0);
+  });
+
   it('emits retry visibility at Talk scope on queue redelivery', async () => {
     const { runIds, talkId } = await setupRun();
     const { ctx, drain } = makeMockCtx();
