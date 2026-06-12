@@ -7704,9 +7704,246 @@ a {
 
 /* Count badge flips to the accent while any tool is on (screens.jsx
    ToolsHeaderButton). */
-.talk-tools-pill .talk-tab-badge-on {
+.talk-tools-pill .talk-tab-badge-on,
+.talk-connectors-pill .talk-tab-badge-on {
   background: var(--salon-accent, #c8643a);
   color: #ffffff;
+}
+
+.talk-connectors-popover {
+  display: flex;
+  flex-direction: column;
+  background: var(--salon-card, #ffffff);
+}
+
+.talk-connectors-popover-header {
+  display: grid;
+  grid-template-columns: 1.35rem minmax(0, 1fr) auto;
+  gap: 0.55rem;
+  align-items: center;
+  padding: 0.75rem 0.85rem 0.45rem;
+}
+
+.talk-connectors-popover-icon {
+  display: grid;
+  place-items: center;
+  width: 1.35rem;
+  height: 1.35rem;
+  border: 1px solid var(--salon-line, #e6e0d1);
+  border-radius: 0.45rem;
+  background: var(--salon-paper, #fbf7ef);
+}
+
+.talk-connectors-popover-title {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--salon-ink, #1f1b16);
+  font-family: var(--salon-font-serif, 'Newsreader', Georgia, serif);
+  font-size: 0.98rem;
+  line-height: 1.15;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.talk-connectors-popover-count {
+  color: var(--salon-ink-2, #6b6660);
+  font-family: var(--salon-font-mono, 'Geist Mono', ui-monospace, monospace);
+  font-size: 0.62rem;
+  letter-spacing: 0.16em;
+  line-height: 1.2;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.talk-connectors-popover-copy {
+  margin: 0;
+  padding: 0 0.85rem 0.55rem 2.75rem;
+  color: var(--salon-ink-2, #6b6660);
+  font-size: 0.72rem;
+  line-height: 1.35;
+}
+
+.talk-connectors-popover-copy a {
+  color: var(--salon-ink, #1f1b16);
+  text-decoration: underline;
+  text-underline-offset: 0.14em;
+}
+
+.talk-connectors-popover-state,
+.talk-connectors-popover-empty {
+  margin: 0.9rem 1rem 1.1rem;
+  color: var(--salon-ink-2, #6b6660);
+  font-size: 0.82rem;
+  line-height: 1.4;
+  text-align: center;
+}
+
+.talk-connectors-popover-state.error {
+  color: #9f351c;
+}
+
+.talk-connectors-popover-list {
+  display: grid;
+  gap: 0.08rem;
+  margin: 0;
+  padding: 0.15rem 0.65rem 0.6rem;
+  list-style: none;
+}
+
+.talk-connectors-popover-row {
+  display: grid;
+  grid-template-columns: 1.4rem minmax(0, 1fr) auto;
+  gap: 0.65rem;
+  align-items: center;
+  min-height: 2.55rem;
+  padding: 0.35rem 0.25rem;
+}
+
+.talk-connectors-popover-row-disabled .talk-connectors-popover-row-text {
+  opacity: 0.56;
+}
+
+.talk-connectors-popover-avatar {
+  display: grid;
+  place-items: center;
+  width: 1.4rem;
+  height: 1.4rem;
+  border: 1px solid var(--salon-line, #e6e0d1);
+  border-radius: 0.42rem;
+  background: var(--salon-paper-2, #f4ecdb);
+  color: var(--salon-ink-2, #6b6660);
+  font-family: var(--salon-font-serif, 'Newsreader', Georgia, serif);
+  font-size: 0.68rem;
+  font-weight: 500;
+}
+
+.talk-connectors-popover-row-text {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.12rem;
+}
+
+.talk-connectors-popover-row-name {
+  overflow: hidden;
+  color: var(--salon-ink, #1f1b16);
+  font-size: 0.82rem;
+  font-weight: 600;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.talk-connectors-popover-row-meta {
+  color: var(--salon-ink-2, #6b6660);
+  font-size: 0.68rem;
+  line-height: 1.1;
+}
+
+.talk-connectors-popover-switch {
+  position: relative;
+  width: 1.6rem;
+  height: 0.95rem;
+  flex: 0 0 auto;
+  border: 1px solid var(--salon-line, #e6e0d1);
+  border-radius: 999px;
+  background: #ece3d4;
+  cursor: pointer;
+  transition:
+    background 120ms ease,
+    border-color 120ms ease;
+}
+
+.talk-connectors-popover-switch span {
+  position: absolute;
+  top: 0.12rem;
+  left: 0.13rem;
+  width: 0.62rem;
+  height: 0.62rem;
+  border-radius: 999px;
+  background: #ffffff;
+  box-shadow: 0 1px 2px rgba(31, 27, 22, 0.18);
+  transition: transform 120ms ease;
+}
+
+.talk-connectors-popover-switch[aria-checked='true'] {
+  border-color: var(--salon-accent, #c8643a);
+  background: var(--salon-accent, #c8643a);
+}
+
+.talk-connectors-popover-switch[aria-checked='true'] span {
+  transform: translateX(0.62rem);
+}
+
+.talk-connectors-popover-switch:disabled {
+  cursor: not-allowed;
+  opacity: 0.58;
+}
+
+.talk-connectors-popover-switch:focus-visible {
+  outline: 2px solid var(--salon-accent, #c8643a);
+  outline-offset: 2px;
+}
+
+.talk-connectors-popover-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.55rem 0.75rem;
+  border-top: 1px solid var(--salon-line, #e6e0d1);
+  background: var(--salon-paper, #fbf7ef);
+}
+
+.talk-connectors-popover-add {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  min-height: 1.6rem;
+  border: 1px solid var(--salon-line, #e6e0d1);
+  border-radius: 999px;
+  padding: 0 0.62rem;
+  background: var(--salon-card, #ffffff);
+  color: var(--salon-ink, #1f1b16);
+  font-size: 0.72rem;
+  font-weight: 500;
+  text-decoration: none;
+}
+
+.talk-connectors-popover-add:hover,
+.talk-connectors-popover-add:focus-visible {
+  border-color: var(--salon-line-strong, #d8cbb6);
+  background: #fffdf8;
+  outline: none;
+}
+
+.talk-connectors-popover-done {
+  min-height: 1.6rem;
+  border: 1px solid var(--salon-accent, #c8643a);
+  border-radius: 999px;
+  padding: 0 0.72rem;
+  background: var(--salon-accent, #c8643a);
+  color: #ffffff;
+  font-size: 0.72rem;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.talk-connectors-popover-done:hover,
+.talk-connectors-popover-done:focus-visible {
+  border-color: var(--salon-accent-strong, #b05530);
+  background: var(--salon-accent-strong, #b05530);
+  outline: none;
+}
+
+.talk-connectors-toast {
+  margin: 0.2rem 0.75rem 0.65rem;
+  border: 1px solid #efc7b7;
+  border-radius: 0.55rem;
+  background: #fff4ef;
+  color: #8f351c;
+  padding: 0.45rem 0.55rem;
+  font-size: 0.74rem;
 }
 
 /* Salon re-tokens for pre-Salon blues that surface on the Talk screen. */

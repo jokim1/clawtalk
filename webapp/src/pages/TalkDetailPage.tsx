@@ -912,7 +912,6 @@ export function TalkDetailPage({
     resyncTalkState,
     onUnauthorized: handleUnauthorized,
   });
-  const manageConnectorsHref = '/app/connectors';
   const isRenaming = renameDraft?.talkId === talkId;
 
   const handleToggleSidePanel = useCallback(
@@ -1174,6 +1173,7 @@ export function TalkDetailPage({
           sidePanel={sidePanel}
           onToggleSidePanel={handleToggleSidePanel}
           onToggleDocuments={handleToggleDocuments}
+          onUnauthorized={handleUnauthorized}
           documentsOpen={
             currentTab === 'talk' &&
             !docPaneSuppressed &&
