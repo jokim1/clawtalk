@@ -66,6 +66,17 @@ const MANY_TALKS_SIDEBAR = {
   items: Array.from({ length: 40 }, (_, index) => talkItem(index)),
 };
 
+const CRAMPED_SIDEBAR = {
+  mainTalkId: null,
+  contents: Array.from({ length: 12 }, (_, index) => ({
+    id: `doc-${index}`,
+    talkId: `talk-${index}`,
+    title: `Inbox doc ${index}`,
+    updatedAt: '2026-06-10T09:00:00.000Z',
+  })),
+  items: Array.from({ length: 30 }, (_, index) => talkItem(index)),
+};
+
 async function fulfillJson(route: Route, data: unknown, status = 200) {
   await route.fulfill({
     status,
@@ -139,10 +150,36 @@ test('inbox anchors at the bottom and the tree scrolls when talks overflow', asy
   await expect(inboxLocator).toBeInViewport();
   const aside = await page.locator('.ct-secondary').boundingBox();
   const inbox = await inboxLocator.boundingBox();
-  if (!aside || !inbox) throw new Error('layout boxes missing');
+  const foot = await page.locator('.ct-secondary-foot').boundingBox();
+  if (!aside || !inbox || !foot) throw new Error('layout boxes missing');
   expect(inbox.y).toBeGreaterThan(aside.y + aside.height / 2);
+
+  // Inbox at full height (not squashed by the overflowing tree), sitting
+  // above the Archive footer, which stays pinned within the panel.
+  expect(inbox.height).toBeGreaterThan(60);
+  expect(inbox.y + inbox.height).toBeLessThanOrEqual(foot.y + 1);
+  expect(aside.y + aside.height - (foot.y + foot.height)).toBeLessThan(8);
 
   await page
     .locator('.ct-secondary')
     .screenshot({ path: testInfo.outputPath('sidebar-inbox-anchored.png') });
+});
+
+test('archive stays reachable in a degenerate short viewport', async ({
+  page,
+}) => {
+  await installMocks(page, CRAMPED_SIDEBAR);
+  await page.setViewportSize({ width: 1280, height: 420 });
+  await page.goto('/app/talks');
+  await expect(
+    page.locator('.ct-secondary-tree').getByRole('link').first(),
+  ).toBeVisible();
+
+  // Even with the inbox at its cap and almost no room, the inbox shrinks
+  // (tree gives way first) rather than clipping the Archive footer.
+  const aside = await page.locator('.ct-secondary').boundingBox();
+  const foot = await page.locator('.ct-secondary-foot').boundingBox();
+  if (!aside || !foot) throw new Error('layout boxes missing');
+  expect(aside.y + aside.height - (foot.y + foot.height)).toBeLessThan(8);
+  await expect(page.locator('.ct-secondary-content-label')).toBeInViewport();
 });
