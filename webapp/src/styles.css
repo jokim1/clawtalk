@@ -8569,7 +8569,7 @@ a {
 }
 
 .talk-workspace-composer {
-  width: min(900px, calc(100% - 2rem));
+  width: calc(100% - 2rem);
   margin: 0 auto 1rem;
   border: 1px solid var(--salon-line, #e6e0d1);
   border-radius: 0.9rem;

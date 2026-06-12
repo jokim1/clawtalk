@@ -3482,7 +3482,7 @@ describe('TalkDetailPage', () => {
     );
   });
 
-  it('hides the doc pane via the hide button, restores it from Documents, and persists state in localStorage', async () => {
+  it('turns Documents inactive when the doc pane is hidden and restores from the header', async () => {
     const user = userEvent.setup();
     window.localStorage.clear();
     installTalkDetailFetch({
@@ -3523,20 +3523,23 @@ describe('TalkDetailPage', () => {
     );
     expect(
       talkControls.getByRole('button', { name: 'Documents' }),
-    ).toHaveAttribute('aria-pressed', 'true');
+    ).toHaveAttribute('aria-pressed', 'false');
 
     // Persisted to localStorage.
     const raw = window.localStorage.getItem('clawtalk_doc_pane:talk-1');
     expect(raw).not.toBeNull();
     expect(JSON.parse(raw as string)).toMatchObject({ hidden: true });
 
-    // The header Documents control is the restore affordance.
+    // The inactive header Documents control is the only restore affordance.
     await user.click(talkControls.getByRole('button', { name: 'Documents' }));
     await waitFor(() =>
       expect(screen.getByLabelText('Talk document')).not.toHaveClass(
         'talk-tab-pane-hidden',
       ),
     );
+    expect(
+      talkControls.getByRole('button', { name: 'Documents' }),
+    ).toHaveAttribute('aria-pressed', 'true');
   });
 
   it('ignores retired localStorage thread selection when routing a Talk', async () => {
