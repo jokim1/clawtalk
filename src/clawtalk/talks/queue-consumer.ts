@@ -43,6 +43,7 @@ import {
   createTalkResponseStreamSanitizer,
   extractChannelReplyControl,
   stripInternalTalkResponseText,
+  stripLeadingAgentLabel,
   type TalkResponseStreamSanitizer,
 } from './internal-tags.js';
 import { emitOutboxEventOutsideTx } from './outbox-emit.js';
@@ -200,9 +201,11 @@ export async function processTalkRunMessage(
     const emit = (event: TalkExecutionEvent): void => {
       let routed: TalkExecutionEvent = event;
       if (event.type === 'talk_response_started') {
-        sanitizer = createTalkResponseStreamSanitizer();
+        sanitizer = createTalkResponseStreamSanitizer(run.target_agent_name);
       } else if (event.type === 'talk_response_delta') {
-        if (!sanitizer) sanitizer = createTalkResponseStreamSanitizer();
+        if (!sanitizer) {
+          sanitizer = createTalkResponseStreamSanitizer(run.target_agent_name);
+        }
         const deltaText = sanitizer.push(event.deltaText);
         if (!deltaText) return;
         routed = { ...event, deltaText };
@@ -242,7 +245,10 @@ export async function processTalkRunMessage(
       );
       const latencyMs = Date.now() - executionStartedAt;
       void extractChannelReplyControl(output.content);
-      const responseContent = stripInternalTalkResponseText(output.content);
+      const responseContent = stripLeadingAgentLabel(
+        stripInternalTalkResponseText(output.content),
+        output.agentNickname,
+      );
       const responseMetadata = output.metadataJson
         ? (JSON.parse(output.metadataJson) as Record<string, unknown>)
         : null;
