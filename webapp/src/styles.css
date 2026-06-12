@@ -3239,8 +3239,27 @@ a {
 }
 
 .composer {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  gap: 0.55rem;
+}
+
+/* The upper composer chrome (tool chips, agent targeting, help text,
+   guardrail) collapses into a scroll region when the composer is taller than
+   the space under the header — keeping the textarea + Send (below) pinned and
+   visible on short viewports instead of clipping them below the fold. On a
+   normal viewport everything fits and this never scrolls. */
+.composer-chrome {
   display: grid;
   gap: 0.55rem;
+  flex: 0 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.composer .composer-input-shell {
+  flex: 0 0 auto;
 }
 
 .composer-target {
@@ -7304,7 +7323,10 @@ a {
 .talk-thread-detail {
   background: var(--salon-paper, #fbf7ef);
   display: grid;
-  grid-template-rows: minmax(0, 1fr) auto auto;
+  /* Timeline takes the flexible row; the composer row may shrink below its
+     content height (min 0) so its internal chrome-scroll can engage on short
+     viewports rather than the composer overflowing and clipping its input. */
+  grid-template-rows: minmax(0, 1fr) minmax(0, auto);
   height: 100%;
 }
 
