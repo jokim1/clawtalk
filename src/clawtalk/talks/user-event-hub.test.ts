@@ -28,8 +28,7 @@ import {
 } from 'vitest';
 import postgres from 'postgres';
 
-import { closePgDatabase, initPgDatabase } from '../../db.js';
-import { appendOutboxEvent } from '../db/core-accessors.js';
+import { closePgDatabase, getDbPg, initPgDatabase } from '../../db.js';
 import {
   buildAttachmentFilter,
   type SocketAttachment,
@@ -164,16 +163,23 @@ async function seedOutbox(
   topic: string,
   events: Array<{ event_type: string; payload: Record<string, unknown> }>,
 ): Promise<number[]> {
-  const ids: number[] = [];
-  for (const ev of events) {
-    const id = await appendOutboxEvent({
-      topic,
-      eventType: ev.event_type,
-      payload: ev.payload,
-    });
-    ids.push(id);
-  }
-  return ids;
+  // Single bulk insert rather than one round-trip per event. The drain-cap
+  // test seeds 1100 rows; 1100 sequential INSERTs blew the 5s test timeout
+  // when the local DB was under load, which read as a flake even though the
+  // drain logic was fine. One unnest statement removes that throughput
+  // dependency. bigserial assigns event_id in row order, so the drain's
+  // event_id ordering is preserved.
+  const db = getDbPg();
+  const eventTypes = events.map((ev) => ev.event_type);
+  const payloads = events.map((ev) => JSON.stringify(ev.payload));
+  const inserted = await db<{ event_id: number }[]>`
+    insert into public.event_outbox (topic, event_type, payload)
+    select ${topic}, event_type, payload::jsonb
+    from unnest(${eventTypes}::text[], ${payloads}::text[])
+      as t(event_type, payload)
+    returning event_id::int as event_id
+  `;
+  return inserted.map((row) => row.event_id);
 }
 
 async function pruneTestRows(): Promise<void> {
