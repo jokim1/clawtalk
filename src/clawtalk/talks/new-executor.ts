@@ -19,6 +19,14 @@ export const PDF_ATTACHMENT_MIME_TYPE = 'application/pdf';
 
 type ToolResult = { result: string; isError?: boolean };
 
+// Deadline on the web_search provider request. The run-level signal only
+// fires on user cancel, so without this a single hung provider fetch wedges
+// the whole round until the scheduler's 1h stuck-run sweep. The abort signal
+// bounds the fetch leg only; the registry separately bounds its own DB reads
+// via a transaction-local statement_timeout (postgres.js queries are not
+// abortable).
+export const WEB_SEARCH_TIMEOUT_MS = 20_000;
+
 async function executeWebSearch(
   args: Record<string, unknown>,
   signal: AbortSignal,
@@ -37,9 +45,21 @@ async function executeWebSearch(
       ? Math.floor(rawMax)
       : undefined;
 
+  const timeoutController = new AbortController();
+  const timeoutTimer = setTimeout(() => {
+    timeoutController.abort(
+      new DOMException(
+        `web_search timed out after ${WEB_SEARCH_TIMEOUT_MS / 1000}s`,
+        'TimeoutError',
+      ),
+    );
+  }, WEB_SEARCH_TIMEOUT_MS);
   try {
     const { runWebSearchForUser } = await import('../web-search/registry.js');
-    const response = await runWebSearchForUser(query, { maxResults, signal });
+    const response = await runWebSearchForUser(query, {
+      maxResults,
+      signal: AbortSignal.any([signal, timeoutController.signal]),
+    });
     return {
       result: JSON.stringify({
         provider: response.providerId,
@@ -51,14 +71,24 @@ async function executeWebSearch(
       }),
     };
   } catch (err) {
+    // Provider/config errors keep their identity even if they surface after
+    // the timer has fired — a late 401 must say "fix your key", not "retry".
     const { WebSearchError } = await import('../web-search/types.js');
     if (err instanceof WebSearchError) {
       return { result: `web_search error: ${err.message}`, isError: true };
+    }
+    if (timeoutController.signal.aborted && !signal.aborted) {
+      return {
+        result: `web_search error: the search provider did not respond within ${WEB_SEARCH_TIMEOUT_MS / 1000} seconds and the request was aborted. Continue with any results you already have, or retry the search once.`,
+        isError: true,
+      };
     }
     return {
       result: `web_search error: ${err instanceof Error ? err.message : String(err)}`,
       isError: true,
     };
+  } finally {
+    clearTimeout(timeoutTimer);
   }
 }
 
