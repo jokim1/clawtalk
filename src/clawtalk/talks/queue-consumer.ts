@@ -18,7 +18,7 @@
 
 import { randomUUID } from 'crypto';
 
-import { flushCurrentNotifyQueue } from '../../db.js';
+import { flushCurrentNotifyQueue, getOutOfBandSql } from '../../db.js';
 import {
   completeGreenfieldRun,
   failGreenfieldDlqRun,
@@ -63,6 +63,8 @@ export interface ProcessTalkRunMessageInput {
   // this run reaches a terminal state. Defaults to dispatchRun
   // (TALK_RUN_QUEUE.send).
   dispatch?: (input: { runId: string }) => Promise<void>;
+  // Test seam — run watchdog deadline; production default 10 minutes.
+  watchdogTimeoutMs?: number;
 }
 
 export class BlockedBySiblingError extends Error {
@@ -75,6 +77,61 @@ export class BlockedBySiblingError extends Error {
 }
 
 const DEFAULT_CANCEL_POLL_MS = 500;
+
+// Hard ceiling on a single run's wall time. The 2026-06-12 incidents showed
+// an executor await can wedge on I/O that no signal or server-side timeout
+// reaches (db.begin on a dead worker↔Hyperdrive socket), leaving the run
+// 'running' until the scheduler's 1h sweep. The watchdog fails the run and
+// returns; recovery must NOT touch the request-scoped DB client (it may be
+// the wedged resource) — see failRunWedged.
+const DEFAULT_RUN_WATCHDOG_MS = 10 * 60 * 1000;
+
+const RUN_WATCHDOG_FIRED = Symbol('run-watchdog-fired');
+
+/**
+ * Fail a wedged run using ONLY the out-of-band auto-commit connection —
+ * a fresh socket, independent of the request-scoped client the wedged
+ * executor may be blocked on. Skips failGreenfieldRun deliberately: that
+ * path runs on getDbPg() and would queue behind the wedge. Job terminal
+ * bookkeeping is skipped too (scheduler sweeps reconcile job state).
+ */
+async function failRunWedged(
+  run: GreenfieldQueueRunRecord,
+  watchdogMs: number,
+): Promise<void> {
+  const sql = getOutOfBandSql();
+  const errorCode = 'run_watchdog_timeout';
+  const errorMessage = `Run did not settle within ${Math.round(watchdogMs / 1000)}s and was failed by the consumer watchdog (wedged I/O suspected).`;
+  const failed = await sql<{ id: string }[]>`
+    update public.runs
+    set
+      status = 'failed',
+      finished_at = now(),
+      error_json = ${sql.json({ code: errorCode, message: errorMessage } as never)}
+    where id = ${run.id}::uuid
+      and status = 'running'
+    returning id
+  `;
+  if (failed.length !== 1) return;
+  await emitOutboxEventOutsideTx({
+    topic: `talk:${run.talk_id}`,
+    eventType: 'talk_run_failed',
+    payload: {
+      talkId: run.talk_id,
+      runId: run.id,
+      runKind: run.run_kind,
+      triggerMessageId: run.trigger_message_id,
+      responseGroupId: run.response_group_id,
+      sequenceIndex: run.sequence_index,
+      errorCode,
+      errorMessage,
+      executorAlias: run.target_agent_name,
+      executorModel: run.model_id,
+      providerId: run.provider_id,
+    },
+    ownerIds: run.owner_ids,
+  });
+}
 
 /**
  * Stateless per-message handler invoked by the queue() dispatcher.
@@ -226,9 +283,14 @@ export async function processTalkRunMessage(
       });
     };
 
+    const watchdogMs = input.watchdogTimeoutMs ?? DEFAULT_RUN_WATCHDOG_MS;
+    let watchdogTimer: ReturnType<typeof setTimeout> | null = null;
+    const watchdogFired = new Promise<typeof RUN_WATCHDOG_FIRED>((resolve) => {
+      watchdogTimer = setTimeout(() => resolve(RUN_WATCHDOG_FIRED), watchdogMs);
+    });
     try {
       const executionStartedAt = Date.now();
-      const output = await executor.execute(
+      const execution = executor.execute(
         {
           runId: run.id,
           talkId: run.talk_id,
@@ -243,6 +305,20 @@ export async function processTalkRunMessage(
         cancelController.signal,
         emit,
       );
+      const raced = await Promise.race([execution, watchdogFired]);
+      if (raced === RUN_WATCHDOG_FIRED) {
+        // Abandon the wedged executor promise; the finally block aborts its
+        // signal, which unblocks any leg that listens. Returning acks the
+        // message — redelivery would no-op on the now-terminal run anyway.
+        execution.catch(() => {});
+        logger.warn(
+          { runId: run.id, talkId: run.talk_id, watchdogMs },
+          'run watchdog fired: executor never settled; failing run out-of-band',
+        );
+        await failRunWedged(run, watchdogMs);
+        return;
+      }
+      const output = raced;
       const latencyMs = Date.now() - executionStartedAt;
       void extractChannelReplyControl(output.content);
       const responseContent = stripLeadingAgentLabel(
@@ -289,9 +365,15 @@ export async function processTalkRunMessage(
         err instanceof TalkExecutorError ? err.metadata : null,
       );
     } finally {
+      if (watchdogTimer) clearTimeout(watchdogTimer);
       pollerStop.abort();
       cancelController.abort('done');
-      await cancelPoller.catch(() => {});
+      // The poller's status read can itself be stuck on the wedged DB
+      // client — bound the join so teardown can't inherit the wedge.
+      await Promise.race([
+        cancelPoller.catch(() => {}),
+        new Promise((resolve) => setTimeout(resolve, 2000)),
+      ]);
     }
   }
 

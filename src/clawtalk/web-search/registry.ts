@@ -14,6 +14,7 @@
  */
 
 import { getDbPg } from '../../db.js';
+import { logger } from '../../logger.js';
 import { decryptProviderSecret } from '../llm/provider-secret-store.js';
 import { braveSearch } from './brave.js';
 import { exaSearch } from './exa.js';
@@ -78,6 +79,9 @@ export async function runWebSearchForUser(
 
   const db = getDbPg();
   await db`select set_config('statement_timeout', ${String(DB_STATEMENT_TIMEOUT_MS)}, true)`;
+  // Wedge-diagnosis breadcrumbs (2026-06-12 incidents): with Workers Logs
+  // enabled, the last line before silence pinpoints which leg hung.
+  logger.info('web_search registry: tx ready, statement_timeout set');
   // `withUserContext` (set by the caller, e.g. the talk-executor's
   // request-scoped DB) gates these reads to the current user via RLS.
   const userRows = await db<
@@ -122,7 +126,15 @@ export async function runWebSearchForUser(
   const { apiKey } = await decryptProviderSecret(ciphertext);
   const adapter = ADAPTERS[preferredId];
   options?.signal?.throwIfAborted();
+  logger.info(
+    { providerId: preferredId },
+    'web_search registry: dispatching provider fetch',
+  );
   const results = await adapter(apiKey, trimmed, options);
+  logger.info(
+    { providerId: preferredId, resultCount: results.length },
+    'web_search registry: provider fetch returned',
+  );
   return {
     query: trimmed,
     providerId: preferredId,

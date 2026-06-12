@@ -397,6 +397,40 @@ describe('markGreenfieldRunRunning', () => {
 });
 
 describe('processTalkRunMessage', () => {
+  it('watchdog fails a wedged run out-of-band and acks the message', async () => {
+    const { runIds, talkId } = await setupRun();
+    const { ctx, drain } = makeMockCtx();
+    const { env } = makeMockEventHub();
+
+    await withRequestScopedDb(TEST_DB_URL, ctx, env, async () => {
+      await withNotifyQueueScope(env, ctx, () =>
+        processTalkRunMessage({
+          runId: runIds[0]!,
+          // An executor that never settles and ignores everything — the
+          // wedged-I/O shape from the 2026-06-12 incidents.
+          executor: makeMockExecutor({ waitFor: new Promise(() => {}) }),
+          cancelPollIntervalMs: 50_000,
+          watchdogTimeoutMs: 150,
+        }),
+      );
+    });
+    await drain();
+
+    const run = await getGreenfieldQueueRunById(runIds[0]!);
+    expect(run?.status).toBe('failed');
+    expect((run?.error_json as { code?: string })?.code).toBe(
+      'run_watchdog_timeout',
+    );
+
+    const events = await getOutboxEventsForTopics([`talk:${talkId}`], 0);
+    const failedEvent = events.find((e) => e.event_type === 'talk_run_failed');
+    expect(failedEvent?.payload).toMatchObject({
+      talkId,
+      runId: runIds[0]!,
+      errorCode: 'run_watchdog_timeout',
+    });
+  });
+
   it('emits retry visibility at Talk scope on queue redelivery', async () => {
     const { runIds, talkId } = await setupRun();
     const { ctx, drain } = makeMockCtx();

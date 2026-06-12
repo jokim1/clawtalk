@@ -437,7 +437,14 @@ function buildRequestPgClient(url: string): postgres.Sql {
   return postgres(url, {
     max: 1,
     fetch_types: true,
-    idle_timeout: 5,
+    // Queue-consumer runs are minutes long with >5s quiet stretches during
+    // every LLM turn. At idle_timeout 5 the reaper closed and reconnected
+    // the single connection once per turn, and a close racing the next
+    // db.begin is the prime suspect for the 2026-06-12 wedged runs (BEGIN
+    // queued forever client-side, nothing server-side). 60s outlasts any
+    // intra-run gap; withRequestScopedDb still closes explicitly at scope
+    // end.
+    idle_timeout: 60,
     connect_timeout: 10,
     prepare: false,
     types: PG_TIMESTAMP_AS_STRING,

@@ -917,6 +917,46 @@ function hasGreenfieldDocumentEditIds(result: string): boolean {
   }
 }
 
+// Outer deadline on the whole web_search tool call, including the per-call
+// withUserContext transaction ACQUISITION — the 2026-06-12 wedge sat in
+// db.begin on a dead connection, before executeWebSearch (and its 20s fetch
+// timer) ever ran. Wider than the inner fetch timeout so the inner path wins
+// whenever it is functioning.
+const WEB_SEARCH_TOOL_CALL_DEADLINE_MS = 30_000;
+
+/** @internal Exported for tests. */
+export function raceToolCallDeadline(
+  call: Promise<{ result: string; isError?: boolean }>,
+  toolName: string,
+  deadlineMs = WEB_SEARCH_TOOL_CALL_DEADLINE_MS,
+): Promise<{ result: string; isError?: boolean }> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      // Abandon the wedged call; swallow its eventual settle so it can't
+      // surface as an unhandled rejection.
+      call.catch(() => {});
+      logger.warn(
+        { toolName, deadlineMs },
+        'tool call abandoned by deadline (wedged I/O suspected)',
+      );
+      resolve({
+        result: `${toolName} error: the tool call did not return within ${deadlineMs / 1000} seconds and was abandoned. Continue without this result, or retry once.`,
+        isError: true,
+      });
+    }, deadlineMs);
+    call.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (err) => {
+        clearTimeout(timer);
+        reject(err);
+      },
+    );
+  });
+}
+
 function buildGreenfieldToolExecutor(input: {
   run: GreenfieldExecutorRunRow;
   signal: AbortSignal;
@@ -999,8 +1039,15 @@ function buildGreenfieldToolExecutor(input: {
       };
     }
     if (toolName === 'web_search') {
-      return withUserContext(input.run.requested_by, () =>
-        baseExecutor(toolName, args),
+      logger.info(
+        { runId: input.run.id, toolName },
+        'web_search tool call: acquiring user-context tx',
+      );
+      return raceToolCallDeadline(
+        withUserContext(input.run.requested_by, () =>
+          baseExecutor(toolName, args),
+        ),
+        toolName,
       );
     }
     return baseExecutor(toolName, args);
