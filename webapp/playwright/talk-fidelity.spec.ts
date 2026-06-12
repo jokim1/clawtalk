@@ -389,6 +389,54 @@ async function installMocks(page: Page, state: TalkState): Promise<void> {
       available: ['web', 'connectors', 'google_read', 'gmail_read'],
     }),
   );
+  await page.route(`**/api/v1/talks/${TALK_ID}/connector-bindings*`, (route) =>
+    fulfillJson(route, {
+      channels: [
+        {
+          id: 'channel-pricing',
+          kind: 'slack',
+          displayName: '#pricing',
+          enabled: true,
+          hasCredential: true,
+          linked: true,
+        },
+        {
+          id: 'channel-launch',
+          kind: 'slack',
+          displayName: '#launch',
+          enabled: true,
+          hasCredential: true,
+          linked: false,
+        },
+      ],
+      dataConnectors: [
+        {
+          id: 'drive-pricing',
+          kind: 'google_docs',
+          displayName: '/pricing-v2/',
+          enabled: true,
+          hasCredential: true,
+          linked: true,
+        },
+        {
+          id: 'drive-research',
+          kind: 'google_sheets',
+          displayName: 'Research sheet',
+          enabled: true,
+          hasCredential: true,
+          linked: false,
+        },
+        {
+          id: 'drive-model',
+          kind: 'google_docs',
+          displayName: 'Pricing model',
+          enabled: true,
+          hasCredential: true,
+          linked: false,
+        },
+      ],
+    }),
+  );
   await page.route('**/api/v1/agents*', (route) =>
     fulfillJson(route, {
       defaultClaudeModelId: '',
@@ -417,7 +465,7 @@ for (const state of ['populated', 'empty', 'active'] as const) {
         state === 'empty' ? 'Empty Talk' : 'Notion AI teardown',
       );
       await expect(
-        page.getByRole('navigation', { name: 'Talk sections' }),
+        page.getByRole('navigation', { name: 'Talk controls' }),
       ).toBeVisible();
 
       if (vp.width >= 1024) {
@@ -444,6 +492,19 @@ for (const state of ['populated', 'empty', 'active'] as const) {
         await expect(
           page.getByRole('button', { name: 'Tools, 2 of 4 on' }),
         ).toBeVisible();
+        const connectorsButton = page.getByRole('button', {
+          name: 'Connectors, 2 of 5 bound',
+        });
+        await expect(connectorsButton).toBeVisible();
+        await connectorsButton.click();
+        await expect(
+          page.getByRole('dialog', { name: 'Connectors in this Talk' }),
+        ).toBeVisible();
+        await expect(page.getByText('Slack · #pricing')).toBeVisible();
+        await expect(
+          page.getByRole('link', { name: /Add connection/ }),
+        ).toHaveAttribute('href', '/app/settings?tab=connectors');
+        await page.getByRole('button', { name: 'Done' }).click();
       }
 
       if (state === 'empty') {
