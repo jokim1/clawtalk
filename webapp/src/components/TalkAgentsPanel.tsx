@@ -1,4 +1,4 @@
-import type { Dispatch, SetStateAction } from 'react';
+import { useState, type CSSProperties } from 'react';
 import { Link } from 'react-router-dom';
 
 import type { RegisteredAgent, TalkAgent } from '../lib/api';
@@ -16,19 +16,16 @@ type AgentSaveState = {
 
 type TalkAgentsPanelProps = {
   agentDrafts: TalkAgent[];
-  newAgentDraft: AgentCreationDraft;
-  setNewAgentDraft: Dispatch<SetStateAction<AgentCreationDraft>>;
   agentState: AgentSaveState;
-  setAgentState: Dispatch<SetStateAction<AgentSaveState>>;
   agentsCatalogError: string | null;
   registeredAgentsCatalog: RegisteredAgent[];
   canEditAgents: boolean;
-  hasPendingFooterAgentSelection: boolean;
+  hasUnsavedAgentChanges: boolean;
   manageAgentsHref: string;
   showPanelHeader?: boolean;
   handleSetPrimaryAgent: (agentId: string) => void;
   handleRemoveAgent: (agentId: string) => void;
-  handleAddAgent: () => void;
+  handleAddAgent: (draft?: AgentCreationDraft) => void;
   handleSaveAgents: () => void;
 };
 
@@ -67,16 +64,39 @@ function agentModelLabel(
   );
 }
 
+function agentAccent(role: TalkAgent['role']): string {
+  switch (role) {
+    case 'critic':
+    case 'devils-advocate':
+      return '#8E3B59';
+    case 'analyst':
+    case 'synthesizer':
+      return '#3F6B5C';
+    case 'editor':
+      return '#3D5688';
+    case 'strategist':
+      return '#C8643A';
+    default:
+      return '#C8643A';
+  }
+}
+
+function buildAgentDraft(agent: RegisteredAgent): AgentCreationDraft {
+  return {
+    sourceKind: 'provider',
+    providerId: agent.providerId,
+    modelId: agent.id,
+    role: coerceTalkRole(agent.personaRole),
+  };
+}
+
 export function TalkAgentsPanel({
   agentDrafts,
-  newAgentDraft,
-  setNewAgentDraft,
   agentState,
-  setAgentState,
   agentsCatalogError,
   registeredAgentsCatalog,
   canEditAgents,
-  hasPendingFooterAgentSelection,
+  hasUnsavedAgentChanges,
   manageAgentsHref,
   showPanelHeader = true,
   handleSetPrimaryAgent,
@@ -92,6 +112,7 @@ export function TalkAgentsPanel({
     registeredAgentsCatalog.map((agent) => [agent.id, agent] as const),
   );
   const saving = agentState.status === 'saving';
+  const [addMenuOpen, setAddMenuOpen] = useState(false);
 
   return (
     <section
@@ -104,14 +125,14 @@ export function TalkAgentsPanel({
             <p className="talk-room-kicker">Speaking order</p>
             <h2>The Room</h2>
           </div>
-          <Link className="secondary-btn" to={manageAgentsHref}>
+          <Link className="talk-room-manage-link" to={manageAgentsHref}>
             Manage AI Agents
           </Link>
         </header>
       ) : (
         <div className="talk-room-panel-toolbar">
           <p className="talk-room-kicker">Speaking order</p>
-          <Link className="secondary-btn" to={manageAgentsHref}>
+          <Link className="talk-room-manage-link" to={manageAgentsHref}>
             Manage AI Agents
           </Link>
         </div>
@@ -137,6 +158,11 @@ export function TalkAgentsPanel({
             <article
               key={agent.id}
               className="talk-room-agent-card"
+              style={
+                {
+                  '--talk-room-agent-accent': agentAccent(agent.role),
+                } as CSSProperties
+              }
               role="listitem"
               aria-label={`${displayName}, ${roleLabel}`}
             >
@@ -190,69 +216,102 @@ export function TalkAgentsPanel({
       </div>
 
       <div className="talk-room-add-card">
-        <span className="talk-room-add-icon" aria-hidden="true">
-          <CTIcon name="plus" size={14} strokeWidth={1.8} />
-        </span>
-        <label className="talk-room-add-select">
-          <span>Add an agent to the room</span>
-          <select
-            value={newAgentDraft.modelId}
-            onChange={(event) => {
-              const agent = registeredAgentsCatalog.find(
-                (entry) => entry.id === event.target.value,
-              );
-              if (!agent) return;
-              setNewAgentDraft({
-                sourceKind: 'provider',
-                providerId: agent.providerId,
-                modelId: agent.id,
-                role: coerceTalkRole(agent.personaRole),
-              });
-              setAgentState({ status: 'idle' });
-            }}
-            disabled={
-              !canEditAgents || saving || availableRegisteredAgents.length === 0
-            }
-          >
-            <option value="" disabled>
-              {availableRegisteredAgents.length === 0
-                ? 'No available registered agents'
-                : 'Choose a registered agent...'}
-            </option>
-            {availableRegisteredAgents.map((agent) => (
-              <option key={agent.id} value={agent.id}>
-                {agent.name}
-                {agent.personaRole ? ` · ${agent.personaRole}` : ''} (
-                {agent.modelId})
-              </option>
-            ))}
-          </select>
-        </label>
-        <span className="talk-room-available-count">
-          {availableRegisteredAgents.length} available
-        </span>
-        <div className="talk-room-add-actions">
+        {availableRegisteredAgents.length === 0 ? (
+          <div className="talk-room-add-empty">
+            <span className="talk-room-add-icon" aria-hidden="true">
+              <CTIcon name="check" size={13} strokeWidth={1.8} />
+            </span>
+            <span>Every registered agent is already in this room.</span>
+          </div>
+        ) : (
           <button
             type="button"
-            className="secondary-btn"
-            onClick={handleAddAgent}
-            disabled={!canEditAgents || saving || !newAgentDraft.modelId}
-          >
-            Add to room
-          </button>
-          <button
-            type="button"
-            className="secondary-btn"
-            onClick={handleSaveAgents}
+            className="talk-room-add-trigger"
+            aria-expanded={addMenuOpen}
+            onClick={() => setAddMenuOpen((open) => !open)}
             disabled={!canEditAgents || saving}
           >
-            {saving
-              ? 'Saving...'
-              : hasPendingFooterAgentSelection
-                ? 'Add + Save room'
-                : 'Save room'}
+            <span className="talk-room-add-icon" aria-hidden="true">
+              <CTIcon name="plus" size={13} strokeWidth={1.8} />
+            </span>
+            <span className="talk-room-add-label">
+              Add an agent to the room
+            </span>
+            <span className="talk-room-available-count">
+              {availableRegisteredAgents.length} available
+            </span>
+            <CTIcon
+              name={addMenuOpen ? 'chevron-d' : 'chevron-r'}
+              size={13}
+              strokeWidth={1.8}
+            />
           </button>
-        </div>
+        )}
+        {addMenuOpen && availableRegisteredAgents.length > 0 ? (
+          <div
+            className="talk-room-add-options"
+            role="list"
+            aria-label="Available registered agents"
+          >
+            {availableRegisteredAgents.map((agent) => {
+              const role = coerceTalkRole(agent.personaRole);
+              const roleLabel = formatTalkRole(role);
+              return (
+                <div key={agent.id} role="listitem">
+                  <button
+                    type="button"
+                    className="talk-room-add-option"
+                    aria-label={`Add ${agent.name} to room`}
+                    style={
+                      {
+                        '--talk-room-agent-accent': agentAccent(role),
+                      } as CSSProperties
+                    }
+                    onClick={() => {
+                      handleAddAgent(buildAgentDraft(agent));
+                      setAddMenuOpen(false);
+                    }}
+                    disabled={!canEditAgents || saving}
+                  >
+                    <span className="talk-room-avatar" aria-hidden="true">
+                      {buildInitials(agent.name)}
+                    </span>
+                    <span className="talk-room-add-option-main">
+                      <span className="talk-room-agent-title">
+                        <strong>{agent.name}</strong>
+                        <span className="talk-room-role-badge">
+                          {roleLabel}
+                        </span>
+                      </span>
+                      <span className="talk-room-add-option-model">
+                        {agent.modelId || 'Model pending'}
+                      </span>
+                    </span>
+                    <span className="talk-room-add-option-plus" aria-hidden>
+                      <CTIcon name="plus" size={13} strokeWidth={2.1} />
+                    </span>
+                  </button>
+                </div>
+              );
+            })}
+            <Link className="talk-room-add-manage-link" to={manageAgentsHref}>
+              Manage all agents
+              <CTIcon name="arrow" size={11} strokeWidth={1.8} />
+            </Link>
+          </div>
+        ) : null}
+      </div>
+
+      <div className="talk-room-save-strip">
+        <button
+          type="button"
+          className="talk-room-save-button"
+          onClick={handleSaveAgents}
+          disabled={!canEditAgents || saving || !hasUnsavedAgentChanges}
+        >
+          <CTIcon name="bolt" size={12} strokeWidth={1.7} />
+          {saving ? 'Saving...' : 'Save room'}
+        </button>
       </div>
 
       {agentsCatalogError ? (
