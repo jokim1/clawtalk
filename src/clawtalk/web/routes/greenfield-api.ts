@@ -64,6 +64,7 @@ import {
   unarchiveGreenfieldTalkRoute,
   createGreenfieldFolderRoute,
   createGreenfieldTalkRoute,
+  createGreenfieldWorkspaceRoute,
   deleteGreenfieldFolderRoute,
   getGreenfieldMeRoute,
   getGreenfieldTalkRoute,
@@ -263,6 +264,21 @@ export function mountGreenfieldApiRoutes(app: GreenfieldApp): void {
     const rl = checkRateLimit({ principalId: auth.userId, bucket: 'read' });
     if (!rl.allowed) return rateLimitedResponse(c, rl);
     const result = await listGreenfieldWorkspacesRoute({ auth });
+    return jsonResponse(result);
+  });
+
+  app.post('/api/v1/workspaces', async (c) => {
+    const auth = c.get('auth');
+    const rl = checkRateLimit({ principalId: auth.userId, bucket: 'write' });
+    if (!rl.allowed) return rateLimitedResponse(c, rl);
+    const csrfFail = checkCsrf(c, auth);
+    if (csrfFail) return csrfFail;
+    const payload = await readJsonBody<{ name?: unknown }>(c);
+    if (!payload.ok) return invalidJsonResponse(c, payload.error);
+    const result = await createGreenfieldWorkspaceRoute({
+      auth,
+      body: payload.data,
+    });
     return jsonResponse(result);
   });
 

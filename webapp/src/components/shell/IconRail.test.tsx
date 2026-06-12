@@ -20,7 +20,9 @@ function buildUser(): SessionUser {
 
 function LocationProbe() {
   const location = useLocation();
-  return <div data-testid="location">{location.pathname + location.search}</div>;
+  return (
+    <div data-testid="location">{location.pathname + location.search}</div>
+  );
 }
 
 type Overrides = Partial<React.ComponentProps<typeof IconRail>>;
@@ -31,6 +33,7 @@ function renderRail(initialEntry: string, props: Overrides = {}) {
     workspaces: buildUser().workspaces ?? [],
     currentWorkspaceId: 'ws-1',
     onSwitchWorkspace: vi.fn(async () => undefined),
+    onCreateWorkspace: vi.fn(async () => undefined),
     onSignOut: vi.fn(),
     signOutBusy: false,
     onOpenPalette: vi.fn(),
@@ -91,7 +94,9 @@ describe('IconRail', () => {
     const user = userEvent.setup();
     const onOpenPalette = vi.fn();
     renderRail('/app/home', { onOpenPalette });
-    await user.click(screen.getByRole('button', { name: 'Open command palette' }));
+    await user.click(
+      screen.getByRole('button', { name: 'Open command palette' }),
+    );
     expect(onOpenPalette).toHaveBeenCalledTimes(1);
   });
 
@@ -103,7 +108,9 @@ describe('IconRail', () => {
     expect(onToggleSecondary).toHaveBeenCalledTimes(1);
 
     rerender(false);
-    expect(screen.queryByRole('button', { name: 'Toggle talk list' })).toBeNull();
+    expect(
+      screen.queryByRole('button', { name: 'Toggle talk list' }),
+    ).toBeNull();
   });
 
   it('opens the profile menu from the avatar button', async () => {
@@ -138,6 +145,7 @@ function renderToggle(
     workspaces: buildUser().workspaces ?? [],
     currentWorkspaceId: 'ws-1',
     onSwitchWorkspace: vi.fn(async () => undefined),
+    onCreateWorkspace: vi.fn(async () => undefined),
     onSignOut: vi.fn(),
     signOutBusy: false,
     onOpenPalette: vi.fn(),

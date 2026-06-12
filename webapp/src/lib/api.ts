@@ -898,6 +898,20 @@ export async function switchWorkspace(
   );
 }
 
+export async function createWorkspace(input: {
+  name: string;
+}): Promise<SessionUser> {
+  const envelope = await apiMutationRequest<SessionMePayload>(
+    '/api/v1/workspaces',
+    {
+      method: 'POST',
+      includeJson: true,
+      body: JSON.stringify({ name: input.name }),
+    },
+  );
+  return sessionUserFromPayload(envelope);
+}
+
 export async function listWorkspaceMembers(input: {
   workspaceId: string;
 }): Promise<WorkspaceMember[]> {

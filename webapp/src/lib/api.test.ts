@@ -997,6 +997,80 @@ describe('switchWorkspace', () => {
   });
 });
 
+describe('createWorkspace', () => {
+  beforeEach(() => {
+    vi.unstubAllGlobals();
+    Object.defineProperty(document, 'cookie', {
+      configurable: true,
+      get() {
+        return cookieValue;
+      },
+      set(value: string) {
+        cookieValue = value;
+      },
+    });
+    cookieValue = 'cr_csrf_token=test-csrf-token';
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it('POSTs the workspace name and returns the updated session', async () => {
+    const captured: { path: string; init?: RequestInit }[] = [];
+    vi.stubGlobal(
+      'fetch',
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        captured.push({ path: normalizePath(input), init });
+        return jsonResponse(201, {
+          ok: true,
+          data: {
+            user: {
+              id: 'u1',
+              email: 'owner@example.com',
+              name: 'Owner',
+              displayName: 'Owner',
+              avatarColor: null,
+              initials: 'O',
+              role: 'owner',
+              createdAt: '2026-01-01T00:00:00.000Z',
+            },
+            workspaces: [
+              { id: 'ws-1', name: 'Oxbow', role: 'owner', initials: 'OX' },
+              {
+                id: 'ws-2',
+                name: 'Research Lab',
+                role: 'owner',
+                initials: 'RE',
+              },
+            ],
+            currentWorkspaceId: 'ws-2',
+          },
+        });
+      },
+    );
+
+    const api = await loadApiModule();
+    const result = await api.createWorkspace({ name: 'Research Lab' });
+
+    expect(result.currentWorkspaceId).toBe('ws-2');
+    expect(result.workspaces?.map((workspace) => workspace.name)).toEqual([
+      'Oxbow',
+      'Research Lab',
+    ]);
+    expect(captured).toHaveLength(1);
+    expect(captured[0].path).toBe('/api/v1/workspaces');
+    expect(captured[0].init?.method).toBe('POST');
+    expect(captured[0].init?.body).toBe(
+      JSON.stringify({ name: 'Research Lab' }),
+    );
+    const headers = readHeaders(captured[0].init);
+    expect(headers['content-type']).toBe('application/json');
+    expect(headers['x-csrf-token']).toBe('test-csrf-token');
+  });
+});
+
 describe('active workspace header', () => {
   beforeEach(() => {
     vi.unstubAllGlobals();

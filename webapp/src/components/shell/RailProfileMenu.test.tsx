@@ -31,6 +31,7 @@ function renderMenu(props: Overrides = {}) {
     workspaces: user.workspaces ?? [],
     currentWorkspaceId: user.currentWorkspaceId,
     onSwitchWorkspace: vi.fn(async () => undefined),
+    onCreateWorkspace: vi.fn(async () => undefined),
     onSignOut: vi.fn(),
     signOutBusy: false,
     onClose: vi.fn(),
@@ -67,6 +68,37 @@ describe('RailProfileMenu', () => {
     renderMenu({ onSwitchWorkspace });
     await user.click(screen.getByRole('menuitemradio', { name: /Second/ }));
     expect(onSwitchWorkspace).toHaveBeenCalledWith('ws-2');
+  });
+
+  it('creates a named workspace from the workspace section', async () => {
+    const user = userEvent.setup();
+    const onCreateWorkspace = vi.fn(async () => undefined);
+    renderMenu({ onCreateWorkspace });
+
+    await user.click(screen.getByRole('menuitem', { name: 'Add workspace' }));
+    const input = screen.getByLabelText('Workspace name');
+    expect(input).toHaveValue("Owner Example's workspace");
+
+    await user.clear(input);
+    await user.type(input, 'Research Lab');
+    await user.click(screen.getByRole('button', { name: 'Create' }));
+
+    expect(onCreateWorkspace).toHaveBeenCalledWith('Research Lab');
+  });
+
+  it('keeps the create form open for an empty workspace name', async () => {
+    const user = userEvent.setup();
+    const onCreateWorkspace = vi.fn(async () => undefined);
+    renderMenu({ onCreateWorkspace });
+
+    await user.click(screen.getByRole('menuitem', { name: 'Add workspace' }));
+    await user.clear(screen.getByLabelText('Workspace name'));
+    await user.click(screen.getByRole('button', { name: 'Create' }));
+
+    expect(onCreateWorkspace).not.toHaveBeenCalled();
+    expect(screen.getByRole('alert')).toHaveTextContent(
+      'Workspace name is required.',
+    );
   });
 
   it('closes (without switching) when the active workspace is reselected', async () => {

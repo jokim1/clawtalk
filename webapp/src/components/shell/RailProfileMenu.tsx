@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { createPortal } from 'react-dom';
 import { useNavigate } from 'react-router-dom';
 
@@ -14,6 +14,7 @@ type Props = {
   workspaces: SessionWorkspace[];
   currentWorkspaceId: string | undefined;
   onSwitchWorkspace: (workspaceId: string) => void | Promise<void>;
+  onCreateWorkspace: (name: string) => void | Promise<void>;
   onSignOut: () => void;
   signOutBusy: boolean;
   onClose: () => void;
@@ -47,18 +48,39 @@ function roleLabel(
   return titleCaseRole(activeWorkspace?.role ?? user.role);
 }
 
+function defaultWorkspaceName(
+  user: SessionUser,
+  workspaces: SessionWorkspace[],
+): string {
+  const ownerName = user.displayName.trim() || user.email.split('@')[0] || 'My';
+  const base = `${ownerName}'s workspace`;
+  const existing = new Set(workspaces.map((workspace) => workspace.name));
+  if (!existing.has(base)) return base;
+
+  let index = workspaces.length + 1;
+  while (existing.has(`${base} ${index}`)) {
+    index += 1;
+  }
+  return `${base} ${index}`;
+}
+
 export function RailProfileMenu({
   anchorRect,
   user,
   workspaces,
   currentWorkspaceId,
   onSwitchWorkspace,
+  onCreateWorkspace,
   onSignOut,
   signOutBusy,
   onClose,
 }: Props): JSX.Element | null {
   const panelRef = useRef<HTMLDivElement | null>(null);
+  const createInputRef = useRef<HTMLInputElement | null>(null);
   const [switching, setSwitching] = useState(false);
+  const [creating, setCreating] = useState(false);
+  const [createName, setCreateName] = useState('');
+  const [createBusy, setCreateBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const navigate = useNavigate();
   const { initials, color } = getUserAvatar(user);
@@ -74,6 +96,12 @@ export function RailProfileMenu({
     panelRef.current?.focus();
     return () => window.removeEventListener('keydown', onKey);
   }, [onClose]);
+
+  useEffect(() => {
+    if (!creating) return;
+    createInputRef.current?.focus();
+    createInputRef.current?.select();
+  }, [creating]);
 
   if (typeof document === 'undefined') return null;
 
@@ -104,7 +132,7 @@ export function RailProfileMenu({
   };
 
   const handleSwitch = async (workspaceId: string) => {
-    if (workspaceId === currentWorkspaceId || switching) {
+    if (workspaceId === currentWorkspaceId || switching || createBusy) {
       onClose();
       return;
     }
@@ -119,6 +147,39 @@ export function RailProfileMenu({
       );
     } finally {
       setSwitching(false);
+    }
+  };
+
+  const startCreate = () => {
+    setCreateName(defaultWorkspaceName(user, workspaces));
+    setCreating(true);
+    setError(null);
+  };
+
+  const handleCreate = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (createBusy) return;
+    const name = createName.trim();
+    if (!name) {
+      setError('Workspace name is required.');
+      return;
+    }
+    if (name.length > 120) {
+      setError('Workspace name must be 120 characters or fewer.');
+      return;
+    }
+
+    setCreateBusy(true);
+    setError(null);
+    try {
+      await onCreateWorkspace(name);
+      onClose();
+    } catch (err) {
+      setError(
+        err instanceof Error ? err.message : 'Failed to create workspace',
+      );
+    } finally {
+      setCreateBusy(false);
     }
   };
 
@@ -160,7 +221,7 @@ export function RailProfileMenu({
                   type="button"
                   role="menuitemradio"
                   aria-checked={active}
-                  disabled={switching}
+                  disabled={switching || createBusy}
                   onClick={() => void handleSwitch(workspace.id)}
                   className={`ct-rail-profile-workspace${active ? ' active' : ''}`}
                 >
@@ -186,6 +247,56 @@ export function RailProfileMenu({
               );
             })}
           </div>
+
+          {creating ? (
+            <form
+              className="ct-rail-profile-create-form"
+              onSubmit={(event) => void handleCreate(event)}
+            >
+              <label
+                className="ct-rail-profile-create-label"
+                htmlFor="ct-rail-profile-create-name"
+              >
+                Workspace name
+              </label>
+              <input
+                ref={createInputRef}
+                id="ct-rail-profile-create-name"
+                type="text"
+                value={createName}
+                maxLength={120}
+                disabled={createBusy}
+                onChange={(event) => setCreateName(event.target.value)}
+              />
+              <div className="ct-rail-profile-create-actions">
+                <button
+                  type="button"
+                  disabled={createBusy}
+                  onClick={() => {
+                    setCreating(false);
+                    setCreateName('');
+                    setError(null);
+                  }}
+                >
+                  Cancel
+                </button>
+                <button type="submit" disabled={createBusy}>
+                  {createBusy ? 'Creating…' : 'Create'}
+                </button>
+              </div>
+            </form>
+          ) : (
+            <button
+              type="button"
+              role="menuitem"
+              disabled={switching || createBusy}
+              onClick={startCreate}
+              className="ct-rail-profile-create-btn"
+            >
+              <CTIcon name="plus" size={14} strokeWidth={1.9} />
+              Add workspace
+            </button>
+          )}
 
           {error ? (
             <p className="ct-rail-profile-error" role="alert">
