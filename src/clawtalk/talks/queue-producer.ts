@@ -30,9 +30,13 @@ export async function dispatchRun(input: DispatchRunInput): Promise<void> {
   const { env } = getRequestScopeEnvAndCtx();
   const queue = env?.TALK_RUN_QUEUE;
   if (!queue) {
-    logger.warn(
+    // Error-level: since 6A this is the ONLY dispatch path — a missing
+    // binding (e.g. a fetch-scope env object edited without it, the PR
+    // #454 ATTACHMENTS bug class) silently degrades every chat to the
+    // 5-min stuck-queued sweep.
+    logger.error(
       { runId: input.runId },
-      'dispatchRun called without TALK_RUN_QUEUE binding — run row durable, not dispatched',
+      'dispatchRun called without TALK_RUN_QUEUE binding — run row durable, not dispatched until the stuck-queued sweep',
     );
     return;
   }

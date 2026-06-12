@@ -796,6 +796,17 @@ describe('greenfield chat routes', () => {
     const dbUrl =
       process.env[DATABASE_URL_ENV]?.trim() ||
       'postgresql://postgres:postgres@127.0.0.1:54432/postgres';
+    // Stub ExecutionContext so the route runs under the same context
+    // shape as production. Without it, c.executionCtx THROWS in this
+    // harness — a reintroduced waitUntil bypass would fail with a
+    // misleading 500 (test-env quirk), and a ctx-guarded bypass
+    // (try/catch around c.executionCtx) would pass while fully reviving
+    // the 30s-ceiling bug in prod. With the stub, the queue assertion
+    // below is the load-bearing kill (mutation-verified both ways).
+    const executionCtx = {
+      waitUntil: () => {},
+      passThroughOnException: () => {},
+    } as never;
     const postChat = (
       talkId: string,
       workspaceId: string,
@@ -811,6 +822,9 @@ describe('greenfield chat routes', () => {
             },
             body: JSON.stringify(body),
           }),
+          undefined,
+          undefined,
+          executionCtx,
         ),
       );
 
@@ -851,5 +865,17 @@ describe('greenfield chat routes', () => {
     expect(multiBody.ok).toBe(true);
     expect(multiBody.data.runs.length).toBeGreaterThan(1);
     expect(sent).toEqual(multiBody.data.runs.map((run) => run.id));
+
+    // Rejected enqueues must dispatch nothing: a second send while the
+    // first round is still active is refused, and the false branch of
+    // the 202-guard must not reach the queue.
+    sent.length = 0;
+    const rejected = await postChat(
+      singleFixture.talkId,
+      singleFixture.workspaceId,
+      { content: 'Second send while round active' },
+    );
+    expect(rejected.status).not.toBe(202);
+    expect(sent).toEqual([]);
   });
 });

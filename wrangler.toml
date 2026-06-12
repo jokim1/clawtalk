@@ -9,7 +9,7 @@
 #   - [assets]   serves webapp/dist with SPA fallback for /* (non-API)
 #   - [[hyperdrive]] DB  pooled Postgres connection to Supabase
 #   - [[kv_namespaces]] JWKS_CACHE  caches Supabase JWKS for D2 auth
-#   - [[queues.producers]] TALK_RUN_QUEUE  enqueues multi-agent runs
+#   - [[queues.producers]] TALK_RUN_QUEUE  enqueues all Talk runs (6A)
 #   - [[queues.consumers]] TALK_RUN_QUEUE  consumer worker for runs
 #
 # Secrets are set via `wrangler secret put` and never live in this file.
