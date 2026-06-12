@@ -16,6 +16,7 @@ import {
   type ContextSource,
 } from '../lib/api';
 import { isRasterizablePdf, renderAndUploadPdfPages } from '../lib/pdf-raster';
+import { Button, Chip, CTIcon, Input, Textarea } from '../salon';
 import { getSourceDisplayRef } from './sourceDisplay';
 
 // Per-source client-side PDF rasterization progress (this session only).
@@ -308,11 +309,11 @@ export function SavedSourcesPanel({
   };
 
   return (
-    <div className="talk-llm-card">
-      <div className="connector-card-header">
+    <section className="talk-context-card">
+      <div className="talk-context-card-header">
         <div>
           <h3>Saved Sources</h3>
-          <p className="talk-llm-meta">
+          <p className="talk-context-card-copy">
             Files, URLs, and text snippets agents can reference. Each source
             contributes a one-line preview to every turn. Use the @ picker or{' '}
             <code>@title-slug</code> in a message to inline a source's full
@@ -382,7 +383,7 @@ export function SavedSourcesPanel({
       ) : null}
 
       {uploadingFiles.length > 0 ? (
-        <div className="context-source-upload-progress">
+        <div className="context-source-upload-progress" role="status">
           {uploadingFiles.map((f) => (
             <div key={f.localId} className="context-source-upload-item">
               <span>{f.fileName}</span>
@@ -411,7 +412,7 @@ export function SavedSourcesPanel({
       ) : null}
 
       {sources.length > 0 ? (
-        <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>
+        <ul className="context-source-list">
           {sources.map((source, index) => (
             <SavedSourceRow
               key={source.id}
@@ -429,75 +430,74 @@ export function SavedSourcesPanel({
           ))}
         </ul>
       ) : uploadingFiles.length === 0 ? (
-        <p className="page-state">No sources yet.</p>
+        <p className="talk-context-empty">No sources yet.</p>
       ) : null}
 
       {canEdit ? (
-        <div style={{ marginTop: '0.75rem' }}>
-          <div
-            className="connector-attach-row"
-            style={{ marginBottom: '0.5rem' }}
-          >
-            <label style={{ flex: 1 }}>
-              <span className="settings-label">URL</span>
-              <input
+        <div className="talk-context-source-create">
+          <label className="talk-context-field">
+            <span className="talk-context-field-label">
+              Source title (optional)
+            </span>
+            <Input
+              type="text"
+              value={addSourceTitle}
+              onChange={(e) => setAddSourceTitle(e.target.value)}
+              placeholder="Source title"
+              disabled={status.status === 'saving'}
+            />
+          </label>
+          <div className="talk-context-source-mode-row">
+            <label className="talk-context-field talk-context-field-fill">
+              <span className="talk-context-field-label">URL</span>
+              <Input
                 type="url"
                 value={addSourceUrl}
                 onChange={(e) => setAddSourceUrl(e.target.value)}
                 placeholder="https://example.com/docs"
                 disabled={status.status === 'saving'}
-                style={{ width: '100%' }}
               />
             </label>
-            <label>
-              <span className="settings-label">Title (optional)</span>
-              <input
-                type="text"
-                value={addSourceTitle}
-                onChange={(e) => setAddSourceTitle(e.target.value)}
-                placeholder="Source title"
-                disabled={status.status === 'saving'}
-                style={{ width: '100%' }}
-              />
-            </label>
+            <Button
+              variant="secondary"
+              onClick={() => void handleAddUrl()}
+              disabled={status.status === 'saving' || !addSourceUrl.trim()}
+            >
+              Add URL
+            </Button>
           </div>
-          <button
-            type="button"
-            className="secondary-btn"
-            onClick={() => void handleAddUrl()}
-            disabled={status.status === 'saving' || !addSourceUrl.trim()}
-          >
-            Add URL
-          </button>
-          <label style={{ display: 'block', marginTop: '0.75rem' }}>
-            <span className="settings-label">Paste text snippet</span>
-            <textarea
+          <label className="talk-context-field">
+            <span className="talk-context-field-label">Paste text snippet</span>
+            <Textarea
               value={addSourceText}
               onChange={(e) => setAddSourceText(e.target.value)}
               placeholder="Paste notes, source excerpts, or working context here…"
               rows={4}
               disabled={status.status === 'saving'}
-              style={{ width: '100%', resize: 'vertical' }}
+              className="talk-context-textarea"
+              style={{ resize: 'vertical' }}
             />
           </label>
-          <button
-            type="button"
-            className="secondary-btn"
-            onClick={() => void handleAddText()}
-            disabled={status.status === 'saving' || !addSourceText.trim()}
-            style={{ marginTop: '0.5rem' }}
-          >
-            Add Text
-          </button>
+          <div className="talk-context-actions-row">
+            <Button
+              variant="secondary"
+              onClick={() => void handleAddText()}
+              disabled={status.status === 'saving' || !addSourceText.trim()}
+            >
+              Add Text
+            </Button>
+          </div>
         </div>
       ) : null}
 
       {status.status === 'error' ? (
-        <p className="page-state error">{status.message}</p>
+        <p className="talk-context-status talk-context-status-error">
+          {status.message}
+        </p>
       ) : status.status === 'success' ? (
-        <p className="page-state">{status.message}</p>
+        <p className="talk-context-status">{status.message}</p>
       ) : null}
-    </div>
+    </section>
   );
 }
 
@@ -553,14 +553,14 @@ function SavedSourceRow({
         >
           {displayRef}
         </span>
-        <span className="context-source-type-badge">
+        <Chip tone="ghost">
           {source.sourceType === 'file'
-            ? 'FILE'
+            ? 'File'
             : source.sourceType === 'url'
               ? 'URL'
-              : 'TEXT'}
-        </span>
-        <div style={{ flex: 1, minWidth: 0 }}>
+              : 'Text'}
+        </Chip>
+        <div className="context-source-title">
           <InlineEditable
             value={source.title}
             placeholder="Untitled source"
@@ -570,60 +570,50 @@ function SavedSourceRow({
             onSave={(next) => onPatchTitle(source.id, next)}
           />
         </div>
-        {source.sourceType === 'file' && fileSizeLabel ? (
-          <span className="context-source-file-meta">{fileSizeLabel}</span>
-        ) : null}
-        {source.fetchStrategy ? (
-          <span className="context-source-file-meta">
-            via {source.fetchStrategy}
+        <div className="context-source-row-meta">
+          {source.sourceType === 'file' && fileSizeLabel ? (
+            <span className="context-source-file-meta">{fileSizeLabel}</span>
+          ) : null}
+          {source.fetchStrategy ? (
+            <span className="context-source-file-meta">
+              via {source.fetchStrategy}
+            </span>
+          ) : null}
+          <span
+            className={`context-source-status context-source-status-${source.status}`}
+          >
+            {source.status}
           </span>
-        ) : null}
-        <span
-          style={{
-            fontSize: '0.75rem',
-            color:
-              source.status === 'ready'
-                ? 'green'
-                : source.status === 'failed'
-                  ? 'red'
-                  : 'orange',
-          }}
-        >
-          {source.status}
-        </span>
+        </div>
         {canEdit &&
         source.sourceType === 'url' &&
         source.status === 'failed' ? (
-          <button
-            type="button"
-            className="secondary-btn"
+          <Button
+            variant="secondary"
             onClick={() => void onRetry(source.id)}
+            style={{ height: 30, padding: '0 12px' }}
           >
             Retry
-          </button>
+          </Button>
         ) : null}
         {canEdit ? (
-          <button
-            type="button"
-            className="secondary-btn"
+          <Button
+            variant="ghost"
             onClick={() => void onDelete(source.id)}
             title="Remove source"
+            aria-label={`Remove ${source.title || 'source'}`}
             style={{
-              minWidth: '2rem',
-              padding: '0.2rem 0.4rem',
+              width: 32,
+              height: 32,
+              minWidth: 32,
+              padding: 0,
             }}
           >
-            ×
-          </button>
+            <CTIcon name="x" size={14} strokeWidth={1.8} />
+          </Button>
         ) : null}
       </div>
-      <div
-        style={{
-          marginTop: '0.25rem',
-          marginLeft: '0.25rem',
-          fontSize: '0.85rem',
-        }}
-      >
+      <div className="context-source-note">
         <InlineEditable
           value={source.note ?? ''}
           placeholder="Add a one-line routing hint (when to use this source)"
@@ -633,50 +623,24 @@ function SavedSourceRow({
         />
       </div>
       {extractedLabel ? (
-        <p
-          style={{
-            margin: '0.2rem 0 0 0.25rem',
-            fontSize: '0.7rem',
-            opacity: 0.55,
-          }}
-        >
+        <p className="context-source-detail">
           {extractedLabel}
           {source.isTruncated ? ' (truncated)' : ''}
         </p>
       ) : null}
       {source.extractionError ? (
-        <p
-          style={{
-            margin: '0.35rem 0 0 0',
-            fontSize: '0.85rem',
-            color: 'var(--danger-text, #a61b1b)',
-          }}
-        >
-          {source.extractionError}
-        </p>
+        <p className="context-source-error">{source.extractionError}</p>
       ) : null}
       {source.lastFetchedAt ? (
-        <p
-          style={{
-            margin: '0.2rem 0 0 0',
-            fontSize: '0.75rem',
-            opacity: 0.65,
-          }}
-        >
+        <p className="context-source-detail">
           Last fetched {new Date(source.lastFetchedAt).toLocaleString()}
         </p>
       ) : null}
       {renderState ? (
         <p
-          style={{
-            margin: '0.3rem 0 0 0.25rem',
-            fontSize: '0.7rem',
-            opacity: renderState.phase === 'failed' ? 0.85 : 0.55,
-            color:
-              renderState.phase === 'failed'
-                ? 'var(--warning-text, #8a6d00)'
-                : undefined,
-          }}
+          className={`context-source-detail${
+            renderState.phase === 'failed' ? ' context-source-warning' : ''
+          }`}
         >
           {renderState.phase === 'rendering'
             ? `Rendering pages for vision agents…${
@@ -690,51 +654,29 @@ function SavedSourceRow({
                 } rendered for image-only vision agents.`
               : "Couldn't render this PDF's pages — it stays text-only for image-only vision agents."}
           {renderState.phase === 'failed' && canEdit ? (
-            <button
-              type="button"
-              className="secondary-btn"
-              style={{
-                marginLeft: '0.5rem',
-                padding: '0.1rem 0.4rem',
-                fontSize: '0.7rem',
-              }}
+            <Button
+              variant="secondary"
+              className="context-source-inline-action"
               onClick={() => onRetryRender(source.id)}
             >
               Retry
-            </button>
+            </Button>
           ) : null}
         </p>
       ) : null}
       {showRenderAffordance ? (
-        <p
-          style={{
-            margin: '0.3rem 0 0 0.25rem',
-            fontSize: '0.7rem',
-            opacity: 0.7,
-          }}
-        >
+        <p className="context-source-detail">
           Not yet rendered for image-only vision agents.
-          <button
-            type="button"
-            className="secondary-btn"
-            style={{
-              marginLeft: '0.4rem',
-              padding: '0.1rem 0.4rem',
-              fontSize: '0.7rem',
-            }}
+          <Button
+            variant="secondary"
+            className="context-source-inline-action"
             onClick={() => onRetryRender(source.id)}
           >
             Render pages
-          </button>
+          </Button>
         </p>
       ) : isPdf && source.pageSetComplete && !renderState ? (
-        <p
-          style={{
-            margin: '0.3rem 0 0 0.25rem',
-            fontSize: '0.7rem',
-            opacity: 0.5,
-          }}
-        >
+        <p className="context-source-detail">
           {source.pageImageCount} page{source.pageImageCount === 1 ? '' : 's'}{' '}
           rendered for image-only vision agents.
         </p>
@@ -807,7 +749,7 @@ function InlineEditable({
     return (
       <button
         type="button"
-        className="saved-sources-inline-edit-button"
+        className="salon-btn saved-sources-inline-edit-button"
         onClick={() => {
           if (disabled) return;
           setIsEditing(true);
@@ -829,7 +771,7 @@ function InlineEditable({
     <span className="saved-sources-inline-edit-wrap">
       <input
         ref={inputRef}
-        className="saved-sources-inline-edit-input"
+        className="salon-field saved-sources-inline-edit-input"
         type="text"
         value={draft}
         aria-label={ariaLabel}

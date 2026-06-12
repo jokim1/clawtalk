@@ -1051,11 +1051,16 @@ export function TalkDetailPage({
           ) : null}
 
           {currentTab === 'context' ? (
-            <section className="talk-tab-panel" aria-label="Talk context">
+            <section
+              className="talk-context-shell ct-screen-enter ct-thin-scroll"
+              aria-label="Talk context"
+            >
               {contextStatus.status === 'loading' ? (
-                <p className="page-state">Loading context…</p>
+                <p className="talk-context-empty">Loading context…</p>
               ) : contextStatus.status === 'error' ? (
-                <p className="page-state error">{contextStatus.message}</p>
+                <p className="talk-context-status talk-context-status-error">
+                  {contextStatus.message}
+                </p>
               ) : (
                 <>
                   <TalkContextPanel
@@ -1091,7 +1096,9 @@ export function TalkDetailPage({
 
                   {contextStatus.status === 'success' &&
                   contextStatus.message ? (
-                    <p className="page-state">{contextStatus.message}</p>
+                    <p className="talk-context-status">
+                      {contextStatus.message}
+                    </p>
                   ) : null}
                 </>
               )}
