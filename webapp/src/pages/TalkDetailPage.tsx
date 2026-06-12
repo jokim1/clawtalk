@@ -1361,6 +1361,7 @@ export function TalkDetailPage({
               />
               {sidePanelMeta ? (
                 <TalkSidePanelShell
+                  talkId={talkId}
                   title={sidePanelMeta.title}
                   subtitle={sidePanelMeta.subtitle}
                   icon={sidePanelMeta.icon}

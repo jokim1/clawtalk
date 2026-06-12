@@ -276,6 +276,31 @@ describe('TalkDetailPage', () => {
     expect(screen.queryByRole('complementary', { name: 'Context' })).toBeNull();
   });
 
+  it('resizes the Talk side panel and persists the width per Talk', async () => {
+    const user = userEvent.setup();
+    installTalkDetailFetch();
+
+    renderDetailPage('/app/talks/talk-1?panel=context');
+
+    const panel = await screen.findByRole('complementary', {
+      name: 'Context',
+    });
+    const resizeHandle = screen.getByRole('separator', {
+      name: 'Resize Context panel',
+    });
+    resizeHandle.focus();
+    await user.keyboard('{ArrowLeft}');
+    expect(panel).toHaveStyle({ width: '408px', flexBasis: '408px' });
+
+    await user.keyboard('{ArrowRight}');
+    expect(panel).toHaveStyle({ width: '384px', flexBasis: '384px' });
+    expect(
+      JSON.parse(
+        window.localStorage.getItem('clawtalk_side_panel:talk-1') || '{}',
+      ),
+    ).toEqual({ width: 384 });
+  });
+
   it('closes the side panel and opens the document pane from Documents', async () => {
     const user = userEvent.setup();
     installTalkDetailFetch({
