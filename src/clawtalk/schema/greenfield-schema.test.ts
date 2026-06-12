@@ -75,7 +75,7 @@ describe('greenfield schema invariants', () => {
         to_regclass('public.talk_threads')::text as legacy_table,
         (select count(*)::int from public.agent_role_templates) as template_count
     `;
-    expect(rows[0]).toEqual({ legacy_table: null, template_count: 7 });
+    expect(rows[0]).toEqual({ legacy_table: null, template_count: 8 });
   });
 
   it('keeps server-authored workflow tables read-only for authenticated clients', async () => {

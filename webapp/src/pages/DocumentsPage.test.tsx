@@ -41,7 +41,7 @@ const SIDEBAR: TalkSidebarTree = {
       ],
     },
   ],
-  mainTalkId: null,
+  buddyTalkId: null,
   contents: [],
 };
 

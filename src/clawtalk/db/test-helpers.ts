@@ -264,6 +264,11 @@ export async function purgeUserData(userIds: string[]): Promise<void> {
 export async function deleteAuthUsers(userIds: string[]): Promise<void> {
   if (userIds.length === 0) return;
   const db = getDbPg();
+  // Bootstrap seeds a Buddy system talk whose created_by FK is ON DELETE
+  // RESTRICT, so cascade the owned workspaces away before the users.
+  await db`
+    delete from public.workspaces where owner_id in ${db(userIds)}
+  `;
   await db`
     delete from auth.users where id in ${db(userIds)}
   `;

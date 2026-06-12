@@ -209,6 +209,9 @@ export async function enqueueGreenfieldChatTurn(input: {
       join public.agents a
         on a.workspace_id = ta.workspace_id
        and a.id = ta.agent_id
+      join public.talks t
+        on t.workspace_id = ta.workspace_id
+       and t.id = ta.talk_id
       left join lateral (
         select lpm.provider_id
         from public.llm_provider_models lpm
@@ -223,7 +226,9 @@ export async function enqueueGreenfieldChatTurn(input: {
       where ta.workspace_id = ${input.workspaceId}::uuid
         and ta.talk_id = ${input.talkId}::uuid
         and a.enabled = true
-        and a.is_system = false
+        -- System agents (Buddy) may speak only in the system talk; regular
+        -- talks never roster them.
+        and (a.is_system = false or t.is_system = true)
       order by ta.sort_order asc, a.name asc, a.id asc
     `;
 

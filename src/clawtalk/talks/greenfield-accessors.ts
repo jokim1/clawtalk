@@ -20,6 +20,7 @@ export interface GreenfieldTalkRecord {
   mode: 'ordered' | 'parallel';
   rounds_limit: 1 | 2 | 3 | 5;
   created_by: string;
+  is_system: boolean;
   archived_at: string | null;
   last_activity_at: string;
   created_at: string;
@@ -416,6 +417,7 @@ export async function listGreenfieldTalks(input: {
       t.mode,
       t.rounds_limit,
       t.created_by,
+      t.is_system,
       t.archived_at,
       t.last_activity_at,
       t.created_at,
@@ -612,6 +614,9 @@ export async function archiveGreenfieldTalk(input: {
     set archived_at = coalesce(archived_at, now())
     where workspace_id = ${input.workspaceId}::uuid
       and id = ${input.talkId}::uuid
+      -- The system talk (Buddy) anchors the sidebar's pinned row and is
+      -- re-seeded by bootstrap; it can never be archived or deleted.
+      and is_system = false
     returning id
   `;
   return rows.length > 0;
@@ -654,11 +659,16 @@ export async function listGreenfieldTalkAgents(input: {
     join public.agents a
       on a.workspace_id = ta.workspace_id
      and a.id = ta.agent_id
+    join public.talks t
+      on t.workspace_id = ta.workspace_id
+     and t.id = ta.talk_id
     left join public.llm_provider_models m
       on m.model_id = a.model_id
     where ta.workspace_id = ${input.workspaceId}::uuid
       and ta.talk_id = ${input.talkId}::uuid
-      and a.is_system = false
+      -- System agents (Buddy) are visible on the roster of the system talk
+      -- only; regular talks never list them.
+      and (a.is_system = false or t.is_system = true)
     order by ta.sort_order asc, a.name asc
   `;
 }
@@ -681,6 +691,9 @@ export async function replaceGreenfieldTalkAgents(input: {
     from public.talks
     where workspace_id = ${input.workspaceId}::uuid
       and id = ${input.talkId}::uuid
+      -- The system talk's roster (Buddy) is bootstrap-managed; a full replace
+      -- would drop the system agent, so reject it like a missing talk.
+      and is_system = false
     for update
   `;
   if (talks.length === 0) return { status: 'talk_not_found' };

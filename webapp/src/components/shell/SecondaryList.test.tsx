@@ -42,7 +42,7 @@ function renderList(props: Overrides = {}) {
     contents: [],
     loading: false,
     error: null,
-    mainTalkId: null,
+    buddyTalkId: null,
     onNewTalk: vi.fn(),
     onCreateFolder: vi.fn(async () => buildFolder()),
     onRenameTalk: vi.fn(),

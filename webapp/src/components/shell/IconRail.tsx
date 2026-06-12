@@ -42,7 +42,7 @@ const NAV_ITEMS: NavItem[] = [
     label: 'Talks',
     icon: 'chat',
     to: '/app/talks',
-    isActive: (p) => p.startsWith('/app/talks') || p.startsWith('/app/main'),
+    isActive: (p) => p.startsWith('/app/talks') || p.startsWith('/app/buddy'),
   },
   {
     id: 'documents',

@@ -808,9 +808,13 @@ a {
   font-size: 0.9rem;
 }
 
+/* Overlay the right edge of the row instead of reserving flex space, so the
+   active/hover pill spans the full row width like the design mock. */
 .clawtalk-sidebar-tree-actions {
-  position: relative;
-  flex: 0 0 auto;
+  position: absolute;
+  right: 0.2rem;
+  top: 50%;
+  transform: translateY(-50%);
   display: inline-flex;
   align-items: center;
   opacity: 0;
@@ -825,14 +829,23 @@ a {
   pointer-events: auto;
 }
 
+/* The overlaid "…" replaces the row's right-edge meta (badge / doc icon)
+   while it is visible. */
+.clawtalk-sidebar-tree-row:hover .clawtalk-sidebar-unread-badge,
+.clawtalk-sidebar-tree-row:hover .clawtalk-sidebar-content-indicator,
+.clawtalk-sidebar-tree-row:focus-within .clawtalk-sidebar-unread-badge,
+.clawtalk-sidebar-tree-row:focus-within .clawtalk-sidebar-content-indicator {
+  opacity: 0;
+}
+
 .clawtalk-sidebar-more {
-  width: 2rem;
-  height: 2rem;
+  width: 1.55rem;
+  height: 1.55rem;
   border: 0;
-  border-radius: 10px;
+  border-radius: 7px;
   background: var(--salon-paper-2, #f4ecdb);
   color: var(--salon-ink-2, #6b6660);
-  font-size: 1rem;
+  font-size: 0.85rem;
   cursor: pointer;
 }
 

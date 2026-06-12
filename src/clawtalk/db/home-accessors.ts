@@ -1205,6 +1205,9 @@ async function homeStats(input: {
         from public.talks
         where workspace_id = ${input.workspaceId}::uuid
           and archived_at is null
+          -- The seeded Buddy system talk is hidden from the Talks surfaces,
+          -- so keep it out of the Home stats too.
+          and is_system = false
       ) as talks,
       (
         select count(*)::bigint

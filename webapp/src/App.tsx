@@ -413,26 +413,26 @@ function DocumentDetailRoute(): JSX.Element {
   return <DocumentDetailPage key={documentId ?? 'none'} />;
 }
 
-function MainTalkRedirect({
-  mainTalkId,
+function BuddyTalkRedirect({
+  buddyTalkId,
   loading,
   error,
 }: {
-  mainTalkId: string | null;
+  buddyTalkId: string | null;
   loading: boolean;
   error: string | null;
 }): JSX.Element {
-  if (mainTalkId) {
+  if (buddyTalkId) {
     return (
-      <Navigate to={`/app/talks/${encodeURIComponent(mainTalkId)}`} replace />
+      <Navigate to={`/app/talks/${encodeURIComponent(buddyTalkId)}`} replace />
     );
   }
   if (loading) {
-    return <main className="page-state">Loading Main…</main>;
+    return <main className="page-state">Loading Buddy…</main>;
   }
   return (
     <main className="page-state">
-      {error ?? 'Main is not available yet. Try refreshing the page.'}
+      {error ?? 'Buddy is not available yet. Try refreshing the page.'}
     </main>
   );
 }
@@ -446,7 +446,7 @@ export function App() {
   const [sidebarContents, setSidebarContents] = useState<DocumentSidebarItem[]>(
     [],
   );
-  const [mainTalkId, setMainTalkId] = useState<string | null>(null);
+  const [buddyTalkId, setBuddyTalkId] = useState<string | null>(null);
   const [sidebarLoading, setSidebarLoading] = useState(true);
   const [sidebarError, setSidebarError] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState<RenameDraft>(null);
@@ -552,7 +552,7 @@ export function App() {
       const tree = await getTalkSidebar();
       setSidebarItems(tree.items);
       setSidebarContents(tree.contents ?? []);
-      setMainTalkId(tree.mainTalkId);
+      setBuddyTalkId(tree.buddyTalkId);
       setSidebarError(null);
     } catch (err) {
       if (err instanceof UnauthorizedError) {
@@ -571,7 +571,7 @@ export function App() {
     if (auth.status !== 'authenticated') {
       setSidebarItems([]);
       setSidebarContents([]);
-      setMainTalkId(null);
+      setBuddyTalkId(null);
       setSidebarLoading(true);
       setSidebarError(null);
       setRenameDraft(null);
@@ -970,7 +970,7 @@ export function App() {
   const isTalkRoute =
     location.pathname.startsWith('/app/talks/') &&
     location.pathname !== '/app/talks';
-  const isMainRoute = location.pathname.startsWith('/app/main');
+  const isBuddyRoute = location.pathname.startsWith('/app/buddy');
   // The talk-list column rides along on talk-centric routes; management
   // surfaces (Settings, agent profiles) get the full content width.
   const secondaryAvailable =
@@ -978,7 +978,7 @@ export function App() {
     location.pathname.startsWith('/app/home') ||
     location.pathname.startsWith('/app/talks') ||
     location.pathname.startsWith('/app/archive') ||
-    location.pathname.startsWith('/app/main');
+    location.pathname.startsWith('/app/buddy');
 
   // Close the mobile drawer on any navigation, including document-pane links
   // that change only the query string (?doc=1), not the pathname.
@@ -1050,7 +1050,7 @@ export function App() {
             contents={sidebarContents}
             loading={sidebarLoading}
             error={sidebarError}
-            mainTalkId={mainTalkId}
+            buddyTalkId={buddyTalkId}
             onNewTalk={openNewTalk}
             onCreateFolder={handleCreateFolder}
             onRenameTalk={handleRenameTalk}
@@ -1081,7 +1081,7 @@ export function App() {
       ) : null}
       <div className="app-main">
         <div
-          className={`app-main-content${isTalkRoute || isMainRoute ? ' app-main-content-talk' : ''}`}
+          className={`app-main-content${isTalkRoute || isBuddyRoute ? ' app-main-content-talk' : ''}`}
         >
           <Routes>
             <Route path="/" element={<Navigate to="/app/home" replace />} />
@@ -1163,16 +1163,16 @@ export function App() {
               element={<Navigate to="/app/settings?tab=connectors" replace />}
             />
             <Route
-              path="/app/main"
+              path="/app/buddy"
               element={
-                <MainTalkRedirect
-                  mainTalkId={mainTalkId}
+                <BuddyTalkRedirect
+                  buddyTalkId={buddyTalkId}
                   loading={sidebarLoading}
                   error={sidebarError}
                 />
               }
             />
-            <Route path="*" element={<Navigate to="/app/main" replace />} />
+            <Route path="*" element={<Navigate to="/app/buddy" replace />} />
           </Routes>
         </div>
       </div>

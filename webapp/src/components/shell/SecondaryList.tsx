@@ -59,7 +59,7 @@ type Props = {
   contents: DocumentSidebarItem[];
   loading: boolean;
   error: string | null;
-  mainTalkId: string | null;
+  buddyTalkId: string | null;
   onNewTalk: () => void;
   onCreateFolder: () => Promise<TalkSidebarFolder>;
   onRenameTalk: (talkId: string, title: string) => void;
@@ -220,7 +220,7 @@ export function SecondaryList({
   contents,
   loading,
   error,
-  mainTalkId,
+  buddyTalkId,
   onNewTalk,
   onCreateFolder,
   onRenameTalk,
@@ -234,14 +234,14 @@ export function SecondaryList({
   onToggleSecondary,
 }: Props): JSX.Element {
   const location = useLocation();
-  // The Main NavLink targets /app/main, which redirects to the system
-  // Talk at /app/talks/<mainTalkId>. Highlight the link whether we're
+  // The Buddy NavLink targets /app/buddy, which redirects to the system
+  // Talk at /app/talks/<buddyTalkId>. Highlight the link whether we're
   // mid-redirect or already on the system Talk.
-  const isMainActive =
-    location.pathname.startsWith('/app/main') ||
-    (mainTalkId !== null &&
+  const isBuddyActive =
+    location.pathname.startsWith('/app/buddy') ||
+    (buddyTalkId !== null &&
       location.pathname.startsWith(
-        `/app/talks/${encodeURIComponent(mainTalkId)}`,
+        `/app/talks/${encodeURIComponent(buddyTalkId)}`,
       ));
   const [expandedFolderIds, setExpandedFolderIds] = useState<
     Record<string, boolean>
@@ -868,11 +868,11 @@ export function SecondaryList({
       </div>
 
       <NavLink
-        to="/app/main"
-        className={`ct-secondary-row-link${isMainActive ? ' active' : ''}`}
+        to="/app/buddy"
+        className={`ct-secondary-row-link${isBuddyActive ? ' active' : ''}`}
       >
         <CTIcon name="chat" size={14} stroke={salon.ink2} strokeWidth={1.6} />
-        Main
+        Buddy
       </NavLink>
 
       <div className="ct-secondary-tree" aria-label="Talk list">
@@ -913,9 +913,7 @@ export function SecondaryList({
           Inbox <span>{contents.length}</span>
         </div>
         {contents.length === 0 ? (
-          <p className="clawtalk-sidebar-content-empty">
-            No inbox items yet.
-          </p>
+          <p className="clawtalk-sidebar-content-empty">No inbox items yet.</p>
         ) : (
           <div
             className="clawtalk-sidebar-content-list"

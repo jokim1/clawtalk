@@ -376,6 +376,68 @@ describe('greenfield core routes', () => {
     });
   });
 
+  it('seeds the Buddy system talk: pinned id, hidden from lists, immutable', async () => {
+    const workspaceId = await currentWorkspaceId();
+
+    const sidebar = await listGreenfieldTalkSidebarRoute({
+      auth: auth(),
+      workspaceId,
+    });
+    expect(sidebar.statusCode).toBe(200);
+    if (!sidebar.body.ok) throw new Error('Expected sidebar route to succeed');
+    const buddyTalkId = sidebar.body.data.buddyTalkId;
+    if (!buddyTalkId) throw new Error('Expected a seeded Buddy talk id');
+    expect(
+      sidebar.body.data.items.some((item) => item.id === buddyTalkId),
+    ).toBe(false);
+
+    const talks = await listGreenfieldTalksRoute({ auth: auth(), workspaceId });
+    if (!talks.body.ok) throw new Error('Expected talks route to succeed');
+    expect(talks.body.data.talks.some((talk) => talk.id === buddyTalkId)).toBe(
+      false,
+    );
+
+    const detail = await getGreenfieldTalkRoute({
+      auth: auth(),
+      workspaceId,
+      talkId: buddyTalkId,
+    });
+    expect(detail.body).toMatchObject({
+      ok: true,
+      data: { talk: { id: buddyTalkId, title: 'Buddy' } },
+    });
+
+    const roster = await listGreenfieldTalkAgentsRoute({
+      auth: auth(),
+      workspaceId,
+      talkId: buddyTalkId,
+    });
+    expect(roster.statusCode).toBe(200);
+    if (!roster.body.ok) throw new Error('Expected roster route to succeed');
+    expect(roster.body.data.agents).toHaveLength(1);
+    expect(roster.body.data.agents[0]).toMatchObject({ nickname: 'Buddy' });
+
+    const archived = await archiveGreenfieldTalkRoute({
+      auth: auth(),
+      workspaceId,
+      talkId: buddyTalkId,
+    });
+    expect(archived.statusCode).toBe(404);
+
+    const agents = await listGreenfieldAgentsRoute({
+      auth: auth(),
+      workspaceId,
+    });
+    if (!agents.body.ok) throw new Error('Expected agent route to succeed');
+    const replaced = await updateGreenfieldTalkAgentsRoute({
+      auth: auth(),
+      workspaceId,
+      talkId: buddyTalkId,
+      agents: [agents.body.data.agents[0]!.id],
+    });
+    expect(replaced.statusCode).toBe(404);
+  });
+
   it('returns 404 unarchiving an unknown talk and 400 on a bad id', async () => {
     const workspaceId = await currentWorkspaceId();
     const missing = await unarchiveGreenfieldTalkRoute({
