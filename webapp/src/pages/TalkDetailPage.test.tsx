@@ -228,7 +228,9 @@ describe('TalkDetailPage', () => {
       .closest('.composer-meta-row') as HTMLElement | null;
     expect(composerMeta).toBeTruthy();
     expect(within(composerMeta!).getByText('0/20000')).toBeTruthy();
-    expect(screen.queryByRole('button', { name: 'Attach' })).toBeNull();
+    expect(
+      screen.getByRole('button', { name: 'Attach saved source files' }),
+    ).toBeTruthy();
 
     const controls = within(
       screen.getByRole('navigation', { name: 'Talk controls' }),
@@ -1674,6 +1676,58 @@ describe('TalkDetailPage', () => {
     await waitFor(() => {
       expect(screen.getByText('Pasted text source')).toBeTruthy();
     });
+  });
+
+  it('uploads saved source files from the composer attachment button', async () => {
+    const user = userEvent.setup();
+    const uploadedFileNames: string[] = [];
+
+    installTalkDetailFetch({
+      messages: [],
+      runs: [],
+      onUploadContextSource: (file) => {
+        uploadedFileNames.push(file.name);
+        return buildContextSource({
+          id: 'source-uploaded',
+          sourceRef: 'S1',
+          sourceType: 'file',
+          title: file.name,
+          fileName: file.name,
+          fileSize: file.size,
+          mimeType: file.type,
+          status: 'ready',
+          extractedTextLength: file.size,
+        });
+      },
+    });
+
+    renderDetailPage('/app/talks/talk-1');
+
+    const attachButton = await screen.findByRole('button', {
+      name: 'Attach saved source files',
+    });
+    const fileInput = document.querySelector(
+      '.composer-file-input',
+    ) as HTMLInputElement | null;
+    if (!fileInput) {
+      throw new Error('Expected composer file input');
+    }
+    const clickSpy = vi.fn();
+    fileInput.click = clickSpy;
+
+    await user.click(attachButton);
+    expect(clickSpy).toHaveBeenCalledTimes(1);
+
+    const file = new File(['Working notes'], 'working-notes.md', {
+      type: 'text/markdown',
+    });
+    fireEvent.change(fileInput, { target: { files: [file] } });
+
+    await waitFor(() =>
+      expect(uploadedFileNames).toEqual(['working-notes.md']),
+    );
+    expect(await screen.findByText('working-notes.md')).toBeTruthy();
+    expect(screen.getByText('Done')).toBeTruthy();
   });
 
   it('shows unsaved draft agents in the Talk tab and blocks send until agent changes are saved', async () => {
@@ -4750,6 +4804,7 @@ function installTalkDetailFetch(input?: {
     sourceUrl?: string | null;
     extractedText?: string | null;
   }) => ContextSource;
+  onUploadContextSource?: (file: File) => ContextSource;
   onRetryContextSource?: (sourceId: string) => ContextSource;
   onSendMessage?: (body: { content: string; targetAgentIds: string[] }) => {
     talkId: string;
@@ -5304,6 +5359,42 @@ function installTalkDetailFetch(input?: {
               body.sourceType === 'text'
                 ? (body.extractedText?.trim().length ?? 0)
                 : null,
+          });
+        context = {
+          ...context,
+          sources: [...context.sources, created],
+        };
+        return jsonResponse(201, {
+          ok: true,
+          data: { source: created },
+        });
+      }
+
+      if (
+        path === '/api/v1/talks/talk-1/context/sources/upload' &&
+        method === 'POST'
+      ) {
+        const body = init?.body;
+        const formFile =
+          body instanceof FormData ? body.get('file') : undefined;
+        const file =
+          formFile instanceof File
+            ? formFile
+            : new File([''], 'uploaded-source.txt', {
+                type: 'text/plain',
+              });
+        const created =
+          input?.onUploadContextSource?.(file) ??
+          buildContextSource({
+            id: `source-${context.sources.length + 1}`,
+            sourceRef: `S${context.sources.length + 1}`,
+            sourceType: 'file',
+            title: file.name,
+            fileName: file.name,
+            fileSize: file.size,
+            mimeType: file.type || null,
+            status: 'ready',
+            extractedTextLength: file.size,
           });
         context = {
           ...context,

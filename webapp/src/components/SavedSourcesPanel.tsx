@@ -8,31 +8,19 @@ import {
 import {
   createTalkContextSource,
   deleteTalkContextSource,
-  getContextSourceContentUrl,
   patchTalkContextSource,
   retryTalkContextSource,
-  uploadTalkContextSource,
   UnauthorizedError,
   type ContextSource,
 } from '../lib/api';
-import { isRasterizablePdf, renderAndUploadPdfPages } from '../lib/pdf-raster';
+import {
+  TALK_CONTEXT_SOURCE_ALLOWED_FILE_EXTENSIONS,
+  type ContextSourceRenderState,
+  type TalkContextSourceUploadController,
+  useTalkContextSourceUpload,
+} from '../hooks/useTalkContextSourceUpload';
 import { Button, Chip, CTIcon, Input, Textarea } from '../salon';
 import { getSourceDisplayRef } from './sourceDisplay';
-
-// Per-source client-side PDF rasterization progress (this session only).
-// A PDF is rasterized on upload so vision-but-not-PDF agents can read its
-// pages; render runs in the browser (the Worker has no canvas).
-type RenderState =
-  | { phase: 'rendering'; done: number; total: number }
-  | { phase: 'done'; total: number }
-  | { phase: 'failed' };
-
-type UploadingFile = {
-  localId: string;
-  fileName: string;
-  status: 'uploading' | 'done' | 'error';
-  error?: string;
-};
 
 type StatusState =
   | { status: 'idle' }
@@ -49,12 +37,9 @@ type SavedSourcesPanelProps = {
   // but NOT native PDF documents — the audience for rasterized PDF pages.
   // Gates the "render pages" affordance on PDFs lacking a complete set.
   hasVisionNonDocAgent: boolean;
+  uploadController?: TalkContextSourceUploadController;
   onUnauthorized: () => void;
 };
-
-const MAX_FILE_SIZE = 10 * 1024 * 1024;
-const ALLOWED_FILE_EXTENSIONS =
-  '.pdf,.docx,.xlsx,.pptx,.txt,.md,.csv,.html,.json,.xml,.yaml,.yml,.py,.js,.ts,.jsx,.tsx,.java,.c,.h,.cpp,.hpp,.go,.rs,.sh,.sql,.rtf,.rb,.php,.swift,.kt,.lua,.r,.toml,.ini,.cfg,.log';
 
 function formatFileSize(bytes: number | null | undefined): string | null {
   if (bytes == null) return null;
@@ -69,71 +54,26 @@ export function SavedSourcesPanel({
   setSources,
   canEdit,
   hasVisionNonDocAgent,
+  uploadController,
   onUnauthorized,
 }: SavedSourcesPanelProps): JSX.Element {
   const [status, setStatus] = useState<StatusState>({ status: 'idle' });
-  const [uploadingFiles, setUploadingFiles] = useState<UploadingFile[]>([]);
   const [dropActive, setDropActive] = useState(false);
   const [addSourceUrl, setAddSourceUrl] = useState('');
   const [addSourceText, setAddSourceText] = useState('');
   const [addSourceTitle, setAddSourceTitle] = useState('');
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const [renderStates, setRenderStates] = useState<Record<string, RenderState>>(
-    {},
-  );
-
-  // Rasterize a PDF source's pages in the browser and upload them one per
-  // request. Runs fire-and-forget after upload (and on manual retry). A
-  // failure leaves the source text-only — the page set stays incomplete
-  // (count < N) so the server never serves a truncated page run — and a
-  // visible notice is shown.
-  const rasterizePdfSource = async (
-    sourceId: string,
-    loadBytes: () => Promise<ArrayBuffer>,
-  ): Promise<void> => {
-    setRenderStates((prev) => ({
-      ...prev,
-      [sourceId]: { phase: 'rendering', done: 0, total: 0 },
-    }));
-    try {
-      const data = await loadBytes();
-      const result = await renderAndUploadPdfPages({
-        talkId,
-        sourceId,
-        data,
-        onProgress: (done, total) =>
-          setRenderStates((prev) => ({
-            ...prev,
-            [sourceId]: { phase: 'rendering', done, total },
-          })),
-      });
-      setRenderStates((prev) => ({
-        ...prev,
-        [sourceId]:
-          result.pagesTotal > 0
-            ? { phase: 'done', total: result.pagesTotal }
-            : { phase: 'failed' },
-      }));
-    } catch {
-      setRenderStates((prev) => ({
-        ...prev,
-        [sourceId]: { phase: 'failed' },
-      }));
-    }
-  };
-
-  // Manual re-render: re-fetch the stored PDF bytes from R2 (the original
-  // File is gone after a reload) and rasterize again.
-  const handleRetryRender = (sourceId: string): void => {
-    void rasterizePdfSource(sourceId, () =>
-      fetch(getContextSourceContentUrl(talkId, sourceId), {
-        credentials: 'include',
-      }).then((res) => {
-        if (!res.ok) throw new Error(`Failed to load PDF (${res.status})`);
-        return res.arrayBuffer();
-      }),
-    );
-  };
+  const fallbackUploadController = useTalkContextSourceUpload({
+    talkId,
+    setSources,
+    onUnauthorized,
+  });
+  const {
+    uploadingFiles,
+    renderStates,
+    handleFilesSelected,
+    handleRetryRender,
+  } = uploadController ?? fallbackUploadController;
 
   function handleApiError(err: unknown, fallback: string): void {
     if (err instanceof UnauthorizedError) {
@@ -183,69 +123,6 @@ export function SavedSourcesPanel({
       setStatus({ status: 'idle' });
     } catch (err) {
       handleApiError(err, 'Failed to add text source.');
-    }
-  };
-
-  const handleFilesSelected = async (files: FileList | File[]) => {
-    const fileArr = Array.from(files);
-    if (fileArr.length === 0) return;
-
-    for (const file of fileArr) {
-      const localId = `upload_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-      if (file.size > MAX_FILE_SIZE) {
-        setUploadingFiles((prev) => [
-          ...prev,
-          {
-            localId,
-            fileName: file.name,
-            status: 'error',
-            error: 'File exceeds 10 MB limit',
-          },
-        ]);
-        continue;
-      }
-
-      setUploadingFiles((prev) => [
-        ...prev,
-        { localId, fileName: file.name, status: 'uploading' },
-      ]);
-
-      try {
-        const source = await uploadTalkContextSource(talkId, file);
-        setSources((prev) => [...prev, source]);
-        setUploadingFiles((prev) =>
-          prev.map((f) =>
-            f.localId === localId ? { ...f, status: 'done' as const } : f,
-          ),
-        );
-        setTimeout(() => {
-          setUploadingFiles((prev) =>
-            prev.filter((f) => f.localId !== localId),
-          );
-        }, 1500);
-        // Every uploaded PDF is rasterized so vision-but-not-PDF agents
-        // (gpt-5-mini, gemini, kimi) can read its pages. Fire-and-forget;
-        // the source is already usable as text while pages render.
-        if (isRasterizablePdf(file.type)) {
-          void rasterizePdfSource(source.id, () => file.arrayBuffer());
-        }
-      } catch (err) {
-        if (err instanceof UnauthorizedError) {
-          onUnauthorized();
-          return;
-        }
-        setUploadingFiles((prev) =>
-          prev.map((f) =>
-            f.localId === localId
-              ? {
-                  ...f,
-                  status: 'error' as const,
-                  error: err instanceof Error ? err.message : 'Upload failed',
-                }
-              : f,
-          ),
-        );
-      }
     }
   };
 
@@ -371,7 +248,7 @@ export function SavedSourcesPanel({
             type="file"
             multiple
             style={{ display: 'none' }}
-            accept={ALLOWED_FILE_EXTENSIONS}
+            accept={TALK_CONTEXT_SOURCE_ALLOWED_FILE_EXTENSIONS}
             onChange={(e) => {
               if (e.target.files && e.target.files.length > 0) {
                 void handleFilesSelected(e.target.files);
@@ -506,7 +383,7 @@ type SavedSourceRowProps = {
   displayIndex: number;
   canEdit: boolean;
   hasVisionNonDocAgent: boolean;
-  renderState: RenderState | undefined;
+  renderState: ContextSourceRenderState | undefined;
   onPatchTitle: (sourceId: string, nextTitle: string) => Promise<void>;
   onPatchNote: (sourceId: string, nextNote: string) => Promise<void>;
   onRetry: (sourceId: string) => Promise<void>;

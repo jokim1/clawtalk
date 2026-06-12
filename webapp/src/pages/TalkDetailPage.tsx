@@ -55,6 +55,7 @@ import {
   useTalkComposerInputController,
   useTalkSendController,
 } from '../hooks/useTalkComposerController';
+import { useTalkContextSourceUpload } from '../hooks/useTalkContextSourceUpload';
 import { useTalkRunContextController } from '../hooks/useTalkRunContextController';
 import { useTalkSnapshotPageState } from '../hooks/useTalkSnapshotPageState';
 import { createInitialDetailState, detailReducer } from '../lib/talkRunReducer';
@@ -380,6 +381,12 @@ export function TalkDetailPage({
     talkId,
     contextSurfaceActive: currentTab === 'context' || sidePanel === 'context',
     pageKind,
+    onUnauthorized: handleUnauthorized,
+  });
+
+  const sourceUpload = useTalkContextSourceUpload({
+    talkId,
+    setSources: setContextSources,
     onUnauthorized: handleUnauthorized,
   });
 
@@ -1078,6 +1085,7 @@ export function TalkDetailPage({
             setSources={setContextSources}
             canEdit={canEditAgents}
             hasVisionNonDocAgent={hasVisionNonDocAgent}
+            uploadController={sourceUpload}
             onUnauthorized={handleUnauthorized}
           />
 
@@ -1337,6 +1345,7 @@ export function TalkDetailPage({
                 cancelState={state.cancelState}
                 sendBlockedByGuardrail={sendBlockedByGuardrail}
                 historyEditState={historyEditState}
+                sourceUpload={sourceUpload}
                 handleShowDocPane={handleShowDocPane}
                 handleHideDocPane={handleHideDocPane}
                 canEditDoc={canEditDoc}
