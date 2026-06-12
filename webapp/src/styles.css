@@ -5712,35 +5712,6 @@ a {
   font-size: 12.5px;
 }
 
-.talk-tabs-add-doc {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.35rem;
-  border: 1px solid #16a34a;
-  border-radius: 10px;
-  background: #16a34a;
-  color: #fff;
-  padding: 0.4rem 0.8rem;
-  font: inherit;
-  font-size: 0.88rem;
-  font-weight: 600;
-  cursor: pointer;
-  transition:
-    background 140ms ease,
-    border-color 140ms ease,
-    box-shadow 140ms ease;
-}
-
-.talk-tabs-add-doc:hover {
-  background: #15893f;
-  border-color: #15893f;
-}
-
-.talk-tabs-add-doc:focus-visible {
-  outline: 2px solid #4ade80;
-  outline-offset: 2px;
-}
-
 .doc-promote-modal-backdrop {
   position: fixed;
   inset: 0;
@@ -7635,9 +7606,33 @@ a {
   gap: 0.45rem;
 }
 
+.talk-tabs-primary {
+  min-width: 0;
+}
+
+.talk-tabs-far-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  margin-left: auto;
+  padding-left: 0.35rem;
+}
+
+.talk-command-tab {
+  gap: 0.42rem;
+  font: inherit;
+  white-space: nowrap;
+}
+
+.talk-more-trigger {
+  width: 2.75rem;
+  min-width: 2.75rem;
+  min-height: 2.75rem;
+  padding-inline: 0;
+}
+
 .talk-tab,
-.talk-orchestration-trigger,
-.talk-tabs-add-doc {
+.talk-orchestration-trigger {
   min-height: 2rem;
   border: 1px solid var(--salon-line, #e6e0d1);
   border-radius: 999px;
@@ -7650,8 +7645,7 @@ a {
 }
 
 .talk-tab:hover,
-.talk-orchestration-trigger:hover:not(:disabled),
-.talk-tabs-add-doc:hover {
+.talk-orchestration-trigger:hover:not(:disabled) {
   border-color: #d8cbb6;
   background: #fffdf8;
   color: var(--salon-ink, #1f1b16);
@@ -7667,6 +7661,45 @@ a {
 .talk-tab-badge {
   background: var(--salon-paper-2, #f4ecdb);
   color: var(--salon-ink-2, #6b6660);
+}
+
+.talk-tab-badge-muted {
+  min-width: auto;
+  height: 1.15rem;
+  font-size: 0.65rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.talk-more-menu {
+  padding: 0.35rem;
+}
+
+.talk-more-menu-mobile-actions {
+  display: none;
+}
+
+.talk-more-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  width: 100%;
+  border: 0;
+  border-radius: 0.55rem;
+  padding: 0.58rem 0.65rem;
+  background: transparent;
+  color: var(--salon-ink, #1f1b16);
+  font: inherit;
+  font-size: 0.84rem;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.talk-more-menu-item:hover,
+.talk-more-menu-item:focus-visible {
+  background: var(--salon-paper-2, #f4ecdb);
+  box-shadow: inset 0 0 0 1px var(--salon-line-strong, #d8cbb6);
+  outline: none;
 }
 
 /* Count badge flips to the accent while any tool is on (screens.jsx
@@ -7827,6 +7860,153 @@ a {
 
 .talk-tab-content {
   background: var(--salon-paper, #fbf7ef);
+}
+
+.talk-side-panel-backdrop {
+  display: none;
+}
+
+.talk-side-panel {
+  display: flex;
+  flex: 0 0 clamp(320px, 32vw, 460px);
+  flex-direction: column;
+  min-height: 0;
+  max-width: min(460px, 48vw);
+  border-left: 1px solid var(--salon-line, #e6e0d1);
+  background: var(--salon-paper-2, #f4ecdb);
+}
+
+.talk-side-panel-header {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  min-height: 3.5rem;
+  padding: 0.7rem 1rem;
+  border-bottom: 1px solid var(--salon-line, #e6e0d1);
+}
+
+.talk-side-panel-icon {
+  display: grid;
+  place-items: center;
+  width: 1.75rem;
+  height: 1.75rem;
+  flex: 0 0 auto;
+  border: 1px solid var(--salon-line, #e6e0d1);
+  border-radius: 0.55rem;
+  background: var(--salon-card, #ffffff);
+  color: var(--salon-ink-2, #6b6660);
+}
+
+.talk-side-panel-heading {
+  min-width: 0;
+  flex: 1;
+}
+
+.talk-side-panel-heading h2 {
+  margin: 0;
+  overflow: hidden;
+  color: var(--salon-ink, #1f1b16);
+  font-family: var(--salon-font-serif, 'Newsreader', Georgia, serif);
+  font-size: 0.98rem;
+  font-weight: 500;
+  line-height: 1.1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.talk-side-panel-heading p {
+  margin: 0.16rem 0 0;
+  overflow: hidden;
+  color: var(--salon-ink-2, #6b6660);
+  font-family: var(--salon-font-mono, 'Geist Mono', ui-monospace, monospace);
+  font-size: 0.66rem;
+  letter-spacing: 0.12em;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.talk-side-panel-close {
+  display: grid;
+  place-items: center;
+  width: 2.75rem;
+  height: 2.75rem;
+  min-width: 2.75rem;
+  min-height: 2.75rem;
+  flex: 0 0 auto;
+  border: 1px solid transparent;
+  border-radius: 0.55rem;
+  background: transparent;
+  color: var(--salon-ink-2, #6b6660);
+  cursor: pointer;
+}
+
+.talk-side-panel-close:hover,
+.talk-side-panel-close:focus-visible {
+  border-color: var(--salon-line, #e6e0d1);
+  background: var(--salon-card, #ffffff);
+}
+
+.talk-side-panel-close:focus-visible {
+  outline: 2px solid var(--salon-accent, #c8643a);
+  outline-offset: 2px;
+}
+
+.talk-side-panel-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 1rem;
+}
+
+.talk-side-panel-body .talk-tab-panel,
+.talk-side-panel-body .talk-context-shell {
+  width: 100%;
+  max-width: none;
+  margin: 0;
+  padding: 0;
+}
+
+.talk-side-panel-body .talk-context-shell {
+  overflow: visible;
+}
+
+.talk-side-panel-placeholder {
+  display: grid;
+  place-items: center;
+  gap: 0.5rem;
+  min-height: 16rem;
+  border: 1px dashed var(--salon-line, #e6e0d1);
+  border-radius: 0.9rem;
+  background: var(--salon-card, #ffffff);
+  color: var(--salon-ink-2, #6b6660);
+  text-align: center;
+}
+
+.talk-side-panel-placeholder h3 {
+  margin: 0;
+  color: var(--salon-ink, #1f1b16);
+  font-family: var(--salon-font-serif, 'Newsreader', Georgia, serif);
+  font-size: 1.05rem;
+  font-weight: 500;
+}
+
+.talk-side-panel-placeholder p {
+  margin: 0;
+  max-width: 15rem;
+  font-size: 0.82rem;
+}
+
+.talk-side-panel-placeholder span {
+  border: 1px solid var(--salon-line, #e6e0d1);
+  border-radius: 999px;
+  padding: 0.18rem 0.55rem;
+  background: var(--salon-paper-2, #f4ecdb);
+  font-family: var(--salon-font-mono, 'Geist Mono', ui-monospace, monospace);
+  font-size: 0.66rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
 }
 
 .talk-thread-shell {
@@ -8268,10 +8448,25 @@ a {
   }
 
   .talk-tabs .talk-tab:not(.talk-tab-active),
+  .talk-tabs-row > .talk-command-tab:not(.talk-tab-active),
+  .talk-tabs-far-actions
+    > .talk-command-tab:not(.talk-tab-active):not(.talk-more-trigger),
   .talk-orchestration-menu,
-  .talk-tools-pill,
-  .talk-tabs-add-doc {
+  .talk-tools-pill {
     display: none;
+  }
+
+  .talk-more-menu-mobile-actions {
+    display: grid;
+    gap: 0.1rem;
+    margin-bottom: 0.35rem;
+    padding-bottom: 0.35rem;
+    border-bottom: 1px solid var(--salon-line, #e6e0d1);
+  }
+
+  .talk-tabs-far-actions {
+    margin-left: 0;
+    padding-left: 0;
   }
 
   .talk-breadcrumb {
@@ -8279,8 +8474,7 @@ a {
   }
 
   .talk-tab,
-  .talk-orchestration-trigger,
-  .talk-tabs-add-doc {
+  .talk-orchestration-trigger {
     flex: 0 0 auto;
     min-height: 1.8rem;
     padding: 0.35rem 0.65rem;
@@ -8289,6 +8483,29 @@ a {
 
   .talk-thread-scroll {
     padding: 0.45rem 0.9rem 11.5rem;
+  }
+
+  .talk-workspace-scroll-talk {
+    position: relative;
+  }
+
+  .talk-side-panel {
+    position: absolute;
+    inset: 0 0 0 auto;
+    z-index: 4;
+    width: min(100%, 24rem);
+    max-width: 100%;
+    box-shadow: -18px 0 36px rgba(31, 27, 22, 0.16);
+  }
+
+  .talk-side-panel-backdrop {
+    position: absolute;
+    inset: 0;
+    z-index: 3;
+    display: block;
+    border: 0;
+    background: rgba(31, 27, 22, 0.16);
+    cursor: pointer;
   }
 
   .salon-message-grid {

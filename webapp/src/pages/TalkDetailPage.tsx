@@ -28,9 +28,14 @@ import { TalkConnectorsPanel } from '../components/connectors/TalkConnectorsPane
 import { TalkAgentsPanel } from '../components/TalkAgentsPanel';
 import { TalkRunsPanel } from '../components/TalkRunsPanel';
 import { TalkHistoryEditor } from '../components/TalkHistoryEditor';
-import { TalkDetailShell } from '../components/Talk/TalkDetailShell';
+import {
+  TALK_SIDE_PANEL_KEYS,
+  TalkDetailShell,
+  type TalkSidePanelKey,
+} from '../components/Talk/TalkDetailShell';
 import { TalkDocumentCreateModal } from '../components/Talk/TalkDocumentCreateModal';
 import { TalkDocumentsPanel } from '../components/Talk/TalkDocumentsPanel';
+import { TalkSidePanelShell } from '../components/Talk/TalkSidePanelShell';
 import { TalkTabContent } from '../components/Talk/TalkTabContent';
 import { loadTalkScroll, saveTalkScroll } from '../lib/talkScroll';
 import { useTalkRunStream } from '../hooks/useTalkRunStream';
@@ -64,6 +69,15 @@ import {
 const SCROLL_STICK_THRESHOLD_PX = 120;
 
 const EMPTY_MESSAGES: TalkMessage[] = [];
+
+const TALK_SIDE_PANEL_KEY_SET = new Set<string>(TALK_SIDE_PANEL_KEYS);
+
+function parseTalkSidePanel(value: string | null): TalkSidePanelKey | null {
+  if (value && TALK_SIDE_PANEL_KEY_SET.has(value)) {
+    return value as TalkSidePanelKey;
+  }
+  return null;
+}
 
 function snapshotRunsToTalkRuns(snapshotRuns: TalkSnapshot['runs']): TalkRun[] {
   return snapshotRuns.map((row) => ({
@@ -116,6 +130,10 @@ export function TalkDetailPage({
   const { talkId = '' } = useParams<{ talkId: string }>();
   const navigate = useNavigate();
   const { currentTab, locationParams } = useTalkDetailRouteState(talkId);
+  const sidePanel =
+    currentTab === 'talk'
+      ? parseTalkSidePanel(locationParams.get('panel'))
+      : null;
   const queryClient = useQueryClient();
   const {
     snapshotQuery,
@@ -363,7 +381,7 @@ export function TalkDetailPage({
     setRuleDrafts,
   } = useTalkContextController({
     talkId,
-    currentTab,
+    contextSurfaceActive: currentTab === 'context' || sidePanel === 'context',
     pageKind,
     onUnauthorized: handleUnauthorized,
   });
@@ -869,16 +887,8 @@ export function TalkDetailPage({
     pendingRunHistoryScrollRef,
     runsById: state.runsById,
   });
-  const {
-    talkTabHref,
-    documentsTabHref,
-    agentsTabHref,
-    contextTabHref,
-    workspaceConnectorsTabHref,
-    jobsTabHref,
-    runsTabHref,
-    manageAgentsHref,
-  } = useTalkDetailTabLinks({ talkId });
+  const { talkTabHref, agentsTabHref, runsTabHref, manageAgentsHref } =
+    useTalkDetailTabLinks({ talkId });
   const handleOpenRunHistory = useCallback(
     (runId: string) => {
       pendingRunHistoryScrollRef.current = runId;
@@ -904,6 +914,52 @@ export function TalkDetailPage({
   });
   const manageConnectorsHref = '/app/connectors';
   const isRenaming = renameDraft?.talkId === talkId;
+
+  const handleToggleSidePanel = useCallback(
+    (panel: TalkSidePanelKey) => {
+      if (currentTab === 'talk' && sidePanel === panel) {
+        navigate(talkTabHref);
+        return;
+      }
+      navigate(`${talkTabHref}?panel=${panel}`);
+    },
+    [currentTab, navigate, sidePanel, talkTabHref],
+  );
+
+  const handleCloseSidePanel = useCallback(() => {
+    navigate(talkTabHref);
+  }, [navigate, talkTabHref]);
+
+  const handleToggleDocuments = useCallback(() => {
+    if (primaryDocumentId === null) {
+      navigate(talkTabHref);
+      openDocModal();
+      return;
+    }
+    if (currentTab !== 'talk' || sidePanel !== null) {
+      navigate(`${talkTabHref}?doc=1`);
+      setDocPaneHidden(false);
+      if (isNarrowViewport) setMobilePane('doc');
+      return;
+    }
+    if (isNarrowViewport) {
+      setDocPaneHidden(false);
+      setMobilePane('doc');
+      navigate(`${talkTabHref}?doc=1`);
+      return;
+    }
+    setDocPaneHidden((hidden) => !hidden);
+  }, [
+    currentTab,
+    isNarrowViewport,
+    navigate,
+    openDocModal,
+    primaryDocumentId,
+    setDocPaneHidden,
+    setMobilePane,
+    sidePanel,
+    talkTabHref,
+  ]);
 
   const composerSend = useTalkSendController({
     pageKind,
@@ -980,6 +1036,124 @@ export function TalkDetailPage({
 
   const talk = pageTalk;
   const displayedTitle = titleOverride || talk.title;
+  const renderAgentsPanel = () => (
+    <TalkAgentsPanel
+      agentDrafts={agentDrafts}
+      setAgentDrafts={setAgentDrafts}
+      newAgentDraft={newAgentDraft}
+      setNewAgentDraft={setNewAgentDraft}
+      agentState={agentState}
+      setAgentState={setAgentState}
+      agentsCatalogError={agentsCatalogError}
+      registeredAgentsCatalog={registeredAgentsCatalog}
+      canEditAgents={canEditAgents}
+      hasPendingFooterAgentSelection={hasPendingFooterAgentSelection}
+      manageAgentsHref={manageAgentsHref}
+      handleAgentNicknameChange={handleAgentNicknameChange}
+      handleAgentRoleChange={handleAgentRoleChange}
+      handleSetPrimaryAgent={handleSetPrimaryAgent}
+      handleResetNickname={handleResetNickname}
+      handleRemoveAgent={handleRemoveAgent}
+      handleAddAgent={handleAddAgent}
+      handleSaveAgents={handleSaveAgents}
+    />
+  );
+  const renderContextPanel = () => (
+    <section
+      className="talk-context-shell ct-screen-enter ct-thin-scroll"
+      aria-label="Talk context"
+    >
+      {contextStatus.status === 'loading' ? (
+        <p className="talk-context-empty">Loading context…</p>
+      ) : contextStatus.status === 'error' ? (
+        <p className="talk-context-status talk-context-status-error">
+          {contextStatus.message}
+        </p>
+      ) : (
+        <>
+          <TalkContextPanel
+            key={talkId}
+            talkId={talkId}
+            goal={contextGoal}
+            rules={contextRules}
+            setGoal={setContextGoal}
+            setRules={setContextRules}
+            status={contextStatus}
+            setStatus={setContextStatus}
+            goalDraft={goalDraft}
+            setGoalDraft={setGoalDraft}
+            newRuleText={newRuleText}
+            setNewRuleText={setNewRuleText}
+            ruleDrafts={ruleDrafts}
+            setRuleDrafts={setRuleDrafts}
+            canEdit={canEditAgents}
+            onUnauthorized={handleUnauthorized}
+          />
+
+          <SavedSourcesPanel
+            talkId={talkId}
+            sources={contextSources}
+            setSources={setContextSources}
+            canEdit={canEditAgents}
+            hasVisionNonDocAgent={hasVisionNonDocAgent}
+            onUnauthorized={handleUnauthorized}
+          />
+
+          {/* Drive Resources */}
+          <TalkToolsPanel talkId={talkId} />
+
+          {contextStatus.status === 'success' && contextStatus.message ? (
+            <p className="talk-context-status">{contextStatus.message}</p>
+          ) : null}
+        </>
+      )}
+    </section>
+  );
+  const renderConnectorsPanel = () => (
+    <TalkConnectorsPanel talkId={talkId} onUnauthorized={handleUnauthorized} />
+  );
+  const renderJobsPlaceholder = () => (
+    <section className="talk-side-panel-placeholder" aria-label="Talk jobs">
+      <h3>Jobs</h3>
+      <p>This surface is reserved for Talk jobs.</p>
+      <span>Placeholder</span>
+    </section>
+  );
+  const sidePanelMeta =
+    sidePanel === 'agents'
+      ? {
+          title: 'The Room',
+          subtitle: `${effectiveAgents.length} ${
+            effectiveAgents.length === 1 ? 'agent' : 'agents'
+          } in this Talk`,
+          icon: 'sparkle' as const,
+          content: renderAgentsPanel(),
+        }
+      : sidePanel === 'context'
+        ? {
+            title: 'Context',
+            subtitle: `${activeRuleCount} active ${
+              activeRuleCount === 1 ? 'rule' : 'rules'
+            }`,
+            icon: 'bolt' as const,
+            content: renderContextPanel(),
+          }
+        : sidePanel === 'connectors'
+          ? {
+              title: 'Connectors',
+              subtitle: 'Workspace connections for this Talk',
+              icon: 'globe' as const,
+              content: renderConnectorsPanel(),
+            }
+          : sidePanel === 'jobs'
+            ? {
+                title: 'Jobs',
+                subtitle: 'Placeholder',
+                icon: 'clock' as const,
+                content: renderJobsPlaceholder(),
+              }
+            : null;
+  const docPaneSuppressed = sidePanel !== null;
 
   return (
     <section className="page-shell talk-detail-shell">
@@ -996,16 +1170,16 @@ export function TalkDetailPage({
           onRenameDraftCancel={onRenameDraftCancel}
           onRenameDraftCommit={onRenameDraftCommit}
           currentTab={currentTab}
-          tabLinks={{
-            talkTabHref,
-            documentsTabHref,
-            agentsTabHref,
-            contextTabHref,
-            workspaceConnectorsTabHref,
-            jobsTabHref,
-            runsTabHref,
-            manageAgentsHref,
-          }}
+          runHistoryHref={runsTabHref}
+          sidePanel={sidePanel}
+          onToggleSidePanel={handleToggleSidePanel}
+          onToggleDocuments={handleToggleDocuments}
+          documentsOpen={
+            currentTab === 'talk' &&
+            !docPaneSuppressed &&
+            primaryDocumentId !== null &&
+            (isNarrowViewport ? mobilePane === 'doc' : !docPaneHidden)
+          }
           activeRuleCount={activeRuleCount}
           showOrchestrationSelector={showOrchestrationSelector}
           orchestrationMenuRef={orchestrationMenuRef}
@@ -1017,7 +1191,6 @@ export function TalkDetailPage({
             void handleOrchestrationModeChange(mode);
           }}
           currentConversationHasContent={currentConversationHasContent}
-          openDocModal={openDocModal}
           effectiveAgents={effectiveAgents}
           talkAgentExecutionGuardrailsById={talkAgentExecutionGuardrailsById}
         />
@@ -1027,90 +1200,11 @@ export function TalkDetailPage({
             currentTab === 'talk' ? ' talk-workspace-scroll-talk' : ''
           }`}
         >
-          {currentTab === 'agents' ? (
-            <TalkAgentsPanel
-              agentDrafts={agentDrafts}
-              setAgentDrafts={setAgentDrafts}
-              newAgentDraft={newAgentDraft}
-              setNewAgentDraft={setNewAgentDraft}
-              agentState={agentState}
-              setAgentState={setAgentState}
-              agentsCatalogError={agentsCatalogError}
-              registeredAgentsCatalog={registeredAgentsCatalog}
-              canEditAgents={canEditAgents}
-              hasPendingFooterAgentSelection={hasPendingFooterAgentSelection}
-              manageAgentsHref={manageAgentsHref}
-              handleAgentNicknameChange={handleAgentNicknameChange}
-              handleAgentRoleChange={handleAgentRoleChange}
-              handleSetPrimaryAgent={handleSetPrimaryAgent}
-              handleResetNickname={handleResetNickname}
-              handleRemoveAgent={handleRemoveAgent}
-              handleAddAgent={handleAddAgent}
-              handleSaveAgents={handleSaveAgents}
-            />
-          ) : null}
+          {currentTab === 'agents' ? renderAgentsPanel() : null}
 
-          {currentTab === 'context' ? (
-            <section
-              className="talk-context-shell ct-screen-enter ct-thin-scroll"
-              aria-label="Talk context"
-            >
-              {contextStatus.status === 'loading' ? (
-                <p className="talk-context-empty">Loading context…</p>
-              ) : contextStatus.status === 'error' ? (
-                <p className="talk-context-status talk-context-status-error">
-                  {contextStatus.message}
-                </p>
-              ) : (
-                <>
-                  <TalkContextPanel
-                    key={talkId}
-                    talkId={talkId}
-                    goal={contextGoal}
-                    rules={contextRules}
-                    setGoal={setContextGoal}
-                    setRules={setContextRules}
-                    status={contextStatus}
-                    setStatus={setContextStatus}
-                    goalDraft={goalDraft}
-                    setGoalDraft={setGoalDraft}
-                    newRuleText={newRuleText}
-                    setNewRuleText={setNewRuleText}
-                    ruleDrafts={ruleDrafts}
-                    setRuleDrafts={setRuleDrafts}
-                    canEdit={canEditAgents}
-                    onUnauthorized={handleUnauthorized}
-                  />
+          {currentTab === 'context' ? renderContextPanel() : null}
 
-                  <SavedSourcesPanel
-                    talkId={talkId}
-                    sources={contextSources}
-                    setSources={setContextSources}
-                    canEdit={canEditAgents}
-                    hasVisionNonDocAgent={hasVisionNonDocAgent}
-                    onUnauthorized={handleUnauthorized}
-                  />
-
-                  {/* Drive Resources */}
-                  <TalkToolsPanel talkId={talkId} />
-
-                  {contextStatus.status === 'success' &&
-                  contextStatus.message ? (
-                    <p className="talk-context-status">
-                      {contextStatus.message}
-                    </p>
-                  ) : null}
-                </>
-              )}
-            </section>
-          ) : null}
-
-          {currentTab === 'connectors' ? (
-            <TalkConnectorsPanel
-              talkId={talkId}
-              onUnauthorized={handleUnauthorized}
-            />
-          ) : null}
+          {currentTab === 'connectors' ? renderConnectorsPanel() : null}
 
           {currentTab === 'jobs' ? (
             <TalkJobsPanel
@@ -1162,119 +1256,134 @@ export function TalkDetailPage({
           ) : null}
 
           {currentTab === 'talk' ? (
-            <TalkTabContent
-              talkId={talkId}
-              splitContainerRef={splitContainerRef}
-              splitHandleRef={splitHandleRef}
-              docBodyRef={docBodyRef}
-              docNarrowShowBtnRef={docNarrowShowBtnRef}
-              timelineRef={timelineRef}
-              endRef={endRef}
-              setMessageElementRef={setMessageElementRef}
-              textareaRef={composerInput.textareaRef}
-              primaryDocumentId={primaryDocumentId}
-              primaryDocumentTitle={primaryDocumentTitle}
-              primaryDocumentFormat={primaryDocumentFormat}
-              workspaceId={activeTalkWorkspaceId}
-              docReloadSignal={docReloadSignal}
-              isNarrowViewport={isNarrowViewport}
-              mobilePane={mobilePane}
-              setMobilePane={setMobilePane}
-              docPaneHidden={docPaneHidden}
-              setDocPaneHidden={setDocPaneHidden}
-              chatRatio={chatRatio}
-              handleResizeHandleKeyDown={handleResizeHandleKeyDown}
-              conversationState={conversationState}
-              sortedConversations={sortedConversations}
-              editingConversationId={editingConversationId}
-              setEditingConversationId={setEditingConversationId}
-              activeConversationId={activeConversationId}
-              activeConversation={activeConversation}
-              conversationMenu={conversationMenu}
-              menuConversation={menuConversation}
-              handleCreateConversation={handleCreateConversation}
-              handleSearch={handleSearch}
-              searchQuery={searchQuery}
-              setSearchQuery={setSearchQuery}
-              searchLoading={searchLoading}
-              searchError={searchError}
-              searchResults={searchResults}
-              handleSearchResultSelect={handleSearchResultSelect}
-              handleConversationSecondaryClick={
-                handleConversationSecondaryClick
-              }
-              handleConversationContextMenu={handleConversationContextMenu}
-              handleRenameConversation={handleRenameConversation}
-              handleSelectConversation={handleSelectConversation}
-              closeConversationMenu={closeConversationMenu}
-              onRenameMenuConversation={handleRenameMenuConversation}
-              onToggleMenuConversationPin={handleToggleMenuConversationPin}
-              onDeleteMenuConversation={handleDeleteMenuConversation}
-              handleRenameActiveConversation={handleRenameActiveConversation}
-              openHistoryEditor={openHistoryEditor}
-              canEditHistory={canEditHistory}
-              activeOrderedProgress={activeOrderedProgress}
-              latestOrderedRound={latestOrderedRound}
-              handleRetryAgentRun={composerSend.handleRetryAgentRun}
-              retryRunState={composerSend.retryRunState}
-              isSnapshotPending={snapshotQuery.isPending}
-              olderMessagesAvailable={olderMessagesAvailable}
-              loadingOlderMessages={loadingOlderMessages}
-              pageMessages={pageMessages}
-              handleLoadOlderMessages={handleLoadOlderMessages}
-              talkTimeline={talkTimeline}
-              agentsTabHref={agentsTabHref}
-              runsById={state.runsById}
-              orderedGroupSizesById={orderedGroupSizesById}
-              agentLabelById={agentLabelById}
-              handleUnauthorized={handleUnauthorized}
-              refreshBrowserRuns={refreshBrowserRuns}
-              isDenseRound={isDenseRound}
-              nowTick={nowTick}
-              handleOpenRunHistory={handleOpenRunHistory}
-              hasUnreadBelow={state.hasUnreadBelow}
-              handleClearUnread={handleClearUnread}
-              toolsRefreshKey={toolsRefreshKey}
-              handleSend={composerSend.handleSend}
-              effectiveAgents={effectiveAgents}
-              targetAgentIds={targetAgentIds}
-              talkAgentExecutionGuardrailsById={
-                talkAgentExecutionGuardrailsById
-              }
-              selectedGuardrailAgentIds={selectedGuardrailAgentIds}
-              handleToggleTarget={composerSend.handleToggleTarget}
-              sendState={state.sendState}
-              composerTargetHelp={composerTargetHelp}
-              composerModeLabel={
-                pageTalk?.orchestrationMode === 'panel' ? 'Parallel' : 'Ordered'
-              }
-              composerRoundsLabel={
-                latestOrderedRound
-                  ? `${Math.max(1, latestOrderedRound.steps.length)} rounds`
-                  : '1 round'
-              }
-              draft={composerInput.draft}
-              TALK_MESSAGE_MAX_CHARS={composerInput.TALK_MESSAGE_MAX_CHARS}
-              composerGuardrailMessage={composerGuardrailMessage}
-              mentionState={composerInput.mentionState}
-              mentionOptions={composerInput.mentionOptions}
-              insertMentionOption={composerInput.insertMentionOption}
-              setMentionState={composerInput.setMentionState}
-              handleDraftChange={composerInput.handleDraftChange}
-              handleComposerKeyDown={composerSend.handleComposerKeyDown}
-              contextSources={contextSources}
-              activeRound={activeRound}
-              hasUnsavedAgentChanges={hasUnsavedAgentChanges}
-              canEditAgents={canEditAgents}
-              handleCancelRuns={composerSend.handleCancelRuns}
-              cancelState={state.cancelState}
-              sendBlockedByGuardrail={sendBlockedByGuardrail}
-              historyEditState={historyEditState}
-              handleShowDocPane={handleShowDocPane}
-              handleHideDocPane={handleHideDocPane}
-              canEditDoc={canEditDoc}
-              currentUser={currentUser}
-            />
+            <>
+              <TalkTabContent
+                talkId={talkId}
+                splitContainerRef={splitContainerRef}
+                splitHandleRef={splitHandleRef}
+                docBodyRef={docBodyRef}
+                docNarrowShowBtnRef={docNarrowShowBtnRef}
+                timelineRef={timelineRef}
+                endRef={endRef}
+                setMessageElementRef={setMessageElementRef}
+                textareaRef={composerInput.textareaRef}
+                primaryDocumentId={primaryDocumentId}
+                primaryDocumentTitle={primaryDocumentTitle}
+                primaryDocumentFormat={primaryDocumentFormat}
+                workspaceId={activeTalkWorkspaceId}
+                docReloadSignal={docReloadSignal}
+                isNarrowViewport={isNarrowViewport}
+                mobilePane={mobilePane}
+                setMobilePane={setMobilePane}
+                docPaneHidden={docPaneHidden}
+                docPaneSuppressed={docPaneSuppressed}
+                setDocPaneHidden={setDocPaneHidden}
+                chatRatio={chatRatio}
+                handleResizeHandleKeyDown={handleResizeHandleKeyDown}
+                conversationState={conversationState}
+                sortedConversations={sortedConversations}
+                editingConversationId={editingConversationId}
+                setEditingConversationId={setEditingConversationId}
+                activeConversationId={activeConversationId}
+                activeConversation={activeConversation}
+                conversationMenu={conversationMenu}
+                menuConversation={menuConversation}
+                handleCreateConversation={handleCreateConversation}
+                handleSearch={handleSearch}
+                searchQuery={searchQuery}
+                setSearchQuery={setSearchQuery}
+                searchLoading={searchLoading}
+                searchError={searchError}
+                searchResults={searchResults}
+                handleSearchResultSelect={handleSearchResultSelect}
+                handleConversationSecondaryClick={
+                  handleConversationSecondaryClick
+                }
+                handleConversationContextMenu={handleConversationContextMenu}
+                handleRenameConversation={handleRenameConversation}
+                handleSelectConversation={handleSelectConversation}
+                closeConversationMenu={closeConversationMenu}
+                onRenameMenuConversation={handleRenameMenuConversation}
+                onToggleMenuConversationPin={handleToggleMenuConversationPin}
+                onDeleteMenuConversation={handleDeleteMenuConversation}
+                handleRenameActiveConversation={handleRenameActiveConversation}
+                openHistoryEditor={openHistoryEditor}
+                canEditHistory={canEditHistory}
+                activeOrderedProgress={activeOrderedProgress}
+                latestOrderedRound={latestOrderedRound}
+                handleRetryAgentRun={composerSend.handleRetryAgentRun}
+                retryRunState={composerSend.retryRunState}
+                isSnapshotPending={snapshotQuery.isPending}
+                olderMessagesAvailable={olderMessagesAvailable}
+                loadingOlderMessages={loadingOlderMessages}
+                pageMessages={pageMessages}
+                handleLoadOlderMessages={handleLoadOlderMessages}
+                talkTimeline={talkTimeline}
+                agentsTabHref={agentsTabHref}
+                runsById={state.runsById}
+                orderedGroupSizesById={orderedGroupSizesById}
+                agentLabelById={agentLabelById}
+                handleUnauthorized={handleUnauthorized}
+                refreshBrowserRuns={refreshBrowserRuns}
+                isDenseRound={isDenseRound}
+                nowTick={nowTick}
+                handleOpenRunHistory={handleOpenRunHistory}
+                hasUnreadBelow={state.hasUnreadBelow}
+                handleClearUnread={handleClearUnread}
+                toolsRefreshKey={toolsRefreshKey}
+                handleSend={composerSend.handleSend}
+                effectiveAgents={effectiveAgents}
+                targetAgentIds={targetAgentIds}
+                talkAgentExecutionGuardrailsById={
+                  talkAgentExecutionGuardrailsById
+                }
+                selectedGuardrailAgentIds={selectedGuardrailAgentIds}
+                handleToggleTarget={composerSend.handleToggleTarget}
+                sendState={state.sendState}
+                composerTargetHelp={composerTargetHelp}
+                composerModeLabel={
+                  pageTalk?.orchestrationMode === 'panel'
+                    ? 'Parallel'
+                    : 'Ordered'
+                }
+                composerRoundsLabel={
+                  latestOrderedRound
+                    ? `${Math.max(1, latestOrderedRound.steps.length)} rounds`
+                    : '1 round'
+                }
+                draft={composerInput.draft}
+                TALK_MESSAGE_MAX_CHARS={composerInput.TALK_MESSAGE_MAX_CHARS}
+                composerGuardrailMessage={composerGuardrailMessage}
+                mentionState={composerInput.mentionState}
+                mentionOptions={composerInput.mentionOptions}
+                insertMentionOption={composerInput.insertMentionOption}
+                setMentionState={composerInput.setMentionState}
+                handleDraftChange={composerInput.handleDraftChange}
+                handleComposerKeyDown={composerSend.handleComposerKeyDown}
+                contextSources={contextSources}
+                activeRound={activeRound}
+                hasUnsavedAgentChanges={hasUnsavedAgentChanges}
+                canEditAgents={canEditAgents}
+                handleCancelRuns={composerSend.handleCancelRuns}
+                cancelState={state.cancelState}
+                sendBlockedByGuardrail={sendBlockedByGuardrail}
+                historyEditState={historyEditState}
+                handleShowDocPane={handleShowDocPane}
+                handleHideDocPane={handleHideDocPane}
+                canEditDoc={canEditDoc}
+                currentUser={currentUser}
+              />
+              {sidePanelMeta ? (
+                <TalkSidePanelShell
+                  title={sidePanelMeta.title}
+                  subtitle={sidePanelMeta.subtitle}
+                  icon={sidePanelMeta.icon}
+                  onClose={handleCloseSidePanel}
+                >
+                  {sidePanelMeta.content}
+                </TalkSidePanelShell>
+              ) : null}
+            </>
           ) : null}
         </div>
       </div>

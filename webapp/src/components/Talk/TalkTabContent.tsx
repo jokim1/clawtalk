@@ -110,6 +110,7 @@ type TalkTabContentProps = {
   mobilePane: 'chat' | 'doc';
   setMobilePane: Dispatch<SetStateAction<'chat' | 'doc'>>;
   docPaneHidden: boolean;
+  docPaneSuppressed: boolean;
   setDocPaneHidden: Dispatch<SetStateAction<boolean>>;
   chatRatio: number;
   handleResizeHandleKeyDown: (
@@ -225,6 +226,7 @@ export function TalkTabContent({
   mobilePane,
   setMobilePane,
   docPaneHidden,
+  docPaneSuppressed,
   setDocPaneHidden,
   chatRatio,
   handleResizeHandleKeyDown,
@@ -310,6 +312,7 @@ export function TalkTabContent({
   currentUser,
 }: TalkTabContentProps): JSX.Element {
   const hasDocument = primaryDocumentId !== null;
+  const effectiveDocPaneHidden = docPaneHidden || docPaneSuppressed;
   return (
     <div
       ref={splitContainerRef}
@@ -370,7 +373,9 @@ export function TalkTabContent({
       <div
         className={[
           'talk-tab-chat-pane',
-          hasDocument && isNarrowViewport && mobilePane !== 'chat'
+          hasDocument &&
+          isNarrowViewport &&
+          (mobilePane !== 'chat' || docPaneSuppressed)
             ? 'talk-tab-pane-hidden'
             : '',
         ]
@@ -609,7 +614,7 @@ export function TalkTabContent({
           ) : null}
         </div>
       </div>
-      {hasDocument && !isNarrowViewport && !docPaneHidden ? (
+      {hasDocument && !isNarrowViewport && !effectiveDocPaneHidden ? (
         <div
           ref={splitHandleRef}
           className="talk-tab-split-handle"
@@ -623,7 +628,10 @@ export function TalkTabContent({
           onKeyDown={handleResizeHandleKeyDown}
         />
       ) : null}
-      {hasDocument && docPaneHidden && !isNarrowViewport ? (
+      {hasDocument &&
+      docPaneHidden &&
+      !docPaneSuppressed &&
+      !isNarrowViewport ? (
         <DocPaneEdgeTab
           docTitle={primaryDocumentTitle}
           format={primaryDocumentFormat}
@@ -634,15 +642,15 @@ export function TalkTabContent({
         <section
           className={[
             'talk-tab-doc-pane',
-            (isNarrowViewport && mobilePane !== 'doc') ||
-            (!isNarrowViewport && docPaneHidden)
+            (isNarrowViewport && (mobilePane !== 'doc' || docPaneSuppressed)) ||
+            (!isNarrowViewport && effectiveDocPaneHidden)
               ? 'talk-tab-pane-hidden'
               : '',
           ]
             .filter(Boolean)
             .join(' ')}
           style={
-            !isNarrowViewport && !docPaneHidden
+            !isNarrowViewport && !effectiveDocPaneHidden
               ? { flex: `${1 - chatRatio} 1 0` }
               : undefined
           }
