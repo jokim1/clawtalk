@@ -18,6 +18,7 @@ import {
   DocumentSidebarItem,
   createTalk,
   createTalkFolder,
+  createWorkspace,
   deleteTalk,
   deleteTalkFolder,
   getSessionMe,
@@ -271,9 +272,7 @@ function insertFolderTalk(
       talks: [
         ...item.talks.filter((child) => child.id !== sidebarTalk.id),
         sidebarTalk,
-      ].sort(
-        (a, b) => a.sortOrder - b.sortOrder || a.id.localeCompare(b.id),
-      ),
+      ].sort((a, b) => a.sortOrder - b.sortOrder || a.id.localeCompare(b.id)),
     };
   });
   return inserted ? next : insertTopLevelTalk(items, talk);
@@ -646,6 +645,31 @@ export function App() {
       rememberActiveWorkspace(workspaceId);
       clearActiveThreadMemory();
       window.location.assign('/app/talks');
+    },
+    [handleUnauthorized],
+  );
+
+  const handleCreateWorkspace = useCallback(
+    async (name: string) => {
+      try {
+        const user = await createWorkspace({ name });
+        const workspaceId = user.currentWorkspaceId;
+        if (!workspaceId) {
+          throw new Error('Workspace was created but not selected.');
+        }
+        rememberActiveWorkspace(workspaceId);
+        clearActiveThreadMemory();
+        setAuth({ status: 'authenticated', user });
+        window.location.assign('/app/talks');
+      } catch (err) {
+        if (err instanceof UnauthorizedError) {
+          handleUnauthorized();
+          return;
+        }
+        throw err instanceof Error
+          ? err
+          : new Error('Failed to create workspace');
+      }
     },
     [handleUnauthorized],
   );
@@ -1059,6 +1083,7 @@ export function App() {
         workspaces={auth.user.workspaces ?? []}
         currentWorkspaceId={auth.user.currentWorkspaceId}
         onSwitchWorkspace={handleSwitchWorkspace}
+        onCreateWorkspace={handleCreateWorkspace}
         onSignOut={handleSignOut}
         signOutBusy={signOutBusy}
         onOpenPalette={openPalette}
