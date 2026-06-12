@@ -247,7 +247,7 @@ export function useTalkAgentsController({
   handleSetPrimaryAgent: (agentId: string) => void;
   handleResetNickname: (agentId: string) => void;
   handleRemoveAgent: (agentId: string) => void;
-  handleAddAgent: () => void;
+  handleAddAgent: (draft?: AgentCreationDraft) => void;
   handleSaveAgents: () => Promise<void>;
 } {
   const [agents, setAgents] = useState<TalkAgent[]>([]);
@@ -523,12 +523,16 @@ export function useTalkAgentsController({
   }, []);
 
   const materializePendingFooterAgent = useCallback(
-    (currentDrafts: TalkAgent[]): MaterializedFooterAgent => {
-      const selectedAgentId = newAgentDraft.modelId.trim();
+    (
+      currentDrafts: TalkAgent[],
+      draftOverride?: AgentCreationDraft,
+    ): MaterializedFooterAgent => {
+      const activeDraft = draftOverride ?? newAgentDraft;
+      const selectedAgentId = activeDraft.modelId.trim();
       if (!selectedAgentId) {
         return {
           nextAgents: currentDrafts,
-          nextDraft: newAgentDraft,
+          nextDraft: activeDraft,
           added: false,
           error: null,
         };
@@ -540,7 +544,7 @@ export function useTalkAgentsController({
       if (!regAgent) {
         return {
           nextAgents: currentDrafts,
-          nextDraft: newAgentDraft,
+          nextDraft: activeDraft,
           added: false,
           error:
             'Selected registered agent is no longer available. Refresh and try again.',
@@ -550,7 +554,7 @@ export function useTalkAgentsController({
       if (currentDrafts.some((agent) => agent.id === regAgent.id)) {
         return {
           nextAgents: currentDrafts,
-          nextDraft: newAgentDraft,
+          nextDraft: activeDraft,
           added: false,
           error: 'Selected registered agent is already assigned to this talk.',
         };
@@ -565,7 +569,7 @@ export function useTalkAgentsController({
             nickname,
             nicknameMode: 'auto',
             sourceKind: 'provider',
-            role: newAgentDraft.role,
+            role: activeDraft.role,
             isPrimary: false,
             displayOrder: currentDrafts.length,
             health: 'ready',
@@ -580,7 +584,7 @@ export function useTalkAgentsController({
           },
         ],
         nextDraft: {
-          ...newAgentDraft,
+          ...activeDraft,
           modelId: '',
           providerId: null,
         },
@@ -591,8 +595,8 @@ export function useTalkAgentsController({
     [newAgentDraft, registeredAgentsCatalog],
   );
 
-  const handleAddAgent = useCallback(() => {
-    const materialized = materializePendingFooterAgent(agentDrafts);
+  const handleAddAgent = useCallback((draft?: AgentCreationDraft) => {
+    const materialized = materializePendingFooterAgent(agentDrafts, draft);
     if (materialized.error) {
       setAgentState({ status: 'error', message: materialized.error });
       return;
