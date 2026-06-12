@@ -28,6 +28,7 @@ import {
   formatConversationLabel,
 } from '../../lib/conversationLabels';
 import type { TalkAgentExecutionGuardrail } from '../../lib/talkAgents';
+import type { TalkContextSourceUploadController } from '../../hooks/useTalkContextSourceUpload';
 import type {
   OrderedRoundSummary,
   RunView,
@@ -197,6 +198,7 @@ type TalkTabContentProps = {
   cancelState: CancelState;
   sendBlockedByGuardrail: boolean;
   historyEditState: HistoryEditState;
+  sourceUpload: TalkContextSourceUploadController;
   handleShowDocPane: () => void;
   handleHideDocPane: () => void;
   canEditDoc: boolean;
@@ -300,6 +302,7 @@ export function TalkTabContent({
   cancelState,
   sendBlockedByGuardrail,
   historyEditState,
+  sourceUpload,
   handleShowDocPane,
   handleHideDocPane,
   canEditDoc,
@@ -594,6 +597,7 @@ export function TalkTabContent({
               cancelState={cancelState}
               sendBlockedByGuardrail={sendBlockedByGuardrail}
               historyEditState={historyEditState}
+              sourceUpload={sourceUpload}
             />
           </div>
           {conversationMenu && menuConversation ? (

@@ -1,17 +1,24 @@
-import type {
-  Dispatch,
-  FormEvent,
-  KeyboardEvent as ReactKeyboardEvent,
-  ReactNode,
-  RefObject,
-  SetStateAction,
+import {
+  useRef,
+  type ChangeEvent,
+  type Dispatch,
+  type FormEvent,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type ReactNode,
+  type RefObject,
+  type SetStateAction,
 } from 'react';
 
 import type { ContextSource, TalkAgent } from '../lib/api';
 import {
+  TALK_CONTEXT_SOURCE_ALLOWED_FILE_EXTENSIONS,
+  type TalkContextSourceUploadController,
+} from '../hooks/useTalkContextSourceUpload';
+import {
   buildAgentLabel,
   type TalkAgentExecutionGuardrail,
 } from '../lib/talkAgents';
+import { CTIcon } from '../salon';
 import {
   SourceMentionPicker,
   type SourceMentionOption,
@@ -108,6 +115,7 @@ type TalkComposerProps = {
   cancelState: ComposerCancelState;
   sendBlockedByGuardrail: boolean;
   historyEditState: ComposerHistoryEditState;
+  sourceUpload: TalkContextSourceUploadController;
 };
 
 /**
@@ -148,7 +156,17 @@ export function TalkComposer({
   cancelState,
   sendBlockedByGuardrail,
   historyEditState,
+  sourceUpload,
 }: TalkComposerProps): JSX.Element {
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const handleFileInputChange = (event: ChangeEvent<HTMLInputElement>) => {
+    if (event.target.files && event.target.files.length > 0) {
+      void sourceUpload.handleFilesSelected(event.target.files);
+      event.target.value = '';
+    }
+  };
+
   return (
     <form className="composer talk-workspace-composer" onSubmit={handleSend}>
       {/* Chrome (tool chips, agent targeting, help, guardrail) scrolls within
@@ -268,6 +286,29 @@ export function TalkComposer({
 
         <div className="composer-controls">
           <div className="composer-tool-buttons">
+            {canEditAgents ? (
+              <>
+                <button
+                  type="button"
+                  className="composer-icon-btn composer-attach-btn"
+                  onClick={() => fileInputRef.current?.click()}
+                  aria-label="Attach saved source files"
+                  title="Attach files"
+                >
+                  <CTIcon name="paperclip" size={16} strokeWidth={1.8} />
+                </button>
+                <input
+                  ref={fileInputRef}
+                  className="composer-file-input"
+                  type="file"
+                  multiple
+                  style={{ display: 'none' }}
+                  accept={TALK_CONTEXT_SOURCE_ALLOWED_FILE_EXTENSIONS}
+                  aria-label="Attach saved source files input"
+                  onChange={handleFileInputChange}
+                />
+              </>
+            ) : null}
             {canEditAgents && activeRound ? (
               <button
                 type="button"
@@ -302,6 +343,28 @@ export function TalkComposer({
             <ComposerSendIcon />
           </button>
         </div>
+        {sourceUpload.uploadingFiles.length > 0 ? (
+          <div
+            className="composer-upload-progress"
+            role="status"
+            aria-live="polite"
+          >
+            {sourceUpload.uploadingFiles.map((file) => (
+              <div key={file.localId} className="composer-upload-item">
+                <span>{file.fileName}</span>
+                <span
+                  className={`composer-upload-status composer-upload-status-${file.status}`}
+                >
+                  {file.status === 'uploading'
+                    ? 'Uploading...'
+                    : file.status === 'error'
+                      ? file.error || 'Failed'
+                      : 'Done'}
+                </span>
+              </div>
+            ))}
+          </div>
+        ) : null}
       </div>
 
       {activeRound ? (
