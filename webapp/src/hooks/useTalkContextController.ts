@@ -8,20 +8,18 @@ import {
   type ContextRule,
   type ContextSource,
 } from '../lib/api';
-import type { TalkDetailTabKey } from './useTalkDetailTabs';
-
 type PageKind = 'loading' | 'ready' | 'unavailable' | 'error';
 
 type UseTalkContextControllerInput = {
   talkId: string;
-  currentTab: TalkDetailTabKey;
+  contextSurfaceActive: boolean;
   pageKind: PageKind;
   onUnauthorized: () => void;
 };
 
 export function useTalkContextController({
   talkId,
-  currentTab,
+  contextSurfaceActive,
   pageKind,
   onUnauthorized,
 }: UseTalkContextControllerInput) {
@@ -82,7 +80,7 @@ export function useTalkContextController({
     const loadContext = async () => {
       try {
         await refreshContext({
-          showLoading: currentTab === 'context',
+          showLoading: contextSurfaceActive,
         });
         if (cancelled) return;
       } catch (err) {
@@ -104,10 +102,16 @@ export function useTalkContextController({
     return () => {
       cancelled = true;
     };
-  }, [contextLoaded, currentTab, onUnauthorized, refreshContext, pageKind]);
+  }, [
+    contextLoaded,
+    contextSurfaceActive,
+    onUnauthorized,
+    refreshContext,
+    pageKind,
+  ]);
 
   useEffect(() => {
-    if (pageKind !== 'ready' || currentTab !== 'context' || !contextLoaded) {
+    if (pageKind !== 'ready' || !contextSurfaceActive || !contextLoaded) {
       return;
     }
     if (!contextSources.some((source) => source.status === 'pending')) {
@@ -138,8 +142,8 @@ export function useTalkContextController({
     };
   }, [
     contextLoaded,
+    contextSurfaceActive,
     contextSources,
-    currentTab,
     onUnauthorized,
     refreshContext,
     pageKind,

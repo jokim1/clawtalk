@@ -1,4 +1,10 @@
-import type { Dispatch, RefObject, SetStateAction } from 'react';
+import {
+  useRef,
+  useState,
+  type Dispatch,
+  type RefObject,
+  type SetStateAction,
+} from 'react';
 import { Link } from 'react-router-dom';
 
 import type { Talk, TalkAgent } from '../../lib/api';
@@ -6,14 +12,20 @@ import {
   buildAgentLabel,
   type TalkAgentExecutionGuardrail,
 } from '../../lib/talkAgents';
-import type {
-  TalkDetailTabKey,
-  TalkDetailTabLinks,
-} from '../../hooks/useTalkDetailTabs';
-import { CTIcon } from '../../salon';
+import type { TalkDetailTabKey } from '../../hooks/useTalkDetailTabs';
+import { CTIcon, Popover } from '../../salon';
 import { TalkToolsPill } from './TalkToolsPill';
 
 type TalkOrchestrationMode = Talk['orchestrationMode'];
+
+export const TALK_SIDE_PANEL_KEYS = [
+  'agents',
+  'context',
+  'connectors',
+  'jobs',
+] as const;
+
+export type TalkSidePanelKey = (typeof TALK_SIDE_PANEL_KEYS)[number];
 
 const ORCHESTRATION_MODE_OPTIONS: ReadonlyArray<{
   value: TalkOrchestrationMode;
@@ -96,7 +108,11 @@ type TalkDetailShellProps = {
   onRenameDraftCancel: (talkId: string) => void;
   onRenameDraftCommit: (talkId: string, draft: string) => Promise<void>;
   currentTab: TalkDetailTabKey;
-  tabLinks: TalkDetailTabLinks;
+  runHistoryHref: string;
+  sidePanel: TalkSidePanelKey | null;
+  onToggleSidePanel: (panel: TalkSidePanelKey) => void;
+  onToggleDocuments: () => void;
+  documentsOpen: boolean;
   activeRuleCount: number;
   showOrchestrationSelector: boolean;
   orchestrationMenuRef: RefObject<HTMLDivElement>;
@@ -109,7 +125,6 @@ type TalkDetailShellProps = {
   };
   onOrchestrationModeChange: (mode: TalkOrchestrationMode) => void;
   currentConversationHasContent: boolean;
-  openDocModal: () => void;
   effectiveAgents: TalkAgent[];
   talkAgentExecutionGuardrailsById: Record<string, TalkAgentExecutionGuardrail>;
 };
@@ -126,7 +141,11 @@ export function TalkDetailShell({
   onRenameDraftCancel,
   onRenameDraftCommit,
   currentTab,
-  tabLinks,
+  runHistoryHref,
+  sidePanel,
+  onToggleSidePanel,
+  onToggleDocuments,
+  documentsOpen,
   activeRuleCount,
   showOrchestrationSelector,
   orchestrationMenuRef,
@@ -136,11 +155,33 @@ export function TalkDetailShell({
   orchestrationState,
   onOrchestrationModeChange,
   currentConversationHasContent,
-  openDocModal,
   effectiveAgents,
   talkAgentExecutionGuardrailsById,
 }: TalkDetailShellProps): JSX.Element {
   const orchestrationModeLabel = getOrchestrationModeLabel(orchestrationMode);
+  const [moreOpen, setMoreOpen] = useState(false);
+  const [moreAnchorRect, setMoreAnchorRect] = useState<DOMRect | null>(null);
+  const moreButtonRef = useRef<HTMLButtonElement | null>(null);
+  const activePanel =
+    currentTab === 'agents'
+      ? 'agents'
+      : currentTab === 'context'
+        ? 'context'
+        : currentTab === 'connectors'
+          ? 'connectors'
+          : currentTab === 'jobs'
+            ? 'jobs'
+            : sidePanel;
+  const commandButtonClass = (active: boolean) =>
+    `talk-tab talk-command-tab${active ? ' talk-tab-active' : ''}`;
+  const handleMoreSidePanel = (panel: TalkSidePanelKey) => {
+    setMoreOpen(false);
+    onToggleSidePanel(panel);
+  };
+  const handleMoreDocuments = () => {
+    setMoreOpen(false);
+    onToggleDocuments();
+  };
 
   return (
     <div className="talk-workspace-header">
@@ -196,57 +237,22 @@ export function TalkDetailShell({
               </h1>
             )}
             <div className="talk-tabs-stack">
-              <div className="talk-tabs-row">
-                <nav className="talk-tabs" aria-label="Talk sections">
-                  <Link
-                    to={tabLinks.talkTabHref}
-                    className={`talk-tab ${currentTab === 'talk' ? 'talk-tab-active' : ''}`}
+              <nav className="talk-tabs-row" aria-label="Talk controls">
+                <div className="talk-tabs talk-tabs-primary">
+                  <button
+                    type="button"
+                    className={commandButtonClass(activePanel === 'agents')}
+                    onClick={() => onToggleSidePanel('agents')}
+                    aria-pressed={activePanel === 'agents'}
+                    title="Open the Room panel"
                   >
-                    Talk
-                  </Link>
-                  <Link
-                    to={tabLinks.documentsTabHref}
-                    className={`talk-tab ${currentTab === 'documents' ? 'talk-tab-active' : ''}`}
-                  >
-                    Documents
-                  </Link>
-                  <Link
-                    to={tabLinks.agentsTabHref}
-                    className={`talk-tab ${currentTab === 'agents' ? 'talk-tab-active' : ''}`}
-                  >
+                    <CTIcon name="sparkle" size={13} strokeWidth={1.7} />
                     Agents
-                  </Link>
-                  <Link
-                    to={tabLinks.contextTabHref}
-                    className={`talk-tab ${currentTab === 'context' ? 'talk-tab-active' : ''}`}
-                  >
-                    Context
-                    <span
-                      className="talk-tab-badge"
-                      aria-label={`${activeRuleCount} active rules`}
-                    >
-                      {activeRuleCount}
+                    <span className="talk-tab-badge" aria-hidden="true">
+                      {effectiveAgents.length}
                     </span>
-                  </Link>
-                  <Link
-                    to={tabLinks.workspaceConnectorsTabHref}
-                    className={`talk-tab ${currentTab === 'connectors' ? 'talk-tab-active' : ''}`}
-                  >
-                    Connectors
-                  </Link>
-                  <Link
-                    to={tabLinks.jobsTabHref}
-                    className={`talk-tab ${currentTab === 'jobs' ? 'talk-tab-active' : ''}`}
-                  >
-                    Jobs
-                  </Link>
-                  <Link
-                    to={tabLinks.runsTabHref}
-                    className={`talk-tab ${currentTab === 'runs' ? 'talk-tab-active' : ''}`}
-                  >
-                    Run History
-                  </Link>
-                </nav>
+                  </button>
+                </div>
                 {showOrchestrationSelector ? (
                   <div
                     className="talk-orchestration-menu"
@@ -331,18 +337,153 @@ export function TalkDetailShell({
                   talkId={talkId}
                   refreshKey={toolsRefreshKey}
                 />
-                {!currentConversationHasContent ? (
+                <button
+                  type="button"
+                  className={commandButtonClass(activePanel === 'context')}
+                  onClick={() => onToggleSidePanel('context')}
+                  aria-pressed={activePanel === 'context'}
+                  aria-label={`Context, ${activeRuleCount} active ${
+                    activeRuleCount === 1 ? 'rule' : 'rules'
+                  }`}
+                  title="Open Context panel"
+                >
+                  <CTIcon name="bolt" size={13} strokeWidth={1.7} />
+                  Context
+                  <span className="talk-tab-badge" aria-hidden="true">
+                    {activeRuleCount}
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  className={commandButtonClass(activePanel === 'connectors')}
+                  onClick={() => onToggleSidePanel('connectors')}
+                  aria-pressed={activePanel === 'connectors'}
+                  title="Open Connectors panel"
+                >
+                  <CTIcon name="globe" size={13} strokeWidth={1.7} />
+                  Connectors
+                </button>
+                <button
+                  type="button"
+                  className={commandButtonClass(activePanel === 'jobs')}
+                  onClick={() => onToggleSidePanel('jobs')}
+                  aria-pressed={activePanel === 'jobs'}
+                  title="Open Jobs placeholder"
+                >
+                  <CTIcon name="clock" size={13} strokeWidth={1.7} />
+                  Jobs
+                  <span
+                    className="talk-tab-badge talk-tab-badge-muted"
+                    aria-hidden="true"
+                  >
+                    Soon
+                  </span>
+                </button>
+                <div className="talk-tabs-far-actions">
                   <button
                     type="button"
-                    className="talk-tabs-add-doc"
-                    onClick={openDocModal}
-                    aria-label="Add a document to this conversation"
-                    title="Add a document to this conversation"
+                    className={commandButtonClass(
+                      documentsOpen || currentTab === 'documents',
+                    )}
+                    onClick={onToggleDocuments}
+                    aria-pressed={documentsOpen || currentTab === 'documents'}
+                    title={
+                      currentConversationHasContent
+                        ? 'Open or close the document pane'
+                        : 'Add a document to this conversation'
+                    }
                   >
-                    + Doc
+                    <CTIcon name="doc" size={13} strokeWidth={1.7} />
+                    Documents
                   </button>
-                ) : null}
-              </div>
+                  <button
+                    ref={moreButtonRef}
+                    type="button"
+                    className={`talk-tab talk-command-tab talk-more-trigger${
+                      moreOpen || currentTab === 'runs'
+                        ? ' talk-tab-active'
+                        : ''
+                    }`}
+                    onClick={() => {
+                      setMoreAnchorRect(
+                        moreButtonRef.current?.getBoundingClientRect() ?? null,
+                      );
+                      setMoreOpen((current) => !current);
+                    }}
+                    aria-haspopup="dialog"
+                    aria-expanded={moreOpen}
+                    aria-label="More Talk actions"
+                    title="More Talk actions"
+                  >
+                    <CTIcon name="more" size={14} strokeWidth={1.8} />
+                  </button>
+                  {moreOpen ? (
+                    <Popover
+                      anchorRect={moreAnchorRect}
+                      onClose={() => setMoreOpen(false)}
+                      width={240}
+                      ariaLabel="More Talk actions"
+                    >
+                      <div className="talk-more-menu">
+                        <div className="talk-more-menu-mobile-actions">
+                          <button
+                            type="button"
+                            className="talk-more-menu-item"
+                            onClick={() => handleMoreSidePanel('agents')}
+                          >
+                            <CTIcon
+                              name="sparkle"
+                              size={13}
+                              strokeWidth={1.7}
+                            />
+                            Agents
+                          </button>
+                          <button
+                            type="button"
+                            className="talk-more-menu-item"
+                            onClick={() => handleMoreSidePanel('context')}
+                          >
+                            <CTIcon name="bolt" size={13} strokeWidth={1.7} />
+                            Context
+                          </button>
+                          <button
+                            type="button"
+                            className="talk-more-menu-item"
+                            onClick={() => handleMoreSidePanel('connectors')}
+                          >
+                            <CTIcon name="globe" size={13} strokeWidth={1.7} />
+                            Connectors
+                          </button>
+                          <button
+                            type="button"
+                            className="talk-more-menu-item"
+                            onClick={() => handleMoreSidePanel('jobs')}
+                          >
+                            <CTIcon name="clock" size={13} strokeWidth={1.7} />
+                            Jobs
+                          </button>
+                          <button
+                            type="button"
+                            className="talk-more-menu-item"
+                            onClick={handleMoreDocuments}
+                          >
+                            <CTIcon name="doc" size={13} strokeWidth={1.7} />
+                            Documents
+                          </button>
+                        </div>
+                        <Link
+                          to={runHistoryHref}
+                          className="talk-more-menu-item"
+                          onClick={() => setMoreOpen(false)}
+                        >
+                          <CTIcon name="clock" size={13} strokeWidth={1.7} />
+                          Run History
+                        </Link>
+                      </div>
+                    </Popover>
+                  ) : null}
+                </div>
+              </nav>
             </div>
           </div>
           {effectiveAgents.length > 0 ? (

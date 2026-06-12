@@ -132,6 +132,22 @@ function mockTextareaMetrics(input: {
   };
 }
 
+function stubNarrowViewport(matches: boolean): void {
+  vi.stubGlobal(
+    'matchMedia',
+    vi.fn((query: string) => ({
+      matches: query.includes('max-width') ? matches : false,
+      media: query,
+      onchange: null,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    })),
+  );
+}
+
 describe('TalkDetailPage', () => {
   const openTalkStreamMock = vi.mocked(openTalkStream);
   let streamInput: StreamCallbacks | null = null;
@@ -174,7 +190,7 @@ describe('TalkDetailPage', () => {
     document.cookie = 'cr_csrf_token=; Max-Age=0; path=/';
   });
 
-  it('defaults to the Talk tab, shows the status strip, and preserves the stream across tab switches', async () => {
+  it('defaults to the Talk surface, shows the status strip, and preserves the stream across side panels', async () => {
     const user = userEvent.setup();
     installTalkDetailFetch();
 
@@ -214,22 +230,198 @@ describe('TalkDetailPage', () => {
     expect(within(composerMeta!).getByText('0/20000')).toBeTruthy();
     expect(screen.queryByRole('button', { name: 'Attach' })).toBeNull();
 
-    const tabs = within(
-      screen.getByRole('navigation', { name: 'Talk sections' }),
+    const controls = within(
+      screen.getByRole('navigation', { name: 'Talk controls' }),
     );
-    await user.click(tabs.getByRole('link', { name: 'Agents' }));
-    await screen.findByRole('heading', { name: 'Agents' });
+    await user.click(controls.getByRole('button', { name: 'Agents' }));
+    expect(
+      await screen.findByRole('complementary', { name: 'The Room' }),
+    ).toBeTruthy();
     expect(screen.getByLabelText('Talk agents')).toBeTruthy();
+    expect(screen.getByLabelText('Talk timeline')).toBeTruthy();
+    await user.keyboard('{Escape}');
+    await waitFor(() =>
+      expect(
+        screen.queryByRole('complementary', { name: 'The Room' }),
+      ).toBeNull(),
+    );
 
-    await user.click(tabs.getByRole('link', { name: 'Run History' }));
+    await user.click(controls.getByRole('button', { name: 'Agents' }));
+    expect(
+      await screen.findByRole('complementary', { name: 'The Room' }),
+    ).toBeTruthy();
+    await user.click(screen.getByRole('button', { name: 'Close The Room' }));
+
+    await user.click(screen.getByRole('button', { name: 'More Talk actions' }));
+    await user.click(screen.getByRole('link', { name: 'Run History' }));
     await screen.findByRole('heading', { name: 'Run History' });
     expect(screen.getByText('run-1')).toBeTruthy();
     expect(screen.getByText('Agent: GPT-5 Mini')).toBeTruthy();
 
-    await user.click(tabs.getByRole('link', { name: 'Talk' }));
-    await screen.findByPlaceholderText(/^Send a message to this conversation/);
-
     expect(openTalkStreamMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('ignores invalid Talk side-panel query values', async () => {
+    installTalkDetailFetch();
+
+    renderDetailPage('/app/talks/talk-1?panel=not-a-panel');
+
+    expect(await screen.findByLabelText('Talk timeline')).toBeTruthy();
+    expect(
+      screen.queryByRole('complementary', { name: 'The Room' }),
+    ).toBeNull();
+    expect(screen.queryByRole('complementary', { name: 'Context' })).toBeNull();
+  });
+
+  it('closes the side panel and opens the document pane from Documents', async () => {
+    const user = userEvent.setup();
+    installTalkDetailFetch({
+      documentByTalkId: {
+        'talk-1': buildSnapshotDocument({ title: 'Strategy Doc' }),
+      },
+    });
+
+    renderDetailPage('/app/talks/talk-1?panel=context');
+
+    expect(
+      await screen.findByRole('complementary', { name: 'Context' }),
+    ).toBeTruthy();
+
+    await user.click(screen.getByRole('button', { name: 'Documents' }));
+
+    await waitFor(() =>
+      expect(
+        screen.queryByRole('complementary', { name: 'Context' }),
+      ).toBeNull(),
+    );
+    expect(screen.getByLabelText('Talk document')).not.toHaveClass(
+      'talk-tab-pane-hidden',
+    );
+  });
+
+  it('switches to the document pane from a side panel on narrow viewports', async () => {
+    const user = userEvent.setup();
+    stubNarrowViewport(true);
+    installTalkDetailFetch({
+      documentByTalkId: {
+        'talk-1': buildSnapshotDocument({ title: 'Strategy Doc' }),
+      },
+    });
+
+    renderDetailPage('/app/talks/talk-1?panel=context');
+
+    expect(
+      await screen.findByRole('complementary', { name: 'Context' }),
+    ).toBeTruthy();
+
+    await user.click(screen.getByRole('button', { name: 'Documents' }));
+
+    await waitFor(() =>
+      expect(screen.getByRole('tab', { name: 'Doc' })).toHaveAttribute(
+        'aria-selected',
+        'true',
+      ),
+    );
+    expect(screen.getByLabelText('Talk document')).not.toHaveClass(
+      'talk-tab-pane-hidden',
+    );
+  });
+
+  it('hides the narrow document pane while a side panel is open from document view', async () => {
+    const user = userEvent.setup();
+    stubNarrowViewport(true);
+    installTalkDetailFetch({
+      documentByTalkId: {
+        'talk-1': buildSnapshotDocument({ title: 'Strategy Doc' }),
+      },
+    });
+
+    renderDetailPage('/app/talks/talk-1?doc=1');
+
+    await waitFor(() =>
+      expect(screen.getByRole('tab', { name: 'Doc' })).toHaveAttribute(
+        'aria-selected',
+        'true',
+      ),
+    );
+    expect(screen.getByLabelText('Talk document')).not.toHaveClass(
+      'talk-tab-pane-hidden',
+    );
+
+    await user.click(
+      screen.getByRole('button', { name: 'Context, 0 active rules' }),
+    );
+
+    expect(
+      await screen.findByRole('complementary', { name: 'Context' }),
+    ).toBeTruthy();
+    expect(screen.getByLabelText('Talk document')).toHaveClass(
+      'talk-tab-pane-hidden',
+    );
+  });
+
+  it('does not persist document-pane hidden state when a side panel opens', async () => {
+    const user = userEvent.setup();
+    installTalkDetailFetch({
+      documentByTalkId: {
+        'talk-1': buildSnapshotDocument({ title: 'Strategy Doc' }),
+      },
+    });
+
+    renderDetailPage('/app/talks/talk-1?panel=agents');
+
+    expect(
+      await screen.findByRole('complementary', { name: 'The Room' }),
+    ).toBeTruthy();
+    expect(screen.getByLabelText('Talk document')).toHaveClass(
+      'talk-tab-pane-hidden',
+    );
+
+    await user.click(screen.getByRole('button', { name: 'Close The Room' }));
+
+    await waitFor(() =>
+      expect(
+        screen.queryByRole('complementary', { name: 'The Room' }),
+      ).toBeNull(),
+    );
+    expect(screen.getByLabelText('Talk document')).not.toHaveClass(
+      'talk-tab-pane-hidden',
+    );
+    expect(window.localStorage.getItem('clawtalk_doc_pane:talk-1')).toBe(
+      JSON.stringify({ hidden: false }),
+    );
+  });
+
+  it('dismisses the More actions popover without navigating', async () => {
+    const user = userEvent.setup();
+    installTalkDetailFetch();
+
+    renderDetailPage('/app/talks/talk-1');
+
+    const moreButton = await screen.findByRole('button', {
+      name: 'More Talk actions',
+    });
+    await user.click(moreButton);
+
+    expect(moreButton).toHaveAttribute('aria-expanded', 'true');
+    expect(screen.getByRole('link', { name: 'Run History' })).toBeTruthy();
+
+    const backdrop = Array.from(document.body.children).find((element) => {
+      const node = element as HTMLElement;
+      return (
+        node.getAttribute('aria-hidden') === 'true' &&
+        node.style.position === 'fixed'
+      );
+    });
+    if (!backdrop) {
+      throw new Error('Expected More actions backdrop');
+    }
+    fireEvent.mouseDown(backdrop);
+
+    await waitFor(() =>
+      expect(screen.queryByRole('link', { name: 'Run History' })).toBeNull(),
+    );
+    expect(moreButton).toHaveAttribute('aria-expanded', 'false');
   });
 
   it('renders blocked browser runs in the Talk timeline and approves confirmation inline', async () => {
@@ -675,7 +867,11 @@ describe('TalkDetailPage', () => {
     renderDetailPage('/app/talks/talk-1/context');
 
     await screen.findByRole('heading', { name: 'Rules' });
-    expect(screen.getByLabelText('1 active rules')).toBeTruthy();
+    expect(
+      within(
+        screen.getByRole('button', { name: 'Context, 1 active rule' }),
+      ).getByText('1'),
+    ).toBeTruthy();
 
     const input = screen.getByDisplayValue('Use simple language');
     await user.clear(input);
@@ -1197,10 +1393,10 @@ describe('TalkDetailPage', () => {
       '',
     );
 
-    const tabs = within(
-      screen.getByRole('navigation', { name: 'Talk sections' }),
+    const controls = within(
+      screen.getByRole('navigation', { name: 'Talk controls' }),
     );
-    await user.click(tabs.getByRole('link', { name: 'Talk' }));
+    await user.click(controls.getByRole('button', { name: 'Agents' }));
     await screen.findByLabelText('Talk timeline');
 
     const statusPills = screen.getByRole('list', { name: 'Talk agent status' });
@@ -1244,10 +1440,10 @@ describe('TalkDetailPage', () => {
     await user.selectOptions(screen.getAllByLabelText('Role')[1], 'critic');
     await user.click(screen.getByRole('button', { name: 'Add + Save Agents' }));
 
-    const tabs = within(
-      screen.getByRole('navigation', { name: 'Talk sections' }),
+    const controls = within(
+      screen.getByRole('navigation', { name: 'Talk controls' }),
     );
-    await user.click(tabs.getByRole('link', { name: 'Talk' }));
+    await user.click(controls.getByRole('button', { name: 'Agents' }));
     await screen.findByLabelText('Talk timeline');
 
     if (!savedRequest || !resolveSave) {
@@ -1269,7 +1465,6 @@ describe('TalkDetailPage', () => {
       screen.queryByText('Save agent changes before sending a message.'),
     ).toBeNull();
 
-    await user.click(tabs.getByRole('link', { name: 'Agents' }));
     expect(await screen.findByText('Talk agents updated.')).toBeTruthy();
     expect(screen.getAllByLabelText('Registered Agent')).toHaveLength(2);
   });
@@ -1394,6 +1589,55 @@ describe('TalkDetailPage', () => {
     expect(screen.getByText('via browser')).toBeTruthy();
   }, 10000);
 
+  it('refreshes pending source status while Context is open as a side panel', async () => {
+    let requestCount = 0;
+    const pendingContext = buildTalkContext({
+      sources: [
+        buildContextSource({
+          id: 'source-pending',
+          title: 'Gamemakers Substack',
+          sourceUrl: 'https://example.substack.com/p/post',
+          status: 'pending',
+        }),
+      ],
+    });
+    const readyContext = buildTalkContext({
+      sources: [
+        buildContextSource({
+          id: 'source-pending',
+          title: 'Gamemakers Substack',
+          sourceUrl: 'https://example.substack.com/p/post',
+          status: 'ready',
+          fetchStrategy: 'browser',
+          lastFetchedAt: '2026-03-06T00:05:00.000Z',
+          extractedTextLength: 1200,
+        }),
+      ],
+    });
+
+    installTalkDetailFetch({
+      context: pendingContext,
+      onGetContext: () => {
+        requestCount += 1;
+        return requestCount >= 2 ? readyContext : pendingContext;
+      },
+    });
+
+    renderDetailPage('/app/talks/talk-1?panel=context');
+
+    expect(
+      await screen.findByRole('complementary', { name: 'Context' }),
+    ).toBeTruthy();
+    expect(await screen.findByText('pending')).toBeTruthy();
+
+    await act(async () => {
+      await new Promise((resolve) => window.setTimeout(resolve, 2200));
+    });
+
+    await waitFor(() => expect(screen.getByText('ready')).toBeTruthy());
+    expect(screen.getByText('via browser')).toBeTruthy();
+  }, 10000);
+
   it('keeps pasted text sources available and lets keyboard users trigger file upload', async () => {
     const user = userEvent.setup();
     installTalkDetailFetch();
@@ -1457,10 +1701,10 @@ describe('TalkDetailPage', () => {
     await user.selectOptions(screen.getAllByLabelText('Role')[1], 'critic');
     await user.click(screen.getByRole('button', { name: 'Add Agent' }));
 
-    const tabs = within(
-      screen.getByRole('navigation', { name: 'Talk sections' }),
+    const controls = within(
+      screen.getByRole('navigation', { name: 'Talk controls' }),
     );
-    await user.click(tabs.getByRole('link', { name: 'Talk' }));
+    await user.click(controls.getByRole('button', { name: 'Agents' }));
     await screen.findByLabelText('Talk timeline');
 
     const statusPills = screen.getByRole('list', { name: 'Talk agent status' });
@@ -2673,10 +2917,8 @@ describe('TalkDetailPage', () => {
 
     expect(screen.queryByText('Side thread failed')).toBeNull();
 
-    const tabs = within(
-      screen.getByRole('navigation', { name: 'Talk sections' }),
-    );
-    await user.click(tabs.getByRole('link', { name: 'Run History' }));
+    await user.click(screen.getByRole('button', { name: 'More Talk actions' }));
+    await user.click(screen.getByRole('link', { name: 'Run History' }));
     await screen.findByRole('heading', { name: 'Run History' });
 
     expect(screen.getByText('run-side')).toBeTruthy();
@@ -3152,9 +3394,9 @@ describe('TalkDetailPage', () => {
 
     await screen.findByPlaceholderText(/^Send a message to this conversation/);
 
-    // Open the + Doc modal via the existing add-doc button.
+    // Open the document modal via the far-right Documents control.
     const addDocButton = await screen.findByRole('button', {
-      name: /add a document|\+ doc/i,
+      name: 'Documents',
     });
     await user.click(addDocButton);
 
@@ -3227,9 +3469,7 @@ describe('TalkDetailPage', () => {
     });
 
     // Create a doc while that snapshot is still pending.
-    await user.click(
-      await screen.findByRole('button', { name: /add a document|\+ doc/i }),
-    );
+    await user.click(await screen.findByRole('button', { name: 'Documents' }));
     await user.type(await screen.findByLabelText('Title'), 'Optimistic Doc');
     await user.click(screen.getByRole('button', { name: /create document/i }));
 
