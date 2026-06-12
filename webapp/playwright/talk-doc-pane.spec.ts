@@ -162,6 +162,45 @@ async function fulfillJson(route: Route, data: unknown, status = 200) {
   });
 }
 
+test('desktop Documents inactive expands chat without a floating edge tab', async ({
+  page,
+}) => {
+  await installMocks(page);
+  await page.setViewportSize({ width: 1512, height: 982 });
+  await page.goto(`/app/talks/${TALK_ID}/talk?thread=${THREAD_ID}&doc=1`);
+
+  const docPane = page.getByRole('region', { name: /talk document/i });
+  await expect(docPane).toBeVisible();
+  const content = page.locator('.talk-tab-content');
+  const chatPane = page.locator('.talk-tab-chat-pane');
+  const splitChatBox = await chatPane.boundingBox();
+  expect(splitChatBox?.width ?? 0).toBeGreaterThan(0);
+
+  await page.getByRole('button', { name: /hide document pane/i }).click();
+
+  await expect(docPane).toBeHidden();
+  const fullContentBox = await content.boundingBox();
+  const fullChatBox = await chatPane.boundingBox();
+  expect(fullChatBox?.width ?? 0).toBeGreaterThan(
+    (splitChatBox?.width ?? 0) + 250,
+  );
+  expect(fullChatBox?.width ?? 0).toBeGreaterThan(
+    (fullContentBox?.width ?? 0) * 0.9,
+  );
+  await expect(
+    page.getByRole('button', { name: /show launch brief document/i }),
+  ).toHaveCount(0);
+
+  const documentsButton = page
+    .getByRole('navigation', { name: 'Talk controls' })
+    .getByRole('button', { name: 'Documents' });
+  await expect(documentsButton).toHaveAttribute('aria-pressed', 'false');
+
+  await documentsButton.click();
+  await expect(docPane).toBeVisible();
+  await expect(documentsButton).toHaveAttribute('aria-pressed', 'true');
+});
+
 async function installMocks(page: Page): Promise<void> {
   // LIFO: catch-all first, specific handlers below win.
   await page.route('**/api/v1/**', (route) => fulfillJson(route, {}));
@@ -199,6 +238,10 @@ async function installMocks(page: Page): Promise<void> {
   );
   await page.route(`**/api/v1/talks/${TALK_ID}/tools*`, (route) =>
     fulfillJson(route, { tools: [] }),
+  );
+  await page.route(
+    `**/api/v1/talks/${TALK_ID}/connector-bindings*`,
+    (route) => fulfillJson(route, { channels: [], dataConnectors: [] }),
   );
   await page.route('**/api/v1/agents*', (route) =>
     fulfillJson(route, {

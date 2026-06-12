@@ -7,7 +7,6 @@ import {
   type SetStateAction,
 } from 'react';
 
-import { DocPaneEdgeTab } from '../DocPaneEdgeTab';
 import type { SourceMentionOption } from '../SourceMentionPicker';
 import { TalkComposer } from '../TalkComposer';
 import { TalkDocPane } from './TalkDocPane';
@@ -18,7 +17,6 @@ import { ThreadStartButton } from '../ThreadStartButton';
 import { ToolChipsBar } from '../ToolChipsBar';
 import type {
   ContextSource,
-  NativeDocumentFormat,
   SessionUser,
   TalkAgent,
   TalkMessage,
@@ -102,8 +100,6 @@ type TalkTabContentProps = {
   // Native primary-document metadata (no flat content facade). `null` id means
   // the active conversation has no document, so the split layout collapses to chat.
   primaryDocumentId: string | null;
-  primaryDocumentTitle: string;
-  primaryDocumentFormat: NativeDocumentFormat;
   workspaceId: string | null;
   docReloadSignal: number;
   isNarrowViewport: boolean;
@@ -218,8 +214,6 @@ export function TalkTabContent({
   setMessageElementRef,
   textareaRef,
   primaryDocumentId,
-  primaryDocumentTitle,
-  primaryDocumentFormat,
   workspaceId,
   docReloadSignal,
   isNarrowViewport,
@@ -313,12 +307,14 @@ export function TalkTabContent({
 }: TalkTabContentProps): JSX.Element {
   const hasDocument = primaryDocumentId !== null;
   const effectiveDocPaneHidden = docPaneHidden || docPaneSuppressed;
+  const splitLayoutActive =
+    hasDocument && (isNarrowViewport || !effectiveDocPaneHidden);
   return (
     <div
       ref={splitContainerRef}
       className={[
         'talk-tab-content',
-        hasDocument ? 'talk-tab-content-split' : '',
+        splitLayoutActive ? 'talk-tab-content-split' : '',
         hasDocument && isNarrowViewport ? 'talk-tab-content-split-narrow' : '',
       ]
         .filter(Boolean)
@@ -382,7 +378,7 @@ export function TalkTabContent({
           .filter(Boolean)
           .join(' ')}
         style={
-          hasDocument && !isNarrowViewport
+          hasDocument && !isNarrowViewport && !effectiveDocPaneHidden
             ? { flex: `${chatRatio} 1 0` }
             : undefined
         }
@@ -626,16 +622,6 @@ export function TalkTabContent({
           aria-label="Resize chat and document panes"
           tabIndex={0}
           onKeyDown={handleResizeHandleKeyDown}
-        />
-      ) : null}
-      {hasDocument &&
-      docPaneHidden &&
-      !docPaneSuppressed &&
-      !isNarrowViewport ? (
-        <DocPaneEdgeTab
-          docTitle={primaryDocumentTitle}
-          format={primaryDocumentFormat}
-          onClick={handleShowDocPane}
         />
       ) : null}
       {primaryDocumentId !== null ? (

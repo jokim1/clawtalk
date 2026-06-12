@@ -6,7 +6,6 @@ export type TalkDetailTabKey =
   | 'documents'
   | 'agents'
   | 'context'
-  | 'connectors'
   | 'jobs'
   | 'runs';
 
@@ -15,7 +14,6 @@ export type TalkDetailTabLinks = {
   documentsTabHref: string;
   agentsTabHref: string;
   contextTabHref: string;
-  workspaceConnectorsTabHref: string;
   jobsTabHref: string;
   runsTabHref: string;
   manageAgentsHref: string;
@@ -29,11 +27,9 @@ export function getTabFromPath(
   if (pathname === `${base}/documents`) return 'documents';
   if (pathname === `${base}/agents`) return 'agents';
   if (pathname === `${base}/context`) return 'context';
-  if (pathname === `${base}/connectors`) {
-    return 'connectors';
-  }
   if (pathname === `${base}/jobs`) return 'jobs';
   if (pathname === `${base}/runs`) return 'runs';
+  if (pathname === `${base}/connectors`) return 'talk';
   if (pathname === `${base}/tools`) return 'context';
   return 'talk';
 }
@@ -71,10 +67,6 @@ export function useTalkDetailTabLinks(input: {
     const documentsTabHref = buildTalkDetailHref(talkId, 'documents');
     const agentsTabHref = buildTalkDetailHref(talkId, 'agents');
     const contextTabHref = buildTalkDetailHref(talkId, 'context');
-    const workspaceConnectorsTabHref = buildTalkDetailHref(
-      talkId,
-      'connectors',
-    );
     const jobsTabHref = buildTalkDetailHref(talkId, 'jobs');
     const runsTabHref = buildTalkDetailHref(talkId, 'runs');
     const manageAgentsHref = `/app/settings?tab=agents&returnTo=${encodeURIComponent(
@@ -86,7 +78,6 @@ export function useTalkDetailTabLinks(input: {
       documentsTabHref,
       agentsTabHref,
       contextTabHref,
-      workspaceConnectorsTabHref,
       jobsTabHref,
       runsTabHref,
       manageAgentsHref,

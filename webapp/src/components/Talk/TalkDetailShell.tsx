@@ -14,6 +14,7 @@ import {
 } from '../../lib/talkAgents';
 import type { TalkDetailTabKey } from '../../hooks/useTalkDetailTabs';
 import { CTIcon, Popover } from '../../salon';
+import { TalkConnectorsPill } from '../connectors/TalkConnectorsPill';
 import { TalkToolsPill } from './TalkToolsPill';
 
 type TalkOrchestrationMode = Talk['orchestrationMode'];
@@ -21,7 +22,6 @@ type TalkOrchestrationMode = Talk['orchestrationMode'];
 export const TALK_SIDE_PANEL_KEYS = [
   'agents',
   'context',
-  'connectors',
   'jobs',
 ] as const;
 
@@ -112,6 +112,7 @@ type TalkDetailShellProps = {
   sidePanel: TalkSidePanelKey | null;
   onToggleSidePanel: (panel: TalkSidePanelKey) => void;
   onToggleDocuments: () => void;
+  onUnauthorized: () => void;
   documentsOpen: boolean;
   activeRuleCount: number;
   showOrchestrationSelector: boolean;
@@ -145,6 +146,7 @@ export function TalkDetailShell({
   sidePanel,
   onToggleSidePanel,
   onToggleDocuments,
+  onUnauthorized,
   documentsOpen,
   activeRuleCount,
   showOrchestrationSelector,
@@ -167,11 +169,9 @@ export function TalkDetailShell({
       ? 'agents'
       : currentTab === 'context'
         ? 'context'
-        : currentTab === 'connectors'
-          ? 'connectors'
-          : currentTab === 'jobs'
-            ? 'jobs'
-            : sidePanel;
+        : currentTab === 'jobs'
+          ? 'jobs'
+          : sidePanel;
   const commandButtonClass = (active: boolean) =>
     `talk-tab talk-command-tab${active ? ' talk-tab-active' : ''}`;
   const handleMoreSidePanel = (panel: TalkSidePanelKey) => {
@@ -353,16 +353,10 @@ export function TalkDetailShell({
                     {activeRuleCount}
                   </span>
                 </button>
-                <button
-                  type="button"
-                  className={commandButtonClass(activePanel === 'connectors')}
-                  onClick={() => onToggleSidePanel('connectors')}
-                  aria-pressed={activePanel === 'connectors'}
-                  title="Open Connectors panel"
-                >
-                  <CTIcon name="globe" size={13} strokeWidth={1.7} />
-                  Connectors
-                </button>
+                <TalkConnectorsPill
+                  talkId={talkId}
+                  onUnauthorized={onUnauthorized}
+                />
                 <button
                   type="button"
                   className={commandButtonClass(activePanel === 'jobs')}
@@ -445,14 +439,6 @@ export function TalkDetailShell({
                           >
                             <CTIcon name="bolt" size={13} strokeWidth={1.7} />
                             Context
-                          </button>
-                          <button
-                            type="button"
-                            className="talk-more-menu-item"
-                            onClick={() => handleMoreSidePanel('connectors')}
-                          >
-                            <CTIcon name="globe" size={13} strokeWidth={1.7} />
-                            Connectors
                           </button>
                           <button
                             type="button"

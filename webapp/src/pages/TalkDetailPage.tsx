@@ -24,7 +24,6 @@ import { TalkToolsPanel } from '../components/TalkToolsPanel';
 import { SavedSourcesPanel } from '../components/SavedSourcesPanel';
 import { TalkContextPanel } from '../components/TalkContextPanel';
 import { TalkJobsPanel } from '../components/TalkJobsPanel';
-import { TalkConnectorsPanel } from '../components/connectors/TalkConnectorsPanel';
 import { TalkAgentsPanel } from '../components/TalkAgentsPanel';
 import { TalkRunsPanel } from '../components/TalkRunsPanel';
 import { TalkHistoryEditor } from '../components/TalkHistoryEditor';
@@ -293,8 +292,6 @@ export function TalkDetailPage({
   // format only, never a flat content body read.
   const primaryDocumentId = talkSnapshot?.primaryDocument?.id ?? null;
   const primaryDocumentTitle = talkSnapshot?.primaryDocument?.title ?? '';
-  const primaryDocumentFormat =
-    talkSnapshot?.primaryDocument?.format ?? 'markdown';
 
   // Bumped on each content-edit stream event so the native doc pane reloads
   // its blocks/pending edits in place (replaces the legacy content refetch).
@@ -904,7 +901,6 @@ export function TalkDetailPage({
     resyncTalkState,
     onUnauthorized: handleUnauthorized,
   });
-  const manageConnectorsHref = '/app/connectors';
   const isRenaming = renameDraft?.talkId === talkId;
 
   const handleToggleSidePanel = useCallback(
@@ -1095,9 +1091,6 @@ export function TalkDetailPage({
       )}
     </section>
   );
-  const renderConnectorsPanel = () => (
-    <TalkConnectorsPanel talkId={talkId} onUnauthorized={handleUnauthorized} />
-  );
   const renderJobsPlaceholder = () => (
     <section className="talk-side-panel-placeholder" aria-label="Talk jobs">
       <h3>Jobs</h3>
@@ -1124,21 +1117,14 @@ export function TalkDetailPage({
             icon: 'bolt' as const,
             content: renderContextPanel(),
           }
-        : sidePanel === 'connectors'
+        : sidePanel === 'jobs'
           ? {
-              title: 'Connectors',
-              subtitle: 'Workspace connections for this Talk',
-              icon: 'globe' as const,
-              content: renderConnectorsPanel(),
+              title: 'Jobs',
+              subtitle: 'Placeholder',
+              icon: 'clock' as const,
+              content: renderJobsPlaceholder(),
             }
-          : sidePanel === 'jobs'
-            ? {
-                title: 'Jobs',
-                subtitle: 'Placeholder',
-                icon: 'clock' as const,
-                content: renderJobsPlaceholder(),
-              }
-            : null;
+          : null;
   const docPaneSuppressed = sidePanel !== null;
 
   return (
@@ -1160,6 +1146,7 @@ export function TalkDetailPage({
           sidePanel={sidePanel}
           onToggleSidePanel={handleToggleSidePanel}
           onToggleDocuments={handleToggleDocuments}
+          onUnauthorized={handleUnauthorized}
           documentsOpen={
             currentTab === 'talk' &&
             !docPaneSuppressed &&
@@ -1189,8 +1176,6 @@ export function TalkDetailPage({
           {currentTab === 'agents' ? renderAgentsPanel() : null}
 
           {currentTab === 'context' ? renderContextPanel() : null}
-
-          {currentTab === 'connectors' ? renderConnectorsPanel() : null}
 
           {currentTab === 'jobs' ? (
             <TalkJobsPanel
@@ -1254,8 +1239,6 @@ export function TalkDetailPage({
                 setMessageElementRef={setMessageElementRef}
                 textareaRef={composerInput.textareaRef}
                 primaryDocumentId={primaryDocumentId}
-                primaryDocumentTitle={primaryDocumentTitle}
-                primaryDocumentFormat={primaryDocumentFormat}
                 workspaceId={activeTalkWorkspaceId}
                 docReloadSignal={docReloadSignal}
                 isNarrowViewport={isNarrowViewport}

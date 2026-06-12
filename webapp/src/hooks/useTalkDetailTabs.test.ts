@@ -13,7 +13,7 @@ describe('getTabFromPath', () => {
     expect(getTabFromPath('/app/talks/t1/context', 't1')).toBe('context');
     expect(getTabFromPath('/app/talks/t1/jobs', 't1')).toBe('jobs');
     expect(getTabFromPath('/app/talks/t1/runs', 't1')).toBe('runs');
-    expect(getTabFromPath('/app/talks/t1/connectors', 't1')).toBe('connectors');
+    expect(getTabFromPath('/app/talks/t1/connectors', 't1')).toBe('talk');
   });
 });
 

@@ -89,7 +89,6 @@ export function useTalkDocPaneController({
   // reloads.
   const [docPaneHidden, setDocPaneHidden] = useState<boolean>(false);
   const docBodyRef = useRef<HTMLDivElement | null>(null);
-  const docEdgeTabRef = useRef<HTMLButtonElement | null>(null);
   const docNarrowShowBtnRef = useRef<HTMLButtonElement | null>(null);
   const [chatRatio, setChatRatio] = useState(0.5);
   const [isNarrowViewport, setIsNarrowViewport] = useState(() => {
@@ -226,7 +225,6 @@ export function useTalkDocPaneController({
   const handleHideDocPane = useCallback(() => {
     setDocPaneHidden(true);
     requestAnimationFrame(() => {
-      docEdgeTabRef.current?.focus();
       docNarrowShowBtnRef.current?.focus();
     });
   }, []);
@@ -341,7 +339,6 @@ export function useTalkDocPaneController({
     docPaneHidden,
     setDocPaneHidden,
     docBodyRef,
-    docEdgeTabRef,
     docNarrowShowBtnRef,
     chatRatio,
     isNarrowViewport,
