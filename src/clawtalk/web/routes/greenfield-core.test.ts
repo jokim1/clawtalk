@@ -1367,6 +1367,7 @@ describe('greenfield core routes', () => {
       data: {
         talkId: created.body.data.talk.id,
         active: {},
+        activeToolIds: [],
         available: EXPECTED_TALK_TOOL_FAMILIES,
       },
     });
@@ -1391,6 +1392,7 @@ describe('greenfield core routes', () => {
       data: {
         talkId: created.body.data.talk.id,
         active: { web: true },
+        activeToolIds: ['web-search', 'web-fetch', 'news-monitor'],
         available: EXPECTED_TALK_TOOL_FAMILIES,
       },
     });
@@ -1417,7 +1419,7 @@ describe('greenfield core routes', () => {
     expect(disabled.statusCode).toBe(200);
     expect(disabled.body).toMatchObject({
       ok: true,
-      data: { active: { web: false } },
+      data: { active: { web: false }, activeToolIds: [] },
     });
 
     const afterRows = await db<{ count: number }[]>`
@@ -1438,6 +1440,66 @@ describe('greenfield core routes', () => {
     expect(latest[0]?.payload).toEqual({
       talkId: created.body.data.talk.id,
       active: { web: false },
+    });
+  });
+
+  it('updates individual greenfield talk tool ids', async () => {
+    const workspaceId = await currentWorkspaceId();
+    const agents = await listGreenfieldAgentsRoute({
+      auth: auth(),
+      workspaceId,
+    });
+    if (!agents.body.ok) throw new Error('Expected agent route to succeed');
+    const created = await createGreenfieldTalkRoute({
+      auth: auth(),
+      workspaceId,
+      body: {
+        title: 'Per Tool Toggle Talk',
+        team: agents.body.data.agents.slice(0, 1).map((agent) => agent.id),
+      },
+    });
+    expect(created.statusCode).toBe(201);
+    if (!created.body.ok) throw new Error('Expected talk route to succeed');
+
+    const enabled = await updateGreenfieldTalkToolRoute({
+      auth: auth(),
+      workspaceId,
+      talkId: created.body.data.talk.id,
+      body: { toolId: 'web-search', enabled: true },
+    });
+    expect(enabled.statusCode).toBe(200);
+    expect(enabled.body).toMatchObject({
+      ok: true,
+      data: {
+        active: { web: true },
+        activeToolIds: ['web-search'],
+        available: EXPECTED_TALK_TOOL_FAMILIES,
+      },
+    });
+
+    const db = getDbPg();
+    const persisted = await db<Array<{ tool_id: string; enabled: boolean }>>`
+      select tool_id, enabled
+      from public.talk_tools
+      where workspace_id = ${workspaceId}::uuid
+        and talk_id = ${created.body.data.talk.id}::uuid
+      order by tool_id asc
+    `;
+    expect(persisted).toEqual([{ tool_id: 'web-search', enabled: true }]);
+
+    const disabled = await updateGreenfieldTalkToolRoute({
+      auth: auth(),
+      workspaceId,
+      talkId: created.body.data.talk.id,
+      body: { toolId: 'web-search', enabled: false },
+    });
+    expect(disabled.statusCode).toBe(200);
+    expect(disabled.body).toMatchObject({
+      ok: true,
+      data: {
+        active: { web: false },
+        activeToolIds: [],
+      },
     });
   });
 
@@ -1584,7 +1646,7 @@ describe('greenfield core routes', () => {
     expect(result.statusCode).toBe(200);
     expect(result.body).toMatchObject({
       ok: true,
-      data: { active: { web: true } },
+      data: { active: { web: true }, activeToolIds: ['web-search'] },
     });
   });
 

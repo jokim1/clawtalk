@@ -1918,6 +1918,7 @@ export async function updateTalkAgents(input: {
 export interface TalkToolsState {
   talkId: string;
   active: Record<string, boolean>;
+  activeToolIds?: string[];
   available: string[];
 }
 
@@ -1927,18 +1928,23 @@ export async function getTalkTools(talkId: string): Promise<TalkToolsState> {
   );
 }
 
-export async function updateTalkTool(input: {
-  talkId: string;
-  family: string;
-  enabled: boolean;
-}): Promise<TalkToolsState> {
+export async function updateTalkTool(
+  input: {
+    talkId: string;
+    enabled: boolean;
+  } & ({ family: string; toolId?: never } | { toolId: string; family?: never }),
+): Promise<TalkToolsState> {
+  const toggleKey =
+    input.toolId !== undefined
+      ? { toolId: input.toolId }
+      : { family: input.family };
   return apiMutationRequest<TalkToolsState>(
     `/api/v1/talks/${encodeURIComponent(input.talkId)}/tools`,
     {
       method: 'PATCH',
       includeJson: true,
       body: JSON.stringify({
-        family: input.family,
+        ...toggleKey,
         enabled: input.enabled,
       }),
     },
