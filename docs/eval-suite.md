@@ -107,6 +107,25 @@ type AgentAuditResult = {
 };
 ```
 
+## Live Capture + Provider Grading
+
+`npm run eval:capture` (CLI in `src/clawtalk/eval/live-capture.ts`) runs a scenario against the real local stack and writes a `source: "live"` observation that `--mode=live` scores:
+
+1. Seeds a dedicated eval user (`eval-live-capture@clawtalk.local`) + workspace bootstrap with the default 5-agent team, so reruns are idempotent and never touch a real user's data.
+2. Encrypts provider API keys from the environment into `workspace_provider_secrets` for every provider the roster's models actually use. A preflight lists exactly which env keys are missing (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`, `NVIDIA_API_KEY`) and aborts before any model call. `CLAWTALK_PROVIDER_SECRET_KEY` must match the local executor's.
+3. Enqueues the scenario `userPrompt` through `enqueueGreenfieldChatTurn` and processes each run with the real `processTalkRunMessage` executor — real ordered rounds, real provider model calls. Any non-completed run aborts the capture with the run errors; no observation is written.
+4. Derives mechanical signals from actual DB state: `run.created` / `run.status.completed` from `runs` rows, `messages.persisted` from persisted agent messages, `agent.<role>.reply` from `talk_agent_snapshots.role_key`.
+5. Grades each role reply on all six dimensions with an evaluator model (default `claude-sonnet-4-6`, override `--grader-model=` or `EVAL_GRADER_MODEL`) using the `eval/graders/*.json` prompt contracts. A dimension that meets its threshold attaches that dimension's `requiredSignals` from the scenario's `agentExpectations`; failed dimensions withhold their signals so the live gate fails honestly.
+6. Persists `AgentAuditResult` rows as `<scenarioId>.audits.json` in the live-root next to the observation. There is no agent-audit table in the product schema yet, so the `audit.agent_results.persisted` record points at that artifact; move it to a real table when the product audit surface lands.
+
+```bash
+npm run db:start
+ANTHROPIC_API_KEY=… OPENAI_API_KEY=… GEMINI_API_KEY=… CLAWTALK_PROVIDER_SECRET_KEY=… npm run eval:capture
+npm run eval -- --mode=live --scenarios=s-talk-pricing-launch --live-root=tmp/eval-live-observations
+```
+
+Capture currently supports `s-talk-pricing-launch` only. `--skip-grading` captures mechanical signals without evaluator calls (semantic checks will then fail in live mode, by design).
+
 ## Next Up
 
-The next eval hardening step is live capture and model grading: run scenarios against a local Worker/workspace fixture, persist real Talk/Documents/Jobs/Home observations into a `--live-root` directory, and then call evaluator-model graders. Until that lands, `npm run eval` is a local MVP gate that proves coverage shape and threshold mechanics, and `--mode=live --live-root=<dir>` proves captured observations satisfy the deterministic contracts, not live model quality.
+Remaining eval hardening: extend capture to the other five scenarios (failure-budget injection, Documents, Jobs, Home, permissions — each needs scenario-specific orchestration beyond a plain chat turn), persist audits to a real table, and define the launch threshold policy for when live runs gate a release. Until then, `npm run eval` remains the local MVP gate for coverage shape and threshold mechanics.

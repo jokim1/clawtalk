@@ -14,6 +14,7 @@
     "test:web": "npm run check:webapp && npm --prefix webapp run test",
     "typecheck": "tsc --noEmit",
     "eval": "node --import tsx eval/run.ts",
+    "eval:capture": "node --import tsx eval/capture.ts",
     "format": "prettier --write \"src/**/*.ts\" \"scripts/**/*.ts\"",
     "format:fix": "prettier --write \"src/**/*.ts\" \"scripts/**/*.ts\"",
     "format:check": "prettier --check \"src/**/*.ts\" \"scripts/**/*.ts\"",
