@@ -55,6 +55,7 @@ describe('RailProfileMenu', () => {
     renderMenu();
     expect(screen.getByRole('heading', { name: 'Workspaces' })).toBeTruthy();
     expect(screen.getByLabelText('2 workspaces')).toHaveTextContent('2');
+    expect(screen.getByRole('menuitem', { name: '+ Workspace' })).toBeTruthy();
     expect(screen.getByText('Oxbow')).toBeTruthy();
     const active = screen.getByRole('menuitemradio', { name: /Oxbow/ });
     expect(active.getAttribute('aria-checked')).toBe('true');
@@ -75,7 +76,7 @@ describe('RailProfileMenu', () => {
     const onCreateWorkspace = vi.fn(async () => undefined);
     renderMenu({ onCreateWorkspace });
 
-    await user.click(screen.getByRole('menuitem', { name: 'Add workspace' }));
+    await user.click(screen.getByRole('menuitem', { name: '+ Workspace' }));
     const input = screen.getByLabelText('Workspace name');
     expect(input).toHaveValue("Owner Example's workspace");
 
@@ -91,7 +92,7 @@ describe('RailProfileMenu', () => {
     const onCreateWorkspace = vi.fn(async () => undefined);
     renderMenu({ onCreateWorkspace });
 
-    await user.click(screen.getByRole('menuitem', { name: 'Add workspace' }));
+    await user.click(screen.getByRole('menuitem', { name: '+ Workspace' }));
     await user.clear(screen.getByLabelText('Workspace name'));
     await user.click(screen.getByRole('button', { name: 'Create' }));
 
