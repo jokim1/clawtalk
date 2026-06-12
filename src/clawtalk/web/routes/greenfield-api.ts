@@ -8,10 +8,6 @@ import {
 } from '../../../db.js';
 import { logger } from '../../../logger.js';
 import { updateUserDisplayName } from '../../db/index.js';
-import {
-  dispatchRunInProcess,
-  type DispatchRunInProcessEnv,
-} from '../../talks/dispatch-in-process.js';
 import { updateGreenfieldContextSourceExtraction } from '../../talks/greenfield-context-accessors.js';
 import { dispatchRun } from '../../talks/queue-producer.js';
 import { ingestUrlSource } from '../../talks/source-ingestion.js';
@@ -1375,20 +1371,13 @@ export function mountGreenfieldApiRoutes(app: GreenfieldApp): void {
       targetAgentIds: parsed.data.targetAgentIds,
     });
     if (result.statusCode === 202 && result.body.ok) {
-      const runs = result.body.data.runs;
-      if (runs.length === 1) {
-        // T7: bypass queue for single-run. See dispatchRunInProcess.
-        c.executionCtx.waitUntil(
-          dispatchRunInProcess({
-            env: c.env as DispatchRunInProcessEnv,
-            ctx: c.executionCtx,
-            runId: runs[0].id,
-          }),
-        );
-      } else {
-        for (const run of runs) {
-          await dispatchRun({ runId: run.id });
-        }
+      // Every run — single-run included — goes through TALK_RUN_QUEUE.
+      // The former T7 in-process bypass ran the executor under
+      // ctx.waitUntil, which Cloudflare kills ~30s after the 202; the
+      // #609 run watchdog died with that isolate, so >30s single-agent
+      // tool turns wedged silently (Talk Runtime v2 decision 6A).
+      for (const run of result.body.data.runs) {
+        await dispatchRun({ runId: run.id });
       }
     }
     return jsonResponse(result);
