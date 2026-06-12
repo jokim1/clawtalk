@@ -1210,7 +1210,31 @@ function buildContext(input: {
   };
 }
 
-function mapExecutionEvent(
+// Outbox events are visibility, not the model's input — the full result
+// still reaches the model as a tool_result message. 500 chars is enough
+// to diagnose "what did the tool return / was it an error" from the
+// event stream without bloating event_outbox rows.
+const TOOL_RESULT_EVENT_MAX_CHARS = 500;
+
+function truncateToolResultForEvent(result: string): string {
+  // Postgres jsonb rejects \u0000 outright — a NUL anywhere in fetched
+  // web content would make the outbox INSERT throw and the event
+  // silently drop (the emit path only warn-logs insert failures).
+  const clean = result.replaceAll('\u0000', '');
+  if (clean.length <= TOOL_RESULT_EVENT_MAX_CHARS) return clean;
+  let sliced = clean.slice(0, TOOL_RESULT_EVENT_MAX_CHARS);
+  // Don't split a surrogate pair: slice() cuts at UTF-16 code units, and
+  // a lone high surrogate serializes as an unpaired \udXXX escape that
+  // jsonb also rejects — same silent-drop failure as NUL.
+  const lastCode = sliced.charCodeAt(sliced.length - 1);
+  if (lastCode >= 0xd800 && lastCode <= 0xdbff) {
+    sliced = sliced.slice(0, -1);
+  }
+  return `${sliced}… [truncated]`;
+}
+
+/** @internal Exported for tests. */
+export function mapExecutionEvent(
   event: ExecutionEvent,
   input: TalkExecutorInput,
   run: GreenfieldExecutorRunRow,
@@ -1268,6 +1292,16 @@ function mapExecutionEvent(
         arguments: event.arguments,
       };
     case 'tool_result':
+      // P1-f: previously dropped — invisible tool outcomes blinded wedge
+      // diagnosis twice on 2026-06-12.
+      return {
+        type: 'tool_result',
+        ...shared,
+        toolName: event.toolName,
+        result: truncateToolResultForEvent(event.result),
+        isError: !!event.isError,
+        durationMs: event.durationMs,
+      };
     case 'awaiting_confirmation':
       return null;
   }
