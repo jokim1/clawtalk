@@ -375,3 +375,31 @@ describe('WebSearchError', () => {
     expect(err.statusCode).toBe(500);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Abort-signal conformance — every adapter must forward options.signal to
+// fetch, or the executor's web_search timeout silently stops working for
+// that provider (the hang class behind the 2026-06-12 wedged-run incident).
+// ---------------------------------------------------------------------------
+
+describe('adapter abort-signal conformance', () => {
+  const ADAPTER_TABLE = [
+    ['tavilySearch', tavilySearch],
+    ['braveSearch', braveSearch],
+    ['firecrawlSearch', firecrawlSearch],
+    ['exaSearch', exaSearch],
+  ] as const;
+
+  for (const [name, adapter] of ADAPTER_TABLE) {
+    it(`${name} forwards options.signal to fetch`, async () => {
+      const fetchMock = mockFetchOnce({ ok: true, json: {} });
+      const controller = new AbortController();
+
+      await adapter('key', 'query', { signal: controller.signal });
+
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      const [, init] = fetchMock.mock.calls[0];
+      expect((init as RequestInit).signal).toBe(controller.signal);
+    });
+  }
+});

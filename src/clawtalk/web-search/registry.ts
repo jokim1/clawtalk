@@ -34,6 +34,14 @@ const ADAPTERS: Record<WebSearchProviderId, WebSearchAdapter> = {
   'web_search.exa': exaSearch,
 };
 
+// Server-side bound on this module's own DB reads. The caller's abort signal
+// only cancels the provider fetch (postgres.js queries are not abortable), so
+// a stalled query here would otherwise hold the per-call transaction — and
+// the request scope's only connection — until the scheduler's 1h stuck-run
+// sweep. Applied with set_config(..., is_local=true): dies with the
+// enclosing transaction.
+const DB_STATEMENT_TIMEOUT_MS = 10_000;
+
 export function isKnownWebSearchProviderId(
   id: string,
 ): id is WebSearchProviderId {
@@ -66,7 +74,10 @@ export async function runWebSearchForUser(
     );
   }
 
+  options?.signal?.throwIfAborted();
+
   const db = getDbPg();
+  await db`select set_config('statement_timeout', ${String(DB_STATEMENT_TIMEOUT_MS)}, true)`;
   // `withUserContext` (set by the caller, e.g. the talk-executor's
   // request-scoped DB) gates these reads to the current user via RLS.
   const userRows = await db<
@@ -110,6 +121,7 @@ export async function runWebSearchForUser(
 
   const { apiKey } = await decryptProviderSecret(ciphertext);
   const adapter = ADAPTERS[preferredId];
+  options?.signal?.throwIfAborted();
   const results = await adapter(apiKey, trimmed, options);
   return {
     query: trimmed,
