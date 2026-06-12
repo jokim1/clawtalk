@@ -48,7 +48,11 @@ import {
   type WorkspaceSummaryRecord,
   type WorkspaceUserRecord,
 } from '../../workspaces/accessors.js';
-import { ensureWorkspaceBootstrapForUser } from '../../workspaces/bootstrap.js';
+import {
+  createWorkspaceForUser,
+  ensureWorkspaceBootstrapForUser,
+  getWorkspaceCreationEntitlement,
+} from '../../workspaces/bootstrap.js';
 import type { ApiEnvelope, AuthContext } from '../types.js';
 
 type RouteResult<T> = {
@@ -547,6 +551,61 @@ export async function listGreenfieldWorkspacesRoute(input: {
   const me = await getGreenfieldMeRoute({ auth: input.auth });
   if (!me.body.ok) return me;
   return ok({ workspaces: me.body.data.workspaces });
+}
+
+export async function createGreenfieldWorkspaceRoute(input: {
+  auth: AuthContext;
+  body: { name?: unknown };
+}): Promise<RouteResult<SessionMePayload>> {
+  const name =
+    typeof input.body.name === 'string' ? input.body.name.trim() : '';
+  if (name.length === 0 || name.length > 120) {
+    return error(
+      400,
+      'invalid_workspace_name',
+      'Workspace name must be between 1 and 120 characters.',
+    );
+  }
+
+  const entitlement = await getWorkspaceCreationEntitlement({
+    userId: input.auth.userId,
+  });
+  if (!entitlement.allowed) {
+    return error(entitlement.statusCode, entitlement.code, entitlement.message);
+  }
+
+  try {
+    const workspaceId = await withUserContext(input.auth.userId, () =>
+      createWorkspaceForUser({ userId: input.auth.userId, name }),
+    );
+    const session = await getGreenfieldMeRoute({
+      auth: input.auth,
+      requestedWorkspaceId: workspaceId,
+    });
+    if (!session.body.ok) return session;
+    return ok(session.body.data, 201);
+  } catch (err) {
+    const code =
+      err && typeof err === 'object' && 'code' in err
+        ? String((err as { code?: unknown }).code)
+        : '';
+    if (code === 'CT101') {
+      return error(401, 'unauthorized', 'Session is not active.');
+    }
+    if (code === 'CT104') {
+      return error(
+        400,
+        'invalid_workspace_name',
+        'Workspace name must be between 1 and 120 characters.',
+      );
+    }
+    console.error('[workspace-create] failed', err);
+    return error(
+      500,
+      'workspace_create_failed',
+      'Workspace could not be created.',
+    );
+  }
 }
 
 export async function switchGreenfieldWorkspaceRoute(input: {

@@ -7,6 +7,7 @@ import {
   unarchiveGreenfieldTalkRoute,
   createGreenfieldFolderRoute,
   createGreenfieldTalkRoute,
+  createGreenfieldWorkspaceRoute,
   getGreenfieldMeRoute,
   getGreenfieldTalkRoute,
   getGreenfieldTalkToolsRoute,
@@ -177,6 +178,109 @@ describe('greenfield core routes', () => {
       'Pricing crew',
       'Research crew',
     ]);
+  });
+
+  it('creates additional owned workspaces with isolated default seeds', async () => {
+    const defaultWorkspaceId = await currentWorkspaceId();
+
+    const created = await createGreenfieldWorkspaceRoute({
+      auth: auth(),
+      body: { name: 'Research Lab' },
+    });
+
+    expect(created.statusCode).toBe(201);
+    expect(created.body).toMatchObject({
+      ok: true,
+      data: {
+        currentWorkspaceId: expect.any(String),
+        workspaces: expect.arrayContaining([
+          expect.objectContaining({
+            id: defaultWorkspaceId,
+            role: 'owner',
+          }),
+          expect.objectContaining({
+            name: 'Research Lab',
+            role: 'owner',
+          }),
+        ]),
+      },
+    });
+    if (!created.body.ok)
+      throw new Error('Expected workspace create to succeed');
+    const workspaceId = created.body.data.currentWorkspaceId;
+    expect(workspaceId).not.toBe(defaultWorkspaceId);
+
+    const db = getDbPg();
+    const membershipRows = await db<Array<{ role: string }>>`
+      select role
+      from public.workspace_members
+      where workspace_id = ${workspaceId}::uuid
+        and user_id = ${USER_ID}::uuid
+    `;
+    expect(membershipRows).toEqual([{ role: 'owner' }]);
+
+    const seedCounts = await db<
+      Array<{
+        agents: number;
+        teams: number;
+        system_talks: number;
+        folders: number;
+        regular_talks: number;
+      }>
+    >`
+      select
+        (select count(*)::int from public.agents where workspace_id = ${workspaceId}::uuid) as agents,
+        (select count(*)::int from public.team_compositions where workspace_id = ${workspaceId}::uuid) as teams,
+        (select count(*)::int from public.talks where workspace_id = ${workspaceId}::uuid and is_system = true) as system_talks,
+        (select count(*)::int from public.folders where workspace_id = ${workspaceId}::uuid) as folders,
+        (select count(*)::int from public.talks where workspace_id = ${workspaceId}::uuid and is_system = false) as regular_talks
+    `;
+    expect(seedCounts[0]).toEqual({
+      agents: 8,
+      teams: 3,
+      system_talks: 1,
+      folders: 0,
+      regular_talks: 0,
+    });
+
+    const secondCreated = await createGreenfieldWorkspaceRoute({
+      auth: auth(),
+      body: { name: 'Research Lab 2' },
+    });
+    expect(secondCreated.statusCode).toBe(201);
+
+    const workspaceCount = await db<Array<{ count: number }>>`
+      select count(*)::int as count
+      from public.workspaces
+      where owner_id = ${USER_ID}::uuid
+    `;
+    expect(workspaceCount[0]?.count).toBe(3);
+  });
+
+  it('validates additional workspace names before provisioning', async () => {
+    await currentWorkspaceId();
+
+    const blank = await createGreenfieldWorkspaceRoute({
+      auth: auth(),
+      body: { name: '   ' },
+    });
+
+    expect(blank.statusCode).toBe(400);
+    expect(blank.body).toMatchObject({
+      ok: false,
+      error: { code: 'invalid_workspace_name' },
+    });
+
+    const tooLong = await createGreenfieldWorkspaceRoute({
+      auth: auth(),
+      body: { name: 'x'.repeat(121) },
+    });
+
+    expect(tooLong.statusCode).toBe(400);
+    expect(tooLong.body).toMatchObject({
+      ok: false,
+      error: { code: 'invalid_workspace_name' },
+    });
   });
 
   it('creates and lists folders, talks, sidebar nodes, and talk agents', async () => {

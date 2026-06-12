@@ -28,6 +28,7 @@ type ToolResult = { result: string; isError?: boolean };
 export const WEB_SEARCH_TIMEOUT_MS = 20_000;
 
 async function executeWebSearch(
+  userId: string,
   args: Record<string, unknown>,
   signal: AbortSignal,
 ): Promise<ToolResult> {
@@ -56,7 +57,7 @@ async function executeWebSearch(
   }, WEB_SEARCH_TIMEOUT_MS);
   try {
     const { runWebSearchForUser } = await import('../web-search/registry.js');
-    const response = await runWebSearchForUser(query, {
+    const response = await runWebSearchForUser(userId, query, {
       maxResults,
       signal: AbortSignal.any([signal, timeoutController.signal]),
     });
@@ -78,8 +79,11 @@ async function executeWebSearch(
       return { result: `web_search error: ${err.message}`, isError: true };
     }
     if (timeoutController.signal.aborted && !signal.aborted) {
+      // The timer spans credential resolution AND the provider fetch, so
+      // don't blame the provider — a stalled credential leg can also eat
+      // the budget. The registry's per-leg breadcrumbs say which one hung.
       return {
-        result: `web_search error: the search provider did not respond within ${WEB_SEARCH_TIMEOUT_MS / 1000} seconds and the request was aborted. Continue with any results you already have, or retry the search once.`,
+        result: `web_search error: the search did not complete within ${WEB_SEARCH_TIMEOUT_MS / 1000} seconds and was aborted. Continue with any results you already have, or retry the search once.`,
         isError: true,
       };
     }
@@ -284,7 +288,7 @@ export function buildToolExecutor(
           isError: true,
         };
       }
-      return executeWebSearch(args, signal);
+      return executeWebSearch(userId, args, signal);
     }
 
     if (toolName.startsWith('browser_')) {

@@ -171,10 +171,16 @@ a {
 }
 .ct-rail-profile-section-head {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   justify-content: space-between;
-  gap: 0.75rem;
+  gap: 0.6rem;
   padding: 0.8rem 0.88rem 0.48rem;
+}
+.ct-rail-profile-section-title {
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
 }
 .ct-rail-profile-section-head h2 {
   margin: 0;
@@ -184,12 +190,42 @@ a {
   font-weight: 500;
   letter-spacing: 0;
 }
-.ct-rail-profile-section-head span {
+.ct-rail-profile-section-title span {
   color: var(--salon-ink-2, #6b6660);
   font-family: var(--salon-font-mono, ui-monospace, monospace);
   font-size: 0.63rem;
   letter-spacing: 0.14em;
   text-transform: uppercase;
+}
+.ct-rail-profile-workspace-add {
+  flex: 0 0 auto;
+  min-height: 1.62rem;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.22rem;
+  padding: 0.18rem 0.42rem;
+  border: 1px solid var(--salon-line, #e6e0d1);
+  border-radius: 7px;
+  background: var(--salon-card, #fff);
+  color: var(--salon-ink, #1f1b16);
+  cursor: pointer;
+  font-size: 0.68rem;
+  font-weight: 500;
+  line-height: 1;
+}
+.ct-rail-profile-workspace-add svg {
+  flex: 0 0 auto;
+  color: var(--salon-accent, #c8643a);
+}
+.ct-rail-profile-workspace-add:hover:not(:disabled),
+.ct-rail-profile-workspace-add:focus-visible {
+  border-color: rgba(200, 100, 58, 0.38);
+  background: #fffaf2;
+  outline: none;
+}
+.ct-rail-profile-workspace-add:disabled {
+  cursor: default;
+  opacity: 0.58;
 }
 .ct-rail-profile-workspace-list {
   flex: 1 1 auto;
@@ -257,6 +293,69 @@ a {
 .ct-rail-profile-workspace-check {
   flex: 0 0 auto;
   color: var(--salon-accent, #c8643a);
+}
+.ct-rail-profile-create-form {
+  display: grid;
+  gap: 0.42rem;
+  margin: 0 0.38rem 0.48rem;
+  padding: 0.54rem;
+  border: 1px solid var(--salon-line, #e6e0d1);
+  border-radius: 8px;
+  background: var(--salon-card, #fff);
+}
+.ct-rail-profile-create-label {
+  color: var(--salon-ink-2, #6b6660);
+  font-size: 0.68rem;
+  font-weight: 500;
+}
+.ct-rail-profile-create-form input {
+  width: 100%;
+  min-width: 0;
+  height: 1.9rem;
+  padding: 0 0.5rem;
+  border: 1px solid var(--salon-line, #e6e0d1);
+  border-radius: 7px;
+  background: var(--salon-paper, #fbf7ee);
+  color: var(--salon-ink, #1f1b16);
+  font: inherit;
+  font-size: 0.78rem;
+}
+.ct-rail-profile-create-form input:focus {
+  border-color: var(--salon-accent, #c8643a);
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(200, 100, 58, 0.16);
+}
+.ct-rail-profile-create-form input:disabled {
+  opacity: 0.65;
+}
+.ct-rail-profile-create-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.38rem;
+}
+.ct-rail-profile-create-actions button {
+  min-height: 1.72rem;
+  padding: 0.26rem 0.48rem;
+  border: 1px solid var(--salon-line, #e6e0d1);
+  border-radius: 7px;
+  background: transparent;
+  color: var(--salon-ink, #1f1b16);
+  cursor: pointer;
+  font-size: 0.72rem;
+}
+.ct-rail-profile-create-actions button[type='submit'] {
+  border-color: var(--salon-accent, #c8643a);
+  background: var(--salon-accent, #c8643a);
+  color: #fff;
+}
+.ct-rail-profile-create-actions button:hover:not(:disabled),
+.ct-rail-profile-create-actions button:focus-visible {
+  outline: none;
+  filter: brightness(0.96);
+}
+.ct-rail-profile-create-actions button:disabled {
+  cursor: default;
+  opacity: 0.6;
 }
 .ct-rail-profile-error {
   margin: 0.15rem 0.75rem 0.5rem;

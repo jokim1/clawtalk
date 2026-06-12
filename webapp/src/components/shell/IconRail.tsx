@@ -12,6 +12,7 @@ type Props = {
   workspaces: SessionWorkspace[];
   currentWorkspaceId: string | undefined;
   onSwitchWorkspace: (workspaceId: string) => void | Promise<void>;
+  onCreateWorkspace: (name: string) => void | Promise<void>;
   onSignOut: () => void;
   signOutBusy: boolean;
   onOpenPalette: () => void;
@@ -102,6 +103,7 @@ export function IconRail({
   workspaces,
   currentWorkspaceId,
   onSwitchWorkspace,
+  onCreateWorkspace,
   onSignOut,
   signOutBusy,
   onOpenPalette,
@@ -186,6 +188,7 @@ export function IconRail({
             workspaces={workspaces}
             currentWorkspaceId={currentWorkspaceId}
             onSwitchWorkspace={onSwitchWorkspace}
+            onCreateWorkspace={onCreateWorkspace}
             onSignOut={onSignOut}
             signOutBusy={signOutBusy}
             onClose={() => {

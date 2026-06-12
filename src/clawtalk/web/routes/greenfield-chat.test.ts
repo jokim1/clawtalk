@@ -1,14 +1,18 @@
+import { Hono } from 'hono';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
 import {
   closePgDatabase,
+  DATABASE_URL_ENV,
   getDbPg,
   initPgDatabase,
   withNotifyQueueScope,
+  withRequestScopedDb,
   withUserContext,
 } from '../../../db.js';
 import type { AuthContext } from '../types.js';
 import { cancelGreenfieldTalkRuns } from '../../talks/greenfield-chat-accessors.js';
+import { mountGreenfieldApiRoutes } from './greenfield-api.js';
 import {
   createGreenfieldTalkRoute,
   getGreenfieldMeRoute,
@@ -769,5 +773,109 @@ describe('greenfield chat routes', () => {
         and status in ('queued', 'running', 'awaiting')
     `;
     expect(activeRuns[0]?.count).toBe(2);
+  });
+
+  // Regression for Talk Runtime v2 decision 6A: the former T7 bypass ran
+  // single-run chats in-process under ctx.waitUntil (30s ceiling, no
+  // surviving watchdog). Every accepted run must dispatch via
+  // TALK_RUN_QUEUE, single-run included.
+  it('dispatches every accepted run through TALK_RUN_QUEUE, single-run included', async () => {
+    const app = new Hono<{ Variables: { auth: AuthContext } }>();
+    app.use('*', async (c, next) => {
+      c.set('auth', auth());
+      await next();
+    });
+    mountGreenfieldApiRoutes(app);
+
+    const sent: string[] = [];
+    const queue = {
+      send: async (message: unknown): Promise<void> => {
+        sent.push((message as { runId: string }).runId);
+      },
+    };
+    const dbUrl =
+      process.env[DATABASE_URL_ENV]?.trim() ||
+      'postgresql://postgres:postgres@127.0.0.1:54432/postgres';
+    // Stub ExecutionContext so the route runs under the same context
+    // shape as production. Without it, c.executionCtx THROWS in this
+    // harness — a reintroduced waitUntil bypass would fail with a
+    // misleading 500 (test-env quirk), and a ctx-guarded bypass
+    // (try/catch around c.executionCtx) would pass while fully reviving
+    // the 30s-ceiling bug in prod. With the stub, the queue assertion
+    // below is the load-bearing kill (mutation-verified both ways).
+    const executionCtx = {
+      waitUntil: () => {},
+      passThroughOnException: () => {},
+    } as never;
+    const postChat = (
+      talkId: string,
+      workspaceId: string,
+      body: Record<string, unknown>,
+    ) =>
+      withRequestScopedDb(dbUrl, null, { TALK_RUN_QUEUE: queue }, async () =>
+        app.request(
+          new Request(`https://app.test/api/v1/talks/${talkId}/chat`, {
+            method: 'POST',
+            headers: {
+              'content-type': 'application/json',
+              'x-workspace-id': workspaceId,
+            },
+            body: JSON.stringify(body),
+          }),
+          undefined,
+          undefined,
+          executionCtx,
+        ),
+      );
+
+    // Single-run: the exact shape the bypass used to capture.
+    const singleFixture = await createTalkFixture();
+    const single = await postChat(
+      singleFixture.talkId,
+      singleFixture.workspaceId,
+      {
+        content: 'Single-run dispatch check',
+        targetAgentIds: [singleFixture.agentIds[0]],
+      },
+    );
+    expect(single.status).toBe(202);
+    const singleBody = (await single.json()) as {
+      ok: boolean;
+      data: { runs: Array<{ id: string }> };
+    };
+    expect(singleBody.ok).toBe(true);
+    expect(singleBody.data.runs).toHaveLength(1);
+    expect(sent).toEqual(singleBody.data.runs.map((run) => run.id));
+
+    // Multi-run keeps one queue send per accepted run.
+    sent.length = 0;
+    const multiFixture = await createTalkFixture({
+      workspaceId: singleFixture.workspaceId,
+    });
+    const multi = await postChat(
+      multiFixture.talkId,
+      multiFixture.workspaceId,
+      { content: 'Multi-run dispatch check' },
+    );
+    expect(multi.status).toBe(202);
+    const multiBody = (await multi.json()) as {
+      ok: boolean;
+      data: { runs: Array<{ id: string }> };
+    };
+    expect(multiBody.ok).toBe(true);
+    expect(multiBody.data.runs.length).toBeGreaterThan(1);
+    expect(sent).toEqual(multiBody.data.runs.map((run) => run.id));
+
+    // Rejected enqueues must dispatch nothing: a second send while the
+    // first round is still active is refused, and the false branch of
+    // the 202-guard must not reach the queue.
+    sent.length = 0;
+    const rejected = await postChat(
+      singleFixture.talkId,
+      singleFixture.workspaceId,
+      { content: 'Second send while round active' },
+    );
+    expect(rejected.status).not.toBe(202);
+    expect(sent).toEqual([]);
   });
 });
