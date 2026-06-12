@@ -1641,7 +1641,11 @@ describe('TalkDetailPage', () => {
     expect(within(statusPills).queryByText('Single-agent only')).toBeNull();
 
     await user.type(composer, 'Which team has the edge?');
-    expect(sendButton).not.toHaveAttribute('disabled');
+    // The Send button's disabled state is derived from the `draft` state,
+    // which may commit a microtask after user.type resolves under load. Wait
+    // for it rather than asserting synchronously, so a lagging render doesn't
+    // read as a flake.
+    await waitFor(() => expect(sendButton).not.toHaveAttribute('disabled'));
 
     const targetGroup = screen.getByRole('group', { name: 'Selected agents' });
     const openAiChip = within(targetGroup).getByRole('button', {
@@ -1656,7 +1660,7 @@ describe('TalkDetailPage', () => {
         ),
       ).toBeNull(),
     );
-    expect(sendButton).not.toHaveAttribute('disabled');
+    await waitFor(() => expect(sendButton).not.toHaveAttribute('disabled'));
 
     await user.click(sendButton);
     await waitFor(() => expect(sendBodies).toHaveLength(1));
@@ -3104,8 +3108,11 @@ describe('TalkDetailPage', () => {
         expect(screen.queryByText(repeatedPrompt)).toBeNull(),
       );
 
-      await user.type(composer, repeatedPrompt);
-      await user.keyboard('{Enter}');
+      // Same race as the /edit submit above: a split type()/keyboard('{Enter}')
+      // lets the Enter keydown read a `draft` that hasn't committed under load,
+      // dropping the submit. Type the prompt and Enter in one sequence so the
+      // draft is committed before the Enter keydown fires.
+      await user.type(composer, `${repeatedPrompt}{Enter}`);
 
       await waitFor(() =>
         expect(screen.getAllByText(repeatedPrompt)).toHaveLength(1),
