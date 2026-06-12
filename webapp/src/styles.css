@@ -8000,18 +8000,21 @@ a {
   color: var(--salon-ink, #1f1b16);
 }
 
-/* Read-only tools summary (TalkToolsPill) — popover body after the design's
-   ToolsPopover (prototype/tools.jsx), minus the switches. */
+/* Talk Tools header popover (prototype/tools.jsx). */
 .talk-tools-popover {
   display: flex;
   flex-direction: column;
+  max-height: min(43rem, calc(100vh - 6rem));
 }
 
 .talk-tools-popover-header {
+  padding: 1rem 1rem 0.7rem;
+}
+
+.talk-tools-popover-title-row {
   display: flex;
   align-items: center;
   gap: 0.5rem;
-  padding: 0.85rem 1rem 0.6rem;
 }
 
 .talk-tools-popover-title {
@@ -8030,60 +8033,187 @@ a {
   color: var(--salon-ink-2, #6b6660);
 }
 
-.talk-tools-popover-list {
-  margin: 0;
-  padding: 0 0 0.35rem;
-  list-style: none;
-}
-
-.talk-tools-popover-row {
-  display: flex;
-  align-items: center;
-  gap: 0.75rem;
-  padding: 0.45rem 1rem;
-}
-
-.talk-tools-popover-row-off {
-  opacity: 0.55;
-}
-
-.talk-tools-popover-row-text {
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 0.1rem;
-}
-
-.talk-tools-popover-row-name {
-  font-size: 0.82rem;
-  font-weight: 500;
-  color: var(--salon-ink, #1f1b16);
-}
-
-.talk-tools-popover-row-hint {
-  font-size: 0.72rem;
+.talk-tools-popover-copy {
+  margin: 0.32rem 0 0;
+  max-width: 31rem;
+  font-size: 0.75rem;
+  line-height: 1.45;
   color: var(--salon-ink-2, #6b6660);
 }
 
-.talk-tools-popover-state {
-  margin-left: auto;
+.talk-tools-popover-error {
+  margin: 0 1rem 0.45rem;
+  border: 1px solid rgba(168, 67, 74, 0.25);
+  border-radius: 0.5rem;
+  background: #fbecec;
+  padding: 0.5rem 0.6rem;
+  color: #7b2a30;
+  font-size: 0.74rem;
+}
+
+.talk-tools-popover-scroll {
+  min-height: 0;
+  max-height: min(26rem, 60vh);
+  overflow-y: auto;
+  padding-bottom: 0.25rem;
+}
+
+.talk-tools-popover-group {
+  padding: 0.1rem 0 0.25rem;
+}
+
+.talk-tools-popover-group-title {
+  padding: 0.55rem 1rem 0.3rem;
   font-family: var(--salon-font-mono, 'Geist Mono', ui-monospace, monospace);
-  font-size: 0.67rem;
+  font-size: 0.66rem;
   letter-spacing: 0.16em;
+  line-height: 1.2;
   text-transform: uppercase;
   color: var(--salon-ink-2, #6b6660);
 }
 
-.talk-tools-popover-state-on {
-  color: var(--salon-accent-strong, #b05530);
+.talk-tools-popover-row {
+  width: 100%;
+  border: 0;
+  background: transparent;
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.48rem 1rem;
+  text-align: left;
+  font: inherit;
+  cursor: pointer;
+  transition: background 140ms ease;
+}
+
+.talk-tools-popover-row:hover:not(:disabled),
+.talk-tools-popover-row:focus-visible {
+  background: var(--salon-paper-2, #f4ecdb);
+  outline: none;
+}
+
+.talk-tools-popover-row:disabled {
+  cursor: wait;
+  opacity: 0.72;
+}
+
+.talk-tools-popover-row-icon {
+  display: grid;
+  place-items: center;
+  width: 1.75rem;
+  height: 1.75rem;
+  flex: 0 0 auto;
+  border-radius: 0.5rem;
+  background: var(--salon-paper-2, #f4ecdb);
+  color: var(--salon-ink-2, #6b6660);
+}
+
+.talk-tools-popover-row-icon-on {
+  background: rgba(200, 100, 58, 0.12);
+  color: var(--salon-accent, #c8643a);
+}
+
+.talk-tools-popover-row-text {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 0.08rem;
+}
+
+.talk-tools-popover-row-name {
+  font-size: 0.81rem;
+  font-weight: 500;
+  line-height: 1.25;
+  color: var(--salon-ink, #1f1b16);
+}
+
+.talk-tools-popover-row-hint {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.71rem;
+  line-height: 1.25;
+  color: var(--salon-ink-2, #6b6660);
+}
+
+.talk-tools-popover-switch {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  width: 2rem;
+  height: 1.125rem;
+  flex: 0 0 auto;
+  border: 1px solid var(--salon-line, #e6e0d1);
+  border-radius: 999px;
+  background: var(--salon-paper-2, #f4ecdb);
+  transition:
+    background 140ms ease,
+    border-color 140ms ease;
+}
+
+.talk-tools-popover-switch-on {
+  border-color: var(--salon-accent, #c8643a);
+  background: var(--salon-accent, #c8643a);
+}
+
+.talk-tools-popover-switch-thumb {
+  position: absolute;
+  top: 0.125rem;
+  left: 0.125rem;
+  width: 0.75rem;
+  height: 0.75rem;
+  border-radius: 999px;
+  background: #ffffff;
+  box-shadow: 0 1px 2px rgba(31, 27, 22, 0.2);
+  transition: transform 140ms ease;
+}
+
+.talk-tools-popover-switch-on .talk-tools-popover-switch-thumb {
+  transform: translateX(0.875rem);
 }
 
 .talk-tools-popover-footer {
-  padding: 0.6rem 1rem 0.75rem;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.72rem 1rem;
   border-top: 1px solid var(--salon-line, #e6e0d1);
   background: var(--salon-paper, #fbf7ef);
-  font-size: 0.74rem;
+  font-size: 0.69rem;
+  line-height: 1.35;
   color: var(--salon-ink-2, #6b6660);
+}
+
+.talk-tools-popover-footnote {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 0.24rem;
+  background: var(--salon-paper-2, #f4ecdb);
+  padding: 0 0.25rem;
+  font-family: var(--salon-font-mono, 'Geist Mono', ui-monospace, monospace);
+  color: var(--salon-ink, #1f1b16);
+}
+
+.talk-tools-popover-done {
+  flex: 0 0 auto;
+  min-height: 1.75rem;
+  border: 0;
+  border-radius: 999px;
+  background: var(--salon-accent, #c8643a);
+  padding: 0 0.72rem;
+  color: #ffffff;
+  font: inherit;
+  font-size: 0.72rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.talk-tools-popover-done:hover,
+.talk-tools-popover-done:focus-visible {
+  background: var(--salon-accent-strong, #b05530);
+  outline: none;
 }
 
 .talk-status-strip {

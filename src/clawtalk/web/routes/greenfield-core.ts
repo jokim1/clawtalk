@@ -1427,23 +1427,34 @@ function toolIdsForFamily(family: string): string[] {
   return toolIds;
 }
 
+const TALK_TOOL_IDS = Object.values(TALK_TOOL_IDS_BY_FAMILY).flat();
+
+function activeToolIdsFromRows(rows: GreenfieldTalkToolRecord[]): string[] {
+  const enabled = new Set(
+    rows.filter((row) => row.enabled).map((row) => row.tool_id),
+  );
+  return TALK_TOOL_IDS.filter((toolId) => enabled.has(toolId));
+}
+
 function talkToolsPayload(input: {
   talkId: string;
   rows: GreenfieldTalkToolRecord[];
 }): {
   talkId: string;
   active: Record<string, boolean>;
+  activeToolIds: string[];
   available: string[];
 } {
   return {
     talkId: input.talkId,
     active: toTalkToolsActiveMap(input.rows),
+    activeToolIds: activeToolIdsFromRows(input.rows),
     available: TALK_TOOL_FAMILIES,
   };
 }
 
 type NormalizedToolPatch =
-  | { ok: true; family: string; enabled: boolean }
+  | { ok: true; toolIds: string[]; enabled: boolean }
   | { ok: false; error: string };
 
 function normalizeTalkToolPatch(body: unknown): NormalizedToolPatch {
@@ -1452,23 +1463,48 @@ function normalizeTalkToolPatch(body: unknown): NormalizedToolPatch {
   }
   const raw = body as Record<string, unknown>;
   const family = raw.family;
+  const toolId = raw.toolId;
   const enabled = raw.enabled;
-  if (typeof family !== 'string' || family.trim().length === 0) {
-    return { ok: false, error: 'family must be a non-empty string' };
-  }
   if (typeof enabled !== 'boolean') {
     return { ok: false, error: 'enabled must be a boolean' };
   }
-  const normalizedFamily = family.trim();
-  if (!TALK_TOOL_FAMILIES.includes(normalizedFamily)) {
+
+  const hasFamily = typeof family === 'string' && family.trim().length > 0;
+  const hasToolId = typeof toolId === 'string' && toolId.trim().length > 0;
+  if (hasFamily === hasToolId) {
     return {
       ok: false,
-      error: `unknown family '${normalizedFamily}' — must be one of ${TALK_TOOL_FAMILIES.join(
+      error: 'provide exactly one of family or toolId',
+    };
+  }
+
+  if (hasFamily) {
+    const normalizedFamily = family.trim();
+    if (!TALK_TOOL_FAMILIES.includes(normalizedFamily)) {
+      return {
+        ok: false,
+        error: `unknown family '${normalizedFamily}' — must be one of ${TALK_TOOL_FAMILIES.join(
+          ', ',
+        )}`,
+      };
+    }
+    return {
+      ok: true,
+      toolIds: toolIdsForFamily(normalizedFamily),
+      enabled,
+    };
+  }
+
+  const normalizedToolId = typeof toolId === 'string' ? toolId.trim() : '';
+  if (!TALK_TOOL_IDS.includes(normalizedToolId)) {
+    return {
+      ok: false,
+      error: `unknown toolId '${normalizedToolId}' — must be one of ${TALK_TOOL_IDS.join(
         ', ',
       )}`,
     };
   }
-  return { ok: true, family: normalizedFamily, enabled };
+  return { ok: true, toolIds: [normalizedToolId], enabled };
 }
 
 export async function getGreenfieldTalkToolsRoute(input: {
@@ -1479,6 +1515,7 @@ export async function getGreenfieldTalkToolsRoute(input: {
   RouteResult<{
     talkId: string;
     active: Record<string, boolean>;
+    activeToolIds: string[];
     available: string[];
   }>
 > {
@@ -1513,6 +1550,7 @@ export async function updateGreenfieldTalkToolRoute(input: {
   RouteResult<{
     talkId: string;
     active: Record<string, boolean>;
+    activeToolIds: string[];
     available: string[];
   }>
 > {
@@ -1534,7 +1572,7 @@ export async function updateGreenfieldTalkToolRoute(input: {
       const updated = await setGreenfieldTalkTools({
         workspaceId: ctx.workspace.id,
         talkId: input.talkId,
-        toolIds: toolIdsForFamily(normalized.family),
+        toolIds: normalized.toolIds,
         enabled: normalized.enabled,
       });
       if (!updated) return error(404, 'talk_not_found', 'Talk not found.');
