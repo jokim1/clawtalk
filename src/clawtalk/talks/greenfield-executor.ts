@@ -1218,7 +1218,6 @@ function buildResponseMetadataJson(input: {
     codexReasoningItems?: Array<Record<string, unknown>>;
     codexMessageItems?: Array<Record<string, unknown>>;
   };
-  toolTrace?: Record<string, unknown>;
 }): string {
   const codexReasoning =
     input.providerData?.codexReasoningItems &&
@@ -1245,7 +1244,6 @@ function buildResponseMetadataJson(input: {
     ...(input.isSynthesis ? { isSynthesis: true } : {}),
     ...(codexReasoning ? { codexReasoningItems: codexReasoning } : {}),
     ...(codexMessages ? { codexMessageItems: codexMessages } : {}),
-    ...(input.toolTrace ? { toolTrace: input.toolTrace } : {}),
   });
 }
 
@@ -1323,21 +1321,6 @@ export class GreenfieldTalkExecutor implements TalkExecutor {
       Boolean(documentContext.document) &&
       canApplyContentEdit &&
       isContentEditIntent(stepUserMessage.userMessageText);
-    // TEMP websearch-trace instrumentation (remove after P0 web-search triage):
-    // snapshots the tool pipeline into message metadata so prod runs are
-    // inspectable via SQL. See debug/websearch-trace.
-    const toolTrace = {
-      manifestParsed:
-        parseToolManifestEffectiveTools(run.tool_manifest_json) !== null,
-      families: effectiveTools.map(
-        (tool) =>
-          `${tool.toolFamily}:${tool.enabled ? 1 : 0}:${tool.runtimeTools.join('|')}`,
-      ),
-      contextToolNames: contextTools.map((tool) => tool.name),
-      jobPolicy: jobPolicy ? { allowWeb: jobPolicy.allowWeb } : null,
-      credentialMode: agent.credential_mode,
-    };
-    console.log('[websearch-trace] executor', JSON.stringify(toolTrace));
     let applyContentEditCalled = false;
     const executeToolCall = buildGreenfieldToolExecutor({
       run,
@@ -1433,7 +1416,6 @@ export class GreenfieldTalkExecutor implements TalkExecutor {
         isSynthesis: stepUserMessage.isSynthesis,
         output,
         providerData: result.providerData,
-        toolTrace,
       }),
     };
   }
