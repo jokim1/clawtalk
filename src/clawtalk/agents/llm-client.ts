@@ -833,6 +833,15 @@ async function* parseAnthropicStream(
   }> = [];
   let currentBlockIndex = -1;
   let stopReason = '';
+  // Anthropic reports usage across two events: `message_start` carries
+  // input_tokens plus a placeholder output_tokens (~1), and `message_delta`
+  // carries the running CUMULATIVE output_tokens at the TOP LEVEL of the
+  // event (not under `message`). Track both and emit a full snapshot on each
+  // update so the final output count — not the start placeholder — is what
+  // consumers see.
+  let usageInputTokens = 0;
+  let usageOutputTokens = 0;
+  let sawUsage = false;
   const eventQueue: LlmStreamEvent[] = [];
 
   const queueEvent = (event: LlmStreamEvent) => {
@@ -906,9 +915,12 @@ async function* parseAnthropicStream(
         }
       }
 
+      // message_start: usage lives under `message`. Seeds input_tokens and
+      // the (placeholder) output_tokens. A single consolidated usage event is
+      // emitted at stream end (see below) so the router — which SUMS usage
+      // across tool rounds — gets exactly one snapshot per call.
       if (
-        (payload.type === 'message_start' ||
-          payload.type === 'message_delta') &&
+        payload.type === 'message_start' &&
         typeof payload.message === 'object' &&
         payload.message &&
         'usage' in payload.message
@@ -919,13 +931,36 @@ async function* parseAnthropicStream(
           }
         ).usage;
         if (rawUsage) {
-          queueEvent({
-            type: 'usage',
-            usage: {
-              inputTokens: rawUsage.input_tokens ?? 0,
-              outputTokens: rawUsage.output_tokens ?? 0,
-            },
-          });
+          if (rawUsage.input_tokens != null) {
+            usageInputTokens = rawUsage.input_tokens;
+          }
+          if (rawUsage.output_tokens != null) {
+            usageOutputTokens = rawUsage.output_tokens;
+          }
+          sawUsage = true;
+        }
+      }
+
+      // message_delta: usage is at the TOP LEVEL and carries the cumulative
+      // output_tokens (and occasionally an updated input_tokens). This is the
+      // event that holds the real final output count, which the old code
+      // missed by only reading `message.usage`.
+      if (payload.type === 'message_delta') {
+        const deltaUsage =
+          typeof payload.usage === 'object' && payload.usage
+            ? (payload.usage as {
+                input_tokens?: number;
+                output_tokens?: number;
+              })
+            : null;
+        if (deltaUsage) {
+          if (deltaUsage.input_tokens != null) {
+            usageInputTokens = deltaUsage.input_tokens;
+          }
+          if (deltaUsage.output_tokens != null) {
+            usageOutputTokens = deltaUsage.output_tokens;
+          }
+          sawUsage = true;
         }
       }
 
@@ -967,6 +1002,18 @@ async function* parseAnthropicStream(
         },
       });
     }
+  }
+
+  // One consolidated usage event per call: input from message_start, the
+  // final cumulative output from the last message_delta.
+  if (sawUsage) {
+    queueEvent({
+      type: 'usage',
+      usage: {
+        inputTokens: usageInputTokens,
+        outputTokens: usageOutputTokens,
+      },
+    });
   }
 
   queueEvent({ type: 'done', stopReason });
