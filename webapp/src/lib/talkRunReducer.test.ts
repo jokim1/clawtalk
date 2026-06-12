@@ -88,6 +88,91 @@ describe('talkRunReducer TOOL_RESULT', () => {
     });
   });
 
+  it('does not resurrect a deleted live entry for a terminal run (late replayed frame)', () => {
+    // tool_result outbox inserts are fire-and-forget, so a late frame
+    // can land after the terminal event — and replays reproduce the
+    // ordering deterministically. The guard mirrors RESPONSE_DELTA's.
+    let state = createInitialDetailState();
+    state = detailReducer(state, {
+      type: 'SNAPSHOT_HYDRATED',
+      runs: [
+        {
+          id: RUN_ID,
+          status: 'completed',
+          createdAt: new Date().toISOString(),
+        } as never,
+      ],
+    });
+    expect(state.liveResponsesByRunId[RUN_ID]).toBeUndefined();
+
+    state = detailReducer(state, {
+      type: 'TOOL_RESULT',
+      event: toolResultEvent(),
+    });
+
+    expect(state.liveResponsesByRunId[RUN_ID]).toBeUndefined();
+  });
+
+  it('does not flip an already-terminal live entry back to running', () => {
+    let state = createInitialDetailState();
+    state = detailReducer(state, {
+      type: 'RESPONSE_STARTED',
+      event: startedEvent(),
+    });
+    state = detailReducer(state, {
+      type: 'RESPONSE_FAILED',
+      event: {
+        talkId: TALK_ID,
+        runId: RUN_ID,
+        errorMessage: 'provider exploded',
+      } as never,
+    });
+    expect(state.liveResponsesByRunId[RUN_ID]?.terminalStatus).toBe('failed');
+
+    state = detailReducer(state, {
+      type: 'TOOL_RESULT',
+      event: toolResultEvent(),
+    });
+
+    const live = state.liveResponsesByRunId[RUN_ID];
+    expect(live?.terminalStatus).toBe('failed');
+    expect(live?.pendingStatus).toBeUndefined();
+    expect(live?.lastToolResult?.toolName).toBe('web_search');
+  });
+
+  it('keeps the last tool outcome through a RUN_FAILED rebuild', () => {
+    let state = createInitialDetailState();
+    state = detailReducer(state, {
+      type: 'RESPONSE_STARTED',
+      event: startedEvent(),
+    });
+    state = detailReducer(state, {
+      type: 'TOOL_RESULT',
+      event: toolResultEvent({
+        result: 'web_search error: wedged',
+        isError: true,
+      }),
+    });
+    state = detailReducer(state, {
+      type: 'RUN_FAILED',
+      runId: RUN_ID,
+      showInlineFailure: true,
+      triggerMessageId: null,
+      errorCode: 'run_watchdog_timeout',
+      errorMessage: 'executor never settled',
+    });
+
+    const live = state.liveResponsesByRunId[RUN_ID];
+    expect(live?.terminalStatus).toBe('failed');
+    // Wedge/failure diagnosis is exactly when the tool outcome matters.
+    expect(live?.lastToolResult).toEqual({
+      toolName: 'web_search',
+      result: 'web_search error: wedged',
+      isError: true,
+      durationMs: 850,
+    });
+  });
+
   it('survives subsequent delta and progress rebuilds of the live entry', () => {
     let state = createInitialDetailState();
     state = detailReducer(state, {

@@ -634,6 +634,9 @@ export function detailReducer(
             runId: action.runId,
             rawText: existing?.rawText || '',
             text: existing?.text || '',
+            // Keep the last tool outcome on failure — wedge/failure
+            // diagnosis is exactly when it matters (P1-f).
+            lastToolResult: existing?.lastToolResult,
             agentId: existing?.agentId,
             agentNickname: existing?.agentNickname,
             responseGroupId: existing?.responseGroupId,
@@ -770,8 +773,19 @@ export function detailReducer(
     }
     case 'TOOL_RESULT': {
       // P1-f: record the latest tool outcome on the live run entry.
-      // Mirrors RESPONSE_PROGRESS — same lifecycle, different field.
       const existing = state.liveResponsesByRunId[action.event.runId];
+      // Same zombie guard as RESPONSE_DELTA: tool_result outbox inserts
+      // are fire-and-forget on the out-of-band connection, so a late one
+      // can land (and durably sort) AFTER the terminal event — easiest
+      // trigger is cancel during a slow tool call. Without this guard a
+      // late frame re-creates a ghost "running" panel that every outbox
+      // replay deterministically reproduces.
+      if (!existing) {
+        const trackedRun = state.runsById[action.event.runId];
+        if (trackedRun && !isNonTerminalRunStatus(trackedRun.status)) {
+          return state;
+        }
+      }
       const queuedAt = existing?.queuedAt ?? Date.now();
       return {
         ...state,
@@ -800,7 +814,11 @@ export function detailReducer(
             queuedAt,
             startedAt: existing?.startedAt || Date.now(),
             errorMessage: existing?.errorMessage,
-            pendingStatus: existing?.pendingStatus ?? 'running',
+            // A late tool_result on an already-terminal entry must not
+            // flip it back to "running".
+            pendingStatus: existing?.terminalStatus
+              ? existing.pendingStatus
+              : (existing?.pendingStatus ?? 'running'),
             terminalStatus: existing?.terminalStatus,
           },
         },

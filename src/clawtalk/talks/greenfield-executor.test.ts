@@ -3313,6 +3313,39 @@ describe('mapExecutionEvent tool_result (P1-f)', () => {
     expect(mapped.result).toBe(exact);
   });
 
+  it('never cuts through a surrogate pair (jsonb rejects lone surrogates)', () => {
+    // The emoji is two UTF-16 code units; placing it so the 500-cut
+    // lands mid-pair previously produced an unpaired high surrogate
+    // that Postgres jsonb rejects - the outbox INSERT threw and the
+    // event was silently dropped.
+    const straddling = `${'x'.repeat(499)}\u{1f600}${'z'.repeat(50)}`;
+    const mapped = mapExecutionEvent(
+      { type: 'tool_result', toolName: 'web_search', result: straddling },
+      EXEC_INPUT,
+      RUN_ROW,
+    );
+    if (mapped?.type !== 'tool_result') throw new Error('expected tool_result');
+    const body = mapped.result.replace('\u2026 [truncated]', '');
+    const lastCode = body.charCodeAt(body.length - 1);
+    expect(lastCode >= 0xd800 && lastCode <= 0xdbff).toBe(false);
+    expect(body).toBe('x'.repeat(499));
+  });
+
+  it('strips NUL characters jsonb would reject outright', () => {
+    const mapped = mapExecutionEvent(
+      {
+        type: 'tool_result',
+        toolName: 'read_source',
+        result: 'before\u0000after',
+        isError: false,
+      },
+      EXEC_INPUT,
+      RUN_ROW,
+    );
+    if (mapped?.type !== 'tool_result') throw new Error('expected tool_result');
+    expect(mapped.result).toBe('beforeafter');
+  });
+
   it('normalizes a missing isError to false and an error to true', () => {
     const noFlag = mapExecutionEvent(
       { type: 'tool_result', toolName: 'web_search', result: 'ok' },

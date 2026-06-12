@@ -1217,8 +1217,20 @@ function buildContext(input: {
 const TOOL_RESULT_EVENT_MAX_CHARS = 500;
 
 function truncateToolResultForEvent(result: string): string {
-  if (result.length <= TOOL_RESULT_EVENT_MAX_CHARS) return result;
-  return `${result.slice(0, TOOL_RESULT_EVENT_MAX_CHARS)}… [truncated]`;
+  // Postgres jsonb rejects \u0000 outright — a NUL anywhere in fetched
+  // web content would make the outbox INSERT throw and the event
+  // silently drop (the emit path only warn-logs insert failures).
+  const clean = result.replaceAll('\u0000', '');
+  if (clean.length <= TOOL_RESULT_EVENT_MAX_CHARS) return clean;
+  let sliced = clean.slice(0, TOOL_RESULT_EVENT_MAX_CHARS);
+  // Don't split a surrogate pair: slice() cuts at UTF-16 code units, and
+  // a lone high surrogate serializes as an unpaired \udXXX escape that
+  // jsonb also rejects — same silent-drop failure as NUL.
+  const lastCode = sliced.charCodeAt(sliced.length - 1);
+  if (lastCode >= 0xd800 && lastCode <= 0xdbff) {
+    sliced = sliced.slice(0, -1);
+  }
+  return `${sliced}… [truncated]`;
 }
 
 /** @internal Exported for tests. */
