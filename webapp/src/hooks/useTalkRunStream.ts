@@ -17,6 +17,7 @@ import type {
   TalkRunFailedEvent,
   TalkRunRetryingEvent,
   TalkRunStartedEvent,
+  TalkToolResultEvent,
 } from '../lib/talkStream';
 import { applyMessageAppendedDelta } from '../lib/wsCacheRouter';
 import type { WsCacheRouter } from '../lib/wsCacheRouter';
@@ -169,6 +170,10 @@ export function useTalkRunStream({
       onProgressUpdate: (event: TalkProgressUpdateEvent) => {
         if (event.talkId !== talkId) return;
         dispatch({ type: 'RESPONSE_PROGRESS', event });
+      },
+      onToolResult: (event: TalkToolResultEvent) => {
+        if (event.talkId !== talkId) return;
+        dispatch({ type: 'TOOL_RESULT', event });
       },
       onResponseDelta: (event: TalkResponseDeltaEvent) => {
         if (event.talkId !== talkId) return;

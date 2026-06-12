@@ -6,6 +6,7 @@ import type {
   TalkResponseStartedEvent,
   TalkResponseTerminalEvent,
   TalkStreamState,
+  TalkToolResultEvent,
 } from './talkStream';
 
 const MAX_EVENT_RUN_CACHE = 500;
@@ -19,6 +20,15 @@ export type LiveResponseView = {
   rawText: string;
   text: string;
   progressMessage?: string;
+  // P1-f tool visibility: latest tool outcome for this run. The result
+  // string is already truncated server-side (~500 chars). Rendering is
+  // optional — state visibility is the point.
+  lastToolResult?: {
+    toolName: string;
+    result: string;
+    isError: boolean;
+    durationMs?: number;
+  };
   agentId?: string | null;
   agentNickname?: string | null;
   responseGroupId?: string | null;
@@ -175,6 +185,7 @@ export type DetailAction =
     }
   | { type: 'RESPONSE_STARTED'; event: TalkResponseStartedEvent }
   | { type: 'RESPONSE_PROGRESS'; event: TalkProgressUpdateEvent }
+  | { type: 'TOOL_RESULT'; event: TalkToolResultEvent }
   | { type: 'RESPONSE_DELTA'; event: TalkResponseDeltaEvent }
   | { type: 'RESPONSE_COMPLETED'; event: TalkResponseTerminalEvent }
   | { type: 'RESPONSE_FAILED'; event: TalkResponseTerminalEvent }
@@ -483,6 +494,7 @@ export function detailReducer(
           rawText: existing?.rawText ?? '',
           text: existing?.text ?? '',
           progressMessage: existing?.progressMessage,
+          lastToolResult: existing?.lastToolResult,
           agentId: existing?.agentId ?? action.targetAgentId ?? null,
           agentNickname:
             existing?.agentNickname ?? action.targetAgentNickname ?? null,
@@ -522,6 +534,7 @@ export function detailReducer(
           rawText: existing?.rawText ?? '',
           text: existing?.text ?? '',
           progressMessage: existing?.progressMessage,
+          lastToolResult: existing?.lastToolResult,
           agentId: existing?.agentId ?? action.targetAgentId ?? null,
           agentNickname:
             existing?.agentNickname ?? action.targetAgentNickname ?? null,
@@ -706,6 +719,7 @@ export function detailReducer(
             rawText: existing?.rawText ?? '',
             text: existing?.text ?? '',
             progressMessage: existing?.progressMessage,
+            lastToolResult: existing?.lastToolResult,
             agentId: action.event.agentId ?? existing?.agentId ?? null,
             agentNickname:
               action.event.agentNickname ?? existing?.agentNickname ?? null,
@@ -735,6 +749,45 @@ export function detailReducer(
             rawText: existing?.rawText || '',
             text: existing?.text || '',
             progressMessage: action.event.message,
+            lastToolResult: existing?.lastToolResult,
+            agentId: action.event.agentId ?? existing?.agentId,
+            agentNickname:
+              action.event.agentNickname ?? existing?.agentNickname,
+            responseGroupId:
+              action.event.responseGroupId ?? existing?.responseGroupId ?? null,
+            sequenceIndex:
+              action.event.sequenceIndex ?? existing?.sequenceIndex ?? null,
+            providerId: action.event.providerId ?? existing?.providerId,
+            modelId: action.event.modelId ?? existing?.modelId,
+            queuedAt,
+            startedAt: existing?.startedAt || Date.now(),
+            errorMessage: existing?.errorMessage,
+            pendingStatus: existing?.pendingStatus ?? 'running',
+            terminalStatus: existing?.terminalStatus,
+          },
+        },
+      };
+    }
+    case 'TOOL_RESULT': {
+      // P1-f: record the latest tool outcome on the live run entry.
+      // Mirrors RESPONSE_PROGRESS — same lifecycle, different field.
+      const existing = state.liveResponsesByRunId[action.event.runId];
+      const queuedAt = existing?.queuedAt ?? Date.now();
+      return {
+        ...state,
+        liveResponsesByRunId: {
+          ...state.liveResponsesByRunId,
+          [action.event.runId]: {
+            runId: action.event.runId,
+            rawText: existing?.rawText || '',
+            text: existing?.text || '',
+            progressMessage: existing?.progressMessage,
+            lastToolResult: {
+              toolName: action.event.toolName,
+              result: action.event.result,
+              isError: action.event.isError,
+              durationMs: action.event.durationMs,
+            },
             agentId: action.event.agentId ?? existing?.agentId,
             agentNickname:
               action.event.agentNickname ?? existing?.agentNickname,
@@ -780,6 +833,7 @@ export function detailReducer(
             rawText,
             text: stripInternalAssistantText(rawText),
             progressMessage: existing?.progressMessage,
+            lastToolResult: existing?.lastToolResult,
             agentId: action.event.agentId,
             agentNickname: action.event.agentNickname,
             responseGroupId:
@@ -829,6 +883,7 @@ export function detailReducer(
             queuedAt: existing?.queuedAt ?? Date.now(),
             startedAt: existing?.startedAt || Date.now(),
             progressMessage: existing?.progressMessage,
+            lastToolResult: existing?.lastToolResult,
             errorMessage: action.event.errorMessage,
             terminalStatus: 'failed',
           },

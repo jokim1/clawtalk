@@ -135,6 +135,25 @@ export type TalkExecutionEvent =
       modelId?: string | null;
       toolName: string;
       arguments: Record<string, unknown>;
+    }
+  | {
+      // P1-f (Talk Runtime v2): tool outcomes were previously dropped at
+      // mapExecutionEvent — invisible tool results blinded wedge diagnosis
+      // twice on 2026-06-12. `result` is truncated before emission; the
+      // full result still reaches the model via the tool_result message.
+      type: 'tool_result';
+      runId: string;
+      talkId: string;
+      agentId?: string | null;
+      agentNickname?: string | null;
+      responseGroupId?: string | null;
+      sequenceIndex?: number | null;
+      providerId?: string | null;
+      modelId?: string | null;
+      toolName: string;
+      result: string;
+      isError: boolean;
+      durationMs?: number;
     };
 
 export interface TalkExecutorOutput {

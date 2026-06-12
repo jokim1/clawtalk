@@ -232,6 +232,7 @@ describe('openTalkStream', () => {
   it('dispatches typed events to the right callbacks', () => {
     const onRunStarted = vi.fn();
     const onResponseDelta = vi.fn();
+    const onToolResult = vi.fn();
 
     openTalkStream({
       talkId: 'talk-1',
@@ -244,6 +245,7 @@ describe('openTalkStream', () => {
       onRunFailed: vi.fn(),
       onRunCancelled: vi.fn(),
       onResponseDelta,
+      onToolResult,
       createTransport: (url, options) => new FakeTransport(url, options),
       probeSession: vi.fn(async () => true),
       jitterMs: () => 0,
@@ -265,12 +267,32 @@ describe('openTalkStream', () => {
       { talkId: 'talk-1', runId: 'run-1', deltaText: 'hi' },
       2,
     );
+    transport.emitFrame(
+      'tool_result',
+      {
+        talkId: 'talk-1',
+        runId: 'run-1',
+        toolName: 'web_search',
+        result: '{"provider":"web_search.tavily","results":[]}',
+        isError: false,
+        durationMs: 1234,
+      },
+      3,
+    );
 
     expect(onRunStarted).toHaveBeenCalledWith(
       expect.objectContaining({ runId: 'run-1', status: 'running' }),
     );
     expect(onResponseDelta).toHaveBeenCalledWith(
       expect.objectContaining({ runId: 'run-1', deltaText: 'hi' }),
+    );
+    expect(onToolResult).toHaveBeenCalledWith(
+      expect.objectContaining({
+        runId: 'run-1',
+        toolName: 'web_search',
+        isError: false,
+        durationMs: 1234,
+      }),
     );
   });
 

@@ -68,6 +68,7 @@ export type ExecutionEvent =
       toolName: string;
       result: string;
       isError?: boolean;
+      durationMs?: number;
     }
   | {
       type: 'awaiting_confirmation';
@@ -662,6 +663,7 @@ export async function executeWithResolvedAgent(
           arguments: parsedArgs,
         });
 
+        const toolStartedAt = Date.now();
         try {
           const { result, isError } = await options.executeToolCall(
             call.name,
@@ -672,6 +674,7 @@ export async function executeWithResolvedAgent(
             toolName: call.name,
             result,
             isError,
+            durationMs: Date.now() - toolStartedAt,
           });
           toolResults.push({
             id,
@@ -686,6 +689,7 @@ export async function executeWithResolvedAgent(
             toolName: call.name,
             result: errorMsg,
             isError: true,
+            durationMs: Date.now() - toolStartedAt,
           });
           toolResults.push({
             id,

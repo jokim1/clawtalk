@@ -1210,7 +1210,19 @@ function buildContext(input: {
   };
 }
 
-function mapExecutionEvent(
+// Outbox events are visibility, not the model's input — the full result
+// still reaches the model as a tool_result message. 500 chars is enough
+// to diagnose "what did the tool return / was it an error" from the
+// event stream without bloating event_outbox rows.
+const TOOL_RESULT_EVENT_MAX_CHARS = 500;
+
+function truncateToolResultForEvent(result: string): string {
+  if (result.length <= TOOL_RESULT_EVENT_MAX_CHARS) return result;
+  return `${result.slice(0, TOOL_RESULT_EVENT_MAX_CHARS)}… [truncated]`;
+}
+
+/** @internal Exported for tests. */
+export function mapExecutionEvent(
   event: ExecutionEvent,
   input: TalkExecutorInput,
   run: GreenfieldExecutorRunRow,
@@ -1268,6 +1280,16 @@ function mapExecutionEvent(
         arguments: event.arguments,
       };
     case 'tool_result':
+      // P1-f: previously dropped — invisible tool outcomes blinded wedge
+      // diagnosis twice on 2026-06-12.
+      return {
+        type: 'tool_result',
+        ...shared,
+        toolName: event.toolName,
+        result: truncateToolResultForEvent(event.result),
+        isError: !!event.isError,
+        durationMs: event.durationMs,
+      };
     case 'awaiting_confirmation':
       return null;
   }

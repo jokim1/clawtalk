@@ -214,6 +214,23 @@ export type TalkToolCallStartedEvent = {
   arguments?: Record<string, unknown> | null;
 };
 
+// P1-f: tool outcome visibility. `result` arrives truncated (~500 chars)
+// server-side — it is diagnostic surface, not the model's tool output.
+export type TalkToolResultEvent = {
+  talkId: string;
+  runId: string;
+  agentId?: string | null;
+  agentNickname?: string | null;
+  responseGroupId?: string | null;
+  sequenceIndex?: number | null;
+  providerId?: string | null;
+  modelId?: string | null;
+  toolName: string;
+  result: string;
+  isError: boolean;
+  durationMs?: number;
+};
+
 export type TalkToolsChangedEvent = {
   talkId: string;
   active: Record<string, boolean>;
@@ -252,6 +269,7 @@ interface TalkStreamCallbacks {
   onContentEditApplied?: (event: TalkContentEditAppliedEvent) => void;
   onContentEditResolved?: (event: TalkContentEditResolvedEvent) => void;
   onToolCallStarted?: (event: TalkToolCallStartedEvent) => void;
+  onToolResult?: (event: TalkToolResultEvent) => void;
   onTalkToolsChanged?: (event: TalkToolsChangedEvent) => void;
   onTalkRunRetrying?: (event: TalkRunRetryingEvent) => void;
   onReplayGap: () => void | Promise<void>;
@@ -504,6 +522,11 @@ export function openTalkStream(input: OpenTalkStreamInput): TalkStreamHandle {
       case 'tool_call_started': {
         const payload = parseFrame<TalkToolCallStartedEvent>(frame);
         if (payload) input.onToolCallStarted?.(payload);
+        return;
+      }
+      case 'tool_result': {
+        const payload = parseFrame<TalkToolResultEvent>(frame);
+        if (payload) input.onToolResult?.(payload);
         return;
       }
       case 'talk_tools_changed': {
