@@ -476,6 +476,77 @@ describe('greenfield schema invariants', () => {
     ).rejects.toMatchObject({ code: '23514' });
   });
 
+  it('keeps the Buddy system talk read-only for direct authenticated writes', async () => {
+    const { workspaceId } = await seedUserAndWorkspace();
+    const db = getDbPg();
+    const [buddy] = await db<{ talk_id: string; agent_id: string }[]>`
+      select t.id as talk_id, a.id as agent_id
+      from public.talks t
+      join public.agents a
+        on a.workspace_id = t.workspace_id
+       and a.is_default = true
+       and a.is_system = false
+       and a.role_key = 'strategist'
+      where t.workspace_id = ${workspaceId}::uuid
+        and t.is_system = true
+    `;
+    if (!buddy) throw new Error('Expected a seeded Buddy system talk');
+
+    // WITH CHECK rejects writes that would keep the row a system talk.
+    await expect(
+      withUserContext(USER_ID, async () => {
+        const scopedDb = getDbPg();
+        await scopedDb`
+          update public.talks
+          set title = 'Forged'
+          where id = ${buddy.talk_id}::uuid
+        `;
+      }),
+    ).rejects.toMatchObject({ code: '42501' });
+
+    // The is_system flag itself is outside the authenticated UPDATE column
+    // grant, so it cannot be un-flagged to dodge the policy either.
+    await expect(
+      withUserContext(USER_ID, async () => {
+        const scopedDb = getDbPg();
+        await scopedDb`
+          update public.talks
+          set is_system = false
+          where id = ${buddy.talk_id}::uuid
+        `;
+      }),
+    ).rejects.toMatchObject({ code: '42501' });
+
+    // WITH CHECK rejects spoofing a new system talk outright.
+    await expect(
+      withUserContext(USER_ID, async () => {
+        const scopedDb = getDbPg();
+        await scopedDb`
+          insert into public.talks (
+            workspace_id, sort_order, title, created_by, is_system
+          )
+          values (${workspaceId}::uuid, 0, 'Spoof', ${USER_ID}::uuid, true)
+        `;
+      }),
+    ).rejects.toMatchObject({ code: '42501' });
+
+    // The system talk's roster is closed to direct writes too.
+    await expect(
+      withUserContext(USER_ID, async () => {
+        const scopedDb = getDbPg();
+        await scopedDb`
+          insert into public.talk_agents (
+            workspace_id, talk_id, agent_id, sort_order
+          )
+          values (
+            ${workspaceId}::uuid, ${buddy.talk_id}::uuid,
+            ${buddy.agent_id}::uuid, 99
+          )
+        `;
+      }),
+    ).rejects.toMatchObject({ code: '42501' });
+  });
+
   it('rejects direct authenticated writes into trusted runtime tables', async () => {
     const { workspaceId } = await seedUserAndWorkspace();
     const db = getDbPg();

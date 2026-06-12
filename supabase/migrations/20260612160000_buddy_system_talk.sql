@@ -352,3 +352,64 @@ join public.agents a
  and a.is_system = true
 where t.is_system = true
 on conflict (talk_id, agent_id) do nothing;
+
+-- =============================================================================
+-- 5) DB-level enforcement: the system talk row and its roster cannot be
+--    mutated by the authenticated role, so a direct Supabase client cannot
+--    archive, rename, spoof, or re-roster Buddy. The bootstrap function is
+--    SECURITY DEFINER (table owner — bypasses RLS) and the app accessors
+--    already refuse these writes, so no legitimate path changes behavior.
+--    Trusted runtime paths (last_activity_at bumps, queue consumer) run
+--    elevated and are unaffected.
+--
+--    Shape notes:
+--    - UPDATE keeps a broad USING because SELECT ... FOR UPDATE row locks
+--      (chat-round serialization locks the talk row, including Buddy's)
+--      must keep seeing the system talk; WITH CHECK is not evaluated for
+--      locking, so writes of system rows still fail.
+--    - is_system itself is excluded from the authenticated UPDATE column
+--      grant so the flag cannot be flipped in either direction (policies
+--      cannot reference OLD, so WITH CHECK alone cannot block un-flagging).
+-- =============================================================================
+
+drop policy talks_write on public.talks;
+create policy talks_update on public.talks
+  for update
+  using       (public.is_workspace_writer(workspace_id))
+  with check  (public.is_workspace_writer(workspace_id) and is_system = false);
+create policy talks_insert on public.talks
+  for insert
+  with check  (public.is_workspace_writer(workspace_id) and is_system = false);
+create policy talks_delete on public.talks
+  for delete
+  using       (public.is_workspace_writer(workspace_id) and is_system = false);
+
+revoke update on public.talks from authenticated;
+grant update (
+  title, folder_id, sort_order, mode, rounds_limit, archived_at,
+  last_activity_at, updated_at
+) on public.talks to authenticated;
+
+drop policy talk_agents_write on public.talk_agents;
+create policy talk_agents_write on public.talk_agents
+  for all
+  using (
+    public.is_workspace_writer(workspace_id)
+    and not exists (
+      select 1
+      from public.talks t
+      where t.workspace_id = talk_agents.workspace_id
+        and t.id = talk_agents.talk_id
+        and t.is_system = true
+    )
+  )
+  with check (
+    public.is_workspace_writer(workspace_id)
+    and not exists (
+      select 1
+      from public.talks t
+      where t.workspace_id = talk_agents.workspace_id
+        and t.id = talk_agents.talk_id
+        and t.is_system = true
+    )
+  );
