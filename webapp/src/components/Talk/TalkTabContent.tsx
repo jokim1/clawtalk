@@ -307,12 +307,14 @@ export function TalkTabContent({
 }: TalkTabContentProps): JSX.Element {
   const hasDocument = primaryDocumentId !== null;
   const effectiveDocPaneHidden = docPaneHidden || docPaneSuppressed;
+  const splitLayoutActive =
+    hasDocument && (isNarrowViewport || !effectiveDocPaneHidden);
   return (
     <div
       ref={splitContainerRef}
       className={[
         'talk-tab-content',
-        hasDocument ? 'talk-tab-content-split' : '',
+        splitLayoutActive ? 'talk-tab-content-split' : '',
         hasDocument && isNarrowViewport ? 'talk-tab-content-split-narrow' : '',
       ]
         .filter(Boolean)
@@ -376,7 +378,7 @@ export function TalkTabContent({
           .filter(Boolean)
           .join(' ')}
         style={
-          hasDocument && !isNarrowViewport
+          hasDocument && !isNarrowViewport && !effectiveDocPaneHidden
             ? { flex: `${chatRatio} 1 0` }
             : undefined
         }

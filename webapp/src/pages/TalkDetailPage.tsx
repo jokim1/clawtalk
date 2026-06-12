@@ -1157,7 +1157,8 @@ export function TalkDetailPage({
           documentsOpen={
             currentTab === 'talk' &&
             !docPaneSuppressed &&
-            primaryDocumentId !== null
+            primaryDocumentId !== null &&
+            (isNarrowViewport ? mobilePane === 'doc' : !docPaneHidden)
           }
           activeRuleCount={activeRuleCount}
           showOrchestrationSelector={showOrchestrationSelector}
