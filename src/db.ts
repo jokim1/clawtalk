@@ -238,6 +238,33 @@ export function getStreamingCoalesceMap(): Map<string, PendingDrain> | null {
 }
 
 /**
+ * One-shot detached client for wedge-recovery writes. Builds a brand-new
+ * connection from the request scope's URL — never reuses the pooled request
+ * client OR the shared out-of-band client, since either may itself be the
+ * wedged resource the recovery is escaping — and closes it after `fn`
+ * settles. Falls back to the module-scoped client in test/Node mode.
+ */
+export async function withDetachedDbClient<T>(
+  fn: (sql: Sql) => Promise<T>,
+): Promise<T> {
+  const slot = outOfBandDbStorage.getStore();
+  if (!slot) {
+    if (!nodeScopedDb) throw new Error('Postgres database not initialized');
+    return fn(nodeScopedDb);
+  }
+  const sql = postgres(slot.url, {
+    max: 1,
+    connect_timeout: 10,
+    prepare: false,
+  });
+  try {
+    return await fn(sql as unknown as Sql);
+  } finally {
+    void sql.end({ timeout: 5 }).catch(() => {});
+  }
+}
+
+/**
  * Current user's id from the surrounding `withUserContext` scope.
  * Returns null outside a user context. Producers use this to fill
  * `ownerIds` on `emitOutboxEvent` for operations where the talk's
@@ -437,7 +464,14 @@ function buildRequestPgClient(url: string): postgres.Sql {
   return postgres(url, {
     max: 1,
     fetch_types: true,
-    idle_timeout: 5,
+    // Queue-consumer runs are minutes long with >5s quiet stretches during
+    // every LLM turn. At idle_timeout 5 the reaper closed and reconnected
+    // the single connection once per turn, and a close racing the next
+    // db.begin is the prime suspect for the 2026-06-12 wedged runs (BEGIN
+    // queued forever client-side, nothing server-side). 60s outlasts any
+    // intra-run gap; withRequestScopedDb still closes explicitly at scope
+    // end.
+    idle_timeout: 60,
     connect_timeout: 10,
     prepare: false,
     types: PG_TIMESTAMP_AS_STRING,

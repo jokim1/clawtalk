@@ -44,7 +44,10 @@ import {
   createGreenfieldJob,
   createGreenfieldJobRunNow,
 } from './greenfield-job-accessors.js';
-import { buildGreenfieldStepUserMessageText } from './greenfield-executor.js';
+import {
+  buildGreenfieldStepUserMessageText,
+  raceToolCallDeadline,
+} from './greenfield-executor.js';
 import { processTalkRunMessage } from './queue-consumer.js';
 
 const USER_ID = '0c787878-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
@@ -3178,5 +3181,34 @@ describe('GreenfieldTalkExecutor queue integration', () => {
     expect(calls[0]!.userMessage).not.toContain(
       'Synthesize these perspectives',
     );
+  });
+});
+
+describe('raceToolCallDeadline', () => {
+  it('passes through a call that settles before the deadline', async () => {
+    await expect(
+      raceToolCallDeadline(
+        Promise.resolve({ result: 'ok' }),
+        'web_search',
+        1_000,
+      ),
+    ).resolves.toEqual({ result: 'ok' });
+  });
+
+  it('abandons a wedged call at the deadline with a tool error', async () => {
+    const wedged = new Promise<{ result: string }>(() => {});
+    const result = await raceToolCallDeadline(wedged, 'web_search', 30);
+    expect(result.isError).toBe(true);
+    expect(result.result).toContain('did not return within');
+  });
+
+  it('propagates rejections from the underlying call', async () => {
+    await expect(
+      raceToolCallDeadline(
+        Promise.reject(new Error('boom')),
+        'web_search',
+        1_000,
+      ),
+    ).rejects.toThrow('boom');
   });
 });

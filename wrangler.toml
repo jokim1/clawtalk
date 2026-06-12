@@ -20,6 +20,13 @@ main = "src/worker.ts"
 compatibility_date = "2026-05-12"
 compatibility_flags = ["nodejs_compat"]
 
+# Persist invocation logs (Workers Logs). Added 2026-06-12 to diagnose
+# wedged queue-consumer runs — `wrangler tail` only surfaces invocations
+# that COMPLETE, so a wedged run was invisible. With this on, breadcrumb
+# logs from in-flight invocations are queryable in the dashboard.
+[observability]
+enabled = true
+
 # ─── Local dev ────────────────────────────────────────────────────────
 #
 # Pin `wrangler dev` to :8788 so the local target is deterministic.
