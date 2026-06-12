@@ -164,6 +164,39 @@ describe('workspace bootstrap', () => {
     expect(counts[0]).toEqual({ workspaces: 1, agents: 8, teams: 3 });
   });
 
+  it('reseeds the Buddy agent and system talk after both are deleted', async () => {
+    await seedAuthUser();
+
+    const workspaceId = await ensureWorkspaceBootstrapForUser(USER_ID);
+    const db = getDbPg();
+    await db`
+      delete from public.talks
+      where workspace_id = ${workspaceId}::uuid
+        and is_system = true
+    `;
+    await db`
+      delete from public.agents
+      where workspace_id = ${workspaceId}::uuid
+        and role_key = 'buddy'
+    `;
+
+    await ensureWorkspaceBootstrapForUser(USER_ID);
+
+    const rows = await db<{ title: string; role_key: string }[]>`
+      select t.title, a.role_key
+      from public.talks t
+      join public.talk_agents ta
+        on ta.workspace_id = t.workspace_id
+       and ta.talk_id = t.id
+      join public.agents a
+        on a.workspace_id = ta.workspace_id
+       and a.id = ta.agent_id
+      where t.workspace_id = ${workspaceId}::uuid
+        and t.is_system = true
+    `;
+    expect(rows).toEqual([{ title: 'Buddy', role_key: 'buddy' }]);
+  });
+
   it('unarchives the system talk if direct writes archived it', async () => {
     await seedAuthUser();
 

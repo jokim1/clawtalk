@@ -154,7 +154,10 @@ async function withResolvedWorkspace<T>(
   }
   try {
     await ensureWorkspaceBootstrapForUser(auth.userId);
-  } catch {
+  } catch (err) {
+    // A bootstrap bug locks the user out of every route as a fake auth
+    // failure — keep the real cause in the logs.
+    console.error('[workspace-bootstrap] failed', err);
     return error(401, 'unauthorized', 'Session is not active.');
   }
 
@@ -273,7 +276,8 @@ export async function getGreenfieldMeRoute(input: {
 }): Promise<RouteResult<SessionMePayload>> {
   try {
     await ensureWorkspaceBootstrapForUser(input.auth.userId);
-  } catch {
+  } catch (err) {
+    console.error('[workspace-bootstrap] failed', err);
     return error(401, 'unauthorized', 'Session is not active.');
   }
 
@@ -348,6 +352,7 @@ function toTalkApiRecord(input: {
   lastActivityAt: string;
   primaryDocumentId: string | null;
   messageCount: number;
+  isSystem: boolean;
 } {
   const { talk } = input;
   return {
@@ -372,6 +377,7 @@ function toTalkApiRecord(input: {
     lastActivityAt: talk.last_activity_at,
     primaryDocumentId: talk.primary_document_id,
     messageCount: talk.message_count,
+    isSystem: talk.is_system,
   };
 }
 

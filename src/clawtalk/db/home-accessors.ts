@@ -667,6 +667,9 @@ async function activeTalkCount(input: {
     from public.talks
     where workspace_id = ${input.workspaceId}::uuid
       and archived_at is null
+      -- The seeded Buddy system talk must not satisfy the "has talks yet"
+      -- gate, or the first-talk setup recommendation can never fire.
+      and is_system = false
   `;
   return rows[0]?.count ?? 0;
 }
@@ -1252,6 +1255,9 @@ async function runningTalkCurator(input: {
      and r.status in ('queued', 'running', 'awaiting')
     where t.workspace_id = ${input.workspaceId}::uuid
       and t.archived_at is null
+      -- Hidden from every other Home surface, so a streaming Buddy run must
+      -- not become the curator card either.
+      and t.is_system = false
     group by t.id, t.title, t.last_activity_at
     order by t.last_activity_at desc, t.id asc
     limit 1

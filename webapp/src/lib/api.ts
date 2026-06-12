@@ -63,6 +63,8 @@ export type Talk = {
   createdAt: string;
   updatedAt: string;
   accessRole: 'owner' | 'admin' | 'editor' | 'viewer';
+  /** The per-workspace Buddy system talk; bootstrap-managed, not user-mutable. */
+  isSystem?: boolean;
 };
 
 export type TalkSidebarTalk = {

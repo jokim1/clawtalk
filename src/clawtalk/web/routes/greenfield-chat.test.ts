@@ -292,6 +292,46 @@ describe('greenfield chat routes', () => {
     });
   });
 
+  it('lets Buddy reply in the system talk', async () => {
+    const me = await getGreenfieldMeRoute({ auth: auth() });
+    if (!me.body.ok) throw new Error('Expected session route to succeed');
+    const workspaceId = me.body.data.currentWorkspaceId;
+
+    const db = getDbPg();
+    const buddy = await db<{ talk_id: string; agent_id: string }[]>`
+      select t.id as talk_id, a.id as agent_id
+      from public.talks t
+      join public.talk_agents ta
+        on ta.workspace_id = t.workspace_id
+       and ta.talk_id = t.id
+      join public.agents a
+        on a.workspace_id = ta.workspace_id
+       and a.id = ta.agent_id
+      where t.workspace_id = ${workspaceId}::uuid
+        and t.is_system = true
+    `;
+    expect(buddy).toHaveLength(1);
+
+    // The roster predicate allows the system agent because the talk is a
+    // system talk; without that carve-out this enqueue would 404.
+    const result = await enqueueGreenfieldChatRoute({
+      auth: auth(),
+      workspaceId,
+      talkId: buddy[0]!.talk_id,
+      content: 'How do I add an agent to a talk?',
+    });
+
+    expect(result.statusCode).toBe(202);
+    if (!result.body.ok) {
+      throw new Error('Expected Buddy chat enqueue to succeed');
+    }
+    expect(result.body.data.runs).toHaveLength(1);
+    expect(result.body.data.runs[0]).toMatchObject({
+      status: 'queued',
+      targetAgentId: buddy[0]!.agent_id,
+    });
+  });
+
   it('rejects chat enqueue when a targeted agent model is disabled', async () => {
     const { workspaceId, talkId, agentIds } = await createTalkFixture();
     await assignDisabledModelToAgent({ workspaceId, agentId: agentIds[0]! });

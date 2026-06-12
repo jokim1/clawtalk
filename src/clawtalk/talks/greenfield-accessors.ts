@@ -261,6 +261,10 @@ export async function reorderGreenfieldSidebarItem(input: {
       from public.talks
       where workspace_id = ${input.workspaceId}::uuid
         and archived_at is null
+        -- The system talk (Buddy) is hidden from the sidebar, so the client's
+        -- drag indices are computed without it; including it here would shift
+        -- every root-level drop by one slot.
+        and is_system = false
       order by folder_id nulls first, sort_order asc, id asc
       for update
     `;
@@ -584,7 +588,7 @@ export async function updateGreenfieldTalk(input: {
   sortOrder?: number;
 }): Promise<GreenfieldTalkRecord | undefined> {
   const db = getDbPg();
-  await db`
+  const updated = await db<{ id: string }[]>`
     update public.talks
     set
       title = coalesce(${input.title ?? null}, title),
@@ -597,7 +601,12 @@ export async function updateGreenfieldTalk(input: {
       sort_order = coalesce(${input.sortOrder ?? null}, sort_order)
     where workspace_id = ${input.workspaceId}::uuid
       and id = ${input.talkId}::uuid
+      -- The system talk (Buddy) is bootstrap-managed: its title matches the
+      -- hardcoded pinned sidebar row and it never moves into folders.
+      and is_system = false
+    returning id
   `;
+  if (updated.length === 0) return undefined;
   return getGreenfieldTalk({
     workspaceId: input.workspaceId,
     talkId: input.talkId,
@@ -632,6 +641,7 @@ export async function unarchiveGreenfieldTalk(input: {
     set archived_at = null
     where workspace_id = ${input.workspaceId}::uuid
       and id = ${input.talkId}::uuid
+      and is_system = false
     returning id
   `;
   return rows.length > 0;

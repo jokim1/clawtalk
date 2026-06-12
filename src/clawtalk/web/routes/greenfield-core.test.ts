@@ -436,6 +436,14 @@ describe('greenfield core routes', () => {
       agents: [agents.body.data.agents[0]!.id],
     });
     expect(replaced.statusCode).toBe(404);
+
+    const renamed = await patchGreenfieldTalkRoute({
+      auth: auth(),
+      workspaceId,
+      talkId: buddyTalkId,
+      body: { title: 'Not Buddy' },
+    });
+    expect(renamed.statusCode).toBe(404);
   });
 
   it('returns 404 unarchiving an unknown talk and 400 on a bad id', async () => {
@@ -861,6 +869,45 @@ describe('greenfield core routes', () => {
       id: folderA.body.data.folder.id,
       talks: [{ id: nestedTalk.body.data.talk.id, title: 'Nested Talk' }],
     });
+
+    // Root-level drops use indices computed against the visible list — the
+    // hidden Buddy system talk (seeded at root sort_order 0) must neither
+    // shift them nor get renumbered by the reorder.
+    const rootTwo = await createGreenfieldTalkRoute({
+      auth: auth(),
+      workspaceId,
+      body: { title: 'Root Two', team },
+    });
+    if (!rootTwo.body.ok) throw new Error('Expected talk route to succeed');
+    const midList = await reorderGreenfieldTalkSidebarRoute({
+      auth: auth(),
+      workspaceId,
+      itemType: 'talk',
+      itemId: rootTwo.body.data.talk.id,
+      destinationFolderId: null,
+      destinationIndex: 1,
+    });
+    expect(midList.body).toEqual({ ok: true, data: { reordered: true } });
+    const reorderedSidebar = await listGreenfieldTalkSidebarRoute({
+      auth: auth(),
+      workspaceId,
+    });
+    if (!reorderedSidebar.body.ok) {
+      throw new Error('Expected sidebar route to succeed');
+    }
+    expect(reorderedSidebar.body.data.items[1]?.id).toBe(
+      rootTwo.body.data.talk.id,
+    );
+    const db = getDbPg();
+    const buddyRows = await db<
+      { folder_id: string | null; sort_order: number }[]
+    >`
+      select folder_id, sort_order
+      from public.talks
+      where workspace_id = ${workspaceId}::uuid
+        and is_system = true
+    `;
+    expect(buddyRows).toEqual([{ folder_id: null, sort_order: 0 }]);
 
     const invalidFolderNest = await reorderGreenfieldTalkSidebarRoute({
       auth: auth(),

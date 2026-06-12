@@ -304,3 +304,51 @@ begin
   return ws_id;
 end;
 $$;
+
+-- =============================================================================
+-- 4) Backfill existing workspaces now instead of waiting for each owner's
+--    next bootstrap call, so workspace members never see a dead pinned row
+--    while the owner is away. Mirrors the function's seeding, set-based.
+-- =============================================================================
+
+insert into public.agents (
+  workspace_id, role_key, name, handle, initials, accent, accent_dark,
+  model_id, default_model_id, temperature, persona, method, is_default,
+  is_custom, is_system, enabled, created_from_template_version
+)
+select
+  w.id, t.role_key, t.default_name, t.default_handle, t.default_initials,
+  t.default_accent, t.default_accent_dark, t.default_model_id,
+  t.default_model_id, t.default_temperature, t.system_prompt,
+  t.method_default, true, false, true, true, t.version
+from public.workspaces w
+cross join public.agent_role_templates t
+where t.role_key = 'buddy'
+on conflict (workspace_id, role_key)
+  where is_system = true
+do nothing;
+
+insert into public.talks (
+  workspace_id, folder_id, sort_order, title, created_by, is_system
+)
+select w.id, null, 0, 'Buddy', w.owner_id, true
+from public.workspaces w
+on conflict (workspace_id)
+  where is_system = true
+do nothing;
+
+insert into public.talk_agents (workspace_id, talk_id, agent_id, sort_order)
+select
+  t.workspace_id, t.id, a.id,
+  coalesce((
+    select max(ta.sort_order) + 1
+    from public.talk_agents ta
+    where ta.talk_id = t.id
+  ), 0)
+from public.talks t
+join public.agents a
+  on a.workspace_id = t.workspace_id
+ and a.role_key = 'buddy'
+ and a.is_system = true
+where t.is_system = true
+on conflict (talk_id, agent_id) do nothing;

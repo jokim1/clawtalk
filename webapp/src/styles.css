@@ -829,18 +829,22 @@ a {
   pointer-events: auto;
 }
 
-/* The overlaid "…" replaces the row's right-edge meta (badge / doc icon)
-   while it is visible. */
+/* The overlaid "…" replaces the row's right-edge meta (badge / doc icon /
+   folder count) while it is visible. */
 .clawtalk-sidebar-tree-row:hover .clawtalk-sidebar-unread-badge,
 .clawtalk-sidebar-tree-row:hover .clawtalk-sidebar-content-indicator,
+.clawtalk-sidebar-tree-row:hover .clawtalk-sidebar-folder-count,
 .clawtalk-sidebar-tree-row:focus-within .clawtalk-sidebar-unread-badge,
-.clawtalk-sidebar-tree-row:focus-within .clawtalk-sidebar-content-indicator {
+.clawtalk-sidebar-tree-row:focus-within .clawtalk-sidebar-content-indicator,
+.clawtalk-sidebar-tree-row:focus-within .clawtalk-sidebar-folder-count {
   opacity: 0;
 }
 
+/* 1.4rem fits inside both row heights (talk links ≥1.72rem, folder rows
+   ≥1.45rem) without overflowing on hover. */
 .clawtalk-sidebar-more {
-  width: 1.55rem;
-  height: 1.55rem;
+  width: 1.4rem;
+  height: 1.4rem;
   border: 0;
   border-radius: 7px;
   background: var(--salon-paper-2, #f4ecdb);
