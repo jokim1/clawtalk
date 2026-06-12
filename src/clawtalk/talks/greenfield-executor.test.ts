@@ -2061,6 +2061,62 @@ describe('GreenfieldTalkExecutor queue integration', () => {
     );
   });
 
+  it('enumerates the advertised toolset in the system prompt so toggles override stale history', async () => {
+    const { workspaceId, talkId, agentIds } = await createTalkFixture();
+    const db = getDbPg();
+
+    // Web off: the prompt must list only read_source.
+    const withoutWeb = await enqueueGreenfieldChatTurn({
+      workspaceId,
+      talkId,
+      userId: USER_ID,
+      content: 'What tools do you have?',
+      targetAgentIds: agentIds,
+    });
+    if (!withoutWeb.ok) throw new Error(`enqueue failed: ${withoutWeb.reason}`);
+    const first = mockResolvedExecution('No web yet');
+    await processTalkRunMessage({
+      runId: withoutWeb.runs[0]!.id,
+      dispatch: async () => {},
+      cancelPollIntervalMs: 10_000,
+    });
+    expect(first.calls).toHaveLength(1);
+    expect(first.calls[0]!.context.systemPrompt).toContain(
+      'Tools available in this run: read_source.',
+    );
+
+    // Web toggled on mid-Talk: the next run's prompt must enumerate
+    // web_search and assert authority over earlier turns.
+    await db`
+      insert into public.talk_tools (workspace_id, talk_id, tool_id, enabled)
+      values
+        (${workspaceId}::uuid, ${talkId}::uuid, 'web-search', true),
+        (${workspaceId}::uuid, ${talkId}::uuid, 'web-fetch', false),
+        (${workspaceId}::uuid, ${talkId}::uuid, 'news-monitor', false)
+    `;
+    const withWeb = await enqueueGreenfieldChatTurn({
+      workspaceId,
+      talkId,
+      userId: USER_ID,
+      content: 'Now search the web.',
+      targetAgentIds: agentIds,
+    });
+    if (!withWeb.ok) throw new Error(`enqueue failed: ${withWeb.reason}`);
+    const second = mockResolvedExecution('Web available');
+    await processTalkRunMessage({
+      runId: withWeb.runs[0]!.id,
+      dispatch: async () => {},
+      cancelPollIntervalMs: 10_000,
+    });
+    expect(second.calls).toHaveLength(1);
+    expect(second.calls[0]!.context.systemPrompt).toContain(
+      'Tools available in this run: read_source, web_search.',
+    );
+    expect(second.calls[0]!.context.systemPrompt).toContain(
+      'overrides any earlier turn',
+    );
+  });
+
   it('rejects Google tool calls when the frozen effective tool snapshot does not enable Google', async () => {
     const { workspaceId, talkId, agentIds } = await createTalkFixture();
     const db = getDbPg();
