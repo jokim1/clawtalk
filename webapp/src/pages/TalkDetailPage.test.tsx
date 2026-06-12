@@ -237,6 +237,9 @@ describe('TalkDetailPage', () => {
     expect(
       await screen.findByRole('complementary', { name: 'The Room' }),
     ).toBeTruthy();
+    expect(screen.getAllByRole('heading', { name: 'The Room' })).toHaveLength(
+      1,
+    );
     expect(screen.getByLabelText('Talk agents')).toBeTruthy();
     expect(screen.getByLabelText('Talk timeline')).toBeTruthy();
     await user.keyboard('{Escape}');
@@ -1235,7 +1238,7 @@ describe('TalkDetailPage', () => {
     );
   });
 
-  it('updates nicknames in auto and custom modes and saves talk agents from the Agents tab', async () => {
+  it('shows existing registered agents as fixed room cards and saves primary changes', async () => {
     const user = userEvent.setup();
     let savedRequest: SavedTalkAgentRequest | undefined;
 
@@ -1251,35 +1254,29 @@ describe('TalkDetailPage', () => {
     });
 
     renderDetailPage('/app/talks/talk-1/agents');
-    await screen.findByRole('heading', { name: 'Agents' });
+    await screen.findByRole('heading', { name: 'The Room' });
 
-    const getRegisteredAgentSelects = () =>
-      screen.getAllByLabelText('Registered Agent');
-
-    await user.selectOptions(
-      getRegisteredAgentSelects()[0],
-      'agent-claude-opus',
+    expect(screen.queryByLabelText('Registered Agent')).toBeNull();
+    expect(screen.queryByLabelText('Nickname')).toBeNull();
+    expect(
+      screen.getByRole('link', { name: 'Manage AI Agents' }),
+    ).toHaveAttribute(
+      'href',
+      '/app/settings?tab=agents&returnTo=%2Fapp%2Ftalks%2Ftalk-1',
     );
 
-    const getNicknameInputs = () =>
-      screen.getAllByLabelText('Nickname') as HTMLInputElement[];
+    const room = screen.getByRole('list', { name: 'Agents in this talk' });
+    expect(
+      within(room).getByRole('listitem', {
+        name: 'Claude Sonnet 4.6, General',
+      }),
+    ).toBeTruthy();
+    expect(
+      within(room).getByRole('listitem', { name: 'GPT-5 Mini, Critic' }),
+    ).toBeTruthy();
 
-    expect(getNicknameInputs()[0].value).toBe('Claude Opus 4.6');
-
-    await user.clear(getNicknameInputs()[0]);
-    await user.type(getNicknameInputs()[0], 'Coach');
-    expect(getNicknameInputs()[0].value).toBe('Coach');
-
-    await user.selectOptions(getRegisteredAgentSelects()[0], 'agent-claude');
-    expect(getNicknameInputs()[0].value).toBe('Coach');
-
-    await user.click(screen.getAllByRole('button', { name: 'Reset name' })[0]);
-    expect(getNicknameInputs()[0].value).toBe('Claude Sonnet 4.6');
-
-    const roleSelects = screen.getAllByLabelText('Role');
-    await user.selectOptions(roleSelects[1], 'strategist');
-    await user.click(screen.getAllByLabelText('Primary Agent')[1]);
-    await user.click(screen.getByRole('button', { name: 'Save Agents' }));
+    await user.click(screen.getAllByLabelText('Primary')[1]);
+    await user.click(screen.getByRole('button', { name: 'Save room' }));
 
     expect(await screen.findByText('Talk agents updated.')).toBeTruthy();
     if (!savedRequest) {
@@ -1295,7 +1292,7 @@ describe('TalkDetailPage', () => {
     });
     expect(savedRequest.agents[1]).toMatchObject({
       nickname: 'GPT-5 Mini',
-      role: 'strategist',
+      role: 'critic',
       isPrimary: true,
     });
   });
@@ -1305,22 +1302,22 @@ describe('TalkDetailPage', () => {
     installTalkDetailFetch();
 
     renderDetailPage('/app/talks/talk-1/agents');
-    await screen.findByRole('heading', { name: 'Agents' });
+    await screen.findByRole('heading', { name: 'The Room' });
 
-    expect(screen.getAllByLabelText('Registered Agent')).toHaveLength(2);
+    const room = screen.getByRole('list', { name: 'Agents in this talk' });
+    expect(within(room).getAllByRole('listitem')).toHaveLength(2);
     const removeButtons = screen.getAllByRole('button', { name: 'Remove' });
     expect(removeButtons).toHaveLength(2);
 
     // Claude (row 0) is the primary; removing it promotes GPT-5 Mini.
     await user.click(removeButtons[0]);
 
-    const rows = screen.getAllByLabelText(
-      'Registered Agent',
-    ) as HTMLSelectElement[];
-    expect(rows).toHaveLength(1);
-    expect(rows[0].value).toBe('agent-openai');
+    expect(within(room).getAllByRole('listitem')).toHaveLength(1);
+    expect(
+      within(room).getByRole('listitem', { name: 'GPT-5 Mini, Critic' }),
+    ).toBeTruthy();
     // Surviving agent becomes primary; Remove is disabled at one agent.
-    expect(screen.getByLabelText('Primary Agent')).toBeChecked();
+    expect(screen.getByLabelText('Primary')).toBeChecked();
     expect(screen.getByRole('button', { name: 'Remove' })).toBeDisabled();
   });
 
@@ -1361,15 +1358,17 @@ describe('TalkDetailPage', () => {
     });
 
     renderDetailPage('/app/talks/talk-1/agents');
-    await screen.findByRole('heading', { name: 'Agents' });
+    await screen.findByRole('heading', { name: 'The Room' });
 
-    await user.selectOptions(screen.getByLabelText('Agent'), 'agent-openai');
-    await user.selectOptions(screen.getAllByLabelText('Role')[1], 'critic');
+    await user.selectOptions(
+      screen.getByLabelText('Add an agent to the room'),
+      'agent-openai',
+    );
     expect(
-      screen.getByRole('button', { name: 'Add + Save Agents' }),
+      screen.getByRole('button', { name: 'Add + Save room' }),
     ).toBeTruthy();
 
-    await user.click(screen.getByRole('button', { name: 'Add + Save Agents' }));
+    await user.click(screen.getByRole('button', { name: 'Add + Save room' }));
 
     expect(await screen.findByText('Talk agents updated.')).toBeTruthy();
     if (!savedRequest) {
@@ -1384,14 +1383,13 @@ describe('TalkDetailPage', () => {
       isPrimary: false,
     });
 
-    const rowAgentSelects = screen.getAllByLabelText('Registered Agent');
-    expect(rowAgentSelects).toHaveLength(2);
-    expect((rowAgentSelects[1] as HTMLSelectElement).value).toBe(
-      'agent-openai',
-    );
-    expect((screen.getByLabelText('Agent') as HTMLSelectElement).value).toBe(
-      '',
-    );
+    expect(
+      screen.getByRole('listitem', { name: 'GPT-5 Mini, Critic' }),
+    ).toBeTruthy();
+    expect(
+      (screen.getByLabelText('Add an agent to the room') as HTMLSelectElement)
+        .value,
+    ).toBe('');
 
     const controls = within(
       screen.getByRole('navigation', { name: 'Talk controls' }),
@@ -1434,11 +1432,13 @@ describe('TalkDetailPage', () => {
     });
 
     renderDetailPage('/app/talks/talk-1/agents');
-    await screen.findByRole('heading', { name: 'Agents' });
+    await screen.findByRole('heading', { name: 'The Room' });
 
-    await user.selectOptions(screen.getByLabelText('Agent'), 'agent-openai');
-    await user.selectOptions(screen.getAllByLabelText('Role')[1], 'critic');
-    await user.click(screen.getByRole('button', { name: 'Add + Save Agents' }));
+    await user.selectOptions(
+      screen.getByLabelText('Add an agent to the room'),
+      'agent-openai',
+    );
+    await user.click(screen.getByRole('button', { name: 'Add + Save room' }));
 
     const controls = within(
       screen.getByRole('navigation', { name: 'Talk controls' }),
@@ -1466,30 +1466,16 @@ describe('TalkDetailPage', () => {
     ).toBeNull();
 
     expect(await screen.findByText('Talk agents updated.')).toBeTruthy();
-    expect(screen.getAllByLabelText('Registered Agent')).toHaveLength(2);
+    expect(
+      screen.getByRole('listitem', { name: 'GPT-5 Mini, Critic' }),
+    ).toBeTruthy();
   });
 
-  it('shows an inline error when a pending footer agent becomes invalid before save', async () => {
+  it('only offers registered agents that are not already in the room', async () => {
     const user = userEvent.setup();
     let putCalled = false;
 
     installTalkDetailFetch({
-      messages: [],
-      runs: [],
-      talkAgents: [
-        buildTalkAgent({
-          id: 'agent-claude',
-          nickname: 'Claude Sonnet 4.6',
-          sourceKind: 'claude_default',
-          role: 'assistant',
-          isPrimary: true,
-          displayOrder: 0,
-          health: 'ready',
-          providerId: null,
-          modelId: 'claude-sonnet-4-6',
-          modelDisplayName: 'Claude Sonnet 4.6',
-        }),
-      ],
       onPutAgents: (body) => {
         putCalled = true;
         return body.agents;
@@ -1497,20 +1483,23 @@ describe('TalkDetailPage', () => {
     });
 
     renderDetailPage('/app/talks/talk-1/agents');
-    await screen.findByRole('heading', { name: 'Agents' });
+    await screen.findByRole('heading', { name: 'The Room' });
 
-    await user.selectOptions(screen.getByLabelText('Agent'), 'agent-openai');
-    await user.selectOptions(
-      screen.getByLabelText('Registered Agent'),
-      'agent-openai',
+    const addSelect = screen.getByLabelText(
+      'Add an agent to the room',
+    ) as HTMLSelectElement;
+    const optionValues = Array.from(addSelect.options).map(
+      (option) => option.value,
     );
+    expect(optionValues).not.toContain('agent-claude');
+    expect(optionValues).not.toContain('agent-openai');
+    expect(optionValues).toContain('agent-claude-opus');
 
-    await user.click(screen.getByRole('button', { name: 'Add + Save Agents' }));
+    await user.selectOptions(addSelect, 'agent-claude-opus');
+    await user.click(screen.getByRole('button', { name: 'Add to room' }));
 
     expect(
-      await screen.findByText(
-        'Selected registered agent is already assigned to this talk.',
-      ),
+      screen.getByRole('listitem', { name: 'Claude Opus 4.6, General' }),
     ).toBeTruthy();
     expect(putCalled).toBe(false);
   });
@@ -1694,12 +1683,11 @@ describe('TalkDetailPage', () => {
     });
 
     renderDetailPage('/app/talks/talk-1/agents');
-    await screen.findByRole('heading', { name: 'Agents' });
+    await screen.findByRole('heading', { name: 'The Room' });
 
-    const footerAgentSelect = screen.getByLabelText('Agent');
+    const footerAgentSelect = screen.getByLabelText('Add an agent to the room');
     await user.selectOptions(footerAgentSelect, 'agent-openai');
-    await user.selectOptions(screen.getAllByLabelText('Role')[1], 'critic');
-    await user.click(screen.getByRole('button', { name: 'Add Agent' }));
+    await user.click(screen.getByRole('button', { name: 'Add to room' }));
 
     const controls = within(
       screen.getByRole('navigation', { name: 'Talk controls' }),
@@ -4732,10 +4720,11 @@ function installTalkDetailFetch(input?: {
     extractedText?: string | null;
   }) => ContextSource;
   onRetryContextSource?: (sourceId: string) => ContextSource;
-  onSendMessage?: (body: {
-    content: string;
-    targetAgentIds: string[];
-  }) => { talkId: string; message: TalkMessage; runs: TalkRun[] };
+  onSendMessage?: (body: { content: string; targetAgentIds: string[] }) => {
+    talkId: string;
+    message: TalkMessage;
+    runs: TalkRun[];
+  };
   onListMessages?: (input: {
     visibleMessages: TalkMessage[];
   }) => Promise<TalkMessage[]> | TalkMessage[];

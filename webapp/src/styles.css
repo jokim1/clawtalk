@@ -2640,6 +2640,229 @@ a {
   margin: 0;
 }
 
+.talk-room-panel {
+  gap: 0.85rem;
+}
+
+.talk-room-panel-header {
+  align-items: flex-start;
+}
+
+.talk-room-panel-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.talk-room-kicker {
+  margin: 0 0 0.25rem;
+  color: var(--salon-ink-2, #6b6660);
+  font-family: var(--salon-font-mono, 'Geist Mono', ui-monospace, monospace);
+  font-size: 0.66rem;
+  letter-spacing: 0.16em;
+  line-height: 1.2;
+  text-transform: uppercase;
+}
+
+.talk-room-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+}
+
+.talk-room-agent-card {
+  display: grid;
+  grid-template-columns: auto auto minmax(0, 1fr);
+  gap: 0.65rem;
+  align-items: start;
+  border: 1px solid var(--salon-line, #e6e0d1);
+  border-radius: 0.65rem;
+  padding: 0.72rem;
+  background: var(--salon-card, #ffffff);
+}
+
+.talk-room-order {
+  display: grid;
+  place-items: center;
+  width: 1.45rem;
+  height: 1.45rem;
+  border: 1px solid var(--salon-line, #e6e0d1);
+  border-radius: 999px;
+  background: var(--salon-paper, #fbf7ef);
+  color: var(--salon-ink-2, #6b6660);
+  font-family: var(--salon-font-mono, 'Geist Mono', ui-monospace, monospace);
+  font-size: 0.72rem;
+  line-height: 1;
+}
+
+.talk-room-avatar {
+  display: grid;
+  place-items: center;
+  width: 2.25rem;
+  height: 2.25rem;
+  border: 1px solid rgba(200, 100, 58, 0.36);
+  border-radius: 999px;
+  background: #c8643a;
+  color: #fff;
+  font-family: var(--salon-font-mono, 'Geist Mono', ui-monospace, monospace);
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.talk-room-agent-main {
+  min-width: 0;
+}
+
+.talk-room-agent-title {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+
+.talk-room-agent-title strong {
+  overflow: hidden;
+  color: var(--salon-ink, #1f1b16);
+  font-family: var(--salon-font-serif, 'Newsreader', Georgia, serif);
+  font-size: 0.98rem;
+  font-weight: 500;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.talk-room-role-badge {
+  border: 1px solid rgba(200, 100, 58, 0.32);
+  border-radius: 999px;
+  padding: 0.1rem 0.42rem;
+  background: rgba(200, 100, 58, 0.08);
+  color: #9f4426;
+  font-family: var(--salon-font-mono, 'Geist Mono', ui-monospace, monospace);
+  font-size: 0.63rem;
+  line-height: 1.2;
+}
+
+.talk-room-agent-meta {
+  display: flex;
+  gap: 0.45rem;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-top: 0.25rem;
+  color: var(--salon-ink-2, #6b6660);
+  font-family: var(--salon-font-mono, 'Geist Mono', ui-monospace, monospace);
+  font-size: 0.68rem;
+}
+
+.talk-room-agent-meta span {
+  display: inline-flex;
+  align-items: center;
+  min-height: 1.3rem;
+  border: 1px solid var(--salon-line, #e6e0d1);
+  border-radius: 999px;
+  padding: 0 0.42rem;
+  background: var(--salon-paper-2, #f4ecdb);
+}
+
+.talk-room-agent-description {
+  margin: 0.45rem 0 0;
+  color: var(--salon-ink-2, #6b6660);
+  font-size: 0.78rem;
+  line-height: 1.35;
+}
+
+.talk-room-agent-actions {
+  grid-column: 3;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-top: 0.55rem;
+}
+
+.talk-room-primary-toggle {
+  color: var(--salon-ink-2, #6b6660);
+  font-size: 0.76rem;
+}
+
+.talk-room-text-button {
+  border: 0;
+  background: transparent;
+  color: #a7372f;
+  font: inherit;
+  font-size: 0.76rem;
+  cursor: pointer;
+}
+
+.talk-room-text-button:hover,
+.talk-room-text-button:focus-visible {
+  color: #7f2a24;
+  text-decoration: underline;
+  outline: none;
+}
+
+.talk-room-text-button:disabled {
+  color: var(--salon-ink-muted, #9f9688);
+  cursor: not-allowed;
+  text-decoration: none;
+}
+
+.talk-room-add-card {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 0.55rem;
+  align-items: end;
+  border: 1px dashed var(--salon-line, #e6e0d1);
+  border-radius: 0.65rem;
+  padding: 0.72rem;
+  background: rgba(255, 255, 255, 0.45);
+}
+
+.talk-room-add-icon {
+  display: grid;
+  place-items: center;
+  width: 1.8rem;
+  height: 1.8rem;
+  align-self: center;
+  border: 1px solid var(--salon-line, #e6e0d1);
+  border-radius: 999px;
+  background: var(--salon-card, #ffffff);
+  color: var(--salon-ink-2, #6b6660);
+}
+
+.talk-room-add-select {
+  display: grid;
+  gap: 0.32rem;
+  min-width: 0;
+}
+
+.talk-room-add-select span {
+  color: var(--salon-ink, #1f1b16);
+  font-size: 0.82rem;
+  font-weight: 600;
+}
+
+.talk-room-add-select select {
+  width: 100%;
+}
+
+.talk-room-available-count {
+  align-self: center;
+  color: var(--salon-ink-2, #6b6660);
+  font-size: 0.76rem;
+  white-space: nowrap;
+}
+
+.talk-room-add-actions {
+  grid-column: 2 / -1;
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
 .agent-editor-card {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
@@ -2678,6 +2901,27 @@ a {
   justify-content: flex-start;
   flex-wrap: wrap;
   align-items: end;
+}
+
+@media (max-width: 720px) {
+  .talk-room-agent-card {
+    grid-template-columns: auto auto minmax(0, 1fr);
+  }
+
+  .talk-room-agent-actions,
+  .talk-room-add-actions {
+    grid-column: 1 / -1;
+    justify-content: flex-start;
+  }
+
+  .talk-room-add-card {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .talk-room-available-count {
+    grid-column: 2;
+    justify-self: start;
+  }
 }
 
 .composer-targets {
