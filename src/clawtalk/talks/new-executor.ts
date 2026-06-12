@@ -28,6 +28,7 @@ type ToolResult = { result: string; isError?: boolean };
 export const WEB_SEARCH_TIMEOUT_MS = 20_000;
 
 async function executeWebSearch(
+  userId: string,
   args: Record<string, unknown>,
   signal: AbortSignal,
 ): Promise<ToolResult> {
@@ -56,7 +57,7 @@ async function executeWebSearch(
   }, WEB_SEARCH_TIMEOUT_MS);
   try {
     const { runWebSearchForUser } = await import('../web-search/registry.js');
-    const response = await runWebSearchForUser(query, {
+    const response = await runWebSearchForUser(userId, query, {
       maxResults,
       signal: AbortSignal.any([signal, timeoutController.signal]),
     });
@@ -284,7 +285,7 @@ export function buildToolExecutor(
           isError: true,
         };
       }
-      return executeWebSearch(args, signal);
+      return executeWebSearch(userId, args, signal);
     }
 
     if (toolName.startsWith('browser_')) {

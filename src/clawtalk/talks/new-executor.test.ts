@@ -9,7 +9,7 @@ vi.mock('../web-search/registry.js', () => ({
   // its abort signal, with the signal's reason, mirroring real fetch
   // semantics (including immediate rejection on an already-aborted signal).
   runWebSearchForUser: vi.fn(
-    (_query: string, options?: { signal?: AbortSignal }) =>
+    (_userId: string, _query: string, options?: { signal?: AbortSignal }) =>
       new Promise((_resolve, reject) => {
         const abortSignal = options?.signal;
         const rejectAborted = () =>
@@ -106,7 +106,7 @@ describe('web_search timeout', () => {
     // Rejection arrives a beat after abort, leaving a window for the run
     // signal to abort after the timeout already fired.
     vi.mocked(runWebSearchForUser).mockImplementationOnce(
-      (_query: string, options?: { signal?: AbortSignal }) =>
+      (_userId: string, _query: string, options?: { signal?: AbortSignal }) =>
         new Promise((_resolve, reject) => {
           const abortSignal = options?.signal;
           abortSignal?.addEventListener('abort', () => {

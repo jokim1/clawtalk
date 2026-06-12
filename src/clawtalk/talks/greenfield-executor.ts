@@ -1,4 +1,4 @@
-import { getDbPg, withTrustedDbWrites, withUserContext } from '../../db.js';
+import { getDbPg, withTrustedDbWrites } from '../../db.js';
 import { logger } from '../../logger.js';
 import {
   executeWithResolvedAgent,
@@ -917,11 +917,13 @@ function hasGreenfieldDocumentEditIds(result: string): boolean {
   }
 }
 
-// Outer deadline on the whole web_search tool call, including the per-call
-// withUserContext transaction ACQUISITION — the 2026-06-12 wedge sat in
-// db.begin on a dead connection, before executeWebSearch (and its 20s fetch
-// timer) ever ran. Wider than the inner fetch timeout so the inner path wins
-// whenever it is functioning.
+// Outer deadline on the whole web_search tool call, including the registry's
+// short credential-tx ACQUISITION — the 2026-06-12 wedge sat in db.begin on a
+// dead connection, before executeWebSearch (and its 20s fetch timer) ever
+// ran. Since the P1-0 tx split, the registry commits its credential tx before
+// the provider fetch starts, so abandoning a hung fetch here no longer leaks
+// an open transaction. Wider than the inner fetch timeout so the inner path
+// wins whenever it is functioning. (Absorbed into DeadlineBudget at T6.)
 const WEB_SEARCH_TOOL_CALL_DEADLINE_MS = 30_000;
 
 /** @internal Exported for tests. */
@@ -1039,16 +1041,14 @@ function buildGreenfieldToolExecutor(input: {
       };
     }
     if (toolName === 'web_search') {
+      // P1-0: no withUserContext wrapper here — the registry opens its own
+      // short credential tx and commits it before the provider fetch, so the
+      // fetch never runs inside a transaction.
       logger.info(
         { runId: input.run.id, toolName },
-        'web_search tool call: acquiring user-context tx',
+        'web_search tool call: dispatching',
       );
-      return raceToolCallDeadline(
-        withUserContext(input.run.requested_by, () =>
-          baseExecutor(toolName, args),
-        ),
-        toolName,
-      );
+      return raceToolCallDeadline(baseExecutor(toolName, args), toolName);
     }
     return baseExecutor(toolName, args);
   };

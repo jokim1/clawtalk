@@ -1922,21 +1922,26 @@ describe('GreenfieldTalkExecutor queue integration', () => {
     );
   });
 
-  it('executes web_search inside the requester user context', async () => {
+  it('passes the requester to web_search without holding a user-context tx (P1-0 split)', async () => {
     const { workspaceId, talkId, agentIds } = await createTalkFixture();
     const db = getDbPg();
     await db`
       insert into public.talk_tools (workspace_id, talk_id, tool_id, enabled)
       values (${workspaceId}::uuid, ${talkId}::uuid, 'web-search', true)
     `;
-    runWebSearchForUserMock.mockImplementation(async (query: string) => {
-      expect(getCurrentUserId()).toBe(USER_ID);
-      return {
-        query,
-        providerId: 'web_search.tavily',
-        results: [],
-      };
-    });
+    runWebSearchForUserMock.mockImplementation(
+      async (_userId: string, query: string) => {
+        // The registry owns its own short committed credential tx; the
+        // executor must NOT wrap the call (a wrapper would keep a tx —
+        // and the max:1 connection — open across the provider fetch).
+        expect(getCurrentUserId()).toBeNull();
+        return {
+          query,
+          providerId: 'web_search.tavily',
+          results: [],
+        };
+      },
+    );
 
     const enqueued = await enqueueGreenfieldChatTurn({
       workspaceId,
@@ -1969,6 +1974,7 @@ describe('GreenfieldTalkExecutor queue integration', () => {
     });
 
     expect(runWebSearchForUserMock).toHaveBeenCalledWith(
+      USER_ID,
       'current clawtalk status',
       { maxResults: undefined, signal: expect.any(AbortSignal) },
     );
