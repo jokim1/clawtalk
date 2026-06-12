@@ -399,16 +399,12 @@ export function TalkDetailPage({
   const {
     agents,
     agentDrafts,
-    newAgentDraft,
-    setNewAgentDraft,
     agentState,
-    setAgentState,
     agentsCatalogError,
     registeredAgentsCatalog,
     targetAgentIds,
     effectiveAgents,
     jobAgentOptions,
-    hasPendingFooterAgentSelection,
     hasUnsavedAgentChanges,
     talkAgentExecutionGuardrailsById,
     agentLabelById,
@@ -1035,14 +1031,11 @@ export function TalkDetailPage({
   const renderAgentsPanel = (options?: { sidePanel?: boolean }) => (
     <TalkAgentsPanel
       agentDrafts={agentDrafts}
-      newAgentDraft={newAgentDraft}
-      setNewAgentDraft={setNewAgentDraft}
       agentState={agentState}
-      setAgentState={setAgentState}
       agentsCatalogError={agentsCatalogError}
       registeredAgentsCatalog={registeredAgentsCatalog}
       canEditAgents={canEditAgents}
-      hasPendingFooterAgentSelection={hasPendingFooterAgentSelection}
+      hasUnsavedAgentChanges={hasUnsavedAgentChanges}
       manageAgentsHref={manageAgentsHref}
       showPanelHeader={options?.sidePanel !== true}
       handleSetPrimaryAgent={handleSetPrimaryAgent}

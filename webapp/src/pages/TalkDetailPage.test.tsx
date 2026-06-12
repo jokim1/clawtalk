@@ -1360,15 +1360,15 @@ describe('TalkDetailPage', () => {
     renderDetailPage('/app/talks/talk-1/agents');
     await screen.findByRole('heading', { name: 'The Room' });
 
-    await user.selectOptions(
-      screen.getByLabelText('Add an agent to the room'),
-      'agent-openai',
+    await user.click(
+      screen.getByRole('button', { name: /Add an agent to the room/ }),
     );
-    expect(
-      screen.getByRole('button', { name: 'Add + Save room' }),
-    ).toBeTruthy();
+    await user.click(
+      screen.getByRole('button', { name: 'Add GPT-5 Mini to room' }),
+    );
+    expect(screen.getByRole('button', { name: 'Save room' })).toBeEnabled();
 
-    await user.click(screen.getByRole('button', { name: 'Add + Save room' }));
+    await user.click(screen.getByRole('button', { name: 'Save room' }));
 
     expect(await screen.findByText('Talk agents updated.')).toBeTruthy();
     if (!savedRequest) {
@@ -1387,9 +1387,8 @@ describe('TalkDetailPage', () => {
       screen.getByRole('listitem', { name: 'GPT-5 Mini, Critic' }),
     ).toBeTruthy();
     expect(
-      (screen.getByLabelText('Add an agent to the room') as HTMLSelectElement)
-        .value,
-    ).toBe('');
+      screen.queryByRole('button', { name: 'Add GPT-5 Mini to room' }),
+    ).toBeNull();
 
     const controls = within(
       screen.getByRole('navigation', { name: 'Talk controls' }),
@@ -1434,11 +1433,13 @@ describe('TalkDetailPage', () => {
     renderDetailPage('/app/talks/talk-1/agents');
     await screen.findByRole('heading', { name: 'The Room' });
 
-    await user.selectOptions(
-      screen.getByLabelText('Add an agent to the room'),
-      'agent-openai',
+    await user.click(
+      screen.getByRole('button', { name: /Add an agent to the room/ }),
     );
-    await user.click(screen.getByRole('button', { name: 'Add + Save room' }));
+    await user.click(
+      screen.getByRole('button', { name: 'Add GPT-5 Mini to room' }),
+    );
+    await user.click(screen.getByRole('button', { name: 'Save room' }));
 
     const controls = within(
       screen.getByRole('navigation', { name: 'Talk controls' }),
@@ -1485,18 +1486,33 @@ describe('TalkDetailPage', () => {
     renderDetailPage('/app/talks/talk-1/agents');
     await screen.findByRole('heading', { name: 'The Room' });
 
-    const addSelect = screen.getByLabelText(
-      'Add an agent to the room',
-    ) as HTMLSelectElement;
-    const optionValues = Array.from(addSelect.options).map(
-      (option) => option.value,
+    await user.click(
+      screen.getByRole('button', { name: /Add an agent to the room/ }),
     );
-    expect(optionValues).not.toContain('agent-claude');
-    expect(optionValues).not.toContain('agent-openai');
-    expect(optionValues).toContain('agent-claude-opus');
+    const availableAgents = screen.getByRole('list', {
+      name: 'Available registered agents',
+    });
+    expect(
+      within(availableAgents).queryByRole('button', {
+        name: 'Add Claude Sonnet 4.6 to room',
+      }),
+    ).toBeNull();
+    expect(
+      within(availableAgents).queryByRole('button', {
+        name: 'Add GPT-5 Mini to room',
+      }),
+    ).toBeNull();
+    expect(
+      within(availableAgents).getByRole('button', {
+        name: 'Add Claude Opus 4.6 to room',
+      }),
+    ).toBeTruthy();
 
-    await user.selectOptions(addSelect, 'agent-claude-opus');
-    await user.click(screen.getByRole('button', { name: 'Add to room' }));
+    await user.click(
+      within(availableAgents).getByRole('button', {
+        name: 'Add Claude Opus 4.6 to room',
+      }),
+    );
 
     expect(
       screen.getByRole('listitem', { name: 'Claude Opus 4.6, General' }),
@@ -1685,9 +1701,12 @@ describe('TalkDetailPage', () => {
     renderDetailPage('/app/talks/talk-1/agents');
     await screen.findByRole('heading', { name: 'The Room' });
 
-    const footerAgentSelect = screen.getByLabelText('Add an agent to the room');
-    await user.selectOptions(footerAgentSelect, 'agent-openai');
-    await user.click(screen.getByRole('button', { name: 'Add to room' }));
+    await user.click(
+      screen.getByRole('button', { name: /Add an agent to the room/ }),
+    );
+    await user.click(
+      screen.getByRole('button', { name: 'Add GPT-5 Mini to room' }),
+    );
 
     const controls = within(
       screen.getByRole('navigation', { name: 'Talk controls' }),
