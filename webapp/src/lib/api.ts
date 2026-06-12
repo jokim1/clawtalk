@@ -1030,11 +1030,18 @@ export async function unarchiveTalk(talkId: string): Promise<void> {
   );
 }
 
-export async function createTalk(title: string): Promise<Talk> {
+export async function createTalk(
+  title: string,
+  options: { folderId?: string | null } = {},
+): Promise<Talk> {
+  const body: { title: string; folderId?: string | null } = { title };
+  if (options.folderId !== undefined) {
+    body.folderId = options.folderId;
+  }
   const envelope = await apiMutationRequest<{ talk: Talk }>('/api/v1/talks', {
     method: 'POST',
     includeJson: true,
-    body: JSON.stringify({ title }),
+    body: JSON.stringify(body),
   });
   return envelope.talk;
 }

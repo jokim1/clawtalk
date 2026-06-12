@@ -1,5 +1,6 @@
 import { cleanup, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import { useState } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter } from 'react-router-dom';
 
@@ -36,8 +37,8 @@ function rect(input: Partial<DOMRect> = {}): DOMRect {
 
 type Overrides = Partial<React.ComponentProps<typeof SecondaryList>>;
 
-function renderList(props: Overrides = {}, route = '/') {
-  const base: React.ComponentProps<typeof SecondaryList> = {
+function renderListBaseProps(): React.ComponentProps<typeof SecondaryList> {
+  return {
     items: [],
     contents: [],
     loading: false,
@@ -55,6 +56,10 @@ function renderList(props: Overrides = {}, route = '/') {
     onOpenPalette: vi.fn(),
     onToggleSecondary: vi.fn(),
   };
+}
+
+function renderList(props: Overrides = {}, route = '/') {
+  const base = renderListBaseProps();
   const merged = { ...base, ...props };
   render(
     <MemoryRouter initialEntries={[route]}>
@@ -163,6 +168,89 @@ describe('SecondaryList', () => {
     );
     expect(screen.getByRole('button', { name: 'New Talk' })).toBeTruthy();
     expect(screen.getByRole('button', { name: 'New Folder' })).toBeTruthy();
+  });
+
+  it('opens a new Talk sheet target for a specific folder from the folder menu', async () => {
+    const user = userEvent.setup();
+    const onNewTalk = vi.fn();
+    renderList({
+      onNewTalk,
+      items: [
+        {
+          type: 'folder',
+          id: 'folder-1',
+          title: 'Philosophy',
+          sortOrder: 0,
+          talks: [],
+        },
+      ],
+    });
+
+    await user.click(screen.getByRole('button', { name: 'Manage Philosophy' }));
+    await user.click(screen.getByRole('button', { name: 'New Talk in Folder' }));
+
+    expect(onNewTalk).toHaveBeenCalledTimes(1);
+    expect(onNewTalk).toHaveBeenCalledWith('folder-1');
+  });
+
+  it('starts a newly created folder rename with placeholder text only', async () => {
+    const user = userEvent.setup();
+
+    function StatefulList() {
+      const [items, setItems] = useState<TalkSidebarItem[]>([]);
+      const base = renderListBaseProps();
+      return (
+        <MemoryRouter>
+          <SecondaryList
+            {...base}
+            items={items}
+            onCreateFolder={async () => {
+              const folder = buildFolder();
+              setItems([folder]);
+              return folder;
+            }}
+          />
+        </MemoryRouter>
+      );
+    }
+
+    render(<StatefulList />);
+    await user.click(
+      screen.getByRole('button', { name: 'Create talk or folder' }),
+    );
+    await user.click(screen.getByRole('button', { name: 'New Folder' }));
+
+    const input = await screen.findByRole('textbox');
+    expect(input).toHaveValue('');
+    expect(input).toHaveAttribute('placeholder', 'Untitled Folder');
+  });
+
+  it('cancels a blank folder rename without sending an empty title', async () => {
+    const user = userEvent.setup();
+    const onRenameFolder = vi.fn(async () => undefined);
+    renderList({
+      onRenameFolder,
+      items: [
+        {
+          type: 'folder',
+          id: 'folder-1',
+          title: 'Philosophy',
+          sortOrder: 0,
+          talks: [],
+        },
+      ],
+    });
+
+    await user.click(screen.getByRole('button', { name: 'Manage Philosophy' }));
+    await user.click(screen.getByRole('button', { name: 'Rename Folder' }));
+
+    const input = screen.getByRole('textbox');
+    await user.clear(input);
+    await user.keyboard('{Enter}');
+
+    expect(onRenameFolder).not.toHaveBeenCalled();
+    expect(screen.queryByRole('textbox')).toBeNull();
+    expect(screen.getByText('Philosophy')).toBeTruthy();
   });
 
   it('renders the row menu in a portal and repositions above the trigger when needed', async () => {

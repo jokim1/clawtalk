@@ -233,6 +233,143 @@ describe('App', () => {
     expect(screen.getByLabelText('3 unread messages')).toBeTruthy();
   });
 
+  it('creates a new talk directly in the selected folder', async () => {
+    const user = userEvent.setup();
+    const createBodies: unknown[] = [];
+    let sidebarCalls = 0;
+    let resolveSidebarRefresh = (_response: Response): void => {};
+    const sidebarRefresh = new Promise<Response>((resolve) => {
+      resolveSidebarRefresh = resolve;
+    });
+    const existingTalk = {
+      type: 'talk',
+      id: 'talk-existing',
+      title: 'Existing Talk',
+      status: 'active',
+      sortOrder: 0,
+      lastMessageAt: null,
+      messageCount: 0,
+      hasActiveRun: false,
+    };
+    const folder = {
+      id: 'folder-1',
+      type: 'folder',
+      title: 'Philosophy',
+      sortOrder: 0,
+      talks: [existingTalk],
+    };
+    const createdTalk = {
+      id: 'talk-new',
+      ownerId: 'u1',
+      title: 'Folder Talk',
+      agents: [],
+      status: 'active',
+      folderId: 'folder-1',
+      sortOrder: 1,
+      version: 1,
+      createdAt: '2026-03-08T00:00:00.000Z',
+      updatedAt: '2026-03-08T00:00:00.000Z',
+      accessRole: 'owner',
+    };
+
+    vi.stubGlobal(
+      'fetch',
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url =
+          typeof input === 'string'
+            ? input
+            : input instanceof URL
+              ? input.toString()
+              : input.url;
+        const path = new URL(url, 'http://localhost').pathname;
+
+        if (path === '/api/v1/session/me') {
+          return jsonResponse(200, {
+            ok: true,
+            data: {
+              user: {
+                id: 'u1',
+                email: 'owner@example.com',
+                displayName: 'Owner',
+                role: 'owner',
+              },
+            },
+          });
+        }
+
+        if (path === '/api/v1/talks/sidebar') {
+          sidebarCalls += 1;
+          if (sidebarCalls > 1) {
+            return sidebarRefresh;
+          }
+          return jsonResponse(200, {
+            ok: true,
+            data: {
+              items: [folder],
+            },
+          });
+        }
+
+        if (path === '/api/v1/talks' && init?.method === 'POST') {
+          createBodies.push(JSON.parse(String(init.body)));
+          return jsonResponse(201, {
+            ok: true,
+            data: { talk: createdTalk },
+          });
+        }
+
+        if (path.startsWith('/api/v1/talks/talk-new')) {
+          return jsonResponse(404, {
+            ok: false,
+            error: { code: 'talk_not_found', message: 'Talk not found' },
+          });
+        }
+
+        throw new Error(`Unexpected fetch path: ${path}`);
+      },
+    );
+
+    renderWithRouter('/app/talks');
+    await screen.findByRole('button', { name: 'Manage Philosophy' });
+
+    await user.click(screen.getByRole('button', { name: 'Manage Philosophy' }));
+    await user.click(screen.getByRole('button', { name: 'New Talk in Folder' }));
+    await user.type(await screen.findByLabelText('Title'), 'Folder Talk');
+    await user.click(screen.getByRole('button', { name: 'Create Talk' }));
+
+    await waitFor(() =>
+      expect(createBodies).toEqual([
+        { title: 'Folder Talk', folderId: 'folder-1' },
+      ]),
+    );
+    await waitFor(() =>
+      expect(
+        screen.getByRole('link', { name: /Folder Talk/ }),
+      ).toBeInTheDocument(),
+    );
+    expect(
+      screen
+        .getByRole('link', { name: /Existing Talk/ })
+        .compareDocumentPosition(
+          screen.getByRole('link', { name: /Folder Talk/ }),
+        ) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+
+    resolveSidebarRefresh(
+      jsonResponse(200, {
+        ok: true,
+        data: {
+          items: [
+            {
+              ...folder,
+              talks: [existingTalk, { type: 'talk', ...createdTalk }],
+            },
+          ],
+        },
+      }),
+    );
+  });
+
   it('does not show unread badges when only the stored count is stale', async () => {
     window.localStorage.setItem(
       'clawtalk.talkReadMarkers',

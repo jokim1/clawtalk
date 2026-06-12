@@ -60,7 +60,7 @@ type Props = {
   loading: boolean;
   error: string | null;
   buddyTalkId: string | null;
-  onNewTalk: () => void;
+  onNewTalk: (folderId?: string | null) => void;
   onCreateFolder: () => Promise<TalkSidebarFolder>;
   onRenameTalk: (talkId: string, title: string) => void;
   onPatchTalk: (input: {
@@ -395,20 +395,32 @@ export function SecondaryList({
     onNewTalk();
   };
 
+  const handleCreateTalkInFolderClick = (folderId: string) => {
+    folderMenuButtonRefs.current[folderId]?.focus();
+    setMenuState(null);
+    setExpandedFolderIds((current) => ({ ...current, [folderId]: true }));
+    onNewTalk(folderId);
+  };
+
   const handleCreateFolderClick = async () => {
     setMenuState(null);
     try {
       const folder = await onCreateFolder();
       setExpandedFolderIds((current) => ({ ...current, [folder.id]: true }));
       setRenamingFolderId(folder.id);
-      setFolderDrafts((current) => ({ ...current, [folder.id]: folder.title }));
+      setFolderDrafts((current) => ({ ...current, [folder.id]: '' }));
     } catch {
       // Parent handles refresh/error surfaces.
     }
   };
 
-  const commitFolderRename = async (folderId: string) => {
+  const commitFolderRename = async (folderId: string, currentTitle: string) => {
     const draft = (folderDrafts[folderId] || '').trim();
+    if (!draft) {
+      setFolderDrafts((current) => ({ ...current, [folderId]: currentTitle }));
+      setRenamingFolderId((current) => (current === folderId ? null : current));
+      return;
+    }
     await onRenameFolder(folderId, draft);
     setRenamingFolderId((current) => (current === folderId ? null : current));
   };
@@ -683,19 +695,22 @@ export function SecondaryList({
                   className="clawtalk-sidebar-folder-form"
                   onSubmit={(event: FormEvent) => {
                     event.preventDefault();
-                    void commitFolderRename(folder.id);
+                    void commitFolderRename(folder.id, folder.title);
                   }}
                 >
                   <input
                     autoFocus
                     value={draft}
+                    placeholder="Untitled Folder"
                     onChange={(event) =>
                       setFolderDrafts((current) => ({
                         ...current,
                         [folder.id]: event.target.value,
                       }))
                     }
-                    onBlur={() => void commitFolderRename(folder.id)}
+                    onBlur={() =>
+                      void commitFolderRename(folder.id, folder.title)
+                    }
                     onKeyDown={(event: KeyboardEvent<HTMLInputElement>) => {
                       if (event.key === 'Escape') {
                         setRenamingFolderId(null);
@@ -751,6 +766,14 @@ export function SecondaryList({
                 {menuOpen
                   ? renderMenu(
                       <>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            handleCreateTalkInFolderClick(folder.id)
+                          }
+                        >
+                          New Talk in Folder
+                        </button>
                         <button
                           type="button"
                           onClick={() => {
