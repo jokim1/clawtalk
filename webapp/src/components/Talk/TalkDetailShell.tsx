@@ -22,7 +22,6 @@ type TalkOrchestrationMode = Talk['orchestrationMode'];
 export const TALK_SIDE_PANEL_KEYS = [
   'agents',
   'context',
-  'connectors',
   'jobs',
 ] as const;
 
@@ -170,11 +169,9 @@ export function TalkDetailShell({
       ? 'agents'
       : currentTab === 'context'
         ? 'context'
-        : currentTab === 'connectors'
-          ? 'connectors'
-          : currentTab === 'jobs'
-            ? 'jobs'
-            : sidePanel;
+        : currentTab === 'jobs'
+          ? 'jobs'
+          : sidePanel;
   const commandButtonClass = (active: boolean) =>
     `talk-tab talk-command-tab${active ? ' talk-tab-active' : ''}`;
   const handleMoreSidePanel = (panel: TalkSidePanelKey) => {
@@ -359,7 +356,6 @@ export function TalkDetailShell({
                 <TalkConnectorsPill
                   talkId={talkId}
                   onUnauthorized={onUnauthorized}
-                  active={activePanel === 'connectors'}
                 />
                 <button
                   type="button"
