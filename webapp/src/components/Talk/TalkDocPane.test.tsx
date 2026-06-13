@@ -23,6 +23,7 @@ vi.mock('../../lib/api', async (importActual) => {
   return {
     ...actual,
     getDocument: vi.fn(),
+    updateDocumentTab: vi.fn(),
     acceptDocumentEdit: vi.fn(),
     rejectDocumentEdit: vi.fn(),
     acceptDocumentEditRun: vi.fn(),
@@ -146,6 +147,38 @@ describe('TalkDocPane', () => {
     });
   });
 
+  it('lets editors update the active native document tab directly', async () => {
+    mockApi.getDocument.mockResolvedValue(makeDoc());
+    mockApi.updateDocumentTab.mockResolvedValue({
+      document: makeDoc({
+        tabs: [
+          tab({
+            listVersion: 2,
+            blocks: [block({ text: 'Edited paragraph.' })],
+          }),
+        ],
+      }),
+    });
+    renderPane();
+
+    expect(await screen.findByText('Original paragraph.')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Edit document' }));
+    const editor = screen.getByRole('textbox', { name: 'Edit Main' });
+    fireEvent.change(editor, { target: { value: 'Edited paragraph.' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save document' }));
+
+    await waitFor(() =>
+      expect(mockApi.updateDocumentTab).toHaveBeenCalledWith({
+        documentId: 'doc-1',
+        tabId: 'tab-1',
+        text: 'Edited paragraph.',
+        expectedListVersion: 1,
+        workspaceId: 'ws-1',
+      }),
+    );
+    expect(await screen.findByText('Edited paragraph.')).toBeTruthy();
+  });
+
   it('renders a hide-pane button that invokes onHidePane', async () => {
     const onHidePane = vi.fn();
     mockApi.getDocument.mockResolvedValue(makeDoc());
@@ -193,6 +226,7 @@ describe('TalkDocPane', () => {
     expect(await screen.findByText('Proposed replacement.')).toBeTruthy();
     expect(screen.getByText('Suggested by Strategist')).toBeTruthy();
     expect(screen.getByText(/1 pending edit awaiting review/)).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Edit document' })).toBeNull();
     expect(screen.queryByRole('button', { name: /Accept/ })).toBeNull();
     expect(screen.queryByRole('button', { name: 'Accept all' })).toBeNull();
   });

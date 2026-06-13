@@ -12,6 +12,7 @@ import {
   rejectAllNativeDocumentEdits,
   rejectNativeDocumentEdit,
   rejectNativeDocumentEditRun,
+  updateNativeDocumentTab,
   type NativeDocumentBlockRecord,
   type NativeDocumentEditRecord,
   type NativeDocumentEditStatus,
@@ -248,6 +249,31 @@ function parseOptionalExpectedContentVersion(
       400,
       'invalid_expected_version',
       'expectedContentVersion must be a number.',
+    );
+  }
+  return value;
+}
+
+function parseExpectedListVersion(value: unknown): number | RouteResult<never> {
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 0) {
+    return error(
+      400,
+      'invalid_expected_list_version',
+      'expectedListVersion must be a non-negative integer.',
+    );
+  }
+  return value;
+}
+
+function parseDocumentTabText(value: unknown): string | RouteResult<never> {
+  if (typeof value !== 'string') {
+    return error(400, 'invalid_text', 'Document tab text must be a string.');
+  }
+  if (value.length > 200_000) {
+    return error(
+      400,
+      'text_too_large',
+      'Document tab text must be 200,000 characters or fewer.',
     );
   }
   return value;
@@ -547,6 +573,56 @@ export async function getDocumentRoute(input: {
         return error(404, 'document_not_found', 'Document not found.');
       }
       return ok({ document: toDocumentApi(document) });
+    },
+  );
+}
+
+export async function updateDocumentTabRoute(input: {
+  auth: AuthContext;
+  workspaceId?: string | null;
+  documentId: string;
+  tabId: string;
+  text?: unknown;
+  expectedListVersion?: unknown;
+}): Promise<RouteResult<{ document: ReturnType<typeof toDocumentApi> }>> {
+  if (!isUuid(input.tabId)) {
+    return error(400, 'invalid_tab_id', 'Tab id must be a UUID.');
+  }
+  const text = parseDocumentTabText(input.text);
+  if (typeof text === 'object') return text;
+  const expectedListVersion = parseExpectedListVersion(
+    input.expectedListVersion,
+  );
+  if (typeof expectedListVersion === 'object') return expectedListVersion;
+  return withDocumentsWorkspace(
+    input.auth,
+    input.workspaceId,
+    { documentId: input.documentId },
+    async (ctx) => {
+      const writerError = requireWorkspaceWriter(ctx.workspace);
+      if (writerError) return writerError;
+      const result = await updateNativeDocumentTab({
+        workspaceId: ctx.workspace.id,
+        documentId: input.documentId,
+        tabId: input.tabId,
+        text,
+        expectedListVersion,
+      });
+      if (result.kind === 'not_found') {
+        return error(404, 'document_tab_not_found', 'Document tab not found.');
+      }
+      if (result.kind === 'version_conflict') {
+        return versionConflict(result.currentVersion);
+      }
+      if (result.kind === 'pending_edits_exist') {
+        return error(
+          409,
+          'pending_edits_exist',
+          'Resolve pending edits before editing this tab directly.',
+          { pendingEditIds: result.pendingEditIds },
+        );
+      }
+      return ok({ document: toDocumentApi(result.document) });
     },
   );
 }
@@ -899,6 +975,28 @@ export function mountDocumentRoutes(
       auth,
       workspaceId: requestedWorkspaceId(c),
       documentId: c.req.param('documentId'),
+    });
+    return jsonResponse(result);
+  });
+
+  app.put('/api/v1/documents/:documentId/tabs/:tabId', async (c) => {
+    const auth = c.get('auth');
+    const rl = checkRateLimit({ principalId: auth.userId, bucket: 'write' });
+    if (!rl.allowed) return rateLimitedResponse(c, rl);
+    const csrfFail = checkCsrf(c, auth);
+    if (csrfFail) return csrfFail;
+    const payload = await readOptionalJsonBody<{
+      text?: unknown;
+      expectedListVersion?: unknown;
+    }>(c);
+    if (!payload.ok) return invalidJsonResponse(payload.error);
+    const result = await updateDocumentTabRoute({
+      auth,
+      workspaceId: requestedWorkspaceId(c),
+      documentId: c.req.param('documentId'),
+      tabId: c.req.param('tabId'),
+      text: payload.data.text,
+      expectedListVersion: payload.data.expectedListVersion,
     });
     return jsonResponse(result);
   });

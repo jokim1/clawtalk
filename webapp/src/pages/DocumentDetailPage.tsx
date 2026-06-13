@@ -8,14 +8,15 @@
  * consumer). The page is remounted per `documentId` (see App.tsx) so the hook
  * only ever handles one document.
  */
-import { useId, useRef } from 'react';
+import { useId, useRef, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 
-import { Button, CTIcon, salon, salonFont } from '../salon';
+import { Button, CTIcon, salon, salonFont, Textarea } from '../salon';
 import { CopyExportMenu } from '../components/CopyExportMenu';
 import { DocumentBlocks } from '../components/documents/DocumentBlocks';
 import { PendingEditList } from '../components/documents/PendingEditList';
 import { FormatPill } from '../components/FormatPill';
+import { serializeDocumentBlocksForEditing } from '../components/documents/documentText';
 import {
   documentSummaryMeta,
   formatDocDate,
@@ -40,8 +41,10 @@ export function DocumentDetailPage(): JSX.Element {
     setConflictNotice,
     busyEditIds,
     busyRunIds,
+    savingTabIds,
     allBusy,
     reload,
+    saveTabText,
     acceptEdit,
     rejectEdit,
     acceptRun,
@@ -53,9 +56,47 @@ export function DocumentDetailPage(): JSX.Element {
   // Tab roving-focus refs for the WAI-ARIA tablist keyboard pattern.
   const tabBaseId = useId();
   const tabButtonsRef = useRef<Map<string, HTMLButtonElement>>(new Map());
+  const [editingTabId, setEditingTabId] = useState<string | null>(null);
+  const [draftText, setDraftText] = useState('');
 
   const tabIdFor = (tabId: string) => `${tabBaseId}-tab-${tabId}`;
   const tabPanelId = `${tabBaseId}-panel`;
+  const activePendingEdits =
+    doc?.pendingEdits.filter((edit) => edit.tabId === activeTab?.id) ?? [];
+  const isEditingActiveTab =
+    editingTabId !== null && editingTabId === activeTab?.id;
+  const actionLocked =
+    allBusy ||
+    busyEditIds.size > 0 ||
+    busyRunIds.size > 0 ||
+    savingTabIds.size > 0;
+  const activeTabSaving = activeTab ? savingTabIds.has(activeTab.id) : false;
+
+  const cancelEditing = () => {
+    setEditingTabId(null);
+    setDraftText('');
+  };
+
+  const selectTab = (tabId: string) => {
+    if (tabId !== activeTab?.id) cancelEditing();
+    setActiveTabId(tabId);
+  };
+
+  const startEditing = () => {
+    if (!activeTab || activePendingEdits.length > 0 || actionLocked) return;
+    setEditingTabId(activeTab.id);
+    setDraftText(serializeDocumentBlocksForEditing(activeTab.blocks));
+  };
+
+  const saveEditing = async () => {
+    if (!activeTab || !isEditingActiveTab || activeTabSaving) return;
+    const saved = await saveTabText({
+      tabId: activeTab.id,
+      text: draftText,
+      expectedListVersion: activeTab.listVersion,
+    });
+    if (saved) cancelEditing();
+  };
 
   // WAI-ARIA tablist keyboard nav: arrows move (wrapping), Home/End jump, and
   // focus follows selection so the roving tabindex stays on the active tab.
@@ -75,7 +116,7 @@ export function DocumentDetailPage(): JSX.Element {
     const nextTab = tabs[nextIndex];
     if (!nextTab) return;
     event.preventDefault();
-    setActiveTabId(nextTab.id);
+    selectTab(nextTab.id);
     tabButtonsRef.current.get(nextTab.id)?.focus();
   };
 
@@ -264,7 +305,51 @@ export function DocumentDetailPage(): JSX.Element {
                   : ''}
               </p>
             </div>
-            <DocumentFormatPills format={doc.format} />
+            <div
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'flex-end',
+                gap: 8,
+                flexWrap: 'wrap',
+              }}
+            >
+              <DocumentFormatPills format={doc.format} />
+              {isEditingActiveTab ? (
+                <>
+                  <Button
+                    variant="primary"
+                    disabled={activeTabSaving}
+                    onClick={() => void saveEditing()}
+                    aria-label="Save document"
+                  >
+                    <CTIcon name="check" size={14} />
+                    {activeTabSaving ? 'Saving' : 'Save'}
+                  </Button>
+                  <Button
+                    variant="secondary"
+                    disabled={activeTabSaving}
+                    onClick={cancelEditing}
+                    aria-label="Cancel editing"
+                  >
+                    <CTIcon name="x" size={14} />
+                    Cancel
+                  </Button>
+                </>
+              ) : (
+                <Button
+                  variant="secondary"
+                  disabled={
+                    !activeTab || actionLocked || activePendingEdits.length > 0
+                  }
+                  onClick={startEditing}
+                  aria-label="Edit document"
+                >
+                  <CTIcon name="edit" size={14} />
+                  Edit
+                </Button>
+              )}
+            </div>
           </header>
 
           {conflictNotice ? (
@@ -368,7 +453,7 @@ export function DocumentDetailPage(): JSX.Element {
                     aria-selected={active}
                     aria-controls={tabPanelId}
                     tabIndex={active ? 0 : -1}
-                    onClick={() => setActiveTabId(tab.id)}
+                    onClick={() => selectTab(tab.id)}
                     onKeyDown={(event) => handleTabKeyDown(event, index)}
                     className="salon-btn"
                     style={{
@@ -413,13 +498,29 @@ export function DocumentDetailPage(): JSX.Element {
               outline: 'none',
             }}
           >
-            <DocumentBlocks
-              blocks={activeTab?.blocks ?? []}
-              pendingEdits={doc.pendingEdits.filter(
-                (edit) => edit.tabId === activeTab?.id,
-              )}
-              format={doc.format}
-            />
+            {isEditingActiveTab ? (
+              <Textarea
+                aria-label={`Edit ${activeTab?.title || 'document tab'}`}
+                value={draftText}
+                onChange={(event) => setDraftText(event.target.value)}
+                disabled={activeTabSaving}
+                style={{
+                  minHeight: 520,
+                  resize: 'vertical',
+                  borderRadius: 12,
+                  fontFamily: salonFont.serif,
+                  fontSize: 17,
+                  lineHeight: 1.6,
+                  background: salon.card,
+                }}
+              />
+            ) : (
+              <DocumentBlocks
+                blocks={activeTab?.blocks ?? []}
+                pendingEdits={activePendingEdits}
+                format={doc.format}
+              />
+            )}
           </article>
 
           {doc.pendingEdits.length > 0 ? (
@@ -435,7 +536,7 @@ export function DocumentDetailPage(): JSX.Element {
                   doc={doc}
                   busyEditIds={busyEditIds}
                   busyRunIds={busyRunIds}
-                  allBusy={allBusy}
+                  allBusy={allBusy || savingTabIds.size > 0}
                   onAcceptEdit={(edit) => void acceptEdit(edit)}
                   onRejectEdit={(edit) => void rejectEdit(edit)}
                   onAcceptRun={(group) => void acceptRun(group)}
@@ -479,7 +580,7 @@ export function DocumentDetailPage(): JSX.Element {
                 <Button
                   variant="secondary"
                   disabled={
-                    allBusy || busyEditIds.size > 0 || busyRunIds.size > 0
+                    actionLocked || busyEditIds.size > 0 || busyRunIds.size > 0
                   }
                   onClick={() => void rejectAll()}
                 >
@@ -488,7 +589,7 @@ export function DocumentDetailPage(): JSX.Element {
                 <Button
                   variant="primary"
                   disabled={
-                    allBusy || busyEditIds.size > 0 || busyRunIds.size > 0
+                    actionLocked || busyEditIds.size > 0 || busyRunIds.size > 0
                   }
                   onClick={() => void acceptAll()}
                   aria-label="Accept all"

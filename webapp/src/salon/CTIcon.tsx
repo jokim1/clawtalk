@@ -22,6 +22,7 @@ export type CTIconName =
   | 'chevron-d'
   | 'sidebar'
   | 'panel'
+  | 'edit'
   | 'check'
   | 'x'
   | 'more'
@@ -163,6 +164,13 @@ export function CTIcon({
         <svg {...common}>
           <rect x="3" y="4" width="18" height="16" rx="2" />
           <path d="M15 4v16" />
+        </svg>
+      );
+    case 'edit':
+      return (
+        <svg {...common}>
+          <path d="M4 20h4l10.5-10.5a2.1 2.1 0 0 0-3-3L5 17v3Z" />
+          <path d="m14 7 3 3" />
         </svg>
       );
     case 'check':

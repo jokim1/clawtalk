@@ -1,4 +1,7 @@
-import type { NativeDocumentBlockKind } from '../../lib/api';
+import type {
+  NativeDocumentBlock,
+  NativeDocumentBlockKind,
+} from '../../lib/api';
 
 export type DocumentDisplayBlockKind = NativeDocumentBlockKind;
 
@@ -166,4 +169,18 @@ export function parseDocumentDisplayBlocks(input: {
     return [{ ...blocks[0], kind: fallbackKind }];
   }
   return blocks;
+}
+
+export function serializeDocumentBlocksForEditing(
+  blocks: NativeDocumentBlock[],
+): string {
+  return blocks
+    .map((block) => {
+      if (block.kind === 'h1') return `# ${block.text}`;
+      if (block.kind === 'h2') return `## ${block.text}`;
+      if (block.kind === 'li') return `- ${block.text}`;
+      if (block.kind === 'code') return `\`\`\`\n${block.text}\n\`\`\``;
+      return block.text;
+    })
+    .join('\n\n');
 }

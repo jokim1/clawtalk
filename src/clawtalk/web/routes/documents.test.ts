@@ -25,6 +25,7 @@ import {
   rejectAllDocumentEditsRoute,
   rejectDocumentEditRoute,
   rejectDocumentEditRunRoute,
+  updateDocumentTabRoute,
 } from './documents.js';
 
 const USER_ID = '0c666666-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
@@ -640,6 +641,110 @@ describe('native document routes', () => {
       ok: true,
       data: { edits: [expect.objectContaining({ id: editId })] },
     });
+  });
+
+  it('updates a native document tab from editable text', async () => {
+    const fixture = await createDocumentFixture();
+
+    const updated = await updateDocumentTabRoute({
+      auth: auth(),
+      workspaceId: fixture.workspaceId,
+      documentId: fixture.documentId,
+      tabId: fixture.mainTabId,
+      expectedListVersion: fixture.mainListVersion,
+      text: [
+        '# Investor Email',
+        '',
+        'Opening paragraph.',
+        '',
+        '- First point',
+        '- Second point',
+      ].join('\n'),
+    });
+
+    expect(updated.statusCode).toBe(200);
+    if (!updated.body.ok) throw new Error('Expected tab update to succeed');
+    expect(updated.body.data.document).toMatchObject({
+      id: fixture.documentId,
+      blockCount: 5,
+      tabs: expect.arrayContaining([
+        expect.objectContaining({
+          id: fixture.mainTabId,
+          listVersion: fixture.mainListVersion + 1,
+          blocks: [
+            expect.objectContaining({ kind: 'h1', text: 'Investor Email' }),
+            expect.objectContaining({ kind: 'p', text: 'Opening paragraph.' }),
+            expect.objectContaining({ kind: 'li', text: 'First point' }),
+            expect.objectContaining({ kind: 'li', text: 'Second point' }),
+          ],
+        }),
+      ]),
+    });
+    const stored = await tabBlocks(fixture.mainTabId);
+    expect(stored.map((block) => [block.kind, block.text])).toEqual([
+      ['h1', 'Investor Email'],
+      ['p', 'Opening paragraph.'],
+      ['li', 'First point'],
+      ['li', 'Second point'],
+    ]);
+  });
+
+  it('rejects a direct tab update when the tab list version is stale', async () => {
+    const fixture = await createDocumentFixture();
+    await getDbPg()`
+      update public.doc_tabs
+      set list_version = list_version + 1
+      where id = ${fixture.mainTabId}::uuid
+    `;
+
+    const result = await updateDocumentTabRoute({
+      auth: auth(),
+      workspaceId: fixture.workspaceId,
+      documentId: fixture.documentId,
+      tabId: fixture.mainTabId,
+      expectedListVersion: fixture.mainListVersion,
+      text: 'Stale save.',
+    });
+
+    expect(result.statusCode).toBe(409);
+    expect(result.body).toMatchObject({
+      ok: false,
+      error: { code: 'version_conflict' },
+    });
+    expect(await blockText(fixture.mainBlockId)).toBe('Original paragraph.');
+  });
+
+  it('rejects a direct tab update while that tab has pending proposals', async () => {
+    const fixture = await createDocumentFixture();
+    const editId = await insertPendingDocumentEdit({
+      workspaceId: fixture.workspaceId,
+      documentId: fixture.documentId,
+      tabId: fixture.mainTabId,
+      op: 'replace',
+      blockId: fixture.mainBlockId,
+      baseBlockVersion: fixture.mainBlockVersion,
+      newText: 'Pending proposal.',
+    });
+
+    const result = await updateDocumentTabRoute({
+      auth: auth(),
+      workspaceId: fixture.workspaceId,
+      documentId: fixture.documentId,
+      tabId: fixture.mainTabId,
+      expectedListVersion: fixture.mainListVersion,
+      text: 'Direct edit blocked.',
+    });
+
+    expect(result.statusCode).toBe(409);
+    expect(result.body).toMatchObject({
+      ok: false,
+      error: {
+        code: 'pending_edits_exist',
+        details: { pendingEditIds: [editId] },
+      },
+    });
+    expect(await editStatus(editId)).toBe('pending');
+    expect(await blockText(fixture.mainBlockId)).toBe('Original paragraph.');
   });
 
   it('accepts a pending edit and returns the refreshed native document', async () => {

@@ -1306,6 +1306,29 @@ export async function getDocument(input: {
   return envelope.document;
 }
 
+export async function updateDocumentTab(input: {
+  documentId: string;
+  tabId: string;
+  text: string;
+  expectedListVersion: number;
+  workspaceId?: string | null;
+}): Promise<{ document: NativeDocument }> {
+  return apiMutationRequest<{ document: NativeDocument }>(
+    withWorkspaceQuery(
+      `/api/v1/documents/${encodeURIComponent(input.documentId)}/tabs/${encodeURIComponent(input.tabId)}`,
+      input.workspaceId,
+    ),
+    {
+      method: 'PUT',
+      includeJson: true,
+      body: JSON.stringify({
+        text: input.text,
+        expectedListVersion: input.expectedListVersion,
+      }),
+    },
+  );
+}
+
 export async function listDocumentEdits(input: {
   documentId: string;
   workspaceId?: string | null;

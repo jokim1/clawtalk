@@ -23,6 +23,7 @@ vi.mock('../lib/api', async (importActual) => {
   return {
     ...actual,
     getDocument: vi.fn(),
+    updateDocumentTab: vi.fn(),
     acceptDocumentEdit: vi.fn(),
     rejectDocumentEdit: vi.fn(),
     acceptDocumentEditRun: vi.fn(),
@@ -159,6 +160,64 @@ describe('DocumentDetailPage', () => {
     fireEvent.click(screen.getByRole('tab', { name: 'Research' }));
     expect(await screen.findByText('Research notes')).toBeTruthy();
     expect(screen.queryByText('Original paragraph.')).toBeNull();
+  });
+
+  it('edits and saves the active document tab directly', async () => {
+    mockApi.getDocument.mockResolvedValue(makeDoc());
+    mockApi.updateDocumentTab.mockResolvedValue({
+      document: makeDoc({
+        tabs: [
+          tab({
+            listVersion: 2,
+            blocks: [block({ text: 'Edited paragraph.' })],
+          }),
+        ],
+      }),
+    });
+    renderDetail();
+
+    expect(await screen.findByText('Original paragraph.')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Edit document' }));
+
+    const editor = screen.getByRole('textbox', { name: 'Edit Main' });
+    expect(editor).toHaveValue('Original paragraph.');
+    fireEvent.change(editor, { target: { value: 'Edited paragraph.' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save document' }));
+
+    await waitFor(() =>
+      expect(mockApi.updateDocumentTab).toHaveBeenCalledWith({
+        documentId: 'doc-1',
+        tabId: 'tab-1',
+        text: 'Edited paragraph.',
+        expectedListVersion: 1,
+      }),
+    );
+    expect(await screen.findByText('Edited paragraph.')).toBeTruthy();
+    expect(screen.queryByRole('textbox', { name: 'Edit Main' })).toBeNull();
+  });
+
+  it('keeps the direct-edit draft open when a save conflict refreshes the document', async () => {
+    mockApi.getDocument.mockResolvedValue(makeDoc());
+    mockApi.updateDocumentTab.mockRejectedValue(
+      new ApiError('pending', 409, 'pending_edits_exist'),
+    );
+    renderDetail();
+
+    await screen.findByText('Original paragraph.');
+    fireEvent.click(screen.getByRole('button', { name: 'Edit document' }));
+    const editor = screen.getByRole('textbox', { name: 'Edit Main' });
+    fireEvent.change(editor, { target: { value: 'Unsaved draft.' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save document' }));
+
+    expect(
+      await screen.findByText(
+        'Resolve the pending suggestions on this tab before editing it directly.',
+      ),
+    ).toBeTruthy();
+    await waitFor(() => expect(mockApi.getDocument).toHaveBeenCalledTimes(2));
+    expect(screen.getByRole('textbox', { name: 'Edit Main' })).toHaveValue(
+      'Unsaved draft.',
+    );
   });
 
   it('shows a pending edit in the review panel', async () => {
