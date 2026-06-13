@@ -14,23 +14,30 @@ import {
   type TalkExecutionEvent,
   type TalkJobExecutionPolicy,
 } from './executor.js';
+import {
+  DeadlineBudget,
+  DeadlineBudgetExceededError,
+} from './deadline-budget.js';
 
 export const PDF_ATTACHMENT_MIME_TYPE = 'application/pdf';
 
 type ToolResult = { result: string; isError?: boolean };
 
-// Deadline on the web_search provider request. The run-level signal only
-// fires on user cancel, so without this a single hung provider fetch wedges
-// the whole round until the scheduler's 1h stuck-run sweep. The abort signal
-// bounds the fetch leg only; the registry separately bounds its own DB reads
-// via a transaction-local statement_timeout (postgres.js queries are not
-// abortable).
+// Per-step cap for the web_search tool call. The run-level signal only fires
+// on user cancel, so without a deadline a single hung provider fetch wedges
+// the whole round until the scheduler's 1h stuck-run sweep. The DeadlineBudget
+// (T6) now owns the timer: it threads an abort signal that fires at
+// min(this cap, remaining run budget) into the fetch. The signal bounds the
+// fetch leg only; the registry separately bounds its own DB reads via a
+// transaction-local statement_timeout (postgres.js queries are not abortable),
+// and a wedged credential tx is backstopped by the queue watchdog.
 export const WEB_SEARCH_TIMEOUT_MS = 20_000;
 
 async function executeWebSearch(
   userId: string,
   args: Record<string, unknown>,
   signal: AbortSignal,
+  budget?: DeadlineBudget,
 ): Promise<ToolResult> {
   const query = typeof args.query === 'string' ? args.query.trim() : '';
   if (!query) {
@@ -46,21 +53,31 @@ async function executeWebSearch(
       ? Math.floor(rawMax)
       : undefined;
 
-  const timeoutController = new AbortController();
-  const timeoutTimer = setTimeout(() => {
-    timeoutController.abort(
-      new DOMException(
-        `web_search timed out after ${WEB_SEARCH_TIMEOUT_MS / 1000}s`,
-        'TimeoutError',
-      ),
-    );
-  }, WEB_SEARCH_TIMEOUT_MS);
+  // Direct/test callers that don't thread a run budget get an ephemeral
+  // single-step budget — identical to the old standalone 20s fetch timer.
+  const activeBudget =
+    budget ??
+    new DeadlineBudget({
+      totalMs: WEB_SEARCH_TIMEOUT_MS,
+      defaultStepMs: WEB_SEARCH_TIMEOUT_MS,
+    });
+
   try {
     const { runWebSearchForUser } = await import('../web-search/registry.js');
-    const response = await runWebSearchForUser(userId, query, {
-      maxResults,
-      signal: AbortSignal.any([signal, timeoutController.signal]),
-    });
+    // The budget owns the deadline (no Promise.race): it aborts the fetch at
+    // min(WEB_SEARCH_TIMEOUT_MS, remaining run budget). The credential tx runs
+    // and commits before the fetch; a running credential query self-bounds via
+    // statement_timeout, while a wedged connection acquisition (not covered by
+    // statement_timeout) falls to the queue watchdog — never abandoned here.
+    const response = await activeBudget.bound(
+      'web_search',
+      (boundSignal) =>
+        runWebSearchForUser(userId, query, {
+          maxResults,
+          signal: boundSignal,
+        }),
+      { stepMs: WEB_SEARCH_TIMEOUT_MS, signal },
+    );
     return {
       result: JSON.stringify({
         provider: response.providerId,
@@ -73,17 +90,17 @@ async function executeWebSearch(
     };
   } catch (err) {
     // Provider/config errors keep their identity even if they surface after
-    // the timer has fired — a late 401 must say "fix your key", not "retry".
+    // the deadline fired — a late 401 must say "fix your key", not "retry".
     const { WebSearchError } = await import('../web-search/types.js');
     if (err instanceof WebSearchError) {
       return { result: `web_search error: ${err.message}`, isError: true };
     }
-    if (timeoutController.signal.aborted && !signal.aborted) {
-      // The timer spans credential resolution AND the provider fetch, so
-      // don't blame the provider — a stalled credential leg can also eat
-      // the budget. The registry's per-leg breadcrumbs say which one hung.
+    if (err instanceof DeadlineBudgetExceededError) {
+      // The deadline spans credential resolution AND the provider fetch, so
+      // don't blame the provider — a stalled credential leg can also eat the
+      // budget. The registry's per-leg breadcrumbs say which one hung.
       return {
-        result: `web_search error: the search did not complete within ${WEB_SEARCH_TIMEOUT_MS / 1000} seconds and was aborted. Continue with any results you already have, or retry the search once.`,
+        result: `web_search error: the search did not complete within ${Math.round(err.deadlineMs / 1000)} seconds and was aborted. Continue with any results you already have, or retry the search once.`,
         isError: true,
       };
     }
@@ -91,8 +108,6 @@ async function executeWebSearch(
       result: `web_search error: ${err instanceof Error ? err.message : String(err)}`,
       isError: true,
     };
-  } finally {
-    clearTimeout(timeoutTimer);
   }
 }
 
@@ -107,6 +122,7 @@ export function buildToolExecutor(
   agentId?: string | null,
   agentNickname?: string | null,
   triggerMessageId?: string | null,
+  budget?: DeadlineBudget,
 ) {
   const googleReadToolNames = new Set([
     'google_drive_search',
@@ -288,7 +304,7 @@ export function buildToolExecutor(
           isError: true,
         };
       }
-      return executeWebSearch(userId, args, signal);
+      return executeWebSearch(userId, args, signal, budget);
     }
 
     if (toolName.startsWith('browser_')) {
