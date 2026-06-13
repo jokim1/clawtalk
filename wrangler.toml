@@ -162,9 +162,23 @@ crons = ["* * * * *"]
 name = "USER_EVENT_HUB"
 class_name = "UserEventHub"
 
+# TalkRunner: one DO per Talk (idFromName(talkId)). Owns run execution —
+# SQLite step log + state machine (Talk Runtime v2, docs/13 §6). Wave 2
+# PR-A1 lands the skeleton behind a dev-only route; /chat keeps dispatching
+# through TALK_RUN_QUEUE until PR-C flips the dispatch call.
+[[durable_objects.bindings]]
+name = "TALK_RUNNER"
+class_name = "TalkRunner"
+
 [[migrations]]
 tag = "v1-user-event-hub"
 new_sqlite_classes = ["UserEventHub"]
+
+# Append-only, ordered after v1. SQLite-backed from the start (the step log
+# lives in DO SQLite, not KV storage).
+[[migrations]]
+tag = "v2-talk-runner"
+new_sqlite_classes = ["TalkRunner"]
 
 # ─── Secrets (set via CLI, not here) ──────────────────────────────────
 #

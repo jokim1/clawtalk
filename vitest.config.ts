@@ -11,7 +11,9 @@ export default defineConfig({
       'skills-engine/**/*.test.ts',
       'eval/**/*.test.ts',
     ],
-    exclude: [...defaultExclude],
+    // *.workers.test.ts run in the workerd pool (vitest.workers.config.ts);
+    // they import `cloudflare:test` and would fail in this Node forks pool.
+    exclude: [...defaultExclude, '**/*.workers.test.ts'],
     pool: 'forks',
     fileParallelism: false,
     maxWorkers: 1,
