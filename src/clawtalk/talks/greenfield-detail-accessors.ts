@@ -4,6 +4,10 @@ import {
   withTrustedDbWrites,
   type Sql,
 } from '../../db.js';
+import {
+  parseDocumentTextBlocks,
+  type ParsedDocumentTextBlock,
+} from '../documents/document-block-text.js';
 import { withDocumentEditMutationLock } from '../documents/edit-locks.js';
 
 export interface GreenfieldMessageRecord {
@@ -699,6 +703,22 @@ function normalizeBlockKind(
     : null;
 }
 
+function editPayloadBlocks(
+  edit: Pick<GreenfieldDocumentEditRecord, 'new_kind' | 'new_text'>,
+): ParsedDocumentTextBlock[] {
+  if (edit.new_text === null) return [];
+  return parseDocumentTextBlocks({
+    text: edit.new_text,
+    fallbackKind: edit.new_kind,
+  });
+}
+
+function editPayloadBlockCount(
+  edit: Pick<GreenfieldDocumentEditRecord, 'new_kind' | 'new_text'>,
+): number {
+  return Math.max(1, editPayloadBlocks(edit).length);
+}
+
 async function loadPendingGreenfieldDocumentEditForUpdate(input: {
   workspaceId: string;
   documentId: string;
@@ -978,6 +998,14 @@ async function applyGreenfieldDocumentEdit(
       insertOrder = anchor.sort_order + 1 + (options.insertOrderOffset ?? 0);
     }
 
+    const payloadBlocks = editPayloadBlocks(edit);
+    if (payloadBlocks.length === 0) {
+      return {
+        kind: 'invalid_edit',
+        message: 'Pending insert edit parsed to no document blocks.',
+      };
+    }
+
     await db`
       update public.doc_blocks
       set sort_order = -sort_order - 1000000
@@ -986,25 +1014,27 @@ async function applyGreenfieldDocumentEdit(
         and tab_id = ${edit.tab_id}::uuid
         and sort_order >= ${insertOrder}
     `;
-    await db`
-      insert into public.doc_blocks (
-        workspace_id, document_id, tab_id, sort_order, kind, text, attrs_json
-      )
-      values (
-        ${workspaceId}::uuid,
-        ${edit.document_id}::uuid,
-        ${edit.tab_id}::uuid,
-        ${insertOrder},
-        ${newKind},
-        ${edit.new_text},
-        ${db.json((edit.new_attrs_json ?? {}) as never)}
-      )
-    `;
+    for (const [index, block] of payloadBlocks.entries()) {
+      await db`
+        insert into public.doc_blocks (
+          workspace_id, document_id, tab_id, sort_order, kind, text, attrs_json
+        )
+        values (
+          ${workspaceId}::uuid,
+          ${edit.document_id}::uuid,
+          ${edit.tab_id}::uuid,
+          ${insertOrder + index},
+          ${block.kind},
+          ${block.text},
+          ${db.json((edit.new_attrs_json ?? {}) as never)}
+        )
+      `;
+    }
     // Insert accepts rely on document_edits_bump_versions_on_accept for the
     // tab list_version bump; replace/delete bump list_version in this layer.
     await db`
       update public.doc_blocks
-      set sort_order = -sort_order - 999999
+      set sort_order = -sort_order - 1000000 + ${payloadBlocks.length}
       where workspace_id = ${workspaceId}::uuid
         and document_id = ${edit.document_id}::uuid
         and tab_id = ${edit.tab_id}::uuid
@@ -1023,8 +1053,8 @@ async function applyGreenfieldDocumentEdit(
         message: 'Pending replace edit is missing replacement text.',
       };
     }
-    const blockRows = await db<{ version: number }[]>`
-      select version
+    const blockRows = await db<{ version: number; sort_order: number }[]>`
+      select version, sort_order
       from public.doc_blocks
       where workspace_id = ${workspaceId}::uuid
         and document_id = ${edit.document_id}::uuid
@@ -1052,10 +1082,28 @@ async function applyGreenfieldDocumentEdit(
         message: 'Pending replace edit has an invalid block kind.',
       };
     }
+    const payloadBlocks = editPayloadBlocks(edit);
+    if (payloadBlocks.length === 0) {
+      return {
+        kind: 'invalid_edit',
+        message: 'Pending replace edit parsed to no document blocks.',
+      };
+    }
+    const firstPayloadBlock = payloadBlocks[0]!;
+    if (payloadBlocks.length > 1) {
+      await db`
+        update public.doc_blocks
+        set sort_order = -sort_order - 1000000
+        where workspace_id = ${workspaceId}::uuid
+          and document_id = ${edit.document_id}::uuid
+          and tab_id = ${edit.tab_id}::uuid
+          and sort_order > ${block.sort_order}
+      `;
+    }
     await db`
       update public.doc_blocks
-      set text = ${edit.new_text},
-          kind = coalesce(${newKind}, kind),
+      set text = ${firstPayloadBlock.text},
+          kind = ${firstPayloadBlock.kind},
           attrs_json = coalesce(
             ${edit.new_attrs_json === null ? null : db.json(edit.new_attrs_json as never)},
             attrs_json
@@ -1065,6 +1113,32 @@ async function applyGreenfieldDocumentEdit(
         and tab_id = ${edit.tab_id}::uuid
         and id = ${edit.block_id}::uuid
     `;
+    if (payloadBlocks.length > 1) {
+      for (const [index, payloadBlock] of payloadBlocks.slice(1).entries()) {
+        await db`
+          insert into public.doc_blocks (
+            workspace_id, document_id, tab_id, sort_order, kind, text, attrs_json
+          )
+          values (
+            ${workspaceId}::uuid,
+            ${edit.document_id}::uuid,
+            ${edit.tab_id}::uuid,
+            ${block.sort_order + index + 1},
+            ${payloadBlock.kind},
+            ${payloadBlock.text},
+            ${db.json({} as never)}
+          )
+        `;
+      }
+      await db`
+        update public.doc_blocks
+        set sort_order = -sort_order - 1000000 + ${payloadBlocks.length - 1}
+        where workspace_id = ${workspaceId}::uuid
+          and document_id = ${edit.document_id}::uuid
+          and tab_id = ${edit.tab_id}::uuid
+          and sort_order <= ${-block.sort_order - 1000001}
+      `;
+    }
   } else {
     if (edit.block_id === null || edit.base_block_version === null) {
       return {
@@ -1299,7 +1373,6 @@ export async function acceptGreenfieldDocumentEdits(input: {
       if (edit.op === 'insert') {
         const offsetKey = `${edit.tab_id}:${edit.after_block_id ?? ''}`;
         const insertOrderOffset = insertOffsets.get(offsetKey) ?? 0;
-        insertOffsets.set(offsetKey, insertOrderOffset + 1);
         const applied = await withTrustedDbWrites(() =>
           applyGreenfieldDocumentEdit(edit, input.workspaceId, {
             allowSupersededStatus: true,
@@ -1313,6 +1386,10 @@ export async function acceptGreenfieldDocumentEdits(input: {
           return applied;
         }
         acceptedEditIds.push(edit.id);
+        insertOffsets.set(
+          offsetKey,
+          insertOrderOffset + editPayloadBlockCount(edit),
+        );
         runId ??= edit.proposed_by_run_id;
         continue;
       }

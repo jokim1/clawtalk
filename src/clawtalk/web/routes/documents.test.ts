@@ -294,6 +294,24 @@ async function blockText(blockId: string): Promise<string> {
   return row.text;
 }
 
+async function tabBlocks(tabId: string): Promise<
+  Array<{
+    id: string;
+    kind: string;
+    text: string;
+    sort_order: number;
+  }>
+> {
+  return getDbPg()<
+    Array<{ id: string; kind: string; text: string; sort_order: number }>
+  >`
+    select id, kind, text, sort_order
+    from public.doc_blocks
+    where tab_id = ${tabId}::uuid
+    order by sort_order asc, id asc
+  `;
+}
+
 async function waitForDocumentEditMutationLockHeld(input: {
   workspaceId: string;
   documentId: string;
@@ -667,6 +685,53 @@ describe('native document routes', () => {
         },
       },
     });
+    expect(await editStatus(editId)).toBe('accepted');
+  });
+
+  it('accepts HTML/markdown-ish replacement text as native blocks, not literal formatting text', async () => {
+    const fixture = await createDocumentFixture();
+    const editId = await insertPendingDocumentEdit({
+      workspaceId: fixture.workspaceId,
+      documentId: fixture.documentId,
+      tabId: fixture.mainTabId,
+      op: 'replace',
+      blockId: fixture.mainBlockId,
+      baseBlockVersion: fixture.mainBlockVersion,
+      newKind: 'p',
+      newText:
+        '<h2>Lila Games | May 2026</h2><p><strong>Investors &amp; Advisors Update</strong></p><ul><li>Product velocity is improving.</li><li>Runway stays tight.</li></ul>',
+    });
+
+    const accepted = await acceptDocumentEditRoute({
+      auth: auth(),
+      workspaceId: fixture.workspaceId,
+      documentId: fixture.documentId,
+      editId,
+    });
+
+    expect(accepted.statusCode).toBe(200);
+    if (!accepted.body.ok) throw new Error('Expected accept to succeed');
+    const mainTab = accepted.body.data.document.tabs.find(
+      (tab) => tab.id === fixture.mainTabId,
+    );
+    expect(mainTab?.blocks.map((block) => [block.kind, block.text])).toEqual([
+      ['h2', 'Lila Games | May 2026'],
+      ['p', 'Investors & Advisors Update'],
+      ['li', 'Product velocity is improving.'],
+      ['li', 'Runway stays tight.'],
+    ]);
+    expect(mainTab?.blocks[0]?.id).toBe(fixture.mainBlockId);
+
+    const stored = await tabBlocks(fixture.mainTabId);
+    expect(
+      stored.map((block) => [block.sort_order, block.kind, block.text]),
+    ).toEqual([
+      [0, 'h2', 'Lila Games | May 2026'],
+      [1, 'p', 'Investors & Advisors Update'],
+      [2, 'li', 'Product velocity is improving.'],
+      [3, 'li', 'Runway stays tight.'],
+    ]);
+    expect(stored.map((block) => block.text).join(' ')).not.toContain('<h2>');
     expect(await editStatus(editId)).toBe('accepted');
   });
 

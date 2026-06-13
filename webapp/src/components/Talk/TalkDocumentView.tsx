@@ -16,12 +16,14 @@ import { Button, salon, salonFont } from '../../salon';
 import { CopyExportMenu } from '../CopyExportMenu';
 import { DocumentBlocks } from '../documents/DocumentBlocks';
 import { PendingEditList } from '../documents/PendingEditList';
+import { FormatPill } from '../FormatPill';
 import {
   documentSummaryMeta,
   formatDocDate,
 } from '../documents/documentsFormat';
 import { useNativeDocumentReview } from '../../hooks/useNativeDocumentReview';
 import { nativeDocumentToExportSource } from '../../lib/doc-export';
+import type { NativeDocumentFormat } from '../../lib/api';
 
 export interface TalkDocumentViewProps {
   documentId: string;
@@ -51,7 +53,6 @@ export function TalkDocumentView({
     loadError,
     setActiveTabId,
     activeTab,
-    pendingByBlock,
     actionError,
     conflictNotice,
     setActionError,
@@ -187,15 +188,16 @@ export function TalkDocumentView({
           </h2>
           <p style={{ margin: 0, fontSize: 12.5, color: salon.ink2 }}>
             {documentSummaryMeta(doc)}
-            {doc.lastEditAt
-              ? ` · edited ${formatDocDate(doc.lastEditAt)}`
-              : ''}
+            {doc.lastEditAt ? ` · edited ${formatDocDate(doc.lastEditAt)}` : ''}
           </p>
         </div>
-        <CopyExportMenu
-          source={nativeDocumentToExportSource(doc)}
-          documentTitle={doc.title || 'Untitled document'}
-        />
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <DocumentFormatPills format={doc.format} />
+          <CopyExportMenu
+            source={nativeDocumentToExportSource(doc)}
+            documentTitle={doc.title || 'Untitled document'}
+          />
+        </div>
       </header>
 
       {conflictNotice ? (
@@ -324,7 +326,10 @@ export function TalkDocumentView({
       >
         <DocumentBlocks
           blocks={activeTab?.blocks ?? []}
-          pendingByBlock={pendingByBlock}
+          pendingEdits={doc.pendingEdits.filter(
+            (edit) => edit.tabId === activeTab?.id,
+          )}
+          format={doc.format}
         />
       </article>
 
@@ -354,6 +359,27 @@ export function TalkDocumentView({
         </div>
       )}
     </div>
+  );
+}
+
+function DocumentFormatPills({
+  format,
+}: {
+  format: NativeDocumentFormat;
+}): JSX.Element {
+  return (
+    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
+      {format === 'markdown' ? (
+        <FormatPill format="markdown" />
+      ) : (
+        <span className="format-pill format-pill-inactive">MD</span>
+      )}
+      {format === 'html' ? (
+        <FormatPill format="html" />
+      ) : (
+        <span className="format-pill format-pill-inactive">HTML</span>
+      )}
+    </span>
   );
 }
 

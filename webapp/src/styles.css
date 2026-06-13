@@ -45,7 +45,6 @@
   --format-pill-html-bg: #fbf0dc;
   --format-pill-html-fg: #8a5a14;
   --format-pill-html-border: #ecd9b2;
-
 }
 
 * {
@@ -2822,7 +2821,8 @@ a {
   place-items: center;
   width: 2.125rem;
   height: 2.125rem;
-  border: 1px solid color-mix(in srgb, var(--talk-room-agent-accent, #c8643a) 42%, transparent);
+  border: 1px solid
+    color-mix(in srgb, var(--talk-room-agent-accent, #c8643a) 42%, transparent);
   border-radius: 999px;
   background: var(--talk-room-agent-accent, #c8643a);
   color: #fff;
@@ -7587,6 +7587,12 @@ a {
   border: 1px solid var(--format-pill-html-border);
 }
 
+.format-pill-inactive {
+  background: var(--salon-card, #ffffff);
+  color: var(--salon-ink-2, #6b6660);
+  border: 1px solid var(--salon-line, #e6e0d1);
+}
+
 /* Doc pane header — extends .talk-tab-doc-header. The existing
    selector handles padding + bottom border; we add layout sub-slots
    so the new controls (toggle, export menu, hide button) sit on the
@@ -7962,7 +7968,6 @@ a {
     /* Caller may swap to overflow ⋯; keep the trigger compact. */
     padding: 0 0.35rem;
   }
-
 }
 
 /* ---------------------------------------------------------------------------

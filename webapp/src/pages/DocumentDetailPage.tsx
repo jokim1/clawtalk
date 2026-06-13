@@ -11,16 +11,18 @@
 import { useId, useRef } from 'react';
 import { Link, useParams } from 'react-router-dom';
 
-import { Button, salon, salonFont } from '../salon';
+import { Button, CTIcon, salon, salonFont } from '../salon';
 import { CopyExportMenu } from '../components/CopyExportMenu';
 import { DocumentBlocks } from '../components/documents/DocumentBlocks';
 import { PendingEditList } from '../components/documents/PendingEditList';
+import { FormatPill } from '../components/FormatPill';
 import {
   documentSummaryMeta,
   formatDocDate,
 } from '../components/documents/documentsFormat';
 import { useNativeDocumentReview } from '../hooks/useNativeDocumentReview';
 import { nativeDocumentToExportSource } from '../lib/doc-export';
+import type { NativeDocumentEdit, NativeDocumentFormat } from '../lib/api';
 
 export function DocumentDetailPage(): JSX.Element {
   const params = useParams<{ documentId: string }>();
@@ -32,7 +34,6 @@ export function DocumentDetailPage(): JSX.Element {
     loadError,
     setActiveTabId,
     activeTab,
-    pendingByBlock,
     actionError,
     conflictNotice,
     setActionError,
@@ -82,29 +83,80 @@ export function DocumentDetailPage(): JSX.Element {
     <div
       className="ct-screen-enter ct-thin-scroll"
       style={{
-        maxWidth: 820,
-        margin: '0 auto',
-        padding: '20px 20px 48px',
+        minHeight: 'calc(100vh - 68px)',
+        margin: 0,
+        padding: 0,
         display: 'flex',
         flexDirection: 'column',
-        gap: 16,
+        background: salon.paper,
       }}
     >
-      <Link
-        to="/app/documents"
-        className="salon-btn"
+      <div
         style={{
-          alignSelf: 'flex-start',
-          fontSize: 13,
+          minHeight: 46,
+          display: 'flex',
+          alignItems: 'center',
+          gap: 10,
+          padding: '0 28px',
+          borderBottom: `1px solid ${salon.line}`,
+          background: salon.paper2,
           color: salon.ink2,
-          textDecoration: 'none',
+          fontSize: 12,
         }}
       >
-        ← Documents
-      </Link>
+        <Link
+          to="/app/documents"
+          className="salon-btn"
+          style={{
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: 5,
+            color: salon.ink2,
+            textDecoration: 'none',
+          }}
+        >
+          <span style={{ transform: 'rotate(180deg)', display: 'inline-flex' }}>
+            <CTIcon name="chevron-r" size={12} />
+          </span>
+          Documents
+        </Link>
+        {doc ? (
+          <>
+            <span aria-hidden="true">·</span>
+            <CTIcon name="doc" size={13} stroke={salon.ink2} />
+            <span
+              style={{
+                minWidth: 0,
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+                whiteSpace: 'nowrap',
+                color: salon.ink,
+                fontFamily: salonFont.mono,
+              }}
+            >
+              {doc.title || 'Untitled document'}
+            </span>
+            <DocumentFormatPills format={doc.format} />
+            <div style={{ flex: 1 }} />
+            <CopyExportMenu
+              source={nativeDocumentToExportSource(doc)}
+              documentTitle={doc.title || 'Untitled document'}
+            />
+          </>
+        ) : null}
+      </div>
 
       {phase === 'loading' ? (
-        <div aria-busy="true" aria-label="Loading document">
+        <div
+          aria-busy="true"
+          aria-label="Loading document"
+          style={{
+            width: '100%',
+            maxWidth: 720,
+            margin: '0 auto',
+            padding: '32px',
+          }}
+        >
           <div
             className="ct-pulse"
             style={{
@@ -183,6 +235,10 @@ export function DocumentDetailPage(): JSX.Element {
         <>
           <header
             style={{
+              width: '100%',
+              maxWidth: 720,
+              margin: '0 auto',
+              padding: '28px 32px 0',
               display: 'flex',
               justifyContent: 'space-between',
               alignItems: 'flex-start',
@@ -208,16 +264,16 @@ export function DocumentDetailPage(): JSX.Element {
                   : ''}
               </p>
             </div>
-            <CopyExportMenu
-              source={nativeDocumentToExportSource(doc)}
-              documentTitle={doc.title || 'Untitled document'}
-            />
+            <DocumentFormatPills format={doc.format} />
           </header>
 
           {conflictNotice ? (
             <div
               role="status"
               style={{
+                width: 'calc(100% - 64px)',
+                maxWidth: 720,
+                margin: '0 auto',
                 display: 'flex',
                 alignItems: 'center',
                 gap: 10,
@@ -251,6 +307,9 @@ export function DocumentDetailPage(): JSX.Element {
             <div
               role="alert"
               style={{
+                width: 'calc(100% - 64px)',
+                maxWidth: 720,
+                margin: '0 auto',
                 display: 'flex',
                 alignItems: 'center',
                 gap: 10,
@@ -284,7 +343,15 @@ export function DocumentDetailPage(): JSX.Element {
             <div
               role="tablist"
               aria-label="Document tabs"
-              style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}
+              style={{
+                width: '100%',
+                maxWidth: 720,
+                margin: '0 auto',
+                padding: '8px 32px 0',
+                display: 'flex',
+                gap: 6,
+                flexWrap: 'wrap',
+              }}
             >
               {doc.tabs.map((tab, index) => {
                 const active = tab.id === activeTab?.id;
@@ -307,14 +374,17 @@ export function DocumentDetailPage(): JSX.Element {
                     style={{
                       height: 32,
                       padding: '0 14px',
-                      borderRadius: 9999,
+                      borderRadius: 6,
                       fontFamily: salonFont.sans,
                       fontSize: 13,
                       fontWeight: 500,
                       cursor: 'pointer',
-                      color: active ? salon.ink : salon.ink2,
+                      color: active ? salon.accentStrong : salon.ink2,
                       background: active ? salon.card : 'transparent',
                       border: `1px solid ${active ? salon.line : 'transparent'}`,
+                      boxShadow: active
+                        ? '0 1px 2px rgba(31,27,22,0.04)'
+                        : 'none',
                     }}
                   >
                     {tab.title || 'Untitled tab'}
@@ -334,32 +404,46 @@ export function DocumentDetailPage(): JSX.Element {
             }
             tabIndex={doc.tabs.length > 1 ? 0 : undefined}
             style={{
-              background: salon.card,
-              border: `1px solid ${salon.line}`,
-              borderRadius: 16,
-              padding: '20px 22px',
+              width: '100%',
+              maxWidth: 720,
+              margin: '0 auto',
+              padding: '24px 32px 112px',
+              background: 'transparent',
+              border: 'none',
+              outline: 'none',
             }}
           >
             <DocumentBlocks
               blocks={activeTab?.blocks ?? []}
-              pendingByBlock={pendingByBlock}
+              pendingEdits={doc.pendingEdits.filter(
+                (edit) => edit.tabId === activeTab?.id,
+              )}
+              format={doc.format}
             />
           </article>
 
           {doc.pendingEdits.length > 0 ? (
             <>
-              <PendingEditList
-                doc={doc}
-                busyEditIds={busyEditIds}
-                busyRunIds={busyRunIds}
-                allBusy={allBusy}
-                onAcceptEdit={(edit) => void acceptEdit(edit)}
-                onRejectEdit={(edit) => void rejectEdit(edit)}
-                onAcceptRun={(group) => void acceptRun(group)}
-                onRejectRun={(group) => void rejectRun(group)}
-                onAcceptAll={() => void acceptAll()}
-                onRejectAll={() => void rejectAll()}
-              />
+              <div
+                style={{
+                  width: 'calc(100% - 64px)',
+                  maxWidth: 720,
+                  margin: '-84px auto 24px',
+                }}
+              >
+                <PendingEditList
+                  doc={doc}
+                  busyEditIds={busyEditIds}
+                  busyRunIds={busyRunIds}
+                  allBusy={allBusy}
+                  onAcceptEdit={(edit) => void acceptEdit(edit)}
+                  onRejectEdit={(edit) => void rejectEdit(edit)}
+                  onAcceptRun={(group) => void acceptRun(group)}
+                  onRejectRun={(group) => void rejectRun(group)}
+                  onAcceptAll={() => void acceptAll()}
+                  onRejectAll={() => void rejectAll()}
+                />
+              </div>
               {/* Design's floating review bar: the bulk controls ride the
                   viewport bottom so a long edit list never hides them. */}
               <div
@@ -373,43 +457,57 @@ export function DocumentDetailPage(): JSX.Element {
                   alignItems: 'center',
                   gap: 10,
                   padding: '10px 14px',
-                  borderRadius: 12,
-                  background: salon.card,
-                  border: `1px solid ${salon.line}`,
-                  boxShadow: '0 8px 24px rgba(31, 27, 22, 0.1)',
+                  background: salon.paper2,
+                  borderTop: `1px solid ${salon.line}`,
+                  boxShadow: '0 -8px 24px rgba(31, 27, 22, 0.06)',
                 }}
               >
+                <CTIcon name="sparkle" size={14} stroke={salon.accent} />
                 <span
                   style={{
                     flex: 1,
-                    fontFamily: salonFont.mono,
-                    fontSize: 11.5,
-                    textTransform: 'uppercase',
-                    letterSpacing: '0.1em',
-                    color: salon.ink2,
+                    fontSize: 12.5,
+                    color: salon.ink,
                   }}
                 >
-                  {doc.pendingEdits.length} pending edit
-                  {doc.pendingEdits.length === 1 ? '' : 's'}
+                  <strong>
+                    {doc.pendingEdits.length} pending edit
+                    {doc.pendingEdits.length === 1 ? '' : 's'}
+                  </strong>{' '}
+                  from <em>{pendingEditorSummary(doc.pendingEdits)}</em>.
                 </span>
                 <Button
                   variant="secondary"
-                  disabled={allBusy || busyEditIds.size > 0 || busyRunIds.size > 0}
+                  disabled={
+                    allBusy || busyEditIds.size > 0 || busyRunIds.size > 0
+                  }
                   onClick={() => void rejectAll()}
                 >
                   Reject all
                 </Button>
                 <Button
                   variant="primary"
-                  disabled={allBusy || busyEditIds.size > 0 || busyRunIds.size > 0}
+                  disabled={
+                    allBusy || busyEditIds.size > 0 || busyRunIds.size > 0
+                  }
                   onClick={() => void acceptAll()}
+                  aria-label="Accept all"
                 >
-                  {allBusy ? 'Working…' : 'Accept all'}
+                  {allBusy ? 'Working…' : 'Accept & continue'}
                 </Button>
               </div>
             </>
           ) : (
-            <div style={{ fontSize: 13, color: salon.ink2 }}>
+            <div
+              style={{
+                width: '100%',
+                maxWidth: 720,
+                margin: '-84px auto 24px',
+                padding: '0 32px',
+                fontSize: 13,
+                color: salon.ink2,
+              }}
+            >
               No pending edits. Agent proposals will appear here for review.
             </div>
           )}
@@ -423,6 +521,9 @@ function DetailCard({ children }: { children: React.ReactNode }): JSX.Element {
   return (
     <div
       style={{
+        width: 'calc(100% - 64px)',
+        maxWidth: 720,
+        margin: '32px auto',
         background: salon.card,
         border: `1px solid ${salon.line}`,
         borderRadius: 16,
@@ -432,4 +533,45 @@ function DetailCard({ children }: { children: React.ReactNode }): JSX.Element {
       {children}
     </div>
   );
+}
+
+function DocumentFormatPills({
+  format,
+}: {
+  format: NativeDocumentFormat;
+}): JSX.Element {
+  return (
+    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
+      {format === 'markdown' ? (
+        <FormatPill format="markdown" />
+      ) : (
+        <span className="format-pill format-pill-inactive">MD</span>
+      )}
+      {format === 'html' ? (
+        <FormatPill format="html" />
+      ) : (
+        <span className="format-pill format-pill-inactive">HTML</span>
+      )}
+    </span>
+  );
+}
+
+function pendingEditorSummary(edits: NativeDocumentEdit[]): string {
+  const names = Array.from(
+    new Set(
+      edits.map(
+        (edit) =>
+          edit.proposedByAgentName ??
+          (edit.source === 'forge'
+            ? 'Forge'
+            : edit.source === 'job'
+              ? 'Job'
+              : 'Agent'),
+      ),
+    ),
+  );
+  if (names.length === 0) return 'Agent';
+  if (names.length === 1) return names[0]!;
+  if (names.length === 2) return `${names[0]} and ${names[1]}`;
+  return `${names[0]} and ${names.length - 1} others`;
 }

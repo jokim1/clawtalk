@@ -1,5 +1,10 @@
 import { getDbPg, withTrustedDbWrites } from '../../db.js';
 import type { LlmToolDefinition } from '../agents/llm-client.js';
+import {
+  collapseDocumentTextBlocks,
+  parseDocumentTextBlocks,
+  type ParsedDocumentTextBlock,
+} from '../documents/document-block-text.js';
 import { withDocumentEditMutationLock } from '../documents/edit-locks.js';
 import type { EffectiveToolAccess } from '../db/agent-accessors.js';
 import {
@@ -14,10 +19,7 @@ type GreenfieldDocumentToolResult = {
   isError?: boolean;
 };
 
-type ParsedGreenfieldDocumentBlock = {
-  kind: GreenfieldDocumentBlockRecord['kind'];
-  text: string;
-};
+type ParsedGreenfieldDocumentBlock = ParsedDocumentTextBlock;
 
 const MAX_DOCUMENT_TOOL_TEXT_BYTES = 1_000_000;
 const ENCODER = new TextEncoder();
@@ -111,56 +113,17 @@ function normalizeDocumentToolText(value: string): string {
   return normalized;
 }
 
-function stripFenceMarkers(text: string): string {
-  if (text.startsWith('```') && text.endsWith('```')) {
-    return text.slice(3, -3).trim();
-  }
-  return text;
-}
-
 export function parseGreenfieldDocumentMarkdown(
   markdown: string,
 ): ParsedGreenfieldDocumentBlock[] {
   const normalized = normalizeDocumentToolText(markdown);
-  if (!normalized) return [];
-  return normalized
-    .split(/\n{2,}/)
-    .map((part) => part.trim())
-    .filter(Boolean)
-    .map((part): ParsedGreenfieldDocumentBlock => {
-      if (part.startsWith('# ')) {
-        return { kind: 'h1', text: part.slice(2).trim() };
-      }
-      if (part.startsWith('## ')) {
-        return { kind: 'h2', text: part.slice(3).trim() };
-      }
-      if (part.startsWith('- ')) {
-        return { kind: 'li', text: part.slice(2).trim() };
-      }
-      if (part.startsWith('```')) {
-        return { kind: 'code', text: stripFenceMarkers(part) };
-      }
-      return { kind: 'p', text: part };
-    })
-    .filter((block) => block.text.trim().length > 0);
-}
-
-function blockToMarkdown(block: ParsedGreenfieldDocumentBlock): string {
-  if (block.kind === 'h1') return `# ${block.text}`;
-  if (block.kind === 'h2') return `## ${block.text}`;
-  if (block.kind === 'li') return `- ${block.text}`;
-  if (block.kind === 'code') return `\`\`\`\n${block.text}\n\`\`\``;
-  return block.text;
+  return parseDocumentTextBlocks({ text: normalized });
 }
 
 function collapseDocumentEditBlocks(
   blocks: ParsedGreenfieldDocumentBlock[],
 ): ParsedGreenfieldDocumentBlock {
-  if (blocks.length === 1) return blocks[0]!;
-  return {
-    kind: 'p',
-    text: blocks.map(blockToMarkdown).join('\n\n'),
-  };
+  return collapseDocumentTextBlocks(blocks);
 }
 
 function requireBlock(

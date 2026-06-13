@@ -109,8 +109,8 @@ function makeDoc(o: Partial<NativeDocument> = {}): NativeDocument {
   };
 }
 
-function renderDetail(): void {
-  render(
+function renderDetail(): ReturnType<typeof render> {
+  return render(
     <MemoryRouter initialEntries={['/app/documents/doc-1']}>
       <Routes>
         <Route
@@ -168,10 +168,41 @@ describe('DocumentDetailPage', () => {
     renderDetail();
 
     expect(await screen.findByText('Pending edits')).toBeTruthy();
-    expect(screen.getByRole('button', { name: /Copy \/ Export/i })).toBeTruthy();
+    expect(
+      screen.getByRole('button', { name: /Copy \/ Export/i }),
+    ).toBeTruthy();
     expect(screen.getByText('Replace paragraph')).toBeTruthy();
-    expect(screen.getByText('Proposed replacement.')).toBeTruthy();
-    expect(screen.getByText('Strategist')).toBeTruthy();
+    expect(screen.getAllByText('Proposed replacement.').length).toBeGreaterThan(
+      0,
+    );
+    expect(screen.getAllByText('Strategist').length).toBeGreaterThan(0);
+  });
+
+  it('renders format pills and formats pending HTML-ish proposals inline', async () => {
+    mockApi.getDocument.mockResolvedValue(
+      makeDoc({
+        pendingEditCount: 1,
+        pendingEdits: [
+          edit({
+            newKind: 'p',
+            newText:
+              '<h2>Lila Games | May 2026</h2><p><strong>Investors &amp; Advisors Update</strong></p>',
+          }),
+        ],
+      }),
+    );
+    const view = renderDetail();
+
+    expect(
+      (await screen.findAllByText('Lila Games | May 2026')).length,
+    ).toBeGreaterThan(0);
+    expect(screen.getAllByText('MD').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('HTML').length).toBeGreaterThan(0);
+    expect(
+      screen.getAllByText('Investors & Advisors Update').length,
+    ).toBeGreaterThan(0);
+    expect(view.container.textContent).not.toContain('<h2>');
+    expect(view.container.textContent).not.toContain('&amp;');
   });
 
   it('accepts a pending edit: applies the returned bumped document and clears the panel', async () => {
@@ -449,6 +480,8 @@ describe('DocumentDetailPage', () => {
     expect(
       await screen.findByText('A second proposal you had not seen.'),
     ).toBeTruthy();
-    expect(screen.getByText('Proposed replacement.')).toBeTruthy();
+    expect(screen.getAllByText('Proposed replacement.').length).toBeGreaterThan(
+      0,
+    );
   });
 });
