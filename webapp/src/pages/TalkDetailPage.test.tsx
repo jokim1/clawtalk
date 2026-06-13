@@ -148,6 +148,57 @@ function stubNarrowViewport(matches: boolean): void {
   );
 }
 
+type TestSpeechRecognitionResult = {
+  isFinal: boolean;
+  0: { transcript: string };
+};
+
+class TestSpeechRecognition {
+  static instances: TestSpeechRecognition[] = [];
+
+  continuous = false;
+  interimResults = false;
+  lang = '';
+  onstart: (() => void) | null = null;
+  onend: (() => void) | null = null;
+  onerror: ((event: { error?: string }) => void) | null = null;
+  onresult:
+    | ((event: {
+        resultIndex: number;
+        results: TestSpeechRecognitionResult[];
+      }) => void)
+    | null = null;
+  start = vi.fn(() => {
+    this.onstart?.();
+  });
+  stop = vi.fn(() => {
+    this.onend?.();
+  });
+  abort = vi.fn(() => {
+    this.onend?.();
+  });
+
+  constructor() {
+    TestSpeechRecognition.instances.push(this);
+  }
+
+  emitFinalTranscript(transcript: string): void {
+    this.onresult?.({
+      resultIndex: 0,
+      results: [{ isFinal: true, 0: { transcript } }],
+    });
+  }
+}
+
+function installSpeechRecognitionMock(): void {
+  TestSpeechRecognition.instances = [];
+  Object.defineProperty(window, 'SpeechRecognition', {
+    configurable: true,
+    writable: true,
+    value: TestSpeechRecognition,
+  });
+}
+
 describe('TalkDetailPage', () => {
   const openTalkStreamMock = vi.mocked(openTalkStream);
   let streamInput: StreamCallbacks | null = null;
@@ -185,6 +236,8 @@ describe('TalkDetailPage', () => {
     vi.useRealTimers();
     vi.unstubAllGlobals();
     vi.clearAllMocks();
+    Reflect.deleteProperty(window, 'SpeechRecognition');
+    Reflect.deleteProperty(window, 'webkitSpeechRecognition');
     Reflect.deleteProperty(URL, 'createObjectURL');
     Reflect.deleteProperty(URL, 'revokeObjectURL');
     document.cookie = 'cr_csrf_token=; Max-Age=0; path=/';
@@ -231,6 +284,9 @@ describe('TalkDetailPage', () => {
     expect(
       screen.getByRole('button', { name: 'Attach saved source files' }),
     ).toBeTruthy();
+    expect(
+      screen.getByRole('button', { name: 'Start voice input' }),
+    ).toHaveAttribute('disabled');
 
     const controls = within(
       screen.getByRole('navigation', { name: 'Talk controls' }),
@@ -1728,6 +1784,55 @@ describe('TalkDetailPage', () => {
     );
     expect(await screen.findByText('working-notes.md')).toBeTruthy();
     expect(screen.getByText('Done')).toBeTruthy();
+  });
+
+  it('dictates speech into the composer from the microphone button', async () => {
+    const user = userEvent.setup();
+    installSpeechRecognitionMock();
+    installTalkDetailFetch({
+      messages: [],
+      runs: [],
+    });
+
+    renderDetailPage('/app/talks/talk-1');
+
+    const composer = await screen.findByPlaceholderText(
+      /^Send a message to this conversation/,
+    );
+    const micButton = await screen.findByRole('button', {
+      name: 'Start voice input',
+    });
+    await waitFor(() => expect(micButton).not.toHaveAttribute('disabled'));
+
+    await user.type(composer, 'Typed lead');
+    await user.click(micButton);
+
+    const recognition = TestSpeechRecognition.instances[0];
+    if (!recognition) {
+      throw new Error('Expected speech recognition to start');
+    }
+    expect(recognition.start).toHaveBeenCalledTimes(1);
+    expect(recognition.continuous).toBe(true);
+    expect(recognition.interimResults).toBe(true);
+    expect(
+      screen.getByRole('button', { name: 'Stop voice input' }),
+    ).toHaveAttribute('aria-pressed', 'true');
+
+    act(() => {
+      recognition.emitFinalTranscript('spoken follow up');
+    });
+
+    await waitFor(() =>
+      expect(composer).toHaveValue('Typed lead spoken follow up'),
+    );
+
+    await user.click(screen.getByRole('button', { name: 'Stop voice input' }));
+    expect(recognition.stop).toHaveBeenCalledTimes(1);
+    await waitFor(() =>
+      expect(
+        screen.getByRole('button', { name: 'Start voice input' }),
+      ).toHaveAttribute('aria-pressed', 'false'),
+    );
   });
 
   it('shows unsaved draft agents in the Talk tab and blocks send until agent changes are saved', async () => {

@@ -470,6 +470,9 @@ for (const state of ['populated', 'empty', 'active'] as const) {
       await expect(
         page.getByRole('button', { name: 'Attach saved source files' }),
       ).toBeVisible();
+      await expect(
+        page.getByRole('button', { name: 'Start voice input' }),
+      ).toBeVisible();
 
       if (vp.width >= 1024) {
         await expect(page.getByText('Q1 Launches')).toBeVisible();
