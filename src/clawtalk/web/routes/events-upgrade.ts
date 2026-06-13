@@ -51,6 +51,13 @@ function isUuid(value: string): boolean {
   return UUID_RE.test(value);
 }
 
+const CLIENT_SOCKET_ID_RE = /^[A-Za-z0-9_-]{1,96}$/;
+
+function parseClientSocketId(raw: string | undefined): string | null {
+  if (!raw) return null;
+  return CLIENT_SOCKET_ID_RE.test(raw) ? raw : null;
+}
+
 /**
  * Extract the `exp` claim from the `eb_at` access-token cookie.
  *
@@ -151,6 +158,7 @@ export async function userEventsUpgradeRoute(
 ): Promise<Response> {
   const auth = c.get('auth');
   const lastEventId = parsePositiveInt(c.req.query('lastEventId')) ?? 0;
+  const clientSocketId = parseClientSocketId(c.req.query('clientSocketId'));
   const jwtExp = parseJwtExpFromCookie(c.req.header('cookie') ?? null);
 
   const upgrade = buildUpgradeRequest({
@@ -161,6 +169,9 @@ export async function userEventsUpgradeRoute(
       'x-clawtalk-topic': `user:${auth.userId}`,
       'x-clawtalk-last-event-id': String(lastEventId),
       'x-clawtalk-jwt-exp': String(jwtExp),
+      ...(clientSocketId
+        ? { 'x-clawtalk-client-socket-id': clientSocketId }
+        : {}),
     },
   });
   return forwardToDo(c, upgrade, auth.userId);
@@ -183,6 +194,7 @@ export async function talkEventsUpgradeRoute(
   }
 
   const lastEventId = parsePositiveInt(c.req.query('lastEventId')) ?? 0;
+  const clientSocketId = parseClientSocketId(c.req.query('clientSocketId'));
   const jwtExp = parseJwtExpFromCookie(c.req.header('cookie') ?? null);
 
   const upgrade = buildUpgradeRequest({
@@ -194,6 +206,9 @@ export async function talkEventsUpgradeRoute(
       'x-clawtalk-talk-id': talkId,
       'x-clawtalk-last-event-id': String(lastEventId),
       'x-clawtalk-jwt-exp': String(jwtExp),
+      ...(clientSocketId
+        ? { 'x-clawtalk-client-socket-id': clientSocketId }
+        : {}),
     },
   });
   return forwardToDo(c, upgrade, auth.userId);

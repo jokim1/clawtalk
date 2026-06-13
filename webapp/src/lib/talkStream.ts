@@ -5,6 +5,11 @@ import {
   type WebSocketEventSourceLike,
   type WebSocketEventSourceOptions,
 } from './websocketEventSource';
+import {
+  HEARTBEAT_INTERVAL_MS,
+  HEARTBEAT_TIMEOUT_MS,
+  TALK_HEARTBEAT_PING,
+} from './talkHeartbeat';
 
 export type TalkStreamState =
   | 'connecting'
@@ -284,6 +289,7 @@ export type TalkStreamTransportFactory = (
 
 interface OpenTalkStreamInput extends TalkStreamCallbacks {
   talkId: string;
+  clientSocketId?: string;
   createTransport?: TalkStreamTransportFactory;
   probeSession?: () => Promise<boolean>;
   jitterMs?: (baseMs: number) => number;
@@ -298,10 +304,13 @@ const BACKOFF_STEPS_MS = [500, 1000, 2000, 4000, 8000] as const;
 export function openTalkStream(input: OpenTalkStreamInput): TalkStreamHandle {
   let source: WebSocketEventSourceLike | null = null;
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+  let livenessTimer: ReturnType<typeof setTimeout> | null = null;
   let reconnectAttempt = 0;
   let stopped = false;
   let handlingReplayGap = false;
   let lastEventId = 0;
+  const clientSocketId = input.clientSocketId ?? createClientSocketId();
 
   const createTransport =
     input.createTransport ??
@@ -320,7 +329,19 @@ export function openTalkStream(input: OpenTalkStreamInput): TalkStreamHandle {
     reconnectTimer = null;
   };
 
+  const clearHeartbeatTimers = () => {
+    if (heartbeatTimer) {
+      clearInterval(heartbeatTimer);
+      heartbeatTimer = null;
+    }
+    if (livenessTimer) {
+      clearTimeout(livenessTimer);
+      livenessTimer = null;
+    }
+  };
+
   const closeSource = () => {
+    clearHeartbeatTimers();
     if (!source) return;
     source.close();
     source = null;
@@ -372,6 +393,28 @@ export function openTalkStream(input: OpenTalkStreamInput): TalkStreamHandle {
           scheduleReconnect();
         }
       });
+  };
+
+  const resetLivenessTimer = () => {
+    if (livenessTimer) {
+      clearTimeout(livenessTimer);
+      livenessTimer = null;
+    }
+    if (stopped || !source) return;
+    livenessTimer = setTimeout(() => {
+      livenessTimer = null;
+      handleTransportError();
+    }, HEARTBEAT_TIMEOUT_MS);
+  };
+
+  const startHeartbeat = () => {
+    clearHeartbeatTimers();
+    if (stopped || !source) return;
+    resetLivenessTimer();
+    heartbeatTimer = setInterval(() => {
+      if (stopped || !source) return;
+      source.send(TALK_HEARTBEAT_PING);
+    }, HEARTBEAT_INTERVAL_MS);
   };
 
   const handleReplayGap = () => {
@@ -554,7 +597,7 @@ export function openTalkStream(input: OpenTalkStreamInput): TalkStreamHandle {
     closeSource();
     emitState(state);
 
-    const url = `/api/v1/talks/${encodeURIComponent(input.talkId)}/events?stream=1`;
+    const url = `/api/v1/talks/${encodeURIComponent(input.talkId)}/events?stream=1&clientSocketId=${encodeURIComponent(clientSocketId)}`;
     let next: WebSocketEventSourceLike | null = null;
     next = createTransport(url, {
       getLastEventId: () => lastEventId,
@@ -562,13 +605,19 @@ export function openTalkStream(input: OpenTalkStreamInput): TalkStreamHandle {
         if (next !== source) return;
         reconnectAttempt = 0;
         emitState('live');
+        startHeartbeat();
       },
       onError: () => {
         if (next !== source) return;
         handleTransportError();
       },
+      onHeartbeat: () => {
+        if (next !== source || stopped) return;
+        resetLivenessTimer();
+      },
       onMessage: (frame) => {
         if (next !== source || stopped) return;
+        resetLivenessTimer();
         if (frame.id > lastEventId) lastEventId = frame.id;
         dispatch(frame);
       },
@@ -581,6 +630,14 @@ export function openTalkStream(input: OpenTalkStreamInput): TalkStreamHandle {
   return {
     close: stop,
   };
+}
+
+function createClientSocketId(): string {
+  const randomUUID = globalThis.crypto?.randomUUID;
+  if (typeof randomUUID === 'function') {
+    return randomUUID.call(globalThis.crypto);
+  }
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
 }
 
 function defaultJitterMs(baseMs: number): number {

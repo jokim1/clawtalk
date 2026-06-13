@@ -73,6 +73,7 @@ type SendControllerInput = {
   talkId: string;
   onUnauthorized: () => void;
   openHistoryEditor: () => void;
+  resyncTalkState: () => Promise<void>;
   followBottomRef: MutableRefObject<boolean>;
   autoStickToBottomRef: MutableRefObject<ScrollBehavior | null>;
   composer: {
@@ -270,6 +271,7 @@ export function useTalkSendController({
   talkId,
   onUnauthorized,
   openHistoryEditor,
+  resyncTalkState,
   followBottomRef,
   autoStickToBottomRef,
   composer,
@@ -585,6 +587,7 @@ export function useTalkSendController({
         onUnauthorized();
         return;
       }
+      void resyncTalkState();
       dispatch({
         type: 'CANCEL_FAILED',
         message: err instanceof Error ? err.message : 'Failed to cancel runs',
@@ -597,6 +600,7 @@ export function useTalkSendController({
     onUnauthorized,
     pageKind,
     pageTalk,
+    resyncTalkState,
   ]);
 
   return {

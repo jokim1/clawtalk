@@ -2287,6 +2287,45 @@ describe('TalkDetailPage', () => {
     );
   });
 
+  it('resyncs run state when cancelling fails and keeps the error visible', async () => {
+    const user = userEvent.setup();
+    const requestedPaths: string[] = [];
+    installTalkDetailFetch({
+      messages: [],
+      runs: [
+        buildRun({
+          id: 'run-cancellable',
+          status: 'running',
+          createdAt: '2026-03-06T00:00:06.000Z',
+          targetAgentId: 'agent-claude',
+          targetAgentNickname: 'Claude Sonnet 4.6',
+        }),
+      ],
+      cancelError: {
+        status: 409,
+        code: 'no_active_run',
+        message: 'No active run exists on the server.',
+      },
+      onRequest: (url) => {
+        requestedPaths.push(new URL(url, 'http://localhost').pathname);
+      },
+    });
+
+    renderDetailPage('/app/talks/talk-1');
+    await screen.findByPlaceholderText(/^Send a message to this conversation/);
+    await user.click(screen.getByRole('button', { name: 'Cancel Runs' }));
+
+    expect(
+      await screen.findByText('No active run exists on the server.'),
+    ).toBeTruthy();
+    await waitFor(() => {
+      expect(
+        requestedPaths.filter((path) => path === '/api/v1/talks/talk-1/runs')
+          .length,
+      ).toBeGreaterThan(0);
+    });
+  });
+
   it('renders concurrent live responses as separate streaming bubbles', async () => {
     installTalkDetailFetch();
 
@@ -2904,6 +2943,40 @@ describe('TalkDetailPage', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('resyncs run state when the stream returns live after reconnect only', async () => {
+    const requestedPaths: string[] = [];
+    installTalkDetailFetch({
+      onRequest: (url) => {
+        requestedPaths.push(new URL(url, 'http://localhost').pathname);
+      },
+    });
+
+    renderDetailPage('/app/talks/talk-1');
+    await screen.findByRole('heading', { name: /Cal Football/i });
+    if (!streamInput) {
+      throw new Error('Expected talk stream input');
+    }
+
+    const countRunFetches = () =>
+      requestedPaths.filter((path) => path === '/api/v1/talks/talk-1/runs')
+        .length;
+    const baselineRunFetches = countRunFetches();
+
+    await act(async () => {
+      streamInput?.onStateChange?.('live');
+    });
+    expect(countRunFetches()).toBe(baselineRunFetches);
+
+    await act(async () => {
+      streamInput?.onStateChange?.('reconnecting');
+      streamInput?.onStateChange?.('live');
+    });
+
+    await waitFor(() => {
+      expect(countRunFetches()).toBeGreaterThan(baselineRunFetches);
+    });
   });
 
   it('clears failed live responses when a new user message appends in the same thread', async () => {
@@ -4890,6 +4963,11 @@ function installTalkDetailFetch(input?: {
     code?: string;
     message: string;
   };
+  cancelError?: {
+    status: number;
+    code?: string;
+    message: string;
+  };
   dataConnectors?: TalkConnectorDataConnectorRow[];
   connectorChannels?: TalkConnectorChannelRow[];
   aiAgents?: AiAgentsPageData;
@@ -5827,6 +5905,15 @@ function installTalkDetailFetch(input?: {
       }
 
       if (path === '/api/v1/talks/talk-1/chat/cancel' && method === 'POST') {
+        if (input?.cancelError) {
+          return jsonResponse(input.cancelError.status, {
+            ok: false,
+            error: {
+              code: input.cancelError.code,
+              message: input.cancelError.message,
+            },
+          });
+        }
         return jsonResponse(200, {
           ok: true,
           data: {

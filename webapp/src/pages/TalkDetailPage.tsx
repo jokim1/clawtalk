@@ -975,6 +975,7 @@ export function TalkDetailPage({
     talkId,
     onUnauthorized: handleUnauthorized,
     openHistoryEditor,
+    resyncTalkState,
     followBottomRef,
     autoStickToBottomRef,
     composer: composerInput,

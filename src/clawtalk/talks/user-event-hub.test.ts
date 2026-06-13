@@ -32,6 +32,8 @@ import { closePgDatabase, getDbPg, initPgDatabase } from '../../db.js';
 import {
   buildAttachmentFilter,
   type SocketAttachment,
+  TALK_HEARTBEAT_PING,
+  TALK_HEARTBEAT_PONG,
   UserEventHub,
   type UserEventHubEnv,
 } from './user-event-hub.js';
@@ -46,11 +48,17 @@ const TEST_USER = '00000000-0000-0000-0000-0000000000a3';
 class MockWebSocket {
   attachment: SocketAttachment | null = null;
   sent: Array<{ event: string; data: unknown; id: number }> = [];
+  rawSent: string[] = [];
   closed: { code?: number; reason?: string } | null = null;
   bufferedAmount = 0;
 
   send(payload: string): void {
-    this.sent.push(JSON.parse(payload));
+    this.rawSent.push(payload);
+    try {
+      this.sent.push(JSON.parse(payload));
+    } catch {
+      // Heartbeat fallback sends the raw PONG string, not an outbox frame.
+    }
   }
 
   serializeAttachment(value: unknown): void {
@@ -80,11 +88,14 @@ class MockWebSocket {
 class MockDurableObjectState {
   readonly id: { readonly name?: string };
   alarms: Array<number | Date> = [];
+  autoResponse: { request: string; response: string } | null = null;
+  acceptedSockets: MockWebSocket[] = [];
   blockConcurrencyWhileCalls = 0;
   blockConcurrencyWhileActive = 0;
   blockConcurrencyWhileMaxConcurrent = 0;
 
   private sockets: MockWebSocket[] = [];
+  private storageValues = new Map<string, unknown>();
   // Workerd's blockConcurrencyWhile serializes overlapping calls
   // (the lock is "the next caller waits until the prior fn() resolves").
   // We emulate that with a chained-promise queue so the F9 test can
@@ -99,8 +110,13 @@ class MockDurableObjectState {
     this.sockets.push(ws);
   }
 
-  acceptWebSocket(_ws: never): void {
-    // Tests bypass the upgrade flow.
+  acceptWebSocket(ws: MockWebSocket): void {
+    this.acceptedSockets.push(ws);
+    this.attach(ws);
+  }
+
+  setWebSocketAutoResponse(pair: { request: string; response: string }): void {
+    this.autoResponse = pair;
   }
 
   getWebSockets(_tag?: string): MockWebSocket[] {
@@ -126,6 +142,12 @@ class MockDurableObjectState {
   }
 
   storage = {
+    get: async <T = unknown>(key: string): Promise<T | undefined> => {
+      return this.storageValues.get(key) as T | undefined;
+    },
+    put: async <T = unknown>(key: string, value: T): Promise<void> => {
+      this.storageValues.set(key, value);
+    },
     setAlarm: async (when: number | Date): Promise<void> => {
       this.alarms.push(when);
     },
@@ -145,6 +167,7 @@ function uniqueTopic(): string {
 function makeAttachment(input: {
   scope: 'user' | 'talk';
   topic: string;
+  clientSocketId?: string | null;
   cursor?: number;
   jwtExpSec?: number;
 }): SocketAttachment {
@@ -153,6 +176,7 @@ function makeAttachment(input: {
     userId: TEST_USER,
     talkId: input.scope === 'talk' ? 'talk-fixture' : null,
     topic: input.topic,
+    clientSocketId: input.clientSocketId ?? null,
     cursor: input.cursor ?? 0,
     jwtExp: input.jwtExpSec ?? Math.floor(Date.now() / 1000) + 3600,
     connectedAtMs: Date.now(),
@@ -435,6 +459,36 @@ describe('handleNotify', () => {
     // (our mock counts overlapping entries by waiting for fn() to resolve).
     expect(state.blockConcurrencyWhileMaxConcurrent).toBe(1);
   });
+
+  it('sends fallback heartbeat pongs during notify so busy streams cannot starve the alarm', async () => {
+    const state = new MockDurableObjectState(TEST_USER);
+    Object.defineProperty(state, 'setWebSocketAutoResponse', {
+      value: undefined,
+      configurable: true,
+    });
+    const topic = uniqueTopic();
+    const ws = new MockWebSocket();
+    ws.serializeAttachment(makeAttachment({ scope: 'user', topic }));
+    state.attach(ws);
+
+    vi.stubGlobal('WebSocketRequestResponsePair', undefined);
+    try {
+      const hub = createHub(state);
+
+      await hub.alarm();
+      expect(
+        ws.rawSent.filter((msg) => msg === TALK_HEARTBEAT_PONG),
+      ).toHaveLength(1);
+
+      await hub.fetch(new Request('http://hub/notify', { method: 'POST' }));
+
+      expect(
+        ws.rawSent.filter((msg) => msg === TALK_HEARTBEAT_PONG),
+      ).toHaveLength(2);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
 });
 
 // ─── alarm() catch-up ──────────────────────────────────────────────────
@@ -590,6 +644,324 @@ describe('handleUpgrade pre-accept guards', () => {
       }),
     );
     expect(res.status).toBe(403);
+  });
+
+  it('registers the heartbeat auto-response when accepting an upgrade', async () => {
+    const state = new MockDurableObjectState(TEST_USER);
+    const hub = createHub(state);
+    const topic = uniqueTopic();
+
+    function FakeWebSocketPair() {
+      return { 0: new MockWebSocket(), 1: new MockWebSocket() };
+    }
+    class FakeWebSocketRequestResponsePair {
+      constructor(
+        readonly request: string,
+        readonly response: string,
+      ) {}
+    }
+    class FakeUpgradeResponse {
+      readonly status: number;
+      readonly webSocket?: unknown;
+
+      constructor(
+        _body: unknown,
+        init?: ResponseInit & { webSocket?: unknown },
+      ) {
+        this.status = init?.status ?? 200;
+        this.webSocket = init?.webSocket;
+      }
+    }
+
+    vi.stubGlobal('WebSocketPair', FakeWebSocketPair);
+    vi.stubGlobal(
+      'WebSocketRequestResponsePair',
+      FakeWebSocketRequestResponsePair,
+    );
+    vi.stubGlobal('Response', FakeUpgradeResponse);
+    try {
+      const res = await hub.fetch(
+        new Request('http://hub/upgrade', {
+          method: 'GET',
+          headers: {
+            Upgrade: 'websocket',
+            'x-clawtalk-userid': TEST_USER,
+            'x-clawtalk-topic': topic,
+            'x-clawtalk-scope': 'user',
+            'x-clawtalk-jwt-exp': String(Math.floor(Date.now() / 1000) + 3600),
+          },
+        }),
+      );
+
+      expect(res.status).toBe(101);
+      expect(state.acceptedSockets).toHaveLength(1);
+      expect(state.autoResponse).toEqual({
+        request: TALK_HEARTBEAT_PING,
+        response: TALK_HEARTBEAT_PONG,
+      });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('replaces stale sockets from the same client before enforcing the cap', async () => {
+    const state = new MockDurableObjectState(TEST_USER);
+    const topic = uniqueTopic();
+    const staleSockets = Array.from({ length: 3 }, () => new MockWebSocket());
+    for (const ws of staleSockets) {
+      ws.serializeAttachment(
+        makeAttachment({
+          scope: 'talk',
+          topic,
+          clientSocketId: 'client-1',
+        }),
+      );
+      state.attach(ws);
+    }
+    const hub = createHub(state);
+
+    function FakeWebSocketPair() {
+      return { 0: new MockWebSocket(), 1: new MockWebSocket() };
+    }
+    class FakeWebSocketRequestResponsePair {
+      constructor(
+        readonly request: string,
+        readonly response: string,
+      ) {}
+    }
+    class FakeUpgradeResponse {
+      readonly status: number;
+      readonly webSocket?: unknown;
+
+      constructor(
+        _body: unknown,
+        init?: ResponseInit & { webSocket?: unknown },
+      ) {
+        this.status = init?.status ?? 200;
+        this.webSocket = init?.webSocket;
+      }
+    }
+
+    vi.stubGlobal('WebSocketPair', FakeWebSocketPair);
+    vi.stubGlobal(
+      'WebSocketRequestResponsePair',
+      FakeWebSocketRequestResponsePair,
+    );
+    vi.stubGlobal('Response', FakeUpgradeResponse);
+    try {
+      const res = await hub.fetch(
+        new Request('http://hub/upgrade', {
+          method: 'GET',
+          headers: {
+            Upgrade: 'websocket',
+            'x-clawtalk-userid': TEST_USER,
+            'x-clawtalk-topic': topic,
+            'x-clawtalk-scope': 'talk',
+            'x-clawtalk-talk-id': 'talk-fixture',
+            'x-clawtalk-client-socket-id': 'client-1',
+            'x-clawtalk-jwt-exp': String(Math.floor(Date.now() / 1000) + 3600),
+          },
+        }),
+      );
+
+      expect(res.status).toBe(101);
+      expect(staleSockets.map((ws) => ws.closed?.reason)).toEqual([
+        'replaced_by_reconnect',
+        'replaced_by_reconnect',
+        'replaced_by_reconnect',
+      ]);
+      expect(state.acceptedSockets).toHaveLength(1);
+      expect(state.acceptedSockets[0]?.attachment?.clientSocketId).toBe(
+        'client-1',
+      );
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('falls back to alarm heartbeat when auto-response is unavailable', async () => {
+    const state = new MockDurableObjectState(TEST_USER);
+    const hub = createHub(state);
+    const topic = uniqueTopic();
+
+    Object.defineProperty(state, 'setWebSocketAutoResponse', {
+      value: undefined,
+      configurable: true,
+    });
+
+    function FakeWebSocketPair() {
+      return { 0: new MockWebSocket(), 1: new MockWebSocket() };
+    }
+    class FakeUpgradeResponse {
+      readonly status: number;
+      readonly webSocket?: unknown;
+
+      constructor(
+        _body: unknown,
+        init?: ResponseInit & { webSocket?: unknown },
+      ) {
+        this.status = init?.status ?? 200;
+        this.webSocket = init?.webSocket;
+      }
+    }
+
+    vi.stubGlobal('WebSocketPair', FakeWebSocketPair);
+    vi.stubGlobal('WebSocketRequestResponsePair', undefined);
+    vi.stubGlobal('Response', FakeUpgradeResponse);
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const before = Date.now();
+      const res = await hub.fetch(
+        new Request('http://hub/upgrade', {
+          method: 'GET',
+          headers: {
+            Upgrade: 'websocket',
+            'x-clawtalk-userid': TEST_USER,
+            'x-clawtalk-topic': topic,
+            'x-clawtalk-scope': 'user',
+            'x-clawtalk-jwt-exp': String(Math.floor(Date.now() / 1000) + 3600),
+          },
+        }),
+      );
+
+      expect(res.status).toBe(101);
+      expect(state.autoResponse).toBeNull();
+      expect(state.alarms).toHaveLength(1);
+      expect(state.alarms[0] as number).toBeGreaterThanOrEqual(
+        before + 20_000 - 100,
+      );
+
+      await hub.alarm();
+
+      expect(state.acceptedSockets[0]!.rawSent).toContain(TALK_HEARTBEAT_PONG);
+      expect(state.alarms).toHaveLength(2);
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining('alarm heartbeat fallback'),
+      );
+    } finally {
+      warnSpy.mockRestore();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('keeps fallback heartbeat alive after an alarm wakes a fresh instance', async () => {
+    const state = new MockDurableObjectState(TEST_USER);
+    Object.defineProperty(state, 'setWebSocketAutoResponse', {
+      value: undefined,
+      configurable: true,
+    });
+    const topic = uniqueTopic();
+    const ws = new MockWebSocket();
+    ws.serializeAttachment(makeAttachment({ scope: 'user', topic }));
+    state.attach(ws);
+
+    vi.stubGlobal('WebSocketRequestResponsePair', undefined);
+    try {
+      const before = Date.now();
+      const hub = createHub(state);
+
+      await hub.alarm();
+
+      expect(ws.rawSent).toContain(TALK_HEARTBEAT_PONG);
+      expect(state.alarms).toHaveLength(1);
+      expect(state.alarms[0] as number).toBeGreaterThanOrEqual(
+        before + 20_000 - 100,
+      );
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('continues fallback heartbeat delivery when one socket send fails', async () => {
+    const state = new MockDurableObjectState(TEST_USER);
+    Object.defineProperty(state, 'setWebSocketAutoResponse', {
+      value: undefined,
+      configurable: true,
+    });
+    const topic = uniqueTopic();
+    const broken = new MockWebSocket();
+    const healthy = new MockWebSocket();
+    broken.serializeAttachment(makeAttachment({ scope: 'user', topic }));
+    healthy.serializeAttachment(makeAttachment({ scope: 'user', topic }));
+    state.attach(broken);
+    state.attach(healthy);
+    vi.spyOn(broken, 'send').mockImplementation(() => {
+      throw new Error('socket closed');
+    });
+
+    vi.stubGlobal('WebSocketRequestResponsePair', undefined);
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const before = Date.now();
+      const hub = createHub(state);
+
+      await hub.alarm();
+
+      expect(errorSpy).toHaveBeenCalledWith(
+        '[user-event-hub] heartbeat fallback send failed',
+        expect.any(Error),
+      );
+      expect(healthy.rawSent).toContain(TALK_HEARTBEAT_PONG);
+      expect(state.alarms).toHaveLength(1);
+      expect(state.alarms[0] as number).toBeGreaterThanOrEqual(
+        before + 20_000 - 100,
+      );
+    } finally {
+      errorSpy.mockRestore();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('does not drain Postgres on every fallback heartbeat alarm', async () => {
+    const state = new MockDurableObjectState(TEST_USER);
+    Object.defineProperty(state, 'setWebSocketAutoResponse', {
+      value: undefined,
+      configurable: true,
+    });
+    const topic = uniqueTopic();
+    const ws = new MockWebSocket();
+    ws.serializeAttachment(makeAttachment({ scope: 'user', topic }));
+    state.attach(ws);
+
+    vi.stubGlobal('WebSocketRequestResponsePair', undefined);
+    try {
+      const hub = createHub(state);
+
+      await hub.alarm();
+      expect(
+        ws.rawSent.filter((msg) => msg === TALK_HEARTBEAT_PONG),
+      ).toHaveLength(1);
+
+      await seedOutbox(topic, [
+        { event_type: 'message_appended', payload: { messageId: 'msg-1' } },
+      ]);
+      await hub.alarm();
+
+      expect(
+        ws.rawSent.filter((msg) => msg === TALK_HEARTBEAT_PONG),
+      ).toHaveLength(2);
+      expect(ws.sent).toHaveLength(0);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('does not reschedule fallback heartbeat alarms after all sockets are gone', async () => {
+    const state = new MockDurableObjectState(TEST_USER);
+    Object.defineProperty(state, 'setWebSocketAutoResponse', {
+      value: undefined,
+      configurable: true,
+    });
+    vi.stubGlobal('WebSocketRequestResponsePair', undefined);
+    try {
+      const hub = createHub(state);
+
+      await hub.alarm();
+
+      expect(state.alarms).toHaveLength(0);
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });
 
