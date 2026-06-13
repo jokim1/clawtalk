@@ -321,6 +321,18 @@ function clearFailedLiveResponses(
   return next;
 }
 
+function clearTerminalLiveResponsesFromRuns(
+  liveResponsesByRunId: Record<string, LiveResponseView>,
+  runs: TalkRun[],
+): Record<string, LiveResponseView> {
+  const next = { ...liveResponsesByRunId };
+  for (const run of runs) {
+    if (isNonTerminalRunStatus(run.status)) continue;
+    delete next[run.id];
+  }
+  return next;
+}
+
 function shouldShowInlineFailure(input: {
   existing?: LiveResponseView;
   priorRun?: RunView;
@@ -420,10 +432,20 @@ export function detailReducer(
       const incoming = mapRunsById(action.runs);
       const merged = { ...incoming };
       for (const [runId, view] of Object.entries(state.runsById)) {
-        merged[runId] = { ...merged[runId], ...view };
+        const incomingView = merged[runId];
+        // Terminal statuses are monotonic. If the first server snapshot says a
+        // run completed while local WS state still says running, the snapshot
+        // must win so `activeRound` and composer locking reconcile.
+        if (incomingView && !isNonTerminalRunStatus(incomingView.status)) {
+          continue;
+        }
+        merged[runId] = { ...incomingView, ...view };
       }
       const seededLive = deriveLiveResponsesFromRuns(action.runs);
-      const liveResponsesByRunId = { ...state.liveResponsesByRunId };
+      const liveResponsesByRunId = clearTerminalLiveResponsesFromRuns(
+        state.liveResponsesByRunId,
+        action.runs,
+      );
       for (const [runId, view] of Object.entries(seededLive)) {
         if (!liveResponsesByRunId[runId]) liveResponsesByRunId[runId] = view;
       }
@@ -449,7 +471,14 @@ export function detailReducer(
           merged[runId] = view;
         }
       }
-      return { ...state, runsById: merged };
+      return {
+        ...state,
+        runsById: merged,
+        liveResponsesByRunId: clearTerminalLiveResponsesFromRuns(
+          state.liveResponsesByRunId,
+          action.runs,
+        ),
+      };
     }
     case 'MESSAGE_LANDED': {
       // The snapshot cache holds the message itself (router setQueryData

@@ -91,6 +91,16 @@ export function useTalkRunStream({
 }: UseTalkRunStreamParams): void {
   useEffect(() => {
     if (pageKind !== 'ready') return;
+    let hasObservedLiveConnection = false;
+    let reconnectResyncTimer: ReturnType<typeof setTimeout> | null = null;
+    const scheduleReconnectResync = () => {
+      if (reconnectResyncTimer) return;
+      reconnectResyncTimer = setTimeout(() => {
+        reconnectResyncTimer = null;
+        void resyncTalkState();
+      }, 0);
+    };
+
     const stream = openTalkStream({
       talkId,
       onUnauthorized: handleUnauthorized,
@@ -323,8 +333,12 @@ export function useTalkRunStream({
             // Coming back online (or first live tick on mount) — mark
             // every cached snapshot stale so any other open Talk pulls
             // the latest the next time it renders, and the active one
-            // refetches immediately. Debounced so a reconnect replay
-            // backlog collapses to one round-trip.
+            // refetches immediately after reconnect. Same-tick live
+            // transitions coalesce to one round-trip.
+            if (hasObservedLiveConnection) {
+              scheduleReconnectResync();
+            }
+            hasObservedLiveConnection = true;
             wsCacheRouterRef.current.scheduleInvalidateAllSnapshots();
             dispatch({ type: 'STREAM_LIVE' });
             break;
@@ -342,6 +356,10 @@ export function useTalkRunStream({
 
     return () => {
       stream.close();
+      if (reconnectResyncTimer) {
+        clearTimeout(reconnectResyncTimer);
+        reconnectResyncTimer = null;
+      }
       dispatch({ type: 'STREAM_OFFLINE' });
       for (const timer of pendingMessageRefetchTimersRef.current.values()) {
         clearTimeout(timer);

@@ -8,6 +8,8 @@
 // `getLastEventId` callback when constructing the reconnect URL and
 // is otherwise stateless — fresh adapter per reconnect, no carry-over.
 
+import { TALK_HEARTBEAT_PONG } from './talkHeartbeat';
+
 export interface WebSocketEventSourceFrame {
   event: string;
   data: string;
@@ -15,6 +17,8 @@ export interface WebSocketEventSourceFrame {
 }
 
 export interface WebSocketLike {
+  readonly readyState: number;
+  send(data: string): void;
   close(code?: number, reason?: string): void;
   addEventListener(
     type: 'open',
@@ -37,12 +41,14 @@ export interface WebSocketLike {
 export interface WebSocketEventSourceOptions {
   getLastEventId: () => number;
   onMessage: (frame: WebSocketEventSourceFrame) => void;
+  onHeartbeat?: () => void;
   onOpen?: () => void;
   onError?: (err?: unknown) => void;
   createWebSocket?: (url: string) => WebSocketLike;
 }
 
 export interface WebSocketEventSourceLike {
+  send(data: string): void;
   close(): void;
 }
 
@@ -72,6 +78,10 @@ export class WebSocketEventSource implements WebSocketEventSourceLike {
 
     ws.addEventListener('message', (event: MessageEvent<string>) => {
       if (this.ws !== ws) return;
+      if (event.data === TALK_HEARTBEAT_PONG) {
+        this.options.onHeartbeat?.();
+        return;
+      }
       let parsed: { event?: unknown; data?: unknown; id?: unknown };
       try {
         parsed = JSON.parse(event.data) as typeof parsed;
@@ -104,6 +114,12 @@ export class WebSocketEventSource implements WebSocketEventSourceLike {
       if (event.code === 1000) return;
       this.options.onError?.(event);
     });
+  }
+
+  send(data: string): void {
+    const ws = this.ws;
+    if (!ws || ws.readyState !== 1) return;
+    ws.send(data);
   }
 
   close(): void {

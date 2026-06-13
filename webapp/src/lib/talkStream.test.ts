@@ -5,12 +5,18 @@ import type {
   WebSocketEventSourceFrame,
   WebSocketEventSourceOptions,
 } from './websocketEventSource';
+import {
+  HEARTBEAT_INTERVAL_MS,
+  HEARTBEAT_TIMEOUT_MS,
+  TALK_HEARTBEAT_PING,
+} from './talkHeartbeat';
 
 class FakeTransport {
   static instances: FakeTransport[] = [];
 
   readonly url: string;
   readonly options: WebSocketEventSourceOptions;
+  send = vi.fn();
   close = vi.fn();
 
   constructor(url: string, options: WebSocketEventSourceOptions) {
@@ -25,6 +31,10 @@ class FakeTransport {
 
   emitError(): void {
     this.options.onError?.(new Event('error'));
+  }
+
+  emitHeartbeat(): void {
+    this.options.onHeartbeat?.();
   }
 
   emitFrame(event: string, payload: unknown, id = 1): void {
@@ -101,6 +111,158 @@ describe('openTalkStream', () => {
     await vi.advanceTimersByTimeAsync(500);
     expect(FakeTransport.instances).toHaveLength(2);
     expect(onUnauthorized).not.toHaveBeenCalled();
+  });
+
+  it('sends heartbeat pings while live', async () => {
+    openTalkStream({
+      talkId: 'talk-1',
+      onUnauthorized: vi.fn(),
+      onReplayGap: vi.fn(),
+      onMessageAppended: vi.fn(),
+      onRunStarted: vi.fn(),
+      onRunQueued: vi.fn(),
+      onRunCompleted: vi.fn(),
+      onRunFailed: vi.fn(),
+      onRunCancelled: vi.fn(),
+      createTransport: (url, options) => new FakeTransport(url, options),
+      probeSession: vi.fn(async () => true),
+      jitterMs: () => 0,
+    });
+
+    const transport = FakeTransport.instances[0]!;
+    transport.emitOpen();
+    expect(transport.send).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(HEARTBEAT_INTERVAL_MS);
+    expect(transport.send).toHaveBeenCalledTimes(1);
+    expect(transport.send).toHaveBeenLastCalledWith(TALK_HEARTBEAT_PING);
+
+    await vi.advanceTimersByTimeAsync(HEARTBEAT_INTERVAL_MS);
+    expect(transport.send).toHaveBeenCalledTimes(2);
+    expect(transport.send).toHaveBeenLastCalledWith(TALK_HEARTBEAT_PING);
+  });
+
+  it('does not reconnect while heartbeat pongs keep arriving', async () => {
+    openTalkStream({
+      talkId: 'talk-1',
+      onUnauthorized: vi.fn(),
+      onReplayGap: vi.fn(),
+      onMessageAppended: vi.fn(),
+      onRunStarted: vi.fn(),
+      onRunQueued: vi.fn(),
+      onRunCompleted: vi.fn(),
+      onRunFailed: vi.fn(),
+      onRunCancelled: vi.fn(),
+      createTransport: (url, options) => new FakeTransport(url, options),
+      probeSession: vi.fn(async () => true),
+      jitterMs: () => 0,
+    });
+
+    const transport = FakeTransport.instances[0]!;
+    transport.emitOpen();
+    for (let i = 0; i < 3; i += 1) {
+      await vi.advanceTimersByTimeAsync(HEARTBEAT_INTERVAL_MS);
+      transport.emitHeartbeat();
+    }
+    await vi.advanceTimersByTimeAsync(HEARTBEAT_TIMEOUT_MS - 1);
+
+    expect(transport.close).not.toHaveBeenCalled();
+    expect(FakeTransport.instances).toHaveLength(1);
+  });
+
+  it('closes and reconnects when the live socket has no inbound heartbeat before timeout', async () => {
+    const states: string[] = [];
+
+    openTalkStream({
+      talkId: 'talk-1',
+      onUnauthorized: vi.fn(),
+      onReplayGap: vi.fn(),
+      onMessageAppended: vi.fn(),
+      onRunStarted: vi.fn(),
+      onRunQueued: vi.fn(),
+      onRunCompleted: vi.fn(),
+      onRunFailed: vi.fn(),
+      onRunCancelled: vi.fn(),
+      onStateChange: (state) => states.push(state),
+      createTransport: (url, options) => new FakeTransport(url, options),
+      probeSession: vi.fn(async () => true),
+      jitterMs: () => 0,
+    });
+
+    const first = FakeTransport.instances[0]!;
+    first.emitOpen();
+
+    await vi.advanceTimersByTimeAsync(HEARTBEAT_TIMEOUT_MS);
+    await vi.runAllTicks();
+
+    expect(first.close).toHaveBeenCalledTimes(1);
+    expect(states).toContain('reconnecting');
+
+    await vi.advanceTimersByTimeAsync(500);
+    expect(FakeTransport.instances).toHaveLength(2);
+  });
+
+  it('treats heartbeat pongs as liveness only, not stream frames', () => {
+    const onRunStarted = vi.fn();
+
+    openTalkStream({
+      talkId: 'talk-1',
+      onUnauthorized: vi.fn(),
+      onReplayGap: vi.fn(),
+      onMessageAppended: vi.fn(),
+      onRunStarted,
+      onRunQueued: vi.fn(),
+      onRunCompleted: vi.fn(),
+      onRunFailed: vi.fn(),
+      onRunCancelled: vi.fn(),
+      createTransport: (url, options) => new FakeTransport(url, options),
+      probeSession: vi.fn(async () => true),
+      jitterMs: () => 0,
+    });
+
+    const transport = FakeTransport.instances[0]!;
+    transport.emitOpen();
+    transport.emitHeartbeat();
+
+    expect(onRunStarted).not.toHaveBeenCalled();
+  });
+
+  it('preserves lastEventId across a heartbeat-timeout reconnect', async () => {
+    openTalkStream({
+      talkId: 'talk-1',
+      onUnauthorized: vi.fn(),
+      onReplayGap: vi.fn(),
+      onMessageAppended: vi.fn(),
+      onRunStarted: vi.fn(),
+      onRunQueued: vi.fn(),
+      onRunCompleted: vi.fn(),
+      onRunFailed: vi.fn(),
+      onRunCancelled: vi.fn(),
+      createTransport: (url, options) => new FakeTransport(url, options),
+      probeSession: vi.fn(async () => true),
+      jitterMs: () => 0,
+    });
+
+    const first = FakeTransport.instances[0]!;
+    first.emitOpen();
+    first.emitFrame(
+      'talk_run_started',
+      {
+        talkId: 'talk-1',
+        runId: 'run-1',
+        triggerMessageId: null,
+        status: 'running',
+      },
+      10,
+    );
+    expect(first.options.getLastEventId()).toBe(10);
+
+    await vi.advanceTimersByTimeAsync(HEARTBEAT_TIMEOUT_MS);
+    await vi.runAllTicks();
+    await vi.advanceTimersByTimeAsync(500);
+
+    expect(FakeTransport.instances).toHaveLength(2);
+    expect(FakeTransport.instances[1]!.options.getLastEventId()).toBe(10);
   });
 
   it('stops reconnecting and calls onUnauthorized when session probe returns unauthorized', async () => {

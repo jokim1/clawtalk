@@ -211,3 +211,85 @@ describe('talkRunReducer TOOL_RESULT', () => {
     });
   });
 });
+
+describe('talkRunReducer MERGE_HISTORICAL_RUNS reconciliation', () => {
+  it('deletes a stale live entry when snapshot hydration sees a terminal run', () => {
+    let state = createInitialDetailState();
+    state = detailReducer(state, {
+      type: 'RUN_STARTED',
+      runId: RUN_ID,
+      triggerMessageId: 'msg-1',
+      targetAgentId: 'agent-1',
+      targetAgentNickname: 'Researcher',
+    });
+    expect(state.liveResponsesByRunId[RUN_ID]).toBeDefined();
+
+    state = detailReducer(state, {
+      type: 'SNAPSHOT_HYDRATED',
+      runs: [
+        {
+          id: RUN_ID,
+          status: 'completed',
+          createdAt: '2026-06-13T00:00:00.000Z',
+          completedAt: '2026-06-13T00:00:05.000Z',
+        } as never,
+      ],
+    });
+
+    expect(state.runsById[RUN_ID]?.status).toBe('completed');
+    expect(state.liveResponsesByRunId[RUN_ID]).toBeUndefined();
+  });
+
+  it('deletes a stale live entry when the refetched run is terminal', () => {
+    let state = createInitialDetailState();
+    state = detailReducer(state, {
+      type: 'RUN_QUEUED',
+      runId: RUN_ID,
+      triggerMessageId: 'msg-1',
+      targetAgentId: 'agent-1',
+      targetAgentNickname: 'Researcher',
+    });
+    expect(state.liveResponsesByRunId[RUN_ID]).toBeDefined();
+
+    state = detailReducer(state, {
+      type: 'MERGE_HISTORICAL_RUNS',
+      runs: [
+        {
+          id: RUN_ID,
+          status: 'completed',
+          createdAt: '2026-06-13T00:00:00.000Z',
+          completedAt: '2026-06-13T00:00:05.000Z',
+        } as never,
+      ],
+    });
+
+    expect(state.runsById[RUN_ID]?.status).toBe('completed');
+    expect(state.liveResponsesByRunId[RUN_ID]).toBeUndefined();
+  });
+
+  it('preserves a live entry when the refetched run is still non-terminal', () => {
+    let state = createInitialDetailState();
+    state = detailReducer(state, {
+      type: 'RUN_QUEUED',
+      runId: RUN_ID,
+      triggerMessageId: 'msg-1',
+      targetAgentId: 'agent-1',
+      targetAgentNickname: 'Researcher',
+    });
+
+    state = detailReducer(state, {
+      type: 'MERGE_HISTORICAL_RUNS',
+      runs: [
+        {
+          id: RUN_ID,
+          status: 'running',
+          createdAt: '2026-06-13T00:00:00.000Z',
+          startedAt: '2026-06-13T00:00:01.000Z',
+        } as never,
+      ],
+    });
+
+    expect(state.runsById[RUN_ID]?.status).toBe('running');
+    expect(state.liveResponsesByRunId[RUN_ID]).toBeDefined();
+  });
+});

@@ -5,6 +5,11 @@ import {
   type WebSocketEventSourceLike,
   type WebSocketEventSourceOptions,
 } from './websocketEventSource';
+import {
+  HEARTBEAT_INTERVAL_MS,
+  HEARTBEAT_TIMEOUT_MS,
+  TALK_HEARTBEAT_PING,
+} from './talkHeartbeat';
 
 export type TalkStreamState =
   | 'connecting'
@@ -298,6 +303,8 @@ const BACKOFF_STEPS_MS = [500, 1000, 2000, 4000, 8000] as const;
 export function openTalkStream(input: OpenTalkStreamInput): TalkStreamHandle {
   let source: WebSocketEventSourceLike | null = null;
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+  let livenessTimer: ReturnType<typeof setTimeout> | null = null;
   let reconnectAttempt = 0;
   let stopped = false;
   let handlingReplayGap = false;
@@ -320,7 +327,19 @@ export function openTalkStream(input: OpenTalkStreamInput): TalkStreamHandle {
     reconnectTimer = null;
   };
 
+  const clearHeartbeatTimers = () => {
+    if (heartbeatTimer) {
+      clearInterval(heartbeatTimer);
+      heartbeatTimer = null;
+    }
+    if (livenessTimer) {
+      clearTimeout(livenessTimer);
+      livenessTimer = null;
+    }
+  };
+
   const closeSource = () => {
+    clearHeartbeatTimers();
     if (!source) return;
     source.close();
     source = null;
@@ -372,6 +391,28 @@ export function openTalkStream(input: OpenTalkStreamInput): TalkStreamHandle {
           scheduleReconnect();
         }
       });
+  };
+
+  const resetLivenessTimer = () => {
+    if (livenessTimer) {
+      clearTimeout(livenessTimer);
+      livenessTimer = null;
+    }
+    if (stopped || !source) return;
+    livenessTimer = setTimeout(() => {
+      livenessTimer = null;
+      handleTransportError();
+    }, HEARTBEAT_TIMEOUT_MS);
+  };
+
+  const startHeartbeat = () => {
+    clearHeartbeatTimers();
+    if (stopped || !source) return;
+    resetLivenessTimer();
+    heartbeatTimer = setInterval(() => {
+      if (stopped || !source) return;
+      source.send(TALK_HEARTBEAT_PING);
+    }, HEARTBEAT_INTERVAL_MS);
   };
 
   const handleReplayGap = () => {
@@ -562,13 +603,19 @@ export function openTalkStream(input: OpenTalkStreamInput): TalkStreamHandle {
         if (next !== source) return;
         reconnectAttempt = 0;
         emitState('live');
+        startHeartbeat();
       },
       onError: () => {
         if (next !== source) return;
         handleTransportError();
       },
+      onHeartbeat: () => {
+        if (next !== source || stopped) return;
+        resetLivenessTimer();
+      },
       onMessage: (frame) => {
         if (next !== source || stopped) return;
+        resetLivenessTimer();
         if (frame.id > lastEventId) lastEventId = frame.id;
         dispatch(frame);
       },

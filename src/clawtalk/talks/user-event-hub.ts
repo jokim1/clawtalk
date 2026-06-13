@@ -62,6 +62,7 @@ interface WebSocketLike {
 interface DurableObjectStateLike {
   readonly id: { readonly name?: string };
   acceptWebSocket(ws: WebSocketLike, tags?: string[]): void;
+  setWebSocketAutoResponse?(pair: WebSocketRequestResponsePair): void;
   getWebSockets(tag?: string): WebSocketLike[];
   blockConcurrencyWhile<T>(fn: () => Promise<T>): Promise<T>;
   storage: {
@@ -75,6 +76,10 @@ interface DurableObjectStateLike {
 declare const WebSocketPair: {
   new (): { 0: WebSocketLike; 1: WebSocketLike };
 };
+
+declare class WebSocketRequestResponsePair {
+  constructor(request: string, response: string);
+}
 
 interface DoResponseInit extends ResponseInit {
   webSocket?: WebSocketLike;
@@ -112,6 +117,10 @@ const REPLAY_TIMEOUT_MS = 5_000;
 const ALARM_BACKOFF_MS = 30_000;
 const BACKPRESSURE_BYTES = 1_000_000;
 const STATEMENT_TIMEOUT_MS = 5_000;
+const FALLBACK_HEARTBEAT_INTERVAL_MS = 20_000;
+// Keep PING/PONG in sync with webapp/src/lib/talkHeartbeat.ts.
+export const TALK_HEARTBEAT_PING = 'clawtalk:ping';
+export const TALK_HEARTBEAT_PONG = 'clawtalk:pong';
 
 // ─── G6 helper: bounded promise race ────────────────────────────────────
 
@@ -162,10 +171,22 @@ export function buildAttachmentFilter(
 export class UserEventHub {
   private state: DurableObjectStateLike;
   private env: UserEventHubEnv;
+  private heartbeatFallbackActive = false;
 
   constructor(state: DurableObjectStateLike, env: UserEventHubEnv) {
     this.state = state;
     this.env = env;
+  }
+
+  private canUseHeartbeatAutoResponse(): boolean {
+    return (
+      typeof this.state.setWebSocketAutoResponse === 'function' &&
+      typeof WebSocketRequestResponsePair === 'function'
+    );
+  }
+
+  private shouldRunHeartbeatFallback(): boolean {
+    return this.heartbeatFallbackActive || !this.canUseHeartbeatAutoResponse();
   }
 
   async fetch(request: Request): Promise<Response> {
@@ -215,6 +236,7 @@ export class UserEventHub {
         WebSocketLike,
       ];
       this.state.acceptWebSocket(server, [attachment.topic]);
+      await this.registerHeartbeatResponse();
       server.serializeAttachment(attachment);
 
       // Replay window with G6 timeout.
@@ -235,6 +257,43 @@ export class UserEventHub {
       response = new Response(null, init as ResponseInit);
     });
     return response ?? new Response('upgrade not produced', { status: 500 });
+  }
+
+  private async registerHeartbeatResponse(): Promise<void> {
+    const setAutoResponse = this.state.setWebSocketAutoResponse;
+    if (
+      typeof setAutoResponse === 'function' &&
+      typeof WebSocketRequestResponsePair === 'function'
+    ) {
+      setAutoResponse.call(
+        this.state,
+        new WebSocketRequestResponsePair(
+          TALK_HEARTBEAT_PING,
+          TALK_HEARTBEAT_PONG,
+        ),
+      );
+      return;
+    }
+
+    if (!this.heartbeatFallbackActive) {
+      console.warn(
+        '[user-event-hub] WebSocket auto-response unavailable; using alarm heartbeat fallback',
+      );
+    }
+    this.heartbeatFallbackActive = true;
+    await this.state.storage.setAlarm(
+      Date.now() + FALLBACK_HEARTBEAT_INTERVAL_MS,
+    );
+  }
+
+  private sendFallbackHeartbeatPongs(): void {
+    for (const ws of this.state.getWebSockets()) {
+      try {
+        ws.send(TALK_HEARTBEAT_PONG);
+      } catch (err) {
+        console.error('[user-event-hub] heartbeat fallback send failed', err);
+      }
+    }
   }
 
   private async replayInto(
@@ -329,7 +388,12 @@ export class UserEventHub {
     // R4: schedule an alarm catch-up regardless of drain outcome —
     // if the drain succeeded, alarm fires on idle and is a no-op
     // (no new rows). If it failed, alarm retries in 30s.
-    await this.state.storage.setAlarm(Date.now() + ALARM_BACKOFF_MS);
+    await this.state.storage.setAlarm(
+      Date.now() +
+        (this.heartbeatFallbackActive
+          ? FALLBACK_HEARTBEAT_INTERVAL_MS
+          : ALARM_BACKOFF_MS),
+    );
     return new Response(null, { status: 200 });
   }
 
@@ -421,6 +485,7 @@ export class UserEventHub {
 
   // ─── alarm() — catch-up path (R4) ────────────────────────────────────
   async alarm(): Promise<void> {
+    const useHeartbeatFallback = this.shouldRunHeartbeatFallback();
     // Same drainOnce-inside-blockConcurrencyWhile contract as handleNotify — see above.
     await this.state.blockConcurrencyWhile(async () => {
       try {
@@ -428,7 +493,15 @@ export class UserEventHub {
       } catch (err) {
         console.error('[user-event-hub] alarm drain failed', err);
       }
+      if (useHeartbeatFallback) {
+        this.sendFallbackHeartbeatPongs();
+      }
     });
+    if (useHeartbeatFallback && this.state.getWebSockets().length > 0) {
+      await this.state.storage.setAlarm(
+        Date.now() + FALLBACK_HEARTBEAT_INTERVAL_MS,
+      );
+    }
   }
 
   // ─── WebSocket lifecycle handlers ────────────────────────────────────

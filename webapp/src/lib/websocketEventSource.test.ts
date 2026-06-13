@@ -4,6 +4,7 @@ import {
   WebSocketEventSource,
   type WebSocketLike,
 } from './websocketEventSource';
+import { TALK_HEARTBEAT_PING, TALK_HEARTBEAT_PONG } from './talkHeartbeat';
 
 type Listeners = {
   open: Array<(ev: Event) => void>;
@@ -22,6 +23,8 @@ class FakeWebSocket implements WebSocketLike {
     error: [],
     close: [],
   };
+  readyState = 1;
+  send = vi.fn();
   close = vi.fn();
 
   constructor(url: string) {
@@ -173,6 +176,49 @@ describe('WebSocketEventSource', () => {
 
     adapter.close();
     expect(FakeWebSocket.instances[0]!.close).toHaveBeenCalledWith(1000);
+  });
+
+  it('send() writes to the open underlying WebSocket', () => {
+    const adapter = new WebSocketEventSource('/api/v1/events?stream=1', {
+      getLastEventId: () => 0,
+      onMessage: vi.fn(),
+      createWebSocket: (url) => new FakeWebSocket(url),
+    });
+
+    adapter.send(TALK_HEARTBEAT_PING);
+    expect(FakeWebSocket.instances[0]!.send).toHaveBeenCalledWith(
+      TALK_HEARTBEAT_PING,
+    );
+  });
+
+  it('send() ignores a non-open underlying WebSocket', () => {
+    const adapter = new WebSocketEventSource('/api/v1/events?stream=1', {
+      getLastEventId: () => 0,
+      onMessage: vi.fn(),
+      createWebSocket: (url) => new FakeWebSocket(url),
+    });
+    const socket = FakeWebSocket.instances[0]!;
+    socket.readyState = 3;
+
+    adapter.send(TALK_HEARTBEAT_PING);
+
+    expect(socket.send).not.toHaveBeenCalled();
+  });
+
+  it('filters heartbeat PONG messages out of framed dispatch', () => {
+    const onMessage = vi.fn();
+    const onHeartbeat = vi.fn();
+    new WebSocketEventSource('/api/v1/events?stream=1', {
+      getLastEventId: () => 0,
+      onMessage,
+      onHeartbeat,
+      createWebSocket: (url) => new FakeWebSocket(url),
+    });
+
+    FakeWebSocket.instances[0]!.emitMessage(TALK_HEARTBEAT_PONG);
+
+    expect(onHeartbeat).toHaveBeenCalledTimes(1);
+    expect(onMessage).not.toHaveBeenCalled();
   });
 
   it('routes onError when frame is not valid JSON', () => {
