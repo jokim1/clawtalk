@@ -34,7 +34,7 @@ function pendingLabel(edit: NativeDocumentEdit): string {
       : edit.source === 'forge'
         ? 'Forge'
         : 'Job');
-  return `${actor} · pending`;
+  return `${edit.op === 'delete' ? 'Delete suggested' : 'Suggested'} by ${actor}`;
 }
 
 function expandedBlocks(input: {
@@ -56,7 +56,7 @@ function expandedBlocks(input: {
     key: `${input.keyBase}:${index}`,
     kind: block.kind,
     text: block.text,
-    pendingLabel: input.pendingLabel,
+    pendingLabel: index === 0 ? input.pendingLabel : null,
     pendingMode: input.pendingMode,
   }));
 }
@@ -166,10 +166,10 @@ function PendingBadge({
         fontFamily: salonFont.mono,
         fontSize: 10,
         fontWeight: 700,
-        letterSpacing: '0.08em',
-        textTransform: 'uppercase',
+        letterSpacing: 0,
         verticalAlign: 'middle',
       }}
+      title={`${label}; review this proposal in Pending edits.`}
     >
       {label}
     </span>

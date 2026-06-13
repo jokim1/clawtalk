@@ -254,7 +254,7 @@ describe('TalkDocumentsPanel', () => {
 
     // The document still renders read-only with the inline pending proposal…
     expect(await screen.findByText('Proposed replacement.')).toBeTruthy();
-    expect(screen.getByText('Strategist · pending')).toBeTruthy();
+    expect(screen.getByText('Suggested by Strategist')).toBeTruthy();
     expect(screen.getByText(/1 pending edit awaiting review/)).toBeTruthy();
     // …but no accept/reject affordances are offered.
     expect(screen.queryByRole('button', { name: /Accept/ })).toBeNull();

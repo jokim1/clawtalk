@@ -841,95 +841,6 @@ async function touchDocumentAfterEdit(input: {
   });
 }
 
-async function validateGreenfieldDocumentEdit(
-  edit: GreenfieldDocumentEditRecord,
-  workspaceId: string,
-): Promise<
-  | { kind: 'ok' }
-  | { kind: 'version_conflict'; currentVersion: number }
-  | { kind: 'anchor_missing'; anchorId: string }
-  | { kind: 'invalid_edit'; message: string }
-> {
-  const db = getDbPg();
-
-  if (edit.op === 'insert') {
-    const newKind = normalizeBlockKind(edit.new_kind);
-    if (!newKind || edit.new_text === null || edit.base_list_version === null) {
-      return {
-        kind: 'invalid_edit',
-        message: 'Pending insert edit is missing its required payload.',
-      };
-    }
-    const tabRows = await db<{ list_version: number }[]>`
-      select list_version
-      from public.doc_tabs
-      where workspace_id = ${workspaceId}::uuid
-        and document_id = ${edit.document_id}::uuid
-        and id = ${edit.tab_id}::uuid
-      for update
-    `;
-    const tab = tabRows[0];
-    if (!tab) {
-      return { kind: 'anchor_missing', anchorId: edit.tab_id };
-    }
-    if (tab.list_version !== edit.base_list_version) {
-      return { kind: 'version_conflict', currentVersion: tab.list_version };
-    }
-    if (edit.after_block_id !== null) {
-      const anchorRows = await db<{ id: string }[]>`
-        select id
-        from public.doc_blocks
-        where workspace_id = ${workspaceId}::uuid
-          and document_id = ${edit.document_id}::uuid
-          and tab_id = ${edit.tab_id}::uuid
-          and id = ${edit.after_block_id}::uuid
-        for update
-      `;
-      if (!anchorRows[0]) {
-        return { kind: 'anchor_missing', anchorId: edit.after_block_id };
-      }
-    }
-    return { kind: 'ok' };
-  }
-
-  if (edit.block_id === null || edit.base_block_version === null) {
-    return {
-      kind: 'invalid_edit',
-      message: `Pending ${edit.op} edit is missing its target block.`,
-    };
-  }
-  if (edit.op === 'replace' && edit.new_text === null) {
-    return {
-      kind: 'invalid_edit',
-      message: 'Pending replace edit is missing replacement text.',
-    };
-  }
-  const newKind = normalizeBlockKind(edit.new_kind);
-  if (edit.op === 'replace' && edit.new_kind !== null && !newKind) {
-    return {
-      kind: 'invalid_edit',
-      message: 'Pending replace edit has an invalid block kind.',
-    };
-  }
-  const blockRows = await db<{ version: number }[]>`
-    select version
-    from public.doc_blocks
-    where workspace_id = ${workspaceId}::uuid
-      and document_id = ${edit.document_id}::uuid
-      and tab_id = ${edit.tab_id}::uuid
-      and id = ${edit.block_id}::uuid
-    for update
-  `;
-  const block = blockRows[0];
-  if (!block) {
-    return { kind: 'anchor_missing', anchorId: edit.block_id };
-  }
-  if (block.version !== edit.base_block_version) {
-    return { kind: 'version_conflict', currentVersion: block.version };
-  }
-  return { kind: 'ok' };
-}
-
 async function applyGreenfieldDocumentEdit(
   edit: GreenfieldDocumentEditRecord,
   workspaceId: string,
@@ -1361,15 +1272,14 @@ export async function acceptGreenfieldDocumentEdits(input: {
         editId,
       });
       if (!edit) return { kind: 'not_found' };
-      const validation = await withTrustedDbWrites(() =>
-        validateGreenfieldDocumentEdit(edit, input.workspaceId),
-      );
-      if (validation.kind !== 'ok') return validation;
       edits.push(edit);
     }
 
     const insertOffsets = new Map<string, number>();
     for (const edit of edits) {
+      // The caller already gated this exact reviewed edit set. If one reviewed
+      // proposal is stale, clear it as superseded and keep applying the rest so
+      // bulk accept does not loop on the same pending conflict.
       if (edit.op === 'insert') {
         const offsetKey = `${edit.tab_id}:${edit.after_block_id ?? ''}`;
         const insertOrderOffset = insertOffsets.get(offsetKey) ?? 0;
@@ -1378,10 +1288,20 @@ export async function acceptGreenfieldDocumentEdits(input: {
             allowSupersededStatus: true,
             ignoreInsertListVersionConflict: true,
             insertOrderOffset,
-            supersedeOnConflict: acceptedEditIds.length > 0,
+            supersedeOnConflict: true,
           }),
         );
         if (applied.kind !== 'ok') {
+          if (
+            applied.kind === 'version_conflict' ||
+            applied.kind === 'anchor_missing'
+          ) {
+            await markDocumentEditSuperseded({
+              workspaceId: input.workspaceId,
+              editId: edit.id,
+            });
+            continue;
+          }
           if (acceptedEditIds.length > 0) continue;
           return applied;
         }
@@ -1401,10 +1321,20 @@ export async function acceptGreenfieldDocumentEdits(input: {
       if (!pending) continue;
       const applied = await withTrustedDbWrites(() =>
         applyGreenfieldDocumentEdit(pending, input.workspaceId, {
-          supersedeOnConflict: acceptedEditIds.length > 0,
+          supersedeOnConflict: true,
         }),
       );
       if (applied.kind !== 'ok') {
+        if (
+          applied.kind === 'version_conflict' ||
+          applied.kind === 'anchor_missing'
+        ) {
+          await markDocumentEditSuperseded({
+            workspaceId: input.workspaceId,
+            editId: pending.id,
+          });
+          continue;
+        }
         if (acceptedEditIds.length > 0) continue;
         return applied;
       }
