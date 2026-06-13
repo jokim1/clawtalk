@@ -16,6 +16,11 @@ declare module 'cloudflare:test' {
       sql: {
         exec(query: string, ...bindings: unknown[]): TestSqlCursor;
       };
+      // Alarm API (A2): the workers pool backs these with real workerd storage,
+      // so a test can assert the armed alarm == min(deadline) and fire it.
+      getAlarm(): Promise<number | null>;
+      setAlarm(when: number | Date): Promise<void>;
+      deleteAlarm(): Promise<void>;
     };
   }
   interface TestDoStub {
@@ -25,6 +30,11 @@ declare module 'cloudflare:test' {
     idFromName(name: string): unknown;
     get(id: unknown): TestDoStub;
   }
+
+  // Immediately runs (and removes) the DO's scheduled alarm if one is set,
+  // invoking its alarm() handler. Returns whether an alarm ran. Used to drive
+  // the 1A watchdog without waiting real wall-clock for a deadline to pass.
+  export function runDurableObjectAlarm(stub: TestDoStub): Promise<boolean>;
 
   // Bindings from the test worker (vitest.workers.config.ts).
   export const env: {

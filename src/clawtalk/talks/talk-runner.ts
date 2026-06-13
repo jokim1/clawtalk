@@ -1,38 +1,49 @@
 // TalkRunner — per-Talk Durable Object that owns run execution.
 //
-// Talk Runtime v2, Wave 2 PR-A1 (docs/13-talk-runtime-v2.md §6.1/§6.3/§6.4;
-// ~/.claude/plans/encapsulated-plotting-mist.md). One instance per Talk
-// (idFromName(talkId), D1). This PR is the SKELETON only:
+// Talk Runtime v2, Wave 2 PR-A1 + PR-A2 (docs/13-talk-runtime-v2.md
+// §6.1/§6.3/§6.4; ~/.claude/plans/encapsulated-plotting-mist.md). One instance
+// per Talk (idFromName(talkId), D1). Built so far:
 //
 //   • DO SQLite schema (the plan's sketch, verbatim): runs_local / steps /
-//     step_deadlines.
+//     step_deadlines.                                                  [A1]
 //   • The step state machine PENDING → RUNNING → CHECKPOINT → terminal
-//     (one LLM streaming call OR one tool batch = one step, 8A).
+//     (one LLM streaming call OR one tool batch = one step, 8A).       [A1]
 //   • A dev-only route (/dev/run) that drives ONE run end-to-end by reusing
 //     GreenfieldTalkExecutor UNCHANGED, inside the DO's own request-scoped
-//     DB. Not wired to /chat.
+//     DB. Not wired to /chat.                                          [A1]
 //   • Reference-based checkpoints with a hard <1MB serialized assert (8A —
 //     the DO SQLite value cap is 2MB; an inlined provider message array
-//     with PDF pages blows it).
+//     with PDF pages blows it).                                        [A1]
 //   • CAS-fencing-ready writes: every post-await checkpoint/failure write
-//     is guarded on (run_id, idx, attempt, status='running'). A1 only ever
-//     runs attempt 1, so the guard is a structural no-op here; it becomes
-//     load-bearing in A3 when the alarm spawns a competing retry attempt
-//     (the durable analog of the queue consumer's `runAbandoned` guard).
+//     is guarded on (run_id, idx, attempt, status='running'), so a late
+//     write from an attempt the watchdog already failed is a no-op.    [A1]
+//   • Min-deadline alarm watchdog (1A): the single DO alarm always targets
+//     min(step_deadlines.deadline_ms); alarm() fails every expired step and
+//     re-arms to the next-earliest. Correct under in-DO concurrency (N
+//     parallel runs) because the table — not per-step setAlarm — is the
+//     source of truth.                                                 [A2]
+//   • Startup + alarm resume (4A): the constructor scans in-flight runs and
+//     recovers each through resumeRun, the ONE idempotent recovery function
+//     the alarm also uses. Resume re-runs at most the one interrupted step.
+//                                                                      [A2]
 //
-// EXPLICITLY NOT in A1 (do not read this as production-complete):
-//   • The min-deadline alarm/watchdog (1A) — A2. A1 records deadlines in
-//     step_deadlines but arms no alarm.
-//   • Startup/alarm resume (4A) — A2.
-//   • Cancel RPC + real stale-attempt fencing TEST — A3.
+// EXPLICITLY NOT here yet (do not read this as production-complete):
+//   • Cancel RPC + per-attempt retry/bump + the adversarial stale-attempt
+//     fencing TEST — A3. A2 keeps attempt=1; the alarm neutralises a wedged
+//     attempt by failing its step (status flips off 'running'), so the
+//     fence holds without a competing attempt yet.
+//   • A rebuildable plan for resume after a real eviction — A2 is DO-LOCAL:
+//     planProvider stays null until PR-B wires the Postgres rebuild. Resume
+//     of a run it cannot rebuild no-ops and logs (alarm/reconciliation
+//     backstop).
 //   • Write-behind batching + insert-before-push hub streaming (3A) — PR-B.
 //     The /dev/run route persists run lifecycle SYNCHRONOUSLY via the same
 //     v1 accessors the queue consumer uses (markGreenfieldRunRunning /
 //     completeGreenfieldRun); that is NOT the v2 write-behind contract.
 //
 // Mirrors the production DO precedent in user-event-hub.ts: local CF type
-// shims (no repo-wide @cloudflare/workers-types), schema setup under
-// blockConcurrencyWhile in the constructor.
+// shims (no repo-wide @cloudflare/workers-types), schema + recovery under
+// blockConcurrencyWhile in the constructor, alarm() as the durable backstop.
 
 import {
   type DbScopeEnvBindings,
@@ -155,11 +166,25 @@ export interface TalkRunnerStepResult {
 
 export type TalkRunnerRunPlan = TalkRunnerStep[];
 
+/**
+ * Rebuilds the step plan for an in-flight run so the resume path (4A) can
+ * re-enter the step machine after a DO restart, when the in-memory plan
+ * closures are gone. A1/A2 are DO-LOCAL: this stays null in production until
+ * PR-B wires it to the Postgres-backed rebuild that `runRealExecutor` already
+ * does inline (trigger message / prompt snapshot → executor plan). Tests
+ * inject it directly. Returns null when the run can't be rebuilt (left for the
+ * alarm backstop / reconciliation cron).
+ */
+export type TalkRunnerPlanProvider = (
+  runId: string,
+) => Promise<TalkRunnerRunPlan | null>;
+
 export type RunOutcome =
   | { status: 'completed'; steps: number }
   | { status: 'failed'; failedStepIdx: number }
-  // A step's post-await write lost the CAS race against a competing attempt.
-  // Unreachable in A1 (single attempt); surfaced so A3 can assert it.
+  // A step's post-await write lost the CAS race: the alarm watchdog (A2) — or
+  // in A3 a competing retry attempt — already settled the step, so this
+  // invocation abandons the run to whoever owns the terminal state.
   | { status: 'abandoned'; abandonedStepIdx: number };
 
 // Persisted row shapes (mirror the schema below).
@@ -202,14 +227,31 @@ export class TalkRunner {
     return this.state.storage.sql;
   }
 
+  // Live runs owned by THIS isolate. Two jobs: (1) the alarm/cancel path
+  // reaches the in-flight AbortController to abort a wedged step; (2) a
+  // concurrent executeRun for the same run dedups to the live promise instead
+  // of starting a second invocation (the re-entry/idempotency guard). Empty
+  // after a restart — recovery then runs from durable SQLite, not memory.
+  private readonly inFlight = new Map<
+    string,
+    { controller: AbortController; done: Promise<RunOutcome> }
+  >();
+
+  // 4A resume seam. Null in A1/A2 (DO-local); PR-B sets it to the Postgres
+  // rebuild. The resume path no-ops (and logs) a run it cannot rebuild.
+  public planProvider: TalkRunnerPlanProvider | null = null;
+
   constructor(state: DurableObjectStateLike, env: TalkRunnerEnv) {
     this.state = state;
     this.env = env;
-    // Schema must exist before any method touches storage. blockConcurrencyWhile
-    // defers all incoming fetch()/RPC until this resolves (the A2 startup
-    // resume scan will join this same block).
+    // Schema must exist before any method touches storage, and the 4A startup
+    // resume scan must run before any incoming fetch()/RPC sees stale in-flight
+    // rows. blockConcurrencyWhile defers all delivery (including alarm()) until
+    // both finish. NB: never throw out of this block — it resets the DO
+    // (user-event-hub.ts precedent); recoverInFlightRuns swallows per-run errors.
     void this.state.blockConcurrencyWhile(async () => {
       this.ensureSchema();
+      await this.recoverInFlightRuns();
     });
   }
 
@@ -277,24 +319,58 @@ export class TalkRunner {
   // Concurrency contract: several runs (distinct runIds) may execute
   // CONCURRENTLY inside one per-Talk DO — that is parallel talk mode (§6.3),
   // and every durable row is keyed by run_id so the runs don't collide. Steps
-  // WITHIN a run are sequential (this loop awaits each). The DO is single-
-  // threaded for compute but interleaves at awaits, so this method is written
-  // re-entry-safe (idempotent): re-entering a terminal run is a no-op, and an
-  // already-checkpointed step is skipped rather than re-run. A2 wires the
-  // startup/alarm scan that re-invokes this on resume; A3 adds per-run cancel
-  // via the AbortController below and per-run alarms off step_deadlines.
+  // WITHIN a run are sequential (driveRun awaits each). The DO is single-
+  // threaded for compute but interleaves at awaits, so this is re-entry-safe
+  // (idempotent): re-entering a terminal run is a no-op, an already-
+  // checkpointed step is skipped, and a CONCURRENT executeRun for the same run
+  // dedups to the one live invocation rather than starting a second (so resume
+  // — startup scan or alarm — can never double-execute a step). A3 adds
+  // per-run cancel via the AbortController; the alarm aborts it on watchdog
+  // failure (resumeRun below).
   async executeRun(
     runId: string,
     plan: TalkRunnerRunPlan,
   ): Promise<RunOutcome> {
-    // Re-entry guard: a run that already reached a terminal state stays there.
-    // Re-running would re-execute completed work and rewind the step log
-    // (a duplicate invocation, or A2 resume racing a still-live attempt).
+    // A live invocation in THIS isolate already owns the run → return its
+    // promise. Two callers (e.g. the resume scan racing a still-running
+    // invocation) then observe ONE execution, not two. Checked before any
+    // await so the set below wins the race synchronously.
+    const live = this.inFlight.get(runId);
+    if (live) return live.done;
+
+    // Terminal runs stay terminal — re-running would re-execute completed work
+    // and rewind the step log.
     const existing = this.readRun(runId);
     if (existing && isTerminalRunStatus(existing.status)) {
       return this.outcomeFromState(runId, existing.status, plan.length);
     }
 
+    // Register synchronously (no await between the get() above and here) so a
+    // concurrent executeRun sees the entry. The AbortController is reachable
+    // by the alarm/cancel path via this map.
+    const controller = new AbortController();
+    const entry = {
+      controller,
+      done: undefined as unknown as Promise<RunOutcome>,
+    };
+    this.inFlight.set(runId, entry);
+    entry.done = (async () => {
+      try {
+        return await this.driveRun(runId, plan, controller.signal);
+      } finally {
+        this.inFlight.delete(runId);
+      }
+    })();
+    return entry.done;
+  }
+
+  // The actual per-step loop, run by exactly one invocation per run (executeRun
+  // enforces that via inFlight). Skips already-checkpointed steps on resume.
+  private async driveRun(
+    runId: string,
+    plan: TalkRunnerRunPlan,
+    signal: AbortSignal,
+  ): Promise<RunOutcome> {
     const now = Date.now();
     this.sql.exec(
       `insert into runs_local (run_id, status, started_at, updated_at)
@@ -305,25 +381,16 @@ export class TalkRunner {
       now,
     );
 
-    // A1 has no cancellation; the controller exists so A3 can wire the cancel
-    // RPC to abort in-flight steps in this same isolate.
-    const controller = new AbortController();
-
     for (let idx = 0; idx < plan.length; idx += 1) {
-      const outcome = await this.runStep(
-        runId,
-        idx,
-        plan[idx]!,
-        controller.signal,
-      );
+      const outcome = await this.runStep(runId, idx, plan[idx]!, signal);
       if (outcome === 'failed') {
         this.markRunTerminal(runId, 'failed');
         return { status: 'failed', failedStepIdx: idx };
       }
       if (outcome === 'fenced') {
-        // A competing attempt won the CAS race; this attempt writes nothing
-        // and the run is abandoned to whoever owns the live attempt. Cannot
-        // happen in A1 (single attempt) — guarded for A3.
+        // A competing writer (the alarm watchdog, or in A3 a retry attempt)
+        // won the CAS race on this step; this invocation writes nothing more
+        // and abandons the run to whoever owns the terminal state.
         return { status: 'abandoned', abandonedStepIdx: idx };
       }
     }
@@ -413,8 +480,11 @@ export class TalkRunner {
       attempt,
       deadlineMs,
     );
-    // Arm the deadline (1A table). A1 records it; A2's alarm() targets
-    // min(deadline_ms) across in-flight steps.
+    // Arm the deadline (1A table). The single DO alarm targets min(deadline_ms)
+    // across ALL in-flight steps; reconcileAlarm() re-points it after this
+    // insert. The insert + the 'running' update + the reconcile read run with
+    // no await between them, so the alarm value is computed atomically against
+    // this step's freshly-armed deadline (race analysis in reconcileAlarm).
     this.sql.exec(
       `insert into step_deadlines (run_id, idx, deadline_ms) values (?, ?, ?)
        on conflict(run_id, idx) do update set deadline_ms=excluded.deadline_ms`,
@@ -422,7 +492,8 @@ export class TalkRunner {
       idx,
       deadlineMs,
     );
-    // → RUNNING.
+    // → RUNNING (before arming the alarm: the watchdog only fails 'running'
+    // steps, so the step must be RUNNING the instant its deadline is live).
     this.sql.exec(
       `update steps set status='running'
        where run_id=? and idx=? and attempt=? and status='pending'`,
@@ -430,6 +501,7 @@ export class TalkRunner {
       idx,
       attempt,
     );
+    await this.reconcileAlarm();
 
     try {
       const result = await step.execute(signal);
@@ -444,11 +516,12 @@ export class TalkRunner {
         idx,
         attempt,
       ).rowsWritten;
-      // Fenced (written===0): a competing attempt owns this step now. Do NOT
-      // clear the deadline — it belongs to the live attempt. Clearing it would
-      // erase the live attempt's only watchdog entry and strand it (A3).
+      // Fenced (written===0): a competing writer (the alarm watchdog, or in A3
+      // a retry attempt) settled this step first. Do NOT touch the deadline —
+      // the winner already cleared it; re-clearing/re-arming here would race
+      // its alarm bookkeeping.
       if (written === 0) return 'fenced';
-      this.clearDeadline(runId, idx);
+      await this.settleDeadline(runId, idx);
       return 'checkpoint';
     } catch (err) {
       const written = this.sql.exec(
@@ -469,9 +542,9 @@ export class TalkRunner {
         'TalkRunner step failed',
       );
       // A late abandoned attempt that lost the CAS race must not be treated as
-      // this run's failure, and must not clear the live attempt's deadline.
+      // this run's failure, and must not touch the winner's deadline/alarm.
       if (written === 0) return 'fenced';
-      this.clearDeadline(runId, idx);
+      await this.settleDeadline(runId, idx);
       return 'failed';
     }
   }
@@ -491,6 +564,239 @@ export class TalkRunner {
       runId,
       idx,
     );
+  }
+
+  // ─── Alarm watchdog + resume (1A / 4A) ──────────────────────────────────
+  //
+  // The single DO alarm always targets min(step_deadlines.deadline_ms). It is
+  // re-pointed after every change to that table (arm on step start, clear on
+  // settle, clear on watchdog-fail). Because alarm() fires in a FRESH
+  // invocation, a step wedged on an await can never block its own watchdog —
+  // the property v1's single-invocation runtime fundamentally cannot have.
+  private async reconcileAlarm(): Promise<void> {
+    const min = this.sql
+      .exec<{
+        m: number | null;
+      }>(`select min(deadline_ms) as m from step_deadlines`)
+      .one().m;
+    // Unconditional set/delete (no getAlarm() compare). setAlarm applies its
+    // value synchronously at call-time, so within the await-free
+    // (mutate-table → read-min → setAlarm) window the value reflects the
+    // current table; the LAST such call in program order wins and carries the
+    // true global min. A redundant set to the same time is a firing no-op.
+    if (min == null) {
+      await this.state.storage.deleteAlarm();
+    } else {
+      await this.state.storage.setAlarm(min);
+    }
+  }
+
+  // The watchdog. Fires when the earliest in-flight deadline passes; fails
+  // EVERY expired step (parallel mode can leave several past-due at once via
+  // distinct runs), then re-arms to the next-earliest. Each expired run is
+  // recovered through the shared resumeRun (here always its FAIL branch). The
+  // runtime clears the alarm slot before calling this; resumeRun re-arms it.
+  async alarm(): Promise<void> {
+    try {
+      const now = Date.now();
+      const expired = this.sql
+        .exec<{
+          run_id: string;
+        }>(
+          `select run_id from step_deadlines where deadline_ms <= ? order by deadline_ms, run_id`,
+          now,
+        )
+        .toArray();
+      for (const { run_id } of expired) {
+        // Per-run isolation: one run's recovery throwing must not abandon the
+        // others still past-due, nor (with the finally below) skip the re-arm.
+        try {
+          await this.resumeRun(run_id);
+        } catch (err) {
+          logger.error(
+            { err, runId: run_id, talkId: this.state.id.name },
+            'TalkRunner alarm resume failed',
+          );
+        }
+      }
+    } finally {
+      // ALWAYS re-point the alarm — even if the scan threw — so a transient
+      // error can't strand the watchdog with no future alarm (the remaining
+      // deadlines stay in the table; the next mutation would otherwise be the
+      // only thing to re-arm).
+      try {
+        await this.reconcileAlarm();
+      } catch (err) {
+        logger.error(
+          { err, talkId: this.state.id.name },
+          'TalkRunner alarm re-arm failed',
+        );
+      }
+    }
+  }
+
+  // 4A startup scan — re-drives every run still 'running' in durable SQLite
+  // (the in-memory inFlight map is empty after a restart). Shares resumeRun
+  // with the alarm path, so recovery behaves identically however it is
+  // triggered. Runs inside the constructor's blockConcurrencyWhile; per-run
+  // errors are swallowed so one bad run can't reset the DO.
+  //
+  // A2 is DO-LOCAL: planProvider is null, so every resumeRun here either FAILS
+  // an expired step or DEFERS (logs) a resumable one — both are O(1), so the
+  // constructor stays brief. PR-B WIRES planProvider; when it does it MUST make
+  // the resume RE-RUN path detached (don't `await` a full executeRun inside
+  // blockConcurrencyWhile, or DO startup blocks on the whole run, up to the 30s
+  // ceiling). The dedup in executeRun makes a detached resume safe against
+  // racing inbound traffic.
+  async recoverInFlightRuns(): Promise<void> {
+    const runs = this.sql
+      .exec<{
+        run_id: string;
+      }>(
+        `select run_id from runs_local where status='running' order by started_at, run_id`,
+      )
+      .toArray();
+    for (const { run_id } of runs) {
+      try {
+        await this.resumeRun(run_id);
+      } catch (err) {
+        logger.error(
+          { err, runId: run_id, talkId: this.state.id.name },
+          'TalkRunner startup resume failed',
+        );
+      }
+    }
+  }
+
+  // resumeRun — THE one idempotent recovery function shared by startup (4A) and
+  // the alarm (1A). Given a 'running' run it drives the durable state to a
+  // consistent place, handling EVERY way driveRun can be interrupted:
+  //   • TERMINAL  — already completed/failed/cancelled → no-op.
+  //   • ORPHANED-FAIL — a step is 'failed' but the run row never flipped (a
+  //               crash between the step-fail write and markRunTerminal):
+  //               reconcile the run to failed, clear its deadlines.
+  //   • WATCHDOG-FAIL — the active in-flight step (running OR pending) is past
+  //               its deadline: CAS-fail the step, fail the run, abort any live
+  //               attempt (per the §6.3 diagram: expiry → FAILED).
+  //   • RE-DRIVE  — otherwise the run is still 'running' with work left: an
+  //               interrupted-but-not-expired step, or NO in-flight step at all
+  //               because eviction landed between a checkpoint and the next
+  //               step (or just before the terminal mark). Re-enter the step
+  //               machine via the rebuilt plan; executeRun skips checkpointed
+  //               steps, runs the remainder, and marks the run terminal — so a
+  //               between-steps eviction can never strand a run.
+  // Idempotent under concurrency: a live invocation owns the run (inFlight) so
+  // the re-drive branch defers to it rather than double-executing a step.
+  async resumeRun(runId: string): Promise<void> {
+    const run = this.readRun(runId);
+    if (!run || isTerminalRunStatus(run.status)) return;
+
+    // ORPHANED-FAIL: a 'failed' step on a still-'running' run means driveRun (or
+    // the watchdog) flipped the step but crashed before the run row. driveRun
+    // stops at the first failure, so any failed step ⇒ the run failed. Clear
+    // lingering deadlines so the alarm can't spin on a now-terminal run.
+    const failedStep = this.sql
+      .exec<{
+        idx: number;
+      }>(
+        `select idx from steps where run_id=? and status='failed' order by idx limit 1`,
+        runId,
+      )
+      .toArray()[0];
+    if (failedStep) {
+      this.markRunTerminal(runId, 'failed');
+      this.sql.exec(`delete from step_deadlines where run_id=?`, runId);
+      await this.reconcileAlarm();
+      return;
+    }
+
+    const active = this.sql
+      .exec<{
+        idx: number;
+        attempt: number;
+        status: StepStatus;
+      }>(
+        `select idx, attempt, status from steps
+         where run_id=? and status in ('pending','running') order by idx limit 1`,
+        runId,
+      )
+      .toArray()[0];
+
+    // WATCHDOG-FAIL. The live deadline comes from step_deadlines — the SAME
+    // table the alarm fires on (cleared on settle), so the watchdog decision
+    // can't drift from what armed the alarm. Expiry covers both 'running' and
+    // 'pending' (a restart can leave a step 'pending' and past due) — either
+    // way the budget is blown.
+    if (active) {
+      const deadline = this.sql
+        .exec<{
+          deadline_ms: number;
+        }>(
+          `select deadline_ms from step_deadlines where run_id=? and idx=?`,
+          runId,
+          active.idx,
+        )
+        .toArray()[0];
+      if (deadline != null && deadline.deadline_ms <= Date.now()) {
+        // CAS on (attempt, status in running|pending) so a step that just
+        // settled to 'checkpoint' wins the race (then failed===false and the
+        // run is NOT failed). Abort the live attempt's signal — even if its
+        // await never unwinds, the CAS fence already makes its eventual
+        // checkpoint write a no-op.
+        const failed = this.failStepAndRun(runId, active.idx, active.attempt);
+        if (failed) this.inFlight.get(runId)?.controller.abort();
+        await this.reconcileAlarm();
+        return;
+      }
+    }
+
+    // RE-DRIVE: an interrupted-not-expired step, or no in-flight step but the
+    // run is still 'running' (evicted between a checkpoint and the next step,
+    // or just before the terminal mark). A live invocation already owns the run
+    // → let it finish. Otherwise rebuild the plan and re-enter the machine,
+    // which skips checkpointed steps and marks the run terminal.
+    if (this.inFlight.has(runId)) return;
+    const plan = this.planProvider ? await this.planProvider(runId) : null;
+    if (!plan) {
+      logger.warn(
+        { runId, talkId: this.state.id.name },
+        'TalkRunner resume: no plan provider (DO-local A2); deferring to alarm/reconciliation',
+      );
+      return;
+    }
+    // Re-check after the await: a live invocation may have started meanwhile.
+    if (this.inFlight.has(runId)) return;
+    await this.executeRun(runId, plan);
+  }
+
+  // Fail an expired step and, if WE won the CAS (the step was still running),
+  // the run. Always clears the step's deadline so the alarm won't re-fire on
+  // it. Returns whether this call failed a live step (false ⇒ already settled).
+  private failStepAndRun(runId: string, idx: number, attempt: number): boolean {
+    const written = this.sql.exec(
+      `update steps set status='failed'
+       where run_id=? and idx=? and attempt=? and status in ('running','pending')`,
+      runId,
+      idx,
+      attempt,
+    ).rowsWritten;
+    this.clearDeadline(runId, idx);
+    if (written > 0) {
+      this.markRunTerminal(runId, 'failed');
+      logger.warn(
+        { runId, idx, attempt, talkId: this.state.id.name },
+        'TalkRunner watchdog failed expired step',
+      );
+      return true;
+    }
+    return false;
+  }
+
+  // Clear a settled step's deadline and re-point the alarm at the next-earliest
+  // in-flight deadline (or clear it if this was the last).
+  private async settleDeadline(runId: string, idx: number): Promise<void> {
+    this.clearDeadline(runId, idx);
+    await this.reconcileAlarm();
   }
 
   private debugState(runId: string): {
@@ -702,6 +1008,22 @@ export class TalkRunner {
           capturedError instanceof Error
             ? capturedError.message
             : 'Step failed under the TalkRunner dev route',
+      });
+    } else if (outcome.status === 'abandoned') {
+      // The alarm watchdog (A2) failed this run's step out from under the live
+      // executor — the step's CAS write then lost the race, so executeRun
+      // returned 'abandoned' while the LOCAL run is already 'failed'. Fail the
+      // outer Postgres run too, or the Greenfield queue row is stranded
+      // 'running'. (A1 deemed 'abandoned' unreachable; the A2 watchdog makes it
+      // reachable on the dev path.) The durable cause is ALWAYS the watchdog —
+      // capturedError, if any, is the late executor unwind (an aborted/cleaning-
+      // up provider), a red herring — so record watchdog semantics
+      // unconditionally rather than a misleading provider error.
+      await failGreenfieldRun({
+        runId: run.id,
+        errorCode: 'talk_runner_watchdog_abandoned',
+        errorMessage:
+          'Run step exceeded its deadline and was failed by the TalkRunner watchdog',
       });
     }
 
