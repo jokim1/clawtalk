@@ -403,6 +403,470 @@ describe('fetchWithUpstreamRetry', () => {
   });
 });
 
+describe('buildAnthropicRequest — prompt caching', () => {
+  const cacheTools = [
+    {
+      name: 'read_source',
+      description: 'Read a source by id.',
+      inputSchema: {
+        type: 'object',
+        properties: { sourceId: { type: 'string' } },
+        required: ['sourceId'],
+      },
+    },
+    {
+      name: 'web_search',
+      description: 'Search the web.',
+      inputSchema: {
+        type: 'object',
+        properties: { query: { type: 'string' } },
+        required: ['query'],
+      },
+    },
+  ];
+
+  function promptPrefixBytes(
+    req: ReturnType<typeof buildAnthropicRequest>,
+    messageCount = req.messages.length,
+  ): string {
+    return JSON.stringify({
+      tools: req.tools,
+      system: req.system,
+      messages: req.messages.slice(0, messageCount),
+      cache_control: req.cache_control,
+      tool_choice: req.tool_choice,
+    });
+  }
+
+  function cacheControlCount(
+    req: ReturnType<typeof buildAnthropicRequest>,
+  ): number {
+    return JSON.stringify(req).match(/"cache_control"/g)?.length ?? 0;
+  }
+
+  it('adds system, tool-definition, and history cache breakpoints with byte-stable tool-loop prefixes', () => {
+    const baseMessages: LlmMessage[] = [
+      {
+        role: 'system',
+        content:
+          'You are Research Agent.\n\nUse the Talk sources before answering.',
+      },
+      {
+        role: 'user',
+        content: 'Compare the launch notes against current market news.',
+      },
+    ];
+    const iterationTwoMessages: LlmMessage[] = [
+      ...baseMessages,
+      {
+        role: 'assistant',
+        content: [
+          { type: 'text', text: 'I will inspect the source and search.' },
+          {
+            type: 'tool_use',
+            id: 'toolu_read_source',
+            name: 'read_source',
+            input: { sourceId: 'S2' },
+          },
+          {
+            type: 'tool_use',
+            id: 'toolu_web_search',
+            name: 'web_search',
+            input: { query: 'market news launch notes' },
+          },
+        ],
+      },
+      {
+        role: 'tool',
+        content: [
+          {
+            type: 'tool_result',
+            toolUseId: 'toolu_read_source',
+            content: 'Source S2: launch notes mention a June rollout.',
+          },
+          {
+            type: 'tool_result',
+            toolUseId: 'toolu_web_search',
+            content: 'Search result: competitors announced updates in June.',
+          },
+        ],
+      },
+    ];
+    const iterationThreeMessages: LlmMessage[] = [
+      ...iterationTwoMessages,
+      {
+        role: 'assistant',
+        content: [
+          {
+            type: 'tool_use',
+            id: 'toolu_followup',
+            name: 'web_search',
+            input: { query: 'competitor June update detail' },
+          },
+        ],
+      },
+      {
+        role: 'tool',
+        content: [
+          {
+            type: 'tool_result',
+            toolUseId: 'toolu_followup',
+            content: 'Search result: follow-up detail stays after prior tools.',
+          },
+        ],
+      },
+    ];
+
+    const iterationTwoReq = buildAnthropicRequest(
+      'claude-sonnet-4-6',
+      iterationTwoMessages,
+      cacheTools,
+      1024,
+      'api_key',
+      false,
+    );
+    const iterationThreeReq = buildAnthropicRequest(
+      'claude-sonnet-4-6',
+      iterationThreeMessages,
+      cacheTools,
+      1024,
+      'api_key',
+      false,
+    );
+
+    expect(iterationTwoReq.system).toEqual([
+      {
+        type: 'text',
+        text: 'You are Research Agent.\n\nUse the Talk sources before answering.',
+        cache_control: { type: 'ephemeral' },
+      },
+    ]);
+    expect(iterationTwoReq.tools?.[0]).not.toHaveProperty('cache_control');
+    expect(iterationTwoReq.tools?.[1]?.cache_control).toEqual({
+      type: 'ephemeral',
+    });
+    expect(iterationTwoReq.cache_control).toEqual({ type: 'ephemeral' });
+    expect(cacheControlCount(iterationTwoReq)).toBe(3);
+
+    const toolResultBlocks =
+      iterationTwoReq.messages[iterationTwoReq.messages.length - 1].content;
+    expect(
+      toolResultBlocks.map((block) =>
+        block.type === 'tool_result' ? block.tool_use_id : null,
+      ),
+    ).toEqual(['toolu_read_source', 'toolu_web_search']);
+    expect(promptPrefixBytes(iterationTwoReq)).toBe(
+      promptPrefixBytes(iterationThreeReq, iterationTwoReq.messages.length),
+    );
+  });
+
+  it('treats forced Anthropic tool_choice as cache-invalidating request shape', () => {
+    const requestMessages: LlmMessage[] = [
+      { role: 'system', content: 'Use tools when required.' },
+      { role: 'user', content: 'Edit the attached doc.' },
+    ];
+    const forcedReq = buildAnthropicRequest(
+      'claude-sonnet-4-6',
+      requestMessages,
+      cacheTools,
+      1024,
+      'api_key',
+      true,
+    );
+    const nonForcedReq = buildAnthropicRequest(
+      'claude-sonnet-4-6',
+      requestMessages,
+      cacheTools,
+      1024,
+      'api_key',
+      false,
+    );
+
+    expect(forcedReq.tool_choice).toEqual({ type: 'any' });
+    expect(nonForcedReq.tool_choice).toBeUndefined();
+    expect(promptPrefixBytes(forcedReq)).not.toBe(
+      promptPrefixBytes(nonForcedReq),
+    );
+  });
+
+  it('keeps Anthropic subscription identity first while caching the final system block', () => {
+    const req = buildAnthropicRequest(
+      'claude-sonnet-4-6',
+      [
+        { role: 'system', content: 'Use concise answers.' },
+        { role: 'user', content: 'Hi' },
+      ],
+      undefined,
+      1024,
+      'subscription',
+      false,
+    );
+
+    if (!Array.isArray(req.system)) throw new Error('expected system blocks');
+    expect(req.system).toHaveLength(2);
+    expect(req.system[0]?.text).toContain('Claude Code');
+    expect(req.system[0]).not.toHaveProperty('cache_control');
+    expect(req.system[1]).toEqual({
+      type: 'text',
+      text: 'Use concise answers.',
+      cache_control: { type: 'ephemeral' },
+    });
+  });
+
+  it('can skip global cache markers for Anthropic-compatible backends', () => {
+    const req = buildAnthropicRequest(
+      'claude-compatible-model',
+      [
+        { role: 'system', content: 'Use old-compatible request shape.' },
+        {
+          role: 'user',
+          content: [
+            {
+              type: 'document',
+              mimeType: 'application/pdf',
+              data: 'BASE64PDFDATA',
+              cacheControl: 'ephemeral',
+            },
+            { type: 'text', text: 'Summarize.' },
+          ],
+        },
+      ],
+      cacheTools,
+      1024,
+      'api_key',
+      false,
+      false,
+    );
+
+    expect(req.system).toBe('Use old-compatible request shape.');
+    expect(req.tools?.some((tool) => tool.cache_control)).toBe(false);
+    expect(req.messages[0].content[0]).toMatchObject({
+      cache_control: { type: 'ephemeral' },
+    });
+    expect(req.cache_control).toBeUndefined();
+    expect(cacheControlCount(req)).toBe(1);
+  });
+
+  it('matches 1-hour document TTLs on earlier system and tool breakpoints', () => {
+    const req = buildAnthropicRequest(
+      'claude-sonnet-4-6',
+      [
+        { role: 'system', content: 'Keep the PDF context stable.' },
+        {
+          role: 'user',
+          content: [
+            {
+              type: 'document',
+              mimeType: 'application/pdf',
+              data: 'BASE64PDFDATA',
+              cacheControl: 'ephemeral_1h',
+            },
+            { type: 'text', text: 'Summarize the stable PDF.' },
+          ],
+        },
+      ],
+      cacheTools,
+      1024,
+      'api_key',
+      false,
+    );
+
+    if (!Array.isArray(req.system)) throw new Error('expected system blocks');
+    expect(req.system[0]?.cache_control).toEqual({
+      type: 'ephemeral',
+      ttl: '1h',
+    });
+    expect(req.tools?.[1]?.cache_control).toEqual({
+      type: 'ephemeral',
+      ttl: '1h',
+    });
+    expect(req.messages[0].content[0]).toMatchObject({
+      cache_control: { type: 'ephemeral', ttl: '1h' },
+    });
+    expect(req.cache_control).toEqual({ type: 'ephemeral' });
+    expect(cacheControlCount(req)).toBe(4);
+  });
+
+  it('normalizes explicit document breakpoints to 1h when any document asks for 1h', () => {
+    const req = buildAnthropicRequest(
+      'claude-sonnet-4-6',
+      [
+        {
+          role: 'user',
+          content: [
+            {
+              type: 'document',
+              mimeType: 'application/pdf',
+              data: 'FIRSTPDF',
+              cacheControl: 'ephemeral',
+            },
+            {
+              type: 'document',
+              mimeType: 'application/pdf',
+              data: 'SECONDPDF',
+              cacheControl: 'ephemeral_1h',
+            },
+          ],
+        },
+      ],
+      undefined,
+      1024,
+      'api_key',
+      false,
+    );
+
+    expect(req.messages[0].content[0]).toMatchObject({
+      cache_control: { type: 'ephemeral', ttl: '1h' },
+    });
+    expect(req.messages[0].content[1]).toMatchObject({
+      cache_control: { type: 'ephemeral', ttl: '1h' },
+    });
+    expect(req.cache_control).toBeUndefined();
+    expect(cacheControlCount(req)).toBe(2);
+  });
+
+  it('does not add automatic history caching when the final message block already has an explicit breakpoint', () => {
+    const req = buildAnthropicRequest(
+      'claude-sonnet-4-6',
+      [
+        { role: 'system', content: 'Use the PDF.' },
+        {
+          role: 'user',
+          content: [
+            {
+              type: 'document',
+              mimeType: 'application/pdf',
+              data: 'BASE64PDFDATA',
+              cacheControl: 'ephemeral_1h',
+            },
+          ],
+        },
+      ],
+      cacheTools,
+      1024,
+      'api_key',
+      false,
+    );
+
+    expect(req.cache_control).toBeUndefined();
+    expect(cacheControlCount(req)).toBe(3);
+  });
+
+  it('keeps total cache breakpoints within Anthropic four-slot budget', () => {
+    const req = buildAnthropicRequest(
+      'claude-sonnet-4-6',
+      [
+        { role: 'system', content: 'Use the PDFs.' },
+        {
+          role: 'user',
+          content: [
+            {
+              type: 'document',
+              mimeType: 'application/pdf',
+              data: 'FIRSTPDF',
+              cacheControl: 'ephemeral',
+            },
+            {
+              type: 'document',
+              mimeType: 'application/pdf',
+              data: 'SECONDPDF',
+              cacheControl: 'ephemeral',
+            },
+            { type: 'text', text: 'Compare both PDFs.' },
+          ],
+        },
+      ],
+      cacheTools,
+      1024,
+      'api_key',
+      false,
+    );
+
+    expect(req.cache_control).toBeUndefined();
+    expect(cacheControlCount(req)).toBe(4);
+  });
+
+  it('prioritizes existing document breakpoints when only one new breakpoint slot remains', () => {
+    const req = buildAnthropicRequest(
+      'claude-sonnet-4-6',
+      [
+        { role: 'system', content: 'Use the PDFs.' },
+        {
+          role: 'user',
+          content: [
+            {
+              type: 'document',
+              mimeType: 'application/pdf',
+              data: 'FIRSTPDF',
+              cacheControl: 'ephemeral',
+            },
+            {
+              type: 'document',
+              mimeType: 'application/pdf',
+              data: 'SECONDPDF',
+              cacheControl: 'ephemeral',
+            },
+            {
+              type: 'document',
+              mimeType: 'application/pdf',
+              data: 'THIRDPDF',
+              cacheControl: 'ephemeral',
+            },
+            { type: 'text', text: 'Compare all PDFs.' },
+          ],
+        },
+      ],
+      cacheTools,
+      1024,
+      'api_key',
+      false,
+    );
+
+    if (!Array.isArray(req.system)) throw new Error('expected system blocks');
+    expect(req.system[0]?.cache_control).toEqual({ type: 'ephemeral' });
+    expect(req.tools?.[1]).not.toHaveProperty('cache_control');
+    expect(req.cache_control).toBeUndefined();
+    expect(cacheControlCount(req)).toBe(4);
+  });
+
+  it('caps explicit document breakpoints at Anthropic four-slot limit', () => {
+    const req = buildAnthropicRequest(
+      'claude-sonnet-4-6',
+      [
+        {
+          role: 'user',
+          content: [1, 2, 3, 4, 5].map((index) => ({
+            type: 'document' as const,
+            mimeType: 'application/pdf',
+            data: `PDF${index}`,
+            cacheControl: 'ephemeral' as const,
+          })),
+        },
+      ],
+      undefined,
+      1024,
+      'api_key',
+      false,
+    );
+
+    expect(
+      req.messages[0].content
+        .slice(0, 4)
+        .map((block) =>
+          'cache_control' in block ? block.cache_control : null,
+        ),
+    ).toEqual([
+      { type: 'ephemeral' },
+      { type: 'ephemeral' },
+      { type: 'ephemeral' },
+      { type: 'ephemeral' },
+    ]);
+    expect(req.messages[0].content[4]).not.toHaveProperty('cache_control');
+    expect(req.cache_control).toBeUndefined();
+    expect(cacheControlCount(req)).toBe(4);
+  });
+});
+
 describe('buildAnthropicRequest — document blocks', () => {
   it('translates an LlmContentBlock document into the Anthropic source-block shape with cache_control', () => {
     const msgs: LlmMessage[] = [
@@ -470,7 +934,7 @@ describe('buildAnthropicRequest — document blocks', () => {
     expect(block.cache_control).toEqual({ type: 'ephemeral' });
   });
 
-  it('omits cache_control entirely when not requested', () => {
+  it('omits document-block cache_control when not requested', () => {
     const msgs: LlmMessage[] = [
       {
         role: 'user',

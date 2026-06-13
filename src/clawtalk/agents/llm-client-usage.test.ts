@@ -144,6 +144,55 @@ describe('streamLlmResponse Anthropic usage accounting', () => {
     });
   });
 
+  it('includes Anthropic cache creation and cache read tokens in input token totals', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        sseResponse([
+          {
+            event: 'message_start',
+            data: {
+              type: 'message_start',
+              message: {
+                usage: {
+                  input_tokens: 120,
+                  cache_creation_input_tokens: 300,
+                  cache_read_input_tokens: 400,
+                  output_tokens: 1,
+                },
+              },
+            },
+          },
+          {
+            event: 'message_delta',
+            data: {
+              type: 'message_delta',
+              delta: { stop_reason: 'end_turn' },
+              usage: { input_tokens: 130, output_tokens: 25 },
+            },
+          },
+          { event: 'message_stop', data: { type: 'message_stop' } },
+        ]),
+      ),
+    );
+
+    const events = await collect(
+      streamLlmResponse(ANTHROPIC_PROVIDER, SECRET, 'claude-opus-4-8', [
+        { role: 'user', content: 'hi' },
+      ]),
+    );
+
+    const usage = events.find((e) => e.type === 'usage');
+    expect(usage).toMatchObject({
+      usage: {
+        inputTokens: 830,
+        outputTokens: 25,
+        cacheCreationInputTokens: 300,
+        cacheReadInputTokens: 400,
+      },
+    });
+  });
+
   it('emits no usage event when the stream reports none', async () => {
     vi.stubGlobal(
       'fetch',
@@ -180,5 +229,55 @@ describe('streamLlmResponse Anthropic usage accounting', () => {
     // The text still streams and the turn still completes cleanly.
     expect(events.some((e) => e.type === 'text_delta')).toBe(true);
     expect(events.some((e) => e.type === 'done')).toBe(true);
+  });
+});
+
+describe('streamLlmResponse Anthropic prompt caching guard', () => {
+  it('does not send global prompt-cache markers to base URL overrides', async () => {
+    const captured: { requestBody?: Record<string, unknown> } = {};
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+        captured.requestBody = JSON.parse(String(init?.body));
+        return sseResponse([
+          { event: 'message_start', data: { type: 'message_start' } },
+          { event: 'message_stop', data: { type: 'message_stop' } },
+        ]);
+      }),
+    );
+
+    await collect(
+      streamLlmResponse(
+        {
+          ...ANTHROPIC_PROVIDER,
+          providerId: 'provider.anthropic',
+          baseUrl: 'https://anthropic-proxy.example.com',
+        },
+        SECRET,
+        'claude-opus-4-8',
+        [
+          { role: 'system', content: 'Use old-compatible request shape.' },
+          { role: 'user', content: 'hi' },
+        ],
+        {
+          tools: [
+            {
+              name: 'read_source',
+              description: 'Read source.',
+              inputSchema: { type: 'object', properties: {}, required: [] },
+            },
+          ],
+        },
+      ),
+    );
+
+    if (!captured.requestBody) throw new Error('expected request body');
+    const body = captured.requestBody;
+    expect(body.system).toBe('Use old-compatible request shape.');
+    expect(body.cache_control).toBeUndefined();
+    expect(
+      (body.tools as Array<Record<string, unknown>> | undefined)?.[0]
+        ?.cache_control,
+    ).toBeUndefined();
   });
 });
