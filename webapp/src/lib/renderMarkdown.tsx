@@ -37,9 +37,20 @@ function renderInline(text: string, keyPrefix: string): ReactNode[] {
         ),
       );
     } else if (match[5]) {
-      nodes.push(<strong key={`${keyPrefix}-b-${index}`}>{match[5]}</strong>);
+      // Recurse so inline links/URLs inside bold (e.g. `**[t](url)**`) are
+      // parsed instead of emitted as raw text. The bold delimiter forbids a
+      // nested `*`, so recursion only ever picks up links and bare URLs.
+      nodes.push(
+        <strong key={`${keyPrefix}-b-${index}`}>
+          {renderInline(match[5], `${keyPrefix}-b-${index}`)}
+        </strong>,
+      );
     } else if (match[7]) {
-      nodes.push(<em key={`${keyPrefix}-i-${index}`}>{match[7]}</em>);
+      nodes.push(
+        <em key={`${keyPrefix}-i-${index}`}>
+          {renderInline(match[7], `${keyPrefix}-i-${index}`)}
+        </em>,
+      );
     } else if (match[8]) {
       const href = safeHttpUrl(match[8]);
       nodes.push(
@@ -104,10 +115,7 @@ export function renderMarkdown(
     const ordered = orderedListItems(lines);
     if (ordered) {
       return (
-        <ol
-          key={`md-ol-${blockIndex}`}
-          className={options.className}
-        >
+        <ol key={`md-ol-${blockIndex}`} className={options.className}>
           {ordered.map((item, itemIndex) => (
             <li key={`md-ol-${blockIndex}-${itemIndex}`}>
               {renderInline(item, `md-ol-${blockIndex}-${itemIndex}`)}
@@ -120,10 +128,7 @@ export function renderMarkdown(
     const unordered = unorderedListItems(lines);
     if (unordered) {
       return (
-        <ul
-          key={`md-ul-${blockIndex}`}
-          className={options.className}
-        >
+        <ul key={`md-ul-${blockIndex}`} className={options.className}>
           {unordered.map((item, itemIndex) => (
             <li key={`md-ul-${blockIndex}-${itemIndex}`}>
               {renderInline(item, `md-ul-${blockIndex}-${itemIndex}`)}
