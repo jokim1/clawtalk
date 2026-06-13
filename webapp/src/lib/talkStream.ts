@@ -289,6 +289,7 @@ export type TalkStreamTransportFactory = (
 
 interface OpenTalkStreamInput extends TalkStreamCallbacks {
   talkId: string;
+  clientSocketId?: string;
   createTransport?: TalkStreamTransportFactory;
   probeSession?: () => Promise<boolean>;
   jitterMs?: (baseMs: number) => number;
@@ -309,6 +310,7 @@ export function openTalkStream(input: OpenTalkStreamInput): TalkStreamHandle {
   let stopped = false;
   let handlingReplayGap = false;
   let lastEventId = 0;
+  const clientSocketId = input.clientSocketId ?? createClientSocketId();
 
   const createTransport =
     input.createTransport ??
@@ -595,7 +597,7 @@ export function openTalkStream(input: OpenTalkStreamInput): TalkStreamHandle {
     closeSource();
     emitState(state);
 
-    const url = `/api/v1/talks/${encodeURIComponent(input.talkId)}/events?stream=1`;
+    const url = `/api/v1/talks/${encodeURIComponent(input.talkId)}/events?stream=1&clientSocketId=${encodeURIComponent(clientSocketId)}`;
     let next: WebSocketEventSourceLike | null = null;
     next = createTransport(url, {
       getLastEventId: () => lastEventId,
@@ -628,6 +630,14 @@ export function openTalkStream(input: OpenTalkStreamInput): TalkStreamHandle {
   return {
     close: stop,
   };
+}
+
+function createClientSocketId(): string {
+  const randomUUID = globalThis.crypto?.randomUUID;
+  if (typeof randomUUID === 'function') {
+    return randomUUID.call(globalThis.crypto);
+  }
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
 }
 
 function defaultJitterMs(baseMs: number): number {

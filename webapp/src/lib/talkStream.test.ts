@@ -61,6 +61,7 @@ describe('openTalkStream', () => {
   it('opens a transport at /api/v1/talks/:id/events?stream=1', () => {
     openTalkStream({
       talkId: 'talk-1',
+      clientSocketId: 'client-1',
       onUnauthorized: vi.fn(),
       onReplayGap: vi.fn(),
       onMessageAppended: vi.fn(),
@@ -76,7 +77,37 @@ describe('openTalkStream', () => {
 
     expect(FakeTransport.instances).toHaveLength(1);
     expect(FakeTransport.instances[0]!.url).toBe(
-      '/api/v1/talks/talk-1/events?stream=1',
+      '/api/v1/talks/talk-1/events?stream=1&clientSocketId=client-1',
+    );
+  });
+
+  it('keeps the same client socket id across reconnects', async () => {
+    openTalkStream({
+      talkId: 'talk-1',
+      clientSocketId: 'client-1',
+      onUnauthorized: vi.fn(),
+      onReplayGap: vi.fn(),
+      onMessageAppended: vi.fn(),
+      onRunStarted: vi.fn(),
+      onRunQueued: vi.fn(),
+      onRunCompleted: vi.fn(),
+      onRunFailed: vi.fn(),
+      onRunCancelled: vi.fn(),
+      createTransport: (url, options) => new FakeTransport(url, options),
+      probeSession: vi.fn(async () => true),
+      jitterMs: () => 0,
+    });
+
+    const first = FakeTransport.instances[0]!;
+    first.emitOpen();
+    first.emitError();
+
+    await vi.runAllTicks();
+    await vi.advanceTimersByTimeAsync(500);
+
+    expect(FakeTransport.instances).toHaveLength(2);
+    expect(FakeTransport.instances[1]!.url).toContain(
+      'clientSocketId=client-1',
     );
   });
 
@@ -168,6 +199,44 @@ describe('openTalkStream', () => {
 
     expect(transport.close).not.toHaveBeenCalled();
     expect(FakeTransport.instances).toHaveLength(1);
+  });
+
+  it('does not reconnect while normal stream frames keep arriving', async () => {
+    openTalkStream({
+      talkId: 'talk-1',
+      onUnauthorized: vi.fn(),
+      onReplayGap: vi.fn(),
+      onMessageAppended: vi.fn(),
+      onRunStarted: vi.fn(),
+      onRunQueued: vi.fn(),
+      onRunCompleted: vi.fn(),
+      onRunFailed: vi.fn(),
+      onRunCancelled: vi.fn(),
+      createTransport: (url, options) => new FakeTransport(url, options),
+      probeSession: vi.fn(async () => true),
+      jitterMs: () => 0,
+    });
+
+    const transport = FakeTransport.instances[0]!;
+    transport.emitOpen();
+    await vi.advanceTimersByTimeAsync(HEARTBEAT_TIMEOUT_MS - 1);
+    transport.emitFrame(
+      'talk_run_started',
+      {
+        talkId: 'talk-1',
+        runId: 'run-1',
+        triggerMessageId: null,
+        status: 'running',
+      },
+      1,
+    );
+    await vi.advanceTimersByTimeAsync(1);
+
+    expect(transport.close).not.toHaveBeenCalled();
+    expect(FakeTransport.instances).toHaveLength(1);
+
+    await vi.advanceTimersByTimeAsync(HEARTBEAT_TIMEOUT_MS);
+    expect(transport.close).toHaveBeenCalledTimes(1);
   });
 
   it('closes and reconnects when the live socket has no inbound heartbeat before timeout', async () => {

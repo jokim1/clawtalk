@@ -321,14 +321,29 @@ function clearFailedLiveResponses(
   return next;
 }
 
-function clearTerminalLiveResponsesFromRuns(
+function reconcileTerminalLiveResponsesFromRuns(
   liveResponsesByRunId: Record<string, LiveResponseView>,
   runs: TalkRun[],
 ): Record<string, LiveResponseView> {
   const next = { ...liveResponsesByRunId };
   for (const run of runs) {
     if (isNonTerminalRunStatus(run.status)) continue;
-    delete next[run.id];
+    const existing = next[run.id];
+    if (!existing || run.status === 'completed') {
+      delete next[run.id];
+      continue;
+    }
+    if (run.status !== 'failed' && run.status !== 'cancelled') {
+      delete next[run.id];
+      continue;
+    }
+    next[run.id] = {
+      ...existing,
+      pendingStatus: undefined,
+      terminalStatus: run.status,
+      errorCode: run.errorCode ?? existing.errorCode,
+      errorMessage: run.errorMessage ?? existing.errorMessage,
+    };
   }
   return next;
 }
@@ -442,7 +457,7 @@ export function detailReducer(
         merged[runId] = { ...incomingView, ...view };
       }
       const seededLive = deriveLiveResponsesFromRuns(action.runs);
-      const liveResponsesByRunId = clearTerminalLiveResponsesFromRuns(
+      const liveResponsesByRunId = reconcileTerminalLiveResponsesFromRuns(
         state.liveResponsesByRunId,
         action.runs,
       );
@@ -474,7 +489,7 @@ export function detailReducer(
       return {
         ...state,
         runsById: merged,
-        liveResponsesByRunId: clearTerminalLiveResponsesFromRuns(
+        liveResponsesByRunId: reconcileTerminalLiveResponsesFromRuns(
           state.liveResponsesByRunId,
           action.runs,
         ),

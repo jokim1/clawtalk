@@ -196,7 +196,7 @@ describe('GET /api/v1/events (user-scope)', () => {
     const { binding, captured } = makeMockEventHub();
     const app = getWorkerApp();
     const res = await app.request(
-      '/api/v1/events?lastEventId=42',
+      '/api/v1/events?lastEventId=42&clientSocketId=client_42',
       {
         headers: {
           origin: VALID_ORIGIN,
@@ -220,6 +220,7 @@ describe('GET /api/v1/events (user-scope)', () => {
     expect(fwd.headers['x-clawtalk-scope']).toBe('user');
     expect(fwd.headers['x-clawtalk-topic']).toBe(`user:${sub}`);
     expect(fwd.headers['x-clawtalk-last-event-id']).toBe('42');
+    expect(fwd.headers['x-clawtalk-client-socket-id']).toBe('client_42');
     expect(Number(fwd.headers['x-clawtalk-jwt-exp'])).toBeGreaterThan(0);
     // Cookie + CSRF stripped
     expect(fwd.headers['cookie']).toBeUndefined();
@@ -249,6 +250,24 @@ describe('GET /api/v1/events (user-scope)', () => {
     );
     expect(captured[0]!.headers['x-clawtalk-userid']).toBe(sub);
     expect(captured[0]!.ownerId).toBe(sub);
+  });
+
+  it('strips invalid clientSocketId query values instead of forwarding them', async () => {
+    const token = await mintJwt();
+    const { binding, captured } = makeMockEventHub();
+    const app = getWorkerApp();
+    await app.request(
+      '/api/v1/events?clientSocketId=../../bad',
+      {
+        headers: {
+          origin: VALID_ORIGIN,
+          cookie: `${ACCESS_TOKEN_COOKIE}=${token}`,
+        },
+      },
+      envForWorker({ USER_EVENT_HUB: binding }),
+    );
+
+    expect(captured[0]!.headers['x-clawtalk-client-socket-id']).toBeUndefined();
   });
 
   it('defaults lastEventId to 0 when not supplied', async () => {
