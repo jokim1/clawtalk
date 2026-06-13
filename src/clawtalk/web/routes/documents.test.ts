@@ -1010,6 +1010,54 @@ describe('native document routes', () => {
       expect(await editStatus(editB)).toBe('accepted');
     });
 
+    it('accept-all supersedes stale reviewed edits and still applies valid edits', async () => {
+      const fixture = await createDocumentFixture();
+      const staleEdit = await insertPendingDocumentEdit({
+        workspaceId: fixture.workspaceId,
+        documentId: fixture.documentId,
+        tabId: fixture.mainTabId,
+        op: 'replace',
+        blockId: fixture.mainBlockId,
+        baseBlockVersion: fixture.mainBlockVersion,
+        newText: 'Stale replacement.',
+      });
+      const validEdit = await insertPendingDocumentEdit({
+        workspaceId: fixture.workspaceId,
+        documentId: fixture.documentId,
+        tabId: fixture.secondaryTabId,
+        op: 'replace',
+        blockId: fixture.secondaryBlockId,
+        baseBlockVersion: fixture.secondaryBlockVersion,
+        newText: 'Valid replacement.',
+      });
+      await getDbPg()`
+        update public.doc_blocks
+        set text = 'Already changed elsewhere.',
+            version = version + 1
+        where id = ${fixture.mainBlockId}::uuid
+      `;
+
+      const result = await acceptAllDocumentEditsRoute({
+        auth: auth(),
+        workspaceId: fixture.workspaceId,
+        documentId: fixture.documentId,
+        reviewedEditIds: [staleEdit, validEdit],
+      });
+
+      expect(result.statusCode).toBe(200);
+      if (!result.body.ok) throw new Error('Expected accept-all to succeed');
+      expect(result.body.data.editIds).toEqual([validEdit]);
+      expect(result.body.data.document.pendingEditCount).toBe(0);
+      expect(await editStatus(staleEdit)).toBe('superseded');
+      expect(await editStatus(validEdit)).toBe('accepted');
+      expect(await blockText(fixture.mainBlockId)).toBe(
+        'Already changed elsewhere.',
+      );
+      expect(await blockText(fixture.secondaryBlockId)).toBe(
+        'Valid replacement.',
+      );
+    });
+
     it('keeps a concurrent same-block proposal pending instead of superseding it during accept', async () => {
       const fixture = await createDocumentFixture();
       const acceptedEditId = await insertPendingDocumentEdit({

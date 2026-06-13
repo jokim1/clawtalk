@@ -191,7 +191,7 @@ describe('TalkDocPane', () => {
     renderPane({ canEditDoc: false });
 
     expect(await screen.findByText('Proposed replacement.')).toBeTruthy();
-    expect(screen.getByText('Strategist · pending')).toBeTruthy();
+    expect(screen.getByText('Suggested by Strategist')).toBeTruthy();
     expect(screen.getByText(/1 pending edit awaiting review/)).toBeTruthy();
     expect(screen.queryByRole('button', { name: /Accept/ })).toBeNull();
     expect(screen.queryByRole('button', { name: 'Accept all' })).toBeNull();

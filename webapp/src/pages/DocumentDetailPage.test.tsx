@@ -201,6 +201,7 @@ describe('DocumentDetailPage', () => {
     expect(
       screen.getAllByText('Investors & Advisors Update').length,
     ).toBeGreaterThan(0);
+    expect(screen.getAllByText('Suggested by Strategist')).toHaveLength(1);
     expect(view.container.textContent).not.toContain('<h2>');
     expect(view.container.textContent).not.toContain('&amp;');
   });
