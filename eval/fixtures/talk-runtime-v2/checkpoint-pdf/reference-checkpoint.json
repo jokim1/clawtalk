@@ -1,0 +1,103 @@
+{
+  "version": "talk-runtime-v2-reference-checkpoint-fixture-v1",
+  "talkId": "talk-runtime-v2-fixture",
+  "sourceId": "checkpoint-heavy-report",
+  "sourceRef": "S1",
+  "sourceTitle": "Checkpoint Stress Report",
+  "sourceFile": "checkpoint-heavy-report.pdf",
+  "messages": [
+    {
+      "role": "system",
+      "content": "You are evaluating a Talk Runtime v2 checkpoint containing a raster-heavy PDF source. Preserve the page order and cite page numbers."
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "text",
+          "text": "Talk-level Context PDF page images (rasterized pages of saved PDFs; read these alongside the extracted text in the system prompt):"
+        },
+        {
+          "type": "text",
+          "text": "PDF [S1] \"Checkpoint Stress Report\" - page 1 of 6:"
+        },
+        {
+          "type": "pdf_page_image_ref",
+          "mimeType": "image/jpeg",
+          "storageKey": "attachments/talk-runtime-v2-fixture/checkpoint-heavy-report/page-0.jpg",
+          "pageIndex": 0,
+          "byteLength": 511898,
+          "sha256": "6cdd086823566411e9aca289ee1022653a5f77bde643099f9a2295dd2c916dbb"
+        },
+        {
+          "type": "text",
+          "text": "PDF [S1] \"Checkpoint Stress Report\" - page 2 of 6:"
+        },
+        {
+          "type": "pdf_page_image_ref",
+          "mimeType": "image/jpeg",
+          "storageKey": "attachments/talk-runtime-v2-fixture/checkpoint-heavy-report/page-1.jpg",
+          "pageIndex": 1,
+          "byteLength": 509036,
+          "sha256": "5ac3e568ca3049418de1004f4462401c0a349cdbd25f29d14e0a1ffe76770662"
+        },
+        {
+          "type": "text",
+          "text": "PDF [S1] \"Checkpoint Stress Report\" - page 3 of 6:"
+        },
+        {
+          "type": "pdf_page_image_ref",
+          "mimeType": "image/jpeg",
+          "storageKey": "attachments/talk-runtime-v2-fixture/checkpoint-heavy-report/page-2.jpg",
+          "pageIndex": 2,
+          "byteLength": 512270,
+          "sha256": "4736b0ca1a45278699205f9306cf421b6114c6e3da0eb66f47f025b3890c5f0b"
+        },
+        {
+          "type": "text",
+          "text": "PDF [S1] \"Checkpoint Stress Report\" - page 4 of 6:"
+        },
+        {
+          "type": "pdf_page_image_ref",
+          "mimeType": "image/jpeg",
+          "storageKey": "attachments/talk-runtime-v2-fixture/checkpoint-heavy-report/page-3.jpg",
+          "pageIndex": 3,
+          "byteLength": 514224,
+          "sha256": "0026b1b3da9affefe86b489c89df1d7eb47ceff328366f486f7433fdb46d8e78"
+        },
+        {
+          "type": "text",
+          "text": "PDF [S1] \"Checkpoint Stress Report\" - page 5 of 6:"
+        },
+        {
+          "type": "pdf_page_image_ref",
+          "mimeType": "image/jpeg",
+          "storageKey": "attachments/talk-runtime-v2-fixture/checkpoint-heavy-report/page-4.jpg",
+          "pageIndex": 4,
+          "byteLength": 513933,
+          "sha256": "6de2d36605a07b50481f48223cc4c49fbc2267f6805f763e7e7cbab492c7f478"
+        },
+        {
+          "type": "text",
+          "text": "PDF [S1] \"Checkpoint Stress Report\" - page 6 of 6:"
+        },
+        {
+          "type": "pdf_page_image_ref",
+          "mimeType": "image/jpeg",
+          "storageKey": "attachments/talk-runtime-v2-fixture/checkpoint-heavy-report/page-5.jpg",
+          "pageIndex": 5,
+          "byteLength": 512989,
+          "sha256": "3784661f43d6969a0be3246fde319d92567675cbde7929cba31cbc169ed3558b"
+        },
+        {
+          "type": "text",
+          "text": "Summarize the report, then identify which checkpoint representation should be stored durably."
+        }
+      ]
+    }
+  ],
+  "rehydration": {
+    "loader": "loadPageImage(talkId, sourceId, pageIndex)",
+    "storage": "attachment-storage"
+  }
+}

@@ -1,0 +1,85 @@
+{
+  "fixture": "talk-runtime-v2/checkpoint-pdf",
+  "purpose": "PR-A3 8A checkpoint size assert fixture",
+  "sqliteValueCapBytes": 2097152,
+  "checkpointAssertBytes": 1048576,
+  "pdf": {
+    "file": "checkpoint-heavy-report.pdf",
+    "pageCount": 6,
+    "width": 1240,
+    "height": 1754,
+    "byteLength": 3079390,
+    "sha256": "e59c96b73c86a6be0deafdb1c1670b561f3d9df742f01c979f4cb9c518cd35fb"
+  },
+  "pageImages": {
+    "directory": "page-images",
+    "totalByteLength": 3074350,
+    "totalBase64Length": 4099140,
+    "items": [
+      {
+        "pageIndex": 0,
+        "file": "page-images/page-0.jpg",
+        "storageKey": "attachments/talk-runtime-v2-fixture/checkpoint-heavy-report/page-0.jpg",
+        "mimeType": "image/jpeg",
+        "byteLength": 511898,
+        "base64Length": 682532,
+        "sha256": "6cdd086823566411e9aca289ee1022653a5f77bde643099f9a2295dd2c916dbb"
+      },
+      {
+        "pageIndex": 1,
+        "file": "page-images/page-1.jpg",
+        "storageKey": "attachments/talk-runtime-v2-fixture/checkpoint-heavy-report/page-1.jpg",
+        "mimeType": "image/jpeg",
+        "byteLength": 509036,
+        "base64Length": 678716,
+        "sha256": "5ac3e568ca3049418de1004f4462401c0a349cdbd25f29d14e0a1ffe76770662"
+      },
+      {
+        "pageIndex": 2,
+        "file": "page-images/page-2.jpg",
+        "storageKey": "attachments/talk-runtime-v2-fixture/checkpoint-heavy-report/page-2.jpg",
+        "mimeType": "image/jpeg",
+        "byteLength": 512270,
+        "base64Length": 683028,
+        "sha256": "4736b0ca1a45278699205f9306cf421b6114c6e3da0eb66f47f025b3890c5f0b"
+      },
+      {
+        "pageIndex": 3,
+        "file": "page-images/page-3.jpg",
+        "storageKey": "attachments/talk-runtime-v2-fixture/checkpoint-heavy-report/page-3.jpg",
+        "mimeType": "image/jpeg",
+        "byteLength": 514224,
+        "base64Length": 685632,
+        "sha256": "0026b1b3da9affefe86b489c89df1d7eb47ceff328366f486f7433fdb46d8e78"
+      },
+      {
+        "pageIndex": 4,
+        "file": "page-images/page-4.jpg",
+        "storageKey": "attachments/talk-runtime-v2-fixture/checkpoint-heavy-report/page-4.jpg",
+        "mimeType": "image/jpeg",
+        "byteLength": 513933,
+        "base64Length": 685244,
+        "sha256": "6de2d36605a07b50481f48223cc4c49fbc2267f6805f763e7e7cbab492c7f478"
+      },
+      {
+        "pageIndex": 5,
+        "file": "page-images/page-5.jpg",
+        "storageKey": "attachments/talk-runtime-v2-fixture/checkpoint-heavy-report/page-5.jpg",
+        "mimeType": "image/jpeg",
+        "byteLength": 512989,
+        "base64Length": 683988,
+        "sha256": "3784661f43d6969a0be3246fde319d92567675cbde7929cba31cbc169ed3558b"
+      }
+    ]
+  },
+  "inlineProviderMessages": {
+    "file": "provider-messages.openai-chat.inline.json",
+    "serializedByteLength": 4101290,
+    "exceedsSqliteValueCap": true
+  },
+  "referenceCheckpoint": {
+    "file": "reference-checkpoint.json",
+    "serializedByteLength": 3769,
+    "underOneMbAssert": true
+  }
+}
