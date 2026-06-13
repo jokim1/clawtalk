@@ -33,6 +33,8 @@ import { resolveExecution } from './execution-resolver.js';
 import { streamLlmResponse } from './llm-client.js';
 import {
   ALWAYS_ALLOWED_CONTEXT_TOOLS,
+  READ_ONLY_PARALLELIZABLE_TOOLS,
+  READ_ONLY_TOOL_CONCURRENCY,
   executeWithAgent,
 } from './agent-router.js';
 
@@ -344,5 +346,340 @@ describe('agent-router', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  // --- T5: parallel read-only tool execution -----------------------------
+
+  // Drive the router's tool loop with one batch of tool calls on turn 1, then
+  // a clean final answer on turn 2. Returns a handle capturing the message
+  // history the router replays on turn 2 so tests can assert the tool-result
+  // append order (the byte-stable prefix T4 caching depends on).
+  function mockToolBatchThenFinal(
+    batch: Array<{ id: string; name: string; args: string }>,
+  ): { turn2Messages: Array<Record<string, unknown>> | null } {
+    const captured: {
+      turn2Messages: Array<Record<string, unknown>> | null;
+    } = { turn2Messages: null };
+    let turn = 0;
+    vi.mocked(streamLlmResponse).mockImplementation(async function* (
+      _provider,
+      _secret,
+      _modelId,
+      messages,
+    ) {
+      turn += 1;
+      if (turn === 1) {
+        for (const call of batch) {
+          yield {
+            type: 'tool_call_start',
+            toolCall: { id: call.id, name: call.name },
+          };
+          yield {
+            type: 'tool_call_delta',
+            toolCall: { id: call.id, arguments: call.args },
+          };
+        }
+        yield { type: 'done', stopReason: 'tool_use' };
+        return;
+      }
+      captured.turn2Messages = messages as unknown as Array<
+        Record<string, unknown>
+      >;
+      yield { type: 'text_delta', text: 'final' };
+      yield { type: 'done', stopReason: 'stop' };
+    } as typeof streamLlmResponse);
+    return captured;
+  }
+
+  it('runs read-only registry tools concurrently (3×100ms reads overlap, ~100ms not ~300ms)', async () => {
+    mockToolBatchThenFinal([
+      { id: 'r1', name: 'web_search', args: '{}' },
+      { id: 'r2', name: 'web_search', args: '{}' },
+      { id: 'r3', name: 'web_search', args: '{}' },
+    ]);
+
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const executeToolCall = vi.fn(async () => {
+      inFlight += 1;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      inFlight -= 1;
+      return { result: 'ok' };
+    });
+
+    const startedAt = Date.now();
+    await executeWithAgent('agent-1', null, 'search', {
+      runId: 'run-parallel-reads',
+      userId: 'owner-1',
+      executeToolCall,
+    });
+    const elapsedMs = Date.now() - startedAt;
+
+    expect(executeToolCall).toHaveBeenCalledTimes(3);
+    // Deterministic proof of concurrency: all three were in flight at once.
+    expect(maxInFlight).toBe(3);
+    // Wall-clock sanity only (maxInFlight above is the real proof): parallel
+    // ≈100ms vs ≈300ms sequential. Generous bound to stay flake-free on CI.
+    expect(elapsedMs).toBeLessThan(280);
+  });
+
+  it('runs non-registry (write) tools sequentially in batch order (side-effect ordering)', async () => {
+    mockToolBatchThenFinal([
+      { id: 'w1', name: 'apply_content_edit', args: '{"n":1}' },
+      { id: 'w2', name: 'apply_content_edit', args: '{"n":2}' },
+      { id: 'w3', name: 'apply_content_edit', args: '{"n":3}' },
+    ]);
+
+    const events: string[] = [];
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const executeToolCall = vi.fn(
+      async (_toolName: string, args: Record<string, unknown>) => {
+        inFlight += 1;
+        maxInFlight = Math.max(maxInFlight, inFlight);
+        events.push(`start:${args.n}`);
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        events.push(`end:${args.n}`);
+        inFlight -= 1;
+        return { result: 'ok' };
+      },
+    );
+
+    await executeWithAgent('agent-1', null, 'edit', {
+      runId: 'run-sequential-writes',
+      userId: 'owner-1',
+      executeToolCall,
+    });
+
+    // Writes never overlap and run strictly in batch order.
+    expect(maxInFlight).toBe(1);
+    expect(events).toEqual([
+      'start:1',
+      'end:1',
+      'start:2',
+      'end:2',
+      'start:3',
+      'end:3',
+    ]);
+  });
+
+  it('runs tools absent from the registry sequentially (no name/family inference)', async () => {
+    // Neither tool is in READ_ONLY_PARALLELIZABLE_TOOLS. Even though
+    // 'connector_fetch' superficially reads, the partition never infers from
+    // names or families — unrecognized tools default to sequential.
+    mockToolBatchThenFinal([
+      { id: 'u1', name: 'connector_fetch', args: '{}' },
+      { id: 'u2', name: 'mystery_tool', args: '{}' },
+    ]);
+
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const executeToolCall = vi.fn(async () => {
+      inFlight += 1;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      inFlight -= 1;
+      return { result: 'ok' };
+    });
+
+    await executeWithAgent('agent-1', null, 'go', {
+      runId: 'run-unknown-sequential',
+      userId: 'owner-1',
+      executeToolCall,
+    });
+
+    expect(maxInFlight).toBe(1);
+  });
+
+  it('appends tool results in batch order even when reads finish out of order (byte-stable prefix for T4)', async () => {
+    const captured = mockToolBatchThenFinal([
+      { id: 'r1', name: 'web_search', args: '{"id":"r1"}' },
+      { id: 'r2', name: 'web_search', args: '{"id":"r2"}' },
+      { id: 'r3', name: 'web_search', args: '{"id":"r3"}' },
+    ]);
+
+    // Completion order is the REVERSE of batch order: r3 finishes first,
+    // r1 finishes last.
+    const delaysById: Record<string, number> = { r1: 60, r2: 30, r3: 10 };
+    const executeToolCall = vi.fn(
+      async (_toolName: string, args: Record<string, unknown>) => {
+        const id = String(args.id);
+        await new Promise((resolve) => setTimeout(resolve, delaysById[id]));
+        return { result: `result-${id}` };
+      },
+    );
+
+    await executeWithAgent('agent-1', null, 'search', {
+      runId: 'run-stable-order',
+      userId: 'owner-1',
+      executeToolCall,
+    });
+
+    // openai_chat_completions emits one role:'tool' message per result. Their
+    // order in the replayed history must be batch order (r1, r2, r3), NOT
+    // completion order (r3, r2, r1).
+    const toolMessages = (captured.turn2Messages ?? []).filter(
+      (m) => (m as { role?: string }).role === 'tool',
+    );
+    expect(
+      toolMessages.map((m) => (m as { toolCallId?: string }).toolCallId),
+    ).toEqual(['r1', 'r2', 'r3']);
+    expect(
+      toolMessages.map((m) => (m as { content?: string }).content),
+    ).toEqual(['result-r1', 'result-r2', 'result-r3']);
+  });
+
+  it('registry is the conservative pure-read set; writes AND Google reads default sequential', () => {
+    // Only the two provably side-effect-free tools are parallelizable.
+    expect([...READ_ONLY_PARALLELIZABLE_TOOLS].sort()).toEqual([
+      'read_source',
+      'web_search',
+    ]);
+    // Writes must never be parallelized.
+    expect(READ_ONLY_PARALLELIZABLE_TOOLS.has('apply_content_edit')).toBe(
+      false,
+    );
+    expect(READ_ONLY_PARALLELIZABLE_TOOLS.has('google_docs_create')).toBe(
+      false,
+    );
+    expect(READ_ONLY_PARALLELIZABLE_TOOLS.has('google_docs_batch_update')).toBe(
+      false,
+    );
+    expect(
+      READ_ONLY_PARALLELIZABLE_TOOLS.has('google_sheets_batch_update'),
+    ).toBe(false);
+    // Google READS are intentionally excluded: their 401-retry path can
+    // refresh/delete stored OAuth creds and bypasses the refresh dedupe, so
+    // concurrent Google reads could stampede a credential write. Sequential
+    // until that path is deduped.
+    expect(READ_ONLY_PARALLELIZABLE_TOOLS.has('google_drive_read')).toBe(false);
+    expect(READ_ONLY_PARALLELIZABLE_TOOLS.has('google_drive_search')).toBe(
+      false,
+    );
+    expect(READ_ONLY_PARALLELIZABLE_TOOLS.has('google_docs_read')).toBe(false);
+    expect(READ_ONLY_PARALLELIZABLE_TOOLS.has('google_sheets_read_range')).toBe(
+      false,
+    );
+  });
+
+  it('treats writes as barriers: reads in a run overlap, a read after a write waits for it (batch order preserved)', async () => {
+    const captured = mockToolBatchThenFinal([
+      { id: 'r1', name: 'web_search', args: '{"id":"r1"}' },
+      { id: 'r2', name: 'web_search', args: '{"id":"r2"}' },
+      { id: 'w1', name: 'apply_content_edit', args: '{"id":"w1"}' },
+      { id: 'r3', name: 'web_search', args: '{"id":"r3"}' },
+    ]);
+
+    let readInFlight = 0;
+    let maxReadInFlight = 0;
+    let tick = 0;
+    let w1EndedAt = -1;
+    let r3StartedAt = -1;
+    const executeToolCall = vi.fn(
+      async (name: string, args: Record<string, unknown>) => {
+        const id = String(args.id);
+        if (name === 'web_search') {
+          readInFlight += 1;
+          maxReadInFlight = Math.max(maxReadInFlight, readInFlight);
+          if (id === 'r3') r3StartedAt = tick++;
+          await new Promise((resolve) => setTimeout(resolve, 30));
+          readInFlight -= 1;
+        } else {
+          // A write must never run while a read is in flight.
+          expect(readInFlight).toBe(0);
+          await new Promise((resolve) => setTimeout(resolve, 10));
+          w1EndedAt = tick++;
+        }
+        return { result: `result-${id}` };
+      },
+    );
+
+    await executeWithAgent('agent-1', null, 'go', {
+      runId: 'run-barrier',
+      userId: 'owner-1',
+      executeToolCall,
+    });
+
+    // r1 and r2 (contiguous reads before the write) overlapped.
+    expect(maxReadInFlight).toBe(2);
+    // The write is a barrier: r3 (after w1 in batch order) started only after
+    // w1 finished.
+    expect(w1EndedAt).toBeGreaterThanOrEqual(0);
+    expect(r3StartedAt).toBeGreaterThan(w1EndedAt);
+    // Final append order is batch order, not completion order.
+    const toolMessages = (captured.turn2Messages ?? []).filter(
+      (m) => (m as { role?: string }).role === 'tool',
+    );
+    expect(
+      toolMessages.map((m) => (m as { toolCallId?: string }).toolCallId),
+    ).toEqual(['r1', 'r2', 'w1', 'r3']);
+  });
+
+  it('bounds read-only concurrency to READ_ONLY_TOOL_CONCURRENCY for a large read run', async () => {
+    const batchSize = READ_ONLY_TOOL_CONCURRENCY * 2;
+    mockToolBatchThenFinal(
+      Array.from({ length: batchSize }, (_unused, i) => ({
+        id: `r${i}`,
+        name: 'web_search',
+        args: '{}',
+      })),
+    );
+
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const executeToolCall = vi.fn(async () => {
+      inFlight += 1;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      inFlight -= 1;
+      return { result: 'ok' };
+    });
+
+    await executeWithAgent('agent-1', null, 'go', {
+      runId: 'run-cap',
+      userId: 'owner-1',
+      executeToolCall,
+    });
+
+    expect(executeToolCall).toHaveBeenCalledTimes(batchSize);
+    // Never exceeds the cap, and saturates it (batch is larger than the cap).
+    expect(maxInFlight).toBe(READ_ONLY_TOOL_CONCURRENCY);
+  });
+
+  it('honors a cancel that lands after streaming but before the tool batch launches (no tool calls fire)', async () => {
+    const controller = new AbortController();
+    // Stream the tool calls, then abort AFTER the final `done` event — so the
+    // cancel lands between the stream loop and the tool-dispatch section,
+    // exercising the pre-batch abort guard (not the stream-loop guard).
+    vi.mocked(streamLlmResponse).mockImplementation(async function* () {
+      yield {
+        type: 'tool_call_start',
+        toolCall: { id: 'r1', name: 'web_search' },
+      };
+      yield {
+        type: 'tool_call_delta',
+        toolCall: { id: 'r1', arguments: '{}' },
+      };
+      yield { type: 'done', stopReason: 'tool_use' };
+      controller.abort();
+    } as typeof streamLlmResponse);
+
+    const executeToolCall = vi.fn(async () => ({ result: 'ok' }));
+    const events: Array<Record<string, unknown>> = [];
+
+    await expect(
+      executeWithAgent('agent-1', null, 'go', {
+        runId: 'run-precancel',
+        userId: 'owner-1',
+        signal: controller.signal,
+        executeToolCall,
+        emit: (event) => events.push(event as Record<string, unknown>),
+      }),
+    ).rejects.toMatchObject({ name: 'AbortError' });
+
+    // No tool executed; a cancelled event was emitted.
+    expect(executeToolCall).not.toHaveBeenCalled();
+    expect(events.some((e) => e.type === 'cancelled')).toBe(true);
   });
 });

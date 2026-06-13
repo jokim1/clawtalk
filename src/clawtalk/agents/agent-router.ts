@@ -187,6 +187,75 @@ export const ALWAYS_ALLOWED_CONTEXT_TOOLS = new Set([
   'apply_content_edit',
 ]);
 
+/**
+ * Tools that are SAFE TO RUN CONCURRENTLY with each other within a single
+ * assistant turn's tool batch. A maximal run of CONSECUTIVE listed tools
+ * executes in parallel (bounded by READ_ONLY_TOOL_CONCURRENCY); every other
+ * tool is a barrier that runs sequentially. See the dispatch loop below.
+ *
+ * Membership is an EXPLICIT, per-tool correctness assertion. There is NO name,
+ * prefix, or family inference: a tool absent from this set runs sequentially
+ * even if it "looks" read-only. To add a tool here it must be:
+ *   - side-effect-free on EVERY path, including error/retry paths (it mutates
+ *     no Talk / document / external / stored-credential state — reruns and
+ *     concurrent siblings are observationally equivalent), and
+ *   - safe to run concurrently with its own siblings.
+ *
+ * Deliberately conservative — only the two tools we can assert are pure:
+ *   - read_source: a single SELECT over context_sources.
+ *   - web_search: resolves credentials in a short tx that COMMITS before the
+ *     provider fetch (T2/#622) and never mutates stored secrets; the fetch is
+ *     the latency parallelism actually hides.
+ * The Google read tools are NOT listed: their 401-retry path can refresh OR
+ * DELETE the stored OAuth credential and bypasses the in-flight-refresh
+ * dedupe (google-drive-tools.ts -> google-tools-service.ts), so concurrent
+ * Google reads can stampede a credential write. Parallelizing them is a
+ * follow-up gated on routing that retry through the deduped refresh.
+ *
+ * This set changes ONLY execution concurrency. Results are always appended to
+ * the message history in batch (tool_use id) order regardless of completion
+ * order, so the prefix stays byte-stable for prompt caching (T4 / Lane A). Do
+ * not use this set to reorder results.
+ */
+export const READ_ONLY_PARALLELIZABLE_TOOLS = new Set<string>([
+  'read_source',
+  'web_search',
+]);
+
+/**
+ * Upper bound on read-only tool calls executed concurrently within one
+ * contiguous run. Caps provider-quota and request-DB connection-queue pressure
+ * when a model emits a large tool batch in a single turn (a hostile or confused
+ * model can request many web_search calls at once). Small because the shared
+ * request DB client is max:1 and search providers rate-limit.
+ */
+export const READ_ONLY_TOOL_CONCURRENCY = 6;
+
+/**
+ * Run `fn` over `items` with at most `limit` concurrent executions, returning
+ * results in INPUT order (never completion order). Used to bound and order the
+ * parallel execution of a contiguous run of read-only tool calls so the
+ * appended results stay byte-stable for prompt caching.
+ */
+async function runBoundedInOrder<T, R>(
+  items: T[],
+  limit: number,
+  fn: (item: T) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let cursor = 0;
+  const worker = async (): Promise<void> => {
+    while (cursor < items.length) {
+      const index = cursor;
+      cursor += 1;
+      results[index] = await fn(items[index]);
+    }
+  };
+  const workerCount = Math.min(Math.max(1, limit), items.length);
+  await Promise.all(Array.from({ length: workerCount }, () => worker()));
+  return results;
+}
+
 const CLEAN_PROVIDER_STOP_REASONS = new Set([
   'stop',
   'end_turn',
@@ -642,63 +711,133 @@ export async function executeWithResolvedAgent(
       }
       messages.push({ role: 'assistant', content: assistantContent });
 
-      // Execute each tool call and collect results
+      // Execute this turn's tool calls and collect their results. The dispatch
+      // strategy — parallel contiguous read-only runs, every other tool a
+      // sequential barrier, results appended in batch order — is documented at
+      // the dispatch loop below.
       const toolResults: Array<{
         id: string;
         name: string;
         result: string;
         isError: boolean;
       }> = [];
-      for (const [id, call] of Array.from(pendingToolCalls.entries())) {
-        let parsedArgs: Record<string, unknown> = {};
-        try {
-          parsedArgs = call.argumentsJson ? JSON.parse(call.argumentsJson) : {};
-        } catch {
-          parsedArgs = {};
-        }
 
+      // Guaranteed defined: the loop broke above when executeToolCall was
+      // absent (isToolUseStop guard). Captured into a const so the closure
+      // below sees the narrowed, non-undefined type.
+      const executeToolCall = options.executeToolCall;
+
+      const toolBatch = Array.from(pendingToolCalls.entries()).map(
+        ([id, call]) => {
+          let parsedArgs: Record<string, unknown> = {};
+          try {
+            parsedArgs = call.argumentsJson
+              ? JSON.parse(call.argumentsJson)
+              : {};
+          } catch {
+            parsedArgs = {};
+          }
+          return { id, name: call.name, parsedArgs };
+        },
+      );
+
+      // Run one tool call: emit its lifecycle events and resolve to a result
+      // record. Never throws — executor rejections become isError results,
+      // matching the prior sequential behavior exactly.
+      const runToolCall = async (entry: {
+        id: string;
+        name: string;
+        parsedArgs: Record<string, unknown>;
+      }): Promise<{
+        id: string;
+        name: string;
+        result: string;
+        isError: boolean;
+      }> => {
         emit({
           type: 'tool_call',
-          toolName: call.name,
-          arguments: parsedArgs,
+          toolName: entry.name,
+          arguments: entry.parsedArgs,
         });
-
         const toolStartedAt = Date.now();
         try {
-          const { result, isError } = await options.executeToolCall(
-            call.name,
-            parsedArgs,
+          const { result, isError } = await executeToolCall(
+            entry.name,
+            entry.parsedArgs,
           );
           emit({
             type: 'tool_result',
-            toolName: call.name,
+            toolName: entry.name,
             result,
             isError,
             durationMs: Date.now() - toolStartedAt,
           });
-          toolResults.push({
-            id,
-            name: call.name,
+          return {
+            id: entry.id,
+            name: entry.name,
             result,
             isError: !!isError,
-          });
+          };
         } catch (err) {
           const errorMsg = String(err);
           emit({
             type: 'tool_result',
-            toolName: call.name,
+            toolName: entry.name,
             result: errorMsg,
             isError: true,
             durationMs: Date.now() - toolStartedAt,
           });
-          toolResults.push({
-            id,
-            name: call.name,
+          return {
+            id: entry.id,
+            name: entry.name,
             result: errorMsg,
             isError: true,
-          });
+          };
+        }
+      };
+
+      // Honor a cancel that landed after the model emitted tool calls, before
+      // we launch any (possibly many) tool executions. Mirrors the stream
+      // loop's abort handling above so a mid-turn cancel can't fan out a batch
+      // of provider/DB work that the run is about to discard.
+      if (options.signal?.aborted) {
+        emit({ type: 'cancelled' });
+        const abortErr =
+          options.signal.reason instanceof Error
+            ? options.signal.reason
+            : Object.assign(new Error('Agent execution was cancelled'), {
+                name: 'AbortError',
+              });
+        throw abortErr;
+      }
+
+      // Dispatch in batch order. A maximal run of CONSECUTIVE read-only tools
+      // executes concurrently (bounded by READ_ONLY_TOOL_CONCURRENCY); any
+      // other tool is a BARRIER — it drains the preceding read run, then runs
+      // sequentially. Reads therefore never cross a write, so the model never
+      // sees a read that ran "before" an earlier-in-batch write, and results
+      // stay in batch (tool_use id) order — byte-stable for prompt caching
+      // (T4 / Lane A).
+      let readRun: typeof toolBatch = [];
+      const flushReadRun = async (): Promise<void> => {
+        if (readRun.length === 0) return;
+        const runResults = await runBoundedInOrder(
+          readRun,
+          READ_ONLY_TOOL_CONCURRENCY,
+          runToolCall,
+        );
+        for (const result of runResults) toolResults.push(result);
+        readRun = [];
+      };
+      for (const entry of toolBatch) {
+        if (READ_ONLY_PARALLELIZABLE_TOOLS.has(entry.name)) {
+          readRun.push(entry);
+        } else {
+          await flushReadRun();
+          toolResults.push(await runToolCall(entry));
         }
       }
+      await flushReadRun();
 
       // Append tool results as messages.
       // For Anthropic: tool_result blocks inside a single role:'tool' message
