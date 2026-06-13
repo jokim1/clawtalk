@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
   streamLlmResponse,
+  type LlmMessage,
   type LlmProviderConfig,
   type LlmSecret,
   type LlmStreamEvent,
@@ -233,7 +234,36 @@ describe('streamLlmResponse Anthropic usage accounting', () => {
 });
 
 describe('streamLlmResponse Anthropic prompt caching guard', () => {
-  it('does not send global prompt-cache markers to base URL overrides', async () => {
+  function cacheControlCount(value: unknown): number {
+    if (!value || typeof value !== 'object') return 0;
+    if (Array.isArray(value)) {
+      return value.reduce<number>(
+        (sum, item) => sum + cacheControlCount(item),
+        0,
+      );
+    }
+    const record = value as Record<string, unknown>;
+    const own = Object.prototype.hasOwnProperty.call(record, 'cache_control')
+      ? 1
+      : 0;
+    return (
+      own +
+      Object.entries(record).reduce<number>(
+        (sum, [key, child]) =>
+          key === 'cache_control' ? sum : sum + cacheControlCount(child),
+        0,
+      )
+    );
+  }
+
+  async function captureRequestBody(
+    provider: LlmProviderConfig,
+    messages: LlmMessage[] = [
+      { role: 'system', content: 'Use old-compatible request shape.' },
+      { role: 'user', content: 'hi' },
+    ],
+    options?: Parameters<typeof streamLlmResponse>[4],
+  ): Promise<Record<string, unknown>> {
     const captured: { requestBody?: Record<string, unknown> } = {};
     vi.stubGlobal(
       'fetch',
@@ -248,18 +278,11 @@ describe('streamLlmResponse Anthropic prompt caching guard', () => {
 
     await collect(
       streamLlmResponse(
-        {
-          ...ANTHROPIC_PROVIDER,
-          providerId: 'provider.anthropic',
-          baseUrl: 'https://anthropic-proxy.example.com',
-        },
+        provider,
         SECRET,
         'claude-opus-4-8',
-        [
-          { role: 'system', content: 'Use old-compatible request shape.' },
-          { role: 'user', content: 'hi' },
-        ],
-        {
+        messages,
+        options ?? {
           tools: [
             {
               name: 'read_source',
@@ -272,12 +295,110 @@ describe('streamLlmResponse Anthropic prompt caching guard', () => {
     );
 
     if (!captured.requestBody) throw new Error('expected request body');
-    const body = captured.requestBody;
+    return captured.requestBody;
+  }
+
+  it('sends prompt-cache markers to the official Anthropic API', async () => {
+    const body = await captureRequestBody({
+      ...ANTHROPIC_PROVIDER,
+      providerId: 'provider.anthropic',
+      baseUrl: 'https://api.anthropic.com',
+    });
+
+    expect(body.system).toEqual([
+      {
+        type: 'text',
+        text: 'Use old-compatible request shape.',
+        cache_control: { type: 'ephemeral' },
+      },
+    ]);
+    expect(
+      (body.tools as Array<Record<string, unknown>> | undefined)?.[0]
+        ?.cache_control,
+    ).toEqual({ type: 'ephemeral' });
+    expect(body.cache_control).toEqual({ type: 'ephemeral' });
+    expect(cacheControlCount(body)).toBe(3);
+  });
+
+  it('does not send global prompt-cache markers to base URL overrides', async () => {
+    const body = await captureRequestBody({
+      ...ANTHROPIC_PROVIDER,
+      providerId: 'provider.anthropic',
+      baseUrl: 'https://anthropic-proxy.example.com',
+    });
+
     expect(body.system).toBe('Use old-compatible request shape.');
     expect(body.cache_control).toBeUndefined();
     expect(
       (body.tools as Array<Record<string, unknown>> | undefined)?.[0]
         ?.cache_control,
     ).toBeUndefined();
+    expect(cacheControlCount(body)).toBe(0);
+  });
+
+  it('does not send document prompt-cache markers to base URL overrides', async () => {
+    const body = await captureRequestBody(
+      {
+        ...ANTHROPIC_PROVIDER,
+        providerId: 'provider.anthropic',
+        baseUrl: 'https://anthropic-proxy.example.com',
+      },
+      [
+        { role: 'system', content: 'Use old-compatible request shape.' },
+        {
+          role: 'user',
+          content: [
+            {
+              type: 'document',
+              mimeType: 'application/pdf',
+              data: 'BASE64PDFDATA',
+              cacheControl: 'ephemeral',
+            },
+            { type: 'text', text: 'Summarize.' },
+          ],
+        },
+      ],
+    );
+
+    expect(body.system).toBe('Use old-compatible request shape.');
+    expect(
+      (
+        (body.messages as Array<{ content: Array<Record<string, unknown>> }>)[0]
+          ?.content[0] ?? {}
+      ).cache_control,
+    ).toBeUndefined();
+    expect(cacheControlCount(body)).toBe(0);
+  });
+
+  it('does not send global prompt-cache markers when providerId is not Anthropic', async () => {
+    const body = await captureRequestBody({
+      ...ANTHROPIC_PROVIDER,
+      providerId: 'provider.proxy',
+      baseUrl: 'https://api.anthropic.com',
+    });
+
+    expect(body.system).toBe('Use old-compatible request shape.');
+    expect(body.cache_control).toBeUndefined();
+    expect(
+      (body.tools as Array<Record<string, unknown>> | undefined)?.[0]
+        ?.cache_control,
+    ).toBeUndefined();
+    expect(cacheControlCount(body)).toBe(0);
+  });
+
+  it('does not throw or send global prompt-cache markers for invalid base URLs', async () => {
+    const body = await captureRequestBody({
+      ...ANTHROPIC_PROVIDER,
+      providerId: 'provider.anthropic',
+      baseUrl: 'not a url',
+    });
+
+    expect(body.system).toBe('Use old-compatible request shape.');
+    expect(body.cache_control).toBeUndefined();
+    expect(
+      (body.tools as Array<Record<string, unknown>> | undefined)?.[0]
+        ?.cache_control,
+    ).toBeUndefined();
+    expect(cacheControlCount(body)).toBe(0);
   });
 });

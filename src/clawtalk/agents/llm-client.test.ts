@@ -441,7 +441,23 @@ describe('buildAnthropicRequest — prompt caching', () => {
   function cacheControlCount(
     req: ReturnType<typeof buildAnthropicRequest>,
   ): number {
-    return JSON.stringify(req).match(/"cache_control"/g)?.length ?? 0;
+    let count = 0;
+    const visit = (value: unknown): void => {
+      if (!value || typeof value !== 'object') return;
+      if (Array.isArray(value)) {
+        value.forEach(visit);
+        return;
+      }
+      const record = value as Record<string, unknown>;
+      if (Object.prototype.hasOwnProperty.call(record, 'cache_control')) {
+        count += 1;
+      }
+      for (const [key, child] of Object.entries(record)) {
+        if (key !== 'cache_control') visit(child);
+      }
+    };
+    visit(req);
+    return count;
   }
 
   it('adds system, tool-definition, and history cache breakpoints with byte-stable tool-loop prefixes', () => {
@@ -583,7 +599,11 @@ describe('buildAnthropicRequest — prompt caching', () => {
     );
 
     expect(forcedReq.tool_choice).toEqual({ type: 'any' });
+    expect(forcedReq.cache_control).toBeUndefined();
+    expect(cacheControlCount(forcedReq)).toBe(2);
     expect(nonForcedReq.tool_choice).toBeUndefined();
+    expect(nonForcedReq.cache_control).toEqual({ type: 'ephemeral' });
+    expect(cacheControlCount(nonForcedReq)).toBe(3);
     expect(promptPrefixBytes(forcedReq)).not.toBe(
       promptPrefixBytes(nonForcedReq),
     );
@@ -613,7 +633,7 @@ describe('buildAnthropicRequest — prompt caching', () => {
     });
   });
 
-  it('can skip global cache markers for Anthropic-compatible backends', () => {
+  it('can skip all prompt-cache markers for Anthropic-compatible backends', () => {
     const req = buildAnthropicRequest(
       'claude-compatible-model',
       [
@@ -640,11 +660,9 @@ describe('buildAnthropicRequest — prompt caching', () => {
 
     expect(req.system).toBe('Use old-compatible request shape.');
     expect(req.tools?.some((tool) => tool.cache_control)).toBe(false);
-    expect(req.messages[0].content[0]).toMatchObject({
-      cache_control: { type: 'ephemeral' },
-    });
+    expect(req.messages[0].content[0]).not.toHaveProperty('cache_control');
     expect(req.cache_control).toBeUndefined();
-    expect(cacheControlCount(req)).toBe(1);
+    expect(cacheControlCount(req)).toBe(0);
   });
 
   it('matches 1-hour document TTLs on earlier system and tool breakpoints', () => {
@@ -687,7 +705,45 @@ describe('buildAnthropicRequest — prompt caching', () => {
     expect(cacheControlCount(req)).toBe(4);
   });
 
-  it('normalizes explicit document breakpoints to 1h when any document asks for 1h', () => {
+  it('preserves mixed document TTLs when 1-hour breakpoints precede 5-minute breakpoints', () => {
+    const req = buildAnthropicRequest(
+      'claude-sonnet-4-6',
+      [
+        {
+          role: 'user',
+          content: [
+            {
+              type: 'document',
+              mimeType: 'application/pdf',
+              data: 'FIRSTPDF',
+              cacheControl: 'ephemeral_1h',
+            },
+            {
+              type: 'document',
+              mimeType: 'application/pdf',
+              data: 'SECONDPDF',
+              cacheControl: 'ephemeral',
+            },
+          ],
+        },
+      ],
+      undefined,
+      1024,
+      'api_key',
+      false,
+    );
+
+    expect(req.messages[0].content[0]).toMatchObject({
+      cache_control: { type: 'ephemeral', ttl: '1h' },
+    });
+    expect(req.messages[0].content[1]).toMatchObject({
+      cache_control: { type: 'ephemeral' },
+    });
+    expect(req.cache_control).toBeUndefined();
+    expect(cacheControlCount(req)).toBe(2);
+  });
+
+  it('shortens a later 1-hour document breakpoint rather than extending an earlier 5-minute document', () => {
     const req = buildAnthropicRequest(
       'claude-sonnet-4-6',
       [
@@ -716,10 +772,10 @@ describe('buildAnthropicRequest — prompt caching', () => {
     );
 
     expect(req.messages[0].content[0]).toMatchObject({
-      cache_control: { type: 'ephemeral', ttl: '1h' },
+      cache_control: { type: 'ephemeral' },
     });
     expect(req.messages[0].content[1]).toMatchObject({
-      cache_control: { type: 'ephemeral', ttl: '1h' },
+      cache_control: { type: 'ephemeral' },
     });
     expect(req.cache_control).toBeUndefined();
     expect(cacheControlCount(req)).toBe(2);
@@ -750,6 +806,45 @@ describe('buildAnthropicRequest — prompt caching', () => {
 
     expect(req.cache_control).toBeUndefined();
     expect(cacheControlCount(req)).toBe(3);
+  });
+
+  it('does not add automatic history caching for whitespace-only text', () => {
+    const req = buildAnthropicRequest(
+      'claude-sonnet-4-6',
+      [{ role: 'user', content: '   \n\t  ' }],
+      undefined,
+      1024,
+      'api_key',
+      false,
+    );
+
+    expect(req.cache_control).toBeUndefined();
+    expect(cacheControlCount(req)).toBe(0);
+  });
+
+  it('does not add automatic history caching for empty tool results', () => {
+    const req = buildAnthropicRequest(
+      'claude-sonnet-4-6',
+      [
+        {
+          role: 'tool',
+          content: [
+            {
+              type: 'tool_result',
+              toolUseId: 'toolu_empty',
+              content: '',
+            },
+          ],
+        },
+      ],
+      undefined,
+      1024,
+      'api_key',
+      false,
+    );
+
+    expect(req.cache_control).toBeUndefined();
+    expect(cacheControlCount(req)).toBe(0);
   });
 
   it('keeps total cache breakpoints within Anthropic four-slot budget', () => {

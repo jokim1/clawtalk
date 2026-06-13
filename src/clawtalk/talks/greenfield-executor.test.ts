@@ -3224,6 +3224,38 @@ describe('mapExecutionEvent tool_result (P1-f)', () => {
     sequenceIndex: 0,
   } as Parameters<typeof mapExecutionEvent>[1];
 
+  it('maps usage cache reads into cachedInputTokens', () => {
+    const mapped = mapExecutionEvent(
+      {
+        type: 'usage',
+        inputTokens: 830,
+        cachedInputTokens: 400,
+        outputTokens: 25,
+        estimatedCostUsd: 0,
+      },
+      EXEC_INPUT,
+      RUN_ROW,
+    );
+
+    expect(mapped).toEqual({
+      type: 'talk_response_usage',
+      runId: 'run-map-1',
+      talkId: 'talk-map-1',
+      agentId: 'agent-1',
+      agentNickname: 'Researcher',
+      responseGroupId: 'group-1',
+      sequenceIndex: 0,
+      providerId: 'anthropic',
+      modelId: 'claude-opus-4-8',
+      usage: {
+        inputTokens: 830,
+        cachedInputTokens: 400,
+        outputTokens: 25,
+        estimatedCostUsd: 0,
+      },
+    });
+  });
+
   it('maps tool_result with shared run fields, isError, and durationMs', () => {
     const mapped = mapExecutionEvent(
       {

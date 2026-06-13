@@ -80,6 +80,7 @@ export type ExecutionEvent =
   | {
       type: 'usage';
       inputTokens: number;
+      cachedInputTokens?: number;
       outputTokens: number;
       estimatedCostUsd?: number;
     }
@@ -121,6 +122,7 @@ export interface AgentExecutionResult {
   /** Token usage and estimated cost */
   usage?: {
     inputTokens: number;
+    cachedInputTokens?: number;
     outputTokens: number;
     estimatedCostUsd?: number;
   };
@@ -553,6 +555,7 @@ export async function executeWithResolvedAgent(
   let finalContent = '';
   let accumulatedTokens = {
     inputTokens: 0,
+    cachedInputTokens: 0,
     outputTokens: 0,
     estimatedCostUsd: 0,
   };
@@ -649,6 +652,9 @@ export async function executeWithResolvedAgent(
           accumulatedTokens = {
             inputTokens:
               accumulatedTokens.inputTokens + (event.usage?.inputTokens || 0),
+            cachedInputTokens:
+              accumulatedTokens.cachedInputTokens +
+              (event.usage?.cacheReadInputTokens || 0),
             outputTokens:
               accumulatedTokens.outputTokens + (event.usage?.outputTokens || 0),
             estimatedCostUsd: 0,
@@ -656,6 +662,7 @@ export async function executeWithResolvedAgent(
           emit({
             type: 'usage',
             inputTokens: event.usage?.inputTokens || 0,
+            cachedInputTokens: event.usage?.cacheReadInputTokens || 0,
             outputTokens: event.usage?.outputTokens || 0,
             estimatedCostUsd: 0,
           });

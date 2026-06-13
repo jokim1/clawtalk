@@ -211,6 +211,9 @@ interface AnthropicMessage {
 
 type AnthropicCacheControl = { type: 'ephemeral'; ttl?: '5m' | '1h' };
 const ANTHROPIC_MAX_CACHE_BREAKPOINTS = 4;
+const ANTHROPIC_PROVIDER_ID = 'provider.anthropic';
+const ANTHROPIC_OFFICIAL_API_HOST = 'api.anthropic.com';
+const ANTHROPIC_OFFICIAL_HOST_SUFFIX = '.anthropic.com';
 
 type AnthropicSystemContent = {
   type: 'text';
@@ -573,8 +576,8 @@ export function buildAnthropicRequest(
 } {
   let systemText = '';
   const conversationMessages: AnthropicMessage[] = [];
-  const documentCacheControl = documentMessageCacheControl(messages);
   let remainingDocumentBreakpoints = ANTHROPIC_MAX_CACHE_BREAKPOINTS;
+  let emittedFiveMinuteDocumentBreakpoint = false;
 
   for (const msg of messages) {
     if (msg.role === 'system') {
@@ -648,8 +651,19 @@ export function buildAnthropicRequest(
               },
               ...(block.title ? { title: block.title } : {}),
             };
-            if (block.cacheControl && remainingDocumentBreakpoints > 0) {
-              docBlock.cache_control = documentCacheControl;
+            if (
+              enablePromptCaching &&
+              block.cacheControl &&
+              remainingDocumentBreakpoints > 0
+            ) {
+              const cacheControl = documentBlockCacheControl(
+                block.cacheControl,
+                emittedFiveMinuteDocumentBreakpoint,
+              );
+              docBlock.cache_control = cacheControl;
+              if (cacheControl.ttl !== '1h') {
+                emittedFiveMinuteDocumentBreakpoint = true;
+              }
               remainingDocumentBreakpoints -= 1;
             }
             content.push(docBlock);
@@ -724,6 +738,7 @@ export function buildAnthropicRequest(
     enablePromptCaching &&
     hasMessageCacheTarget &&
     !lastMessageCacheControl &&
+    !forceToolUse &&
     remainingCacheBreakpoints > 0
       ? ephemeralCacheControl()
       : undefined;
@@ -746,16 +761,14 @@ export function buildAnthropicRequest(
   };
 }
 
-function documentMessageCacheControl(
-  messages: LlmMessage[],
+function documentBlockCacheControl(
+  cacheControl: 'ephemeral' | 'ephemeral_1h',
+  emittedFiveMinuteDocumentBreakpoint: boolean,
 ): AnthropicCacheControl {
-  for (const message of messages) {
-    if (typeof message.content === 'string') continue;
-    for (const block of message.content) {
-      if (block.type === 'document' && block.cacheControl === 'ephemeral_1h') {
-        return { type: 'ephemeral', ttl: '1h' };
-      }
-    }
+  // Anthropic requires 1h cache breakpoints to appear before 5m ones.
+  // Prefer shortening a later 1h request to 5m over extending an earlier 5m doc.
+  if (cacheControl === 'ephemeral_1h' && !emittedFiveMinuteDocumentBreakpoint) {
+    return { type: 'ephemeral', ttl: '1h' };
   }
   return ephemeralCacheControl();
 }
@@ -997,13 +1010,14 @@ function numberField(
 function shouldEnableAnthropicPromptCaching(
   provider: LlmProviderConfig,
 ): boolean {
-  if (provider.providerId && provider.providerId !== 'provider.anthropic') {
+  if (provider.providerId && provider.providerId !== ANTHROPIC_PROVIDER_ID) {
     return false;
   }
   try {
     const hostname = new URL(provider.baseUrl).hostname.toLowerCase();
     return (
-      hostname === 'api.anthropic.com' || hostname.endsWith('.anthropic.com')
+      hostname === ANTHROPIC_OFFICIAL_API_HOST ||
+      hostname.endsWith(ANTHROPIC_OFFICIAL_HOST_SUFFIX)
     );
   } catch {
     return false;
