@@ -176,61 +176,111 @@ export async function enqueueGreenfieldChatTurn(input: {
       return { ok: false, reason: 'talk_archived' } as const;
     }
 
-    const active = await txSql<{ count: number }[]>`
-      select count(*)::int as count
-      from public.runs
-      where workspace_id = ${input.workspaceId}::uuid
-        and talk_id = ${input.talkId}::uuid
-        and status in ('queued', 'running', 'awaiting')
-    `;
+    // Acceptance-tx hot path. These six reads depend only on the
+    // workspace/talk/user — not on each other — so issue them as one
+    // Promise.all. postgres.js pipelines concurrent queries onto the single
+    // request connection (max:1 by design — db.ts `buildRequestPgClient`), so
+    // the ~6 Hyperdrive→Postgres round trips overlap into ~1 instead of being
+    // paid serially (~0.37s each on prod). Everything stays inside this tx,
+    // under the `talks ... for update` lock, at the same RLS scope: purely a
+    // latency change, returns are byte-identical (the guards below run in the
+    // same order). None of these use `withTrustedDbWrites` — its shared
+    // per-tx depth counter races under concurrency, which is exactly why the
+    // per-agent credential snapshots below stay sequential.
+    const [
+      active,
+      roster,
+      rounds,
+      toolRows,
+      userToolPermissions,
+      attachedDocuments,
+    ] = await Promise.all([
+      txSql<{ count: number }[]>`
+        select count(*)::int as count
+        from public.runs
+        where workspace_id = ${input.workspaceId}::uuid
+          and talk_id = ${input.talkId}::uuid
+          and status in ('queued', 'running', 'awaiting')
+      `,
+      txSql<GreenfieldChatRosterAgentRecord[]>`
+        select
+          a.id,
+          a.role_key,
+          a.name,
+          a.handle,
+          a.initials,
+          a.accent,
+          a.accent_dark,
+          a.model_id,
+          lpm.provider_id,
+          a.temperature,
+          a.persona,
+          a.focus,
+          a.method,
+          ta.sort_order,
+          a.created_from_template_version,
+          a.credential_mode
+        from public.talk_agents ta
+        join public.agents a
+          on a.workspace_id = ta.workspace_id
+         and a.id = ta.agent_id
+        join public.talks t
+          on t.workspace_id = ta.workspace_id
+         and t.id = ta.talk_id
+        left join lateral (
+          select lpm.provider_id
+          from public.llm_provider_models lpm
+          join public.llm_providers lp
+            on lp.id = lpm.provider_id
+           and lp.enabled = true
+          where lpm.model_id = a.model_id
+            and lpm.enabled = true
+          order by lpm.provider_id asc
+          limit 1
+        ) lpm on true
+        where ta.workspace_id = ${input.workspaceId}::uuid
+          and ta.talk_id = ${input.talkId}::uuid
+          and a.enabled = true
+          -- System agents (Buddy) may speak only in the system talk; regular
+          -- talks never roster them.
+          and (a.is_system = false or t.is_system = true)
+        order by ta.sort_order asc, a.name asc, a.id asc
+      `,
+      txSql<{ round: number }[]>`
+        select greatest(
+          coalesce((
+            select max(round)
+            from public.messages
+            where workspace_id = ${input.workspaceId}::uuid
+              and talk_id = ${input.talkId}::uuid
+          ), 0),
+          coalesce((
+            select max(round)
+            from public.runs
+            where workspace_id = ${input.workspaceId}::uuid
+              and talk_id = ${input.talkId}::uuid
+          ), 0)
+        ) + 1 as round
+      `,
+      txSql<{ tool_id: string; enabled: boolean }[]>`
+        select tool_id, enabled
+        from public.talk_tools
+        where workspace_id = ${input.workspaceId}::uuid
+          and talk_id = ${input.talkId}::uuid
+      `,
+      listUserToolPermissionsForUser(input.userId),
+      txSql<{ id: string }[]>`
+        select id
+        from public.documents
+        where workspace_id = ${input.workspaceId}::uuid
+          and primary_talk_id = ${input.talkId}::uuid
+        limit 1
+      `,
+    ]);
+
     if ((active[0]?.count ?? 0) > 0) {
       return { ok: false, reason: 'talk_round_active' } as const;
     }
-
-    const roster = await txSql<GreenfieldChatRosterAgentRecord[]>`
-      select
-        a.id,
-        a.role_key,
-        a.name,
-        a.handle,
-        a.initials,
-        a.accent,
-        a.accent_dark,
-        a.model_id,
-        lpm.provider_id,
-        a.temperature,
-        a.persona,
-        a.focus,
-        a.method,
-        ta.sort_order,
-        a.created_from_template_version,
-        a.credential_mode
-      from public.talk_agents ta
-      join public.agents a
-        on a.workspace_id = ta.workspace_id
-       and a.id = ta.agent_id
-      join public.talks t
-        on t.workspace_id = ta.workspace_id
-       and t.id = ta.talk_id
-      left join lateral (
-        select lpm.provider_id
-        from public.llm_provider_models lpm
-        join public.llm_providers lp
-          on lp.id = lpm.provider_id
-         and lp.enabled = true
-        where lpm.model_id = a.model_id
-          and lpm.enabled = true
-        order by lpm.provider_id asc
-        limit 1
-      ) lpm on true
-      where ta.workspace_id = ${input.workspaceId}::uuid
-        and ta.talk_id = ${input.talkId}::uuid
-        and a.enabled = true
-        -- System agents (Buddy) may speak only in the system talk; regular
-        -- talks never roster them.
-        and (a.is_system = false or t.is_system = true)
-      order by ta.sort_order asc, a.name asc, a.id asc
-    `;
 
     const requestedTargetIds = Array.from(
       new Set(
@@ -255,42 +305,10 @@ export async function enqueueGreenfieldChatTurn(input: {
       return { ok: false, reason: 'agent_model_not_found' } as const;
     }
 
-    const rounds = await txSql<{ round: number }[]>`
-      select greatest(
-        coalesce((
-          select max(round)
-          from public.messages
-          where workspace_id = ${input.workspaceId}::uuid
-            and talk_id = ${input.talkId}::uuid
-        ), 0),
-        coalesce((
-          select max(round)
-          from public.runs
-          where workspace_id = ${input.workspaceId}::uuid
-            and talk_id = ${input.talkId}::uuid
-        ), 0)
-      ) + 1 as round
-    `;
     const round = rounds[0]?.round ?? 1;
     const responseGroupId = randomUUID();
     const snapshotGroupId = randomUUID();
-    const toolRows = await txSql<{ tool_id: string; enabled: boolean }[]>`
-      select tool_id, enabled
-      from public.talk_tools
-      where workspace_id = ${input.workspaceId}::uuid
-        and talk_id = ${input.talkId}::uuid
-    `;
     const activeToolFamilies = normalizeTalkToolFamiliesFromRows(toolRows);
-    const userToolPermissions = await listUserToolPermissionsForUser(
-      input.userId,
-    );
-    const attachedDocuments = await txSql<{ id: string }[]>`
-      select id
-      from public.documents
-      where workspace_id = ${input.workspaceId}::uuid
-        and primary_talk_id = ${input.talkId}::uuid
-      limit 1
-    `;
     const baseEffectiveTools = buildEffectiveToolsFromTalkToolRows(
       toolRows,
       userToolPermissions,
