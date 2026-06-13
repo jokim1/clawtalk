@@ -14,6 +14,7 @@ import {
   TALK_CONTEXT_SOURCE_ALLOWED_FILE_EXTENSIONS,
   type TalkContextSourceUploadController,
 } from '../hooks/useTalkContextSourceUpload';
+import { useTalkSpeechInput } from '../hooks/useTalkSpeechInput';
 import {
   buildAgentLabel,
   type TalkAgentExecutionGuardrail,
@@ -160,6 +161,30 @@ export function TalkComposer({
 }: TalkComposerProps): JSX.Element {
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  const composerInputDisabled =
+    sendState.status === 'posting' ||
+    activeRound ||
+    hasUnsavedAgentChanges ||
+    !activeConversationId;
+  const {
+    speechSupported,
+    speechListening,
+    speechError,
+    handleToggleSpeechInput,
+  } = useTalkSpeechInput({
+    draft,
+    maxChars: TALK_MESSAGE_MAX_CHARS,
+    textareaRef,
+    handleDraftChange,
+  });
+  const speechButtonTitle = !speechSupported
+    ? 'Speech input is not supported in this browser'
+    : composerInputDisabled
+      ? 'Voice input unavailable while composer is disabled'
+      : speechListening
+        ? 'Stop voice input'
+        : 'Start voice input';
+
   const handleFileInputChange = (event: ChangeEvent<HTMLInputElement>) => {
     if (event.target.files && event.target.files.length > 0) {
       void sourceUpload.handleFilesSelected(event.target.files);
@@ -276,12 +301,7 @@ export function TalkComposer({
           }
           rows={1}
           maxLength={TALK_MESSAGE_MAX_CHARS}
-          disabled={
-            sendState.status === 'posting' ||
-            activeRound ||
-            hasUnsavedAgentChanges ||
-            !activeConversationId
-          }
+          disabled={composerInputDisabled}
         />
 
         <div className="composer-controls">
@@ -309,6 +329,21 @@ export function TalkComposer({
                 />
               </>
             ) : null}
+            <button
+              type="button"
+              className={`composer-icon-btn composer-mic-btn${
+                speechListening ? ' composer-mic-btn-active' : ''
+              }`}
+              onClick={handleToggleSpeechInput}
+              disabled={composerInputDisabled || !speechSupported}
+              aria-label={
+                speechListening ? 'Stop voice input' : 'Start voice input'
+              }
+              aria-pressed={speechListening}
+              title={speechButtonTitle}
+            >
+              <CTIcon name="mic" size={15} strokeWidth={1.8} />
+            </button>
             {canEditAgents && activeRound ? (
               <button
                 type="button"
@@ -363,6 +398,23 @@ export function TalkComposer({
                 </span>
               </div>
             ))}
+          </div>
+        ) : null}
+        {speechListening ? (
+          <div
+            className="composer-speech-status"
+            role="status"
+            aria-live="polite"
+          >
+            Listening...
+          </div>
+        ) : speechError ? (
+          <div
+            className="composer-speech-status composer-speech-status-error"
+            role="status"
+            aria-live="polite"
+          >
+            {speechError}
           </div>
         ) : null}
       </div>

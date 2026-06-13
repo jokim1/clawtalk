@@ -9194,7 +9194,8 @@ a {
   color: var(--salon-ink-2, #6b6660);
 }
 
-.composer-attach-btn {
+.composer-attach-btn,
+.composer-mic-btn {
   width: 1.85rem;
   height: 1.85rem;
   border-color: transparent;
@@ -9203,10 +9204,20 @@ a {
 }
 
 .composer-attach-btn:hover:not(:disabled),
-.composer-attach-btn:focus-visible {
+.composer-attach-btn:focus-visible,
+.composer-mic-btn:hover:not(:disabled),
+.composer-mic-btn:focus-visible {
   border-color: var(--salon-line, #e6e0d1);
   background: var(--salon-paper, #fbf7ef);
   color: var(--salon-ink, #1f1b16);
+}
+
+.composer-mic-btn-active,
+.composer-mic-btn-active:hover:not(:disabled),
+.composer-mic-btn-active:focus-visible {
+  border-color: rgba(176, 85, 48, 0.35);
+  background: rgba(176, 85, 48, 0.1);
+  color: var(--salon-accent-strong, #b05530);
 }
 
 .composer-send-btn {
@@ -9262,6 +9273,17 @@ a {
 }
 
 .composer-upload-status-error {
+  color: #a33a2a;
+}
+
+.composer-speech-status {
+  padding: 0 0.65rem 0.65rem;
+  color: var(--salon-ink-2, #6b6660);
+  font-family: var(--salon-font-mono, ui-monospace, monospace);
+  font-size: 0.68rem;
+}
+
+.composer-speech-status-error {
   color: #a33a2a;
 }
 
