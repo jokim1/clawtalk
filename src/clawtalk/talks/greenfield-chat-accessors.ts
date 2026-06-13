@@ -62,6 +62,33 @@ interface PendingOutboxNotify {
   ownerIds: string[];
 }
 
+interface GreenfieldChatAgentWriteRow {
+  ordinal: number;
+  prompt_snapshot_id: string;
+  source_agent_id: string;
+  role_key: string;
+  name: string;
+  handle: string;
+  initials: string;
+  accent: string;
+  accent_dark: string | null;
+  provider_id: string;
+  model_id: string;
+  temperature: string;
+  persona: string | null;
+  focus: string | null;
+  method_json: string[];
+  sort_order: number;
+  role_template_version: number | null;
+  tool_manifest_json: Record<string, unknown>;
+}
+
+interface BatchedOutboxEventInput {
+  topic: string;
+  eventType: string;
+  payload: Record<string, unknown>;
+}
+
 function uniqueOwnerIds(
   rows: Array<{ user_id: string }>,
   fallbackUserId: string,
@@ -128,6 +155,243 @@ function toCredentialSnapshotAgent(
     created_at: new Date(0).toISOString(),
     updated_at: new Date(0).toISOString(),
   };
+}
+
+async function insertGreenfieldRunBatchOnSql(input: {
+  sql: Sql;
+  workspaceId: string;
+  talkId: string;
+  userId: string;
+  round: number;
+  messageId: string;
+  responseGroupId: string;
+  snapshotGroupId: string;
+  rows: GreenfieldChatAgentWriteRow[];
+}): Promise<GreenfieldChatRunRecord[]> {
+  if (input.rows.length === 0) return [];
+  const rows = await input.sql<GreenfieldChatRunRecord[]>`
+    with input_rows as (
+      select *
+      from jsonb_to_recordset(${input.sql.json(input.rows as never)}::jsonb)
+        as input_rows (
+          ordinal int,
+          prompt_snapshot_id uuid,
+          source_agent_id uuid,
+          role_key text,
+          name text,
+          handle text,
+          initials text,
+          accent text,
+          accent_dark text,
+          provider_id text,
+          model_id text,
+          temperature text,
+          persona text,
+          focus text,
+          method_json jsonb,
+          sort_order int,
+          role_template_version int,
+          tool_manifest_json jsonb
+        )
+    ),
+    inserted_snapshots as (
+      insert into public.talk_agent_snapshots (
+        workspace_id,
+        talk_id,
+        snapshot_group_id,
+        source_agent_id,
+        role_key,
+        name,
+        handle,
+        initials,
+        accent,
+        accent_dark,
+        provider_id,
+        model_id,
+        temperature,
+        persona,
+        focus,
+        method,
+        sort_order,
+        role_template_version
+      )
+      select
+        ${input.workspaceId}::uuid,
+        ${input.talkId}::uuid,
+        ${input.snapshotGroupId}::uuid,
+        i.source_agent_id,
+        i.role_key,
+        i.name,
+        i.handle,
+        i.initials,
+        i.accent,
+        i.accent_dark,
+        i.provider_id,
+        i.model_id,
+        i.temperature::numeric,
+        i.persona,
+        i.focus,
+        array(select jsonb_array_elements_text(i.method_json)),
+        i.sort_order,
+        i.role_template_version
+      from input_rows i
+      order by i.ordinal asc
+      returning id, model_id, source_agent_id
+    ),
+    inserted_runs as (
+      insert into public.runs (
+        workspace_id,
+        talk_id,
+        round,
+        snapshot_group_id,
+        agent_snapshot_id,
+        model_id,
+        requested_by,
+        trigger,
+        trigger_message_id,
+        response_group_id,
+        sequence_index,
+        prompt_snapshot_id,
+        status
+      )
+      select
+        ${input.workspaceId}::uuid,
+        ${input.talkId}::uuid,
+        ${input.round},
+        ${input.snapshotGroupId}::uuid,
+        s.id,
+        s.model_id,
+        ${input.userId}::uuid,
+        'user',
+        ${input.messageId}::uuid,
+        ${input.responseGroupId},
+        i.ordinal,
+        i.prompt_snapshot_id,
+        'queued'
+      from input_rows i
+      join inserted_snapshots s
+        on s.source_agent_id = i.source_agent_id
+      order by i.ordinal asc
+      returning
+        id,
+        talk_id,
+        status,
+        response_group_id,
+        sequence_index,
+        created_at,
+        started_at,
+        finished_at,
+        trigger_message_id,
+        model_id,
+        error_json,
+        agent_snapshot_id,
+        prompt_snapshot_id
+    ),
+    inserted_prompt_snapshots as (
+      insert into public.run_prompt_snapshots (
+        id,
+        workspace_id,
+        run_id,
+        talk_id,
+        agent_snapshot_id,
+        model_id,
+        provider,
+        role_template_version,
+        prompt_assembly_version,
+        tool_manifest_json
+      )
+      select
+        i.prompt_snapshot_id,
+        ${input.workspaceId}::uuid,
+        r.id,
+        ${input.talkId}::uuid,
+        r.agent_snapshot_id,
+        r.model_id,
+        i.provider_id,
+        i.role_template_version,
+        1,
+        i.tool_manifest_json
+      from inserted_runs r
+      join input_rows i
+        on i.prompt_snapshot_id = r.prompt_snapshot_id
+      order by i.ordinal asc
+      returning run_id
+    )
+    select
+      r.id,
+      r.talk_id,
+      r.status,
+      r.response_group_id,
+      r.sequence_index,
+      r.created_at,
+      r.started_at,
+      r.finished_at,
+      r.trigger_message_id,
+      i.source_agent_id::text as target_agent_id,
+      i.name as target_agent_name,
+      i.provider_id,
+      r.model_id,
+      r.error_json
+    from inserted_runs r
+    join inserted_prompt_snapshots ps
+      on ps.run_id = r.id
+    join input_rows i
+      on i.prompt_snapshot_id = r.prompt_snapshot_id
+    order by r.sequence_index asc
+  `;
+  return rows;
+}
+
+async function insertOutboxEventsOnSql(
+  sql: Sql,
+  events: BatchedOutboxEventInput[],
+): Promise<number[]> {
+  if (events.length === 0) return [];
+  const rows = await sql<Array<{ ordinal: number; event_id: number }>>`
+    with input_events as (
+      select *
+      from jsonb_to_recordset(${sql.json(
+        events.map((event, ordinal) => ({
+          ordinal,
+          topic: event.topic,
+          event_type: event.eventType,
+          payload: event.payload,
+        })) as never,
+      )}::jsonb)
+        as input_events (
+          ordinal int,
+          topic text,
+          event_type text,
+          payload jsonb
+        )
+    ),
+    sequenced_events as materialized (
+      select
+        ordinal,
+        nextval('public.event_outbox_event_id_seq')::int as event_id,
+        topic,
+        event_type,
+        payload
+      from input_events
+      order by ordinal asc
+    ),
+    inserted as (
+      insert into public.event_outbox (event_id, topic, event_type, payload)
+      select event_id, topic, event_type, payload
+      from sequenced_events
+      order by ordinal asc
+      returning event_id::int as event_id
+    )
+    select s.ordinal, inserted.event_id
+    from sequenced_events s
+    join inserted
+      on inserted.event_id = s.event_id
+    order by s.ordinal asc
+  `;
+  if (rows.length !== events.length) {
+    throw new Error('outbox_event_batch_return_count_mismatch');
+  }
+  return rows.map((row) => row.event_id);
 }
 
 export type EnqueueGreenfieldChatTurnResult =
@@ -318,238 +582,130 @@ export async function enqueueGreenfieldChatTurn(input: {
       );
     }
 
-    const insertedMessages = await withTrustedDbWrites(
-      () => txSql<GreenfieldMessageRecord[]>`
-        insert into public.messages (
-          workspace_id, talk_id, round, author_kind, author_user_id, body
-        )
-        values (
-          ${input.workspaceId}::uuid,
-          ${input.talkId}::uuid,
-          ${round},
-          'user',
-          ${input.userId}::uuid,
-          ${input.content}
-        )
-        returning
-          id,
-          workspace_id,
-          talk_id,
-          round,
-          author_kind,
-          author_user_id,
-          null::uuid as agent_id,
-          null::text as agent_name,
-          null::text as agent_role_key,
-          run_id,
-          body,
-          created_at
-      `,
-    );
-    const message = insertedMessages[0]!;
-    const runs: GreenfieldChatRunRecord[] = [];
+    let message: GreenfieldMessageRecord | null = null;
+    let runs: GreenfieldChatRunRecord[] = [];
 
     await withTrustedDbWrites(async () => {
-      for (const [index, agent] of selectedAgents.entries()) {
+      const insertedMessages = await txSql<GreenfieldMessageRecord[]>`
+          insert into public.messages (
+            workspace_id, talk_id, round, author_kind, author_user_id, body
+          )
+          values (
+            ${input.workspaceId}::uuid,
+            ${input.talkId}::uuid,
+            ${round},
+            'user',
+            ${input.userId}::uuid,
+            ${input.content}
+          )
+          returning
+            id,
+            workspace_id,
+            talk_id,
+            round,
+            author_kind,
+            author_user_id,
+            null::uuid as agent_id,
+            null::text as agent_name,
+            null::text as agent_role_key,
+            run_id,
+            body,
+            created_at
+        `;
+      message = insertedMessages[0]!;
+      const agentWriteRows = selectedAgents.map((agent, index) => {
         const providerId = agent.provider_id;
         if (!providerId) throw new Error('agent_provider_missing');
-        const promptSnapshotId = randomUUID();
-        const snapshots = await txSql<{ id: string; model_id: string }[]>`
-        insert into public.talk_agent_snapshots (
-          workspace_id,
-          talk_id,
-          snapshot_group_id,
-          source_agent_id,
-          role_key,
-          name,
-          handle,
-          initials,
-          accent,
-          accent_dark,
-          provider_id,
-          model_id,
-          temperature,
-          persona,
-          focus,
-          method,
-          sort_order,
-          role_template_version
-        )
-        values (
-          ${input.workspaceId}::uuid,
-          ${input.talkId}::uuid,
-          ${snapshotGroupId}::uuid,
-          ${agent.id}::uuid,
-          ${agent.role_key},
-          ${agent.name},
-          ${agent.handle},
-          ${agent.initials},
-          ${agent.accent},
-          ${agent.accent_dark},
-          ${providerId},
-          ${agent.model_id},
-          ${agent.temperature},
-          ${agent.persona},
-          ${agent.focus},
-          ${agent.method},
-          ${agent.sort_order},
-          ${agent.created_from_template_version}
-        )
-        returning id, model_id
-      `;
-        const snapshot = snapshots[0]!;
-        const insertedRuns = await txSql<
-          Array<
-            Omit<
-              GreenfieldChatRunRecord,
-              'target_agent_id' | 'target_agent_name'
-            >
-          >
-        >`
-        insert into public.runs (
-          workspace_id,
-          talk_id,
-          round,
-          snapshot_group_id,
-          agent_snapshot_id,
-          model_id,
-          requested_by,
-          trigger,
-          trigger_message_id,
-          response_group_id,
-          sequence_index,
-          prompt_snapshot_id,
-          status
-        )
-        values (
-          ${input.workspaceId}::uuid,
-          ${input.talkId}::uuid,
-          ${round},
-          ${snapshotGroupId}::uuid,
-          ${snapshot.id}::uuid,
-          ${snapshot.model_id},
-          ${input.userId}::uuid,
-          'user',
-          ${message.id}::uuid,
-          ${responseGroupId},
-          ${index},
-          ${promptSnapshotId}::uuid,
-          'queued'
-        )
-        returning
-          id,
-          talk_id,
-          status,
-          response_group_id,
-          sequence_index,
-          created_at,
-          started_at,
-          finished_at,
-          trigger_message_id,
-          model_id,
-          error_json
-      `;
-        const run = insertedRuns[0]!;
-        await txSql`
-        insert into public.run_prompt_snapshots (
-          id,
-          workspace_id,
-          run_id,
-          talk_id,
-          agent_snapshot_id,
-          model_id,
-          provider,
-          role_template_version,
-          prompt_assembly_version,
-          tool_manifest_json
-        )
-        values (
-          ${promptSnapshotId}::uuid,
-          ${input.workspaceId}::uuid,
-          ${run.id}::uuid,
-          ${input.talkId}::uuid,
-          ${snapshot.id}::uuid,
-          ${snapshot.model_id},
-          ${providerId},
-          ${agent.created_from_template_version},
-          1,
-          ${txSql.json({
+        return {
+          ordinal: index,
+          prompt_snapshot_id: randomUUID(),
+          source_agent_id: agent.id,
+          role_key: agent.role_key,
+          name: agent.name,
+          handle: agent.handle,
+          initials: agent.initials,
+          accent: agent.accent,
+          accent_dark: agent.accent_dark,
+          provider_id: providerId,
+          model_id: agent.model_id,
+          temperature: String(agent.temperature),
+          persona: agent.persona,
+          focus: agent.focus,
+          method_json: agent.method,
+          sort_order: agent.sort_order,
+          role_template_version: agent.created_from_template_version,
+          tool_manifest_json: {
             ...toolManifest,
             agentCredentialMode: credentialKindSnapshots.get(agent.id) ?? null,
-          } as never)}
-        )
-      `;
-        runs.push({
-          ...run,
-          target_agent_id: agent.id,
-          target_agent_name: agent.name,
-          provider_id: providerId,
-        });
-      }
-    });
-
-    await withTrustedDbWrites(async () => {
-      await txSql`
-        update public.talks
-        set last_activity_at = now()
-        where workspace_id = ${input.workspaceId}::uuid
-          and id = ${input.talkId}::uuid
-      `;
-    });
-
-    const ownerIds = await listWorkspaceNotifyOwnerIdsOnSql({
-      sql: txSql,
-      workspaceId: input.workspaceId,
-      fallbackUserId: input.userId,
-    });
-    const localNotifies: PendingOutboxNotify[] = [];
-    const messageEventId = await emitOutboxEventOnSql(txSql, {
-      topic: `talk:${input.talkId}`,
-      eventType: 'message_appended',
-      payload: {
-        talkId: input.talkId,
-        messageId: message.id,
-        runId: null,
-        role: 'user',
-        createdBy: input.userId,
-        content: input.content,
-        createdAt: message.created_at,
-      },
-      ownerIds,
-    });
-    localNotifies.push({
-      topic: `talk:${input.talkId}`,
-      eventId: messageEventId,
-      ownerIds,
-    });
-
-    for (const run of runs) {
-      const eventId = await emitOutboxEventOnSql(txSql, {
-        topic: `talk:${input.talkId}`,
-        eventType: 'talk_run_queued',
-        payload: {
-          talkId: input.talkId,
-          runId: run.id,
-          runKind: 'conversation',
-          triggerMessageId: message.id,
-          targetAgentId: run.target_agent_id,
-          targetAgentNickname: run.target_agent_name,
-          responseGroupId: run.response_group_id,
-          sequenceIndex: run.sequence_index,
-          status: 'queued',
-          executorAlias: run.target_agent_name,
-          executorModel: run.model_id,
-          providerId: run.provider_id,
-        },
-        ownerIds,
+          },
+        } satisfies GreenfieldChatAgentWriteRow;
       });
-      localNotifies.push({
-        topic: `talk:${input.talkId}`,
+      runs = await insertGreenfieldRunBatchOnSql({
+        sql: txSql,
+        workspaceId: input.workspaceId,
+        talkId: input.talkId,
+        userId: input.userId,
+        round,
+        messageId: message.id,
+        responseGroupId,
+        snapshotGroupId,
+        rows: agentWriteRows,
+      });
+
+      await txSql`
+          update public.talks
+          set last_activity_at = now()
+          where workspace_id = ${input.workspaceId}::uuid
+            and id = ${input.talkId}::uuid
+        `;
+
+      const ownerIds = await listWorkspaceNotifyOwnerIdsOnSql({
+        sql: txSql,
+        workspaceId: input.workspaceId,
+        fallbackUserId: input.userId,
+      });
+      const topic = `talk:${input.talkId}`;
+      const outboxEvents: BatchedOutboxEventInput[] = [
+        {
+          topic,
+          eventType: 'message_appended',
+          payload: {
+            talkId: input.talkId,
+            messageId: message.id,
+            runId: null,
+            role: 'user',
+            createdBy: input.userId,
+            content: input.content,
+            createdAt: message.created_at,
+          },
+        },
+        ...runs.map((run) => ({
+          topic,
+          eventType: 'talk_run_queued',
+          payload: {
+            talkId: input.talkId,
+            runId: run.id,
+            runKind: 'conversation',
+            triggerMessageId: message!.id,
+            targetAgentId: run.target_agent_id,
+            targetAgentNickname: run.target_agent_name,
+            responseGroupId: run.response_group_id,
+            sequenceIndex: run.sequence_index,
+            status: 'queued',
+            executorAlias: run.target_agent_name,
+            executorModel: run.model_id,
+            providerId: run.provider_id,
+          },
+        })),
+      ];
+      const eventIds = await insertOutboxEventsOnSql(txSql, outboxEvents);
+      pendingNotifies = eventIds.map((eventId) => ({
+        topic,
         eventId,
         ownerIds,
-      });
-    }
-    pendingNotifies = localNotifies;
+      }));
+    });
+    if (!message) throw new Error('greenfield_message_insert_missing');
     return { ok: true, talkId: input.talkId, message, runs } as const;
   });
 

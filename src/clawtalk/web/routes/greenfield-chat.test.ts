@@ -6,12 +6,17 @@ import {
   DATABASE_URL_ENV,
   getDbPg,
   initPgDatabase,
+  type Sql,
+  withDurableObjectScopedDb,
   withNotifyQueueScope,
   withRequestScopedDb,
   withUserContext,
 } from '../../../db.js';
 import type { AuthContext } from '../types.js';
-import { cancelGreenfieldTalkRuns } from '../../talks/greenfield-chat-accessors.js';
+import {
+  cancelGreenfieldTalkRuns,
+  enqueueGreenfieldChatTurn,
+} from '../../talks/greenfield-chat-accessors.js';
 import { mountGreenfieldApiRoutes } from './greenfield-api.js';
 import {
   createGreenfieldTalkRoute,
@@ -219,6 +224,59 @@ async function assignDisabledProviderModelToAgent(input: {
   `;
 }
 
+function sqlTextFromTaggedCall(args: unknown[]): string | null {
+  const firstArg = args[0];
+  if (!Array.isArray(firstArg) || !('raw' in firstArg)) return null;
+  return (firstArg as TemplateStringsArray).join('?');
+}
+
+function isAcceptanceBusinessWrite(sqlText: string): boolean {
+  const normalized = sqlText
+    .replace(/\/\*[\s\S]*?\*\//g, ' ')
+    .replace(/--.*$/gm, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+  if (/^(insert|update|delete)\b/.test(normalized)) return true;
+  return (
+    normalized.startsWith('with ') &&
+    /\b(insert|update|delete)\s+into\b/.test(normalized)
+  );
+}
+
+function withWriteCounting(sql: Sql, writes: string[]): Sql {
+  const wrap = (inner: Sql): Sql =>
+    new Proxy(inner as unknown as (...args: unknown[]) => unknown, {
+      apply(target, _thisArg, argArray) {
+        const sqlText = sqlTextFromTaggedCall(argArray);
+        if (sqlText && isAcceptanceBusinessWrite(sqlText)) {
+          writes.push(sqlText);
+        }
+        return Reflect.apply(target, inner, argArray);
+      },
+      get(target, prop, receiver) {
+        const value = Reflect.get(target, prop, receiver);
+        if (prop === 'begin' && typeof value === 'function') {
+          return (...args: unknown[]) => {
+            const callbackIndex = args.findIndex(
+              (arg) => typeof arg === 'function',
+            );
+            if (callbackIndex === -1) {
+              return Reflect.apply(value, inner, args);
+            }
+            const nextArgs = [...args];
+            const callback = nextArgs[callbackIndex] as (tx: Sql) => unknown;
+            nextArgs[callbackIndex] = (tx: Sql) => callback(wrap(tx));
+            return Reflect.apply(value, inner, nextArgs);
+          };
+        }
+        if (typeof value !== 'function') return value;
+        return (...args: unknown[]) => Reflect.apply(value, inner, args);
+      },
+    }) as unknown as Sql;
+  return wrap(sql);
+}
+
 describe('greenfield chat routes', () => {
   beforeAll(async () => {
     await initPgDatabase();
@@ -294,6 +352,146 @@ describe('greenfield chat routes', () => {
       snapshot_group_count: 1,
       trigger_message_ids: [result.body.data.message.id],
     });
+  });
+
+  it('batches multi-agent acceptance writes without changing rows or outbox events', async () => {
+    const { workspaceId, talkId, agentIds } = await createTalkFixture();
+    const db = getDbPg();
+    const writeStatements: string[] = [];
+
+    const result = await withDurableObjectScopedDb(
+      withWriteCounting(db, writeStatements),
+      () =>
+        withUserContext(USER_ID, () =>
+          enqueueGreenfieldChatTurn({
+            workspaceId,
+            talkId,
+            userId: USER_ID,
+            content: 'Batch the acceptance writes.',
+            targetAgentIds: agentIds,
+          }),
+        ),
+    );
+
+    if (!result.ok) throw new Error('Expected chat enqueue to succeed');
+    expect(result.runs.map((run) => run.target_agent_id)).toEqual(agentIds);
+    expect(result.runs.map((run) => run.sequence_index)).toEqual([0, 1]);
+    expect(writeStatements).toHaveLength(4);
+    expect(writeStatements.map((statement) => statement.trim())).toEqual([
+      expect.stringMatching(/^insert into public\.messages/i),
+      expect.stringMatching(/^with input_rows as/i),
+      expect.stringMatching(/^update public\.talks/i),
+      expect.stringMatching(/^with input_events as/i),
+    ]);
+
+    const persisted = await db<
+      Array<{
+        run_id: string;
+        sequence_index: number;
+        trigger_message_id: string;
+        response_group_id: string;
+        prompt_snapshot_id: string;
+        snapshot_id: string;
+        source_agent_id: string;
+        provider_id: string;
+        prompt_row_id: string;
+        prompt_run_id: string;
+        prompt_provider: string;
+        tool_manifest_json: {
+          active: Record<string, boolean>;
+          effectiveTools: unknown[];
+          agentCredentialMode: string | null;
+        };
+      }>
+    >`
+      select
+        r.id::text as run_id,
+        r.sequence_index,
+        r.trigger_message_id::text as trigger_message_id,
+        r.response_group_id,
+        r.prompt_snapshot_id::text as prompt_snapshot_id,
+        tas.id::text as snapshot_id,
+        tas.source_agent_id::text as source_agent_id,
+        tas.provider_id,
+        rps.id::text as prompt_row_id,
+        rps.run_id::text as prompt_run_id,
+        rps.provider as prompt_provider,
+        rps.tool_manifest_json
+      from public.runs r
+      join public.talk_agent_snapshots tas
+        on tas.workspace_id = r.workspace_id
+       and tas.talk_id = r.talk_id
+       and tas.id = r.agent_snapshot_id
+      join public.run_prompt_snapshots rps
+        on rps.workspace_id = r.workspace_id
+       and rps.run_id = r.id
+      where r.workspace_id = ${workspaceId}::uuid
+        and r.talk_id = ${talkId}::uuid
+      order by r.sequence_index asc
+    `;
+    expect(persisted).toHaveLength(2);
+    expect(persisted.map((row) => row.run_id)).toEqual(
+      result.runs.map((run) => run.id),
+    );
+    expect(persisted.map((row) => row.source_agent_id)).toEqual(agentIds);
+    expect(persisted.map((row) => row.trigger_message_id)).toEqual([
+      result.message.id,
+      result.message.id,
+    ]);
+    expect(new Set(persisted.map((row) => row.response_group_id)).size).toBe(1);
+    for (const [index, row] of persisted.entries()) {
+      expect(row.prompt_snapshot_id).toBe(row.prompt_row_id);
+      expect(row.prompt_run_id).toBe(result.runs[index]!.id);
+      expect(row.prompt_provider).toBe(result.runs[index]!.provider_id);
+      expect(row.tool_manifest_json).toMatchObject({
+        active: expect.any(Object),
+        effectiveTools: expect.any(Array),
+        agentCredentialMode: null,
+      });
+    }
+
+    const outbox = await db<
+      Array<{
+        event_type: string;
+        payload: Record<string, unknown>;
+      }>
+    >`
+      select event_type, payload
+      from public.event_outbox
+      where topic = ${`talk:${talkId}`}
+      order by event_id asc
+    `;
+    expect(outbox).toEqual([
+      {
+        event_type: 'message_appended',
+        payload: {
+          talkId,
+          messageId: result.message.id,
+          runId: null,
+          role: 'user',
+          createdBy: USER_ID,
+          content: 'Batch the acceptance writes.',
+          createdAt: result.message.created_at,
+        },
+      },
+      ...result.runs.map((run) => ({
+        event_type: 'talk_run_queued',
+        payload: {
+          talkId,
+          runId: run.id,
+          runKind: 'conversation',
+          triggerMessageId: result.message.id,
+          targetAgentId: run.target_agent_id,
+          targetAgentNickname: run.target_agent_name,
+          responseGroupId: run.response_group_id,
+          sequenceIndex: run.sequence_index,
+          status: 'queued',
+          executorAlias: run.target_agent_name,
+          executorModel: run.model_id,
+          providerId: run.provider_id,
+        },
+      })),
+    ]);
   });
 
   it('lets Buddy reply in the system talk', async () => {
