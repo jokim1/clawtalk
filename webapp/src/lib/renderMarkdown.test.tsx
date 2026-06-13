@@ -27,4 +27,33 @@ describe('renderMarkdown', () => {
     expect(screen.getByText(/<script>alert/)).toBeTruthy();
     expect(document.querySelector('script')).toBeNull();
   });
+
+  it('renders links wrapped in bold or emphasis as clickable anchors', () => {
+    // Prod regression: the agent emits list items as `**[text](url)**`.
+    // The bold rule used to swallow the inner link as raw text.
+    render(
+      <div>
+        {renderMarkdown(
+          [
+            '1. **[Cal commitments](https://sportspyder.example/cf/news)** — recruiting',
+            '2. *[Spring game recap](https://bearinsider.example/recap)* — roundup',
+          ].join('\n'),
+        )}
+      </div>,
+    );
+
+    const boldLink = screen.getByRole('link', { name: 'Cal commitments' });
+    expect(boldLink).toHaveAttribute(
+      'href',
+      'https://sportspyder.example/cf/news',
+    );
+    expect(boldLink.closest('strong')).not.toBeNull();
+
+    const emLink = screen.getByRole('link', { name: 'Spring game recap' });
+    expect(emLink).toHaveAttribute('href', 'https://bearinsider.example/recap');
+    expect(emLink.closest('em')).not.toBeNull();
+
+    // The raw markdown brackets must not survive into the rendered text.
+    expect(screen.queryByText(/\]\(https/)).toBeNull();
+  });
 });
