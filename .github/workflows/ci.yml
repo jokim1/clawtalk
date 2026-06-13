@@ -21,6 +21,12 @@ jobs:
       - name: Typecheck
         run: npx tsc --noEmit
 
+      # Durable Object tests run in workerd via @cloudflare/vitest-pool-workers
+      # (separate pool from the Node suite below). Hermetic — no Supabase or
+      # secrets needed — so it runs here, before the DB-backed steps.
+      - name: Workers DO tests (TalkRunner)
+        run: npm run test:workers
+
       # MVP eval gate: deterministic dry-run scenarios only. Live/provider
       # grading stays manual until the backend/provider adapter exists.
       - name: MVP eval dry-run

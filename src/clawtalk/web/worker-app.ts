@@ -288,6 +288,9 @@ function buildApp(): Hono<{ Variables: Variables }> {
   app.use('/api/v1/me', requireAuthMiddleware);
   app.use('/api/v1/me/*', requireAuthMiddleware);
   app.use('/api/v1/events', requireAuthMiddleware);
+  // Dev-only TalkRunner harness (Talk Runtime v2, Wave 2 PR-A1). Auth-gated
+  // here; the handler additionally 404s unless CLAWTALK_DEV_TALK_RUNNER='1'.
+  app.use('/api/v1/_dev/*', requireAuthMiddleware);
 
   // ── Sanity probe for the auth middleware ─────────────────────
   app.get('/api/v1/_protected/whoami', (c) => {
@@ -300,6 +303,64 @@ function buildApp(): Hono<{ Variables: Variables }> {
         role: auth.role,
         authType: auth.authType,
       },
+    });
+  });
+
+  // ── Dev-only: drive a run through the TalkRunner DO ──────────
+  // Talk Runtime v2, Wave 2 PR-A1. Unreachable unless
+  // CLAWTALK_DEV_TALK_RUNNER='1' (never set in prod — absent from
+  // wrangler.toml [vars]). Reuses GreenfieldTalkExecutor UNCHANGED inside the
+  // DO; NOT on the /chat dispatch path. Proves the DO-local happy path only —
+  // durability, hub streaming, fencing, and alarms arrive in A2/A3/PR-B.
+  app.post('/api/v1/_dev/talk-runner/run', async (c) => {
+    const env = c.env as {
+      TALK_RUNNER?: {
+        idFromName(name: string): unknown;
+        get(id: unknown): {
+          fetch(input: string, init?: RequestInit): Promise<Response>;
+        };
+      };
+      CLAWTALK_DEV_TALK_RUNNER?: string;
+    };
+    if (env.CLAWTALK_DEV_TALK_RUNNER !== '1' || !env.TALK_RUNNER) {
+      return c.json(
+        { ok: false, error: { code: 'not_found', message: 'Not found' } },
+        404,
+      );
+    }
+    const auth = c.get('auth');
+    const rl = checkRateLimit({ principalId: auth.userId, bucket: 'write' });
+    if (!rl.allowed) return rateLimitedResponse(c, rl);
+    const csrfFail = checkCsrf(c, auth);
+    if (csrfFail) return csrfFail;
+    const payload = await readJsonBody(c);
+    if (!payload.ok) return invalidJsonResponse(c, payload.error);
+    const data = payload.data as { talkId?: unknown; runId?: unknown };
+    const talkId = typeof data.talkId === 'string' ? data.talkId : '';
+    const runId = typeof data.runId === 'string' ? data.runId : '';
+    if (!talkId || !runId) {
+      return c.json(
+        {
+          ok: false,
+          error: {
+            code: 'invalid_request',
+            message: 'talkId and runId are required',
+          },
+        },
+        400,
+      );
+    }
+    // Per-Talk DO (D1): idFromName(talkId). Forward the run request; the DO
+    // claims the run and executes it inside its own request-scoped DB.
+    const stub = env.TALK_RUNNER.get(env.TALK_RUNNER.idFromName(talkId));
+    const res = await stub.fetch('https://talk-runner.internal/dev/run', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ runId }),
+    });
+    return new Response(await res.text(), {
+      status: res.status,
+      headers: { 'content-type': 'application/json; charset=utf-8' },
     });
   });
 

@@ -36,6 +36,7 @@ import {
 import { runScheduledTick } from './clawtalk/talks/scheduler.js';
 
 export { UserEventHub } from './clawtalk/talks/user-event-hub.js';
+export { TalkRunner } from './clawtalk/talks/talk-runner.js';
 
 // Wrangler bindings declared in wrangler.toml. Workers Secrets (set via
 // `wrangler secret put`) appear on the same env object — those modules
@@ -48,6 +49,9 @@ export interface Env {
   CONTENT_IMAGES: R2Bucket;
   TALK_RUN_QUEUE: Queue;
   USER_EVENT_HUB: UserEventHubNamespace;
+  // Talk Runtime v2 (Wave 2 PR-A1): per-Talk run-execution DO. Skeleton
+  // behind a dev-only route — not yet on the /chat dispatch path.
+  TALK_RUNNER: TalkRunnerNamespace;
   SUPABASE_PROJECT_URL: string;
   DB_EVENT_HUB_URL: string;
   APP_ORIGIN: string;
@@ -105,6 +109,17 @@ interface UserEventHubId {
   readonly __brand: 'UserEventHubId';
 }
 interface UserEventHubStub {
+  fetch(input: Request | URL | string, init?: RequestInit): Promise<Response>;
+}
+
+interface TalkRunnerNamespace {
+  idFromName(name: string): TalkRunnerId;
+  get(id: TalkRunnerId): TalkRunnerStub;
+}
+interface TalkRunnerId {
+  readonly __brand: 'TalkRunnerId';
+}
+interface TalkRunnerStub {
   fetch(input: Request | URL | string, init?: RequestInit): Promise<Response>;
 }
 

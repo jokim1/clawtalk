@@ -21,6 +21,7 @@
     "prepare": "husky",
     "test": "node scripts/run-vitest.mjs run",
     "test:watch": "node scripts/run-vitest.mjs",
+    "test:workers": "vitest run --config vitest.workers.config.ts",
     "db:start": "supabase start",
     "db:stop": "supabase stop",
     "db:reset": "supabase db reset",
@@ -44,6 +45,7 @@
     "zod": "^4.3.6"
   },
   "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "^0.16.15",
     "@types/node": "^24.12.0",
     "@vitest/coverage-v8": "^4.1.0",
     "husky": "^9.1.7",
