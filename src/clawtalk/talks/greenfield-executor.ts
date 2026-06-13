@@ -50,7 +50,12 @@ import {
   GREENFIELD_DOCUMENT_EDIT_RUNTIME_TOOL,
   loadGreenfieldDocumentContext,
 } from './greenfield-document-tools.js';
-import { buildToolExecutor, PDF_ATTACHMENT_MIME_TYPE } from './new-executor.js';
+import {
+  buildToolExecutor,
+  PDF_ATTACHMENT_MIME_TYPE,
+  WEB_SEARCH_TIMEOUT_MS,
+} from './new-executor.js';
+import { DeadlineBudget, DEADLINE_BUDGET_TOTAL_MS } from './deadline-budget.js';
 import { emitOutboxEvent } from './outbox-emit.js';
 
 type GreenfieldExecutorRunRow = {
@@ -917,68 +922,10 @@ function hasGreenfieldDocumentEditIds(result: string): boolean {
   }
 }
 
-// Outer deadline on the whole web_search tool call, including the registry's
-// short credential-tx ACQUISITION — the 2026-06-12 wedge sat in db.begin on a
-// dead connection, before executeWebSearch (and its 20s fetch timer) ever
-// ran. Since the P1-0 tx split, the registry commits its credential tx before
-// the provider fetch starts, so abandoning a hung FETCH here no longer leaks
-// an open transaction. A wedged BEGIN/acquisition leg, however, still holds
-// the max:1 connection past abandonment (postgres.js queries are not
-// cancellable) — the run then wedges one step later at its next DB call; the
-// #609 queue watchdog is the backstop for that leg. Wider than the inner
-// fetch timeout so the inner path wins whenever it is functioning.
-// TODO(T6): absorb into the DeadlineBudget primitive
-// (docs/13-talk-runtime-v2.md, P1-c).
-const WEB_SEARCH_TOOL_CALL_DEADLINE_MS = 30_000;
-
-/** @internal Exported for tests. */
-export function raceToolCallDeadline(
-  call: Promise<{ result: string; isError?: boolean }>,
-  toolName: string,
-  deadlineMs = WEB_SEARCH_TOOL_CALL_DEADLINE_MS,
-): Promise<{ result: string; isError?: boolean }> {
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => {
-      // Abandon the wedged call. Log its eventual settle instead of bare
-      // swallowing — a late success means real results were discarded and
-      // the "wedged I/O" warning below was a misdiagnosis (slow, not dead).
-      call.then(
-        (late) =>
-          logger.warn(
-            { toolName, deadlineMs, isError: !!late.isError },
-            'abandoned tool call settled after the deadline',
-          ),
-        (err) =>
-          logger.warn(
-            { toolName, deadlineMs, err },
-            'abandoned tool call rejected after the deadline',
-          ),
-      );
-      logger.warn(
-        { toolName, deadlineMs },
-        'tool call abandoned by deadline (wedged I/O suspected)',
-      );
-      resolve({
-        result: `${toolName} error: the tool call did not return within ${deadlineMs / 1000} seconds and was abandoned. Continue without this result, or retry once.`,
-        isError: true,
-      });
-    }, deadlineMs);
-    call.then(
-      (value) => {
-        clearTimeout(timer);
-        resolve(value);
-      },
-      (err) => {
-        clearTimeout(timer);
-        reject(err);
-      },
-    );
-  });
-}
-
 function buildGreenfieldToolExecutor(input: {
   run: GreenfieldExecutorRunRow;
   signal: AbortSignal;
+  budget: DeadlineBudget;
   jobPolicy: TalkJobExecutionPolicy | null;
   effectiveTools: EffectiveToolAccess[];
   advertisedToolNames: Set<string>;
@@ -1000,6 +947,7 @@ function buildGreenfieldToolExecutor(input: {
     input.agentId,
     input.agentNickname,
     input.triggerMessageId,
+    input.budget,
   );
   const allowedRuntimeTools = buildAllowedRuntimeToolSet(input.effectiveTools);
   return async (toolName, args) => {
@@ -1060,12 +1008,14 @@ function buildGreenfieldToolExecutor(input: {
     if (toolName === 'web_search') {
       // P1-0: no withUserContext wrapper here — the registry opens its own
       // short credential tx and commits it before the provider fetch, so the
-      // fetch never runs inside a transaction.
+      // fetch never runs inside a transaction. T6: the deadline now lives
+      // inside executeWebSearch via the run's DeadlineBudget (no outer race —
+      // a wedged credential leg is bounded by statement_timeout + the watchdog).
       logger.info(
         { runId: input.run.id, toolName },
         'web_search tool call: dispatching',
       );
-      return raceToolCallDeadline(baseExecutor(toolName, args), toolName);
+      return baseExecutor(toolName, args);
     }
     return baseExecutor(toolName, args);
   };
@@ -1365,6 +1315,17 @@ export class GreenfieldTalkExecutor implements TalkExecutor {
       );
     }
 
+    // Run-scoped deadline budget (T6): one ceiling shared by web_search (and
+    // any future bounded leg), also enforced at the agent-router tool-loop step
+    // boundary. Constructed at run start so its clock tracks the whole run;
+    // total stays below the queue watchdog so the graceful labeled-error path
+    // wins for bounded legs and round transitions before the hard detached fail
+    // (a single wedged LLM generation is still the watchdog's job).
+    const budget = new DeadlineBudget({
+      totalMs: DEADLINE_BUDGET_TOTAL_MS,
+      defaultStepMs: WEB_SEARCH_TIMEOUT_MS,
+    });
+
     const jobPolicy = parseGreenfieldJobPolicy(run);
     const [history, sourceContext, stepUserMessage, effectiveTools] =
       await Promise.all([
@@ -1423,6 +1384,7 @@ export class GreenfieldTalkExecutor implements TalkExecutor {
     const executeToolCall = buildGreenfieldToolExecutor({
       run,
       signal,
+      budget,
       jobPolicy,
       effectiveTools,
       advertisedToolNames: new Set(contextTools.map((tool) => tool.name)),
@@ -1469,6 +1431,7 @@ export class GreenfieldTalkExecutor implements TalkExecutor {
             workspaceId: run.workspace_id,
           },
           effectiveTools,
+          budget,
         },
       );
     } finally {
