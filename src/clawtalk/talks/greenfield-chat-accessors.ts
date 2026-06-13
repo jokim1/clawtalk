@@ -176,33 +176,36 @@ export async function enqueueGreenfieldChatTurn(input: {
       return { ok: false, reason: 'talk_archived' } as const;
     }
 
-    // Acceptance-tx hot path. These six reads depend only on the
+    // Fast-fail the active-round guard FIRST, under the `talks ... for
+    // update` lock, before the snapshot reads below. The common "second
+    // message while a round is still running" rejection then stays a cheap
+    // 409 — it never holds the lock across, or 500s on, the batched reads.
+    const active = await txSql<{ count: number }[]>`
+      select count(*)::int as count
+      from public.runs
+      where workspace_id = ${input.workspaceId}::uuid
+        and talk_id = ${input.talkId}::uuid
+        and status in ('queued', 'running', 'awaiting')
+    `;
+    if ((active[0]?.count ?? 0) > 0) {
+      return { ok: false, reason: 'talk_round_active' } as const;
+    }
+
+    // Acceptance-tx hot path. These five reads depend only on the
     // workspace/talk/user — not on each other — so issue them as one
-    // Promise.all. postgres.js pipelines concurrent queries onto the single
-    // request connection (max:1 by design — db.ts `buildRequestPgClient`), so
-    // the ~6 Hyperdrive→Postgres round trips overlap into ~1 instead of being
-    // paid serially (~0.37s each on prod). Everything stays inside this tx,
-    // under the `talks ... for update` lock, at the same RLS scope: purely a
-    // latency change, returns are byte-identical (the guards below run in the
-    // same order). None of these use `withTrustedDbWrites` — its shared
-    // per-tx depth counter races under concurrency, which is exactly why the
-    // per-agent credential snapshots below stay sequential.
-    const [
-      active,
-      roster,
-      rounds,
-      toolRows,
-      userToolPermissions,
-      attachedDocuments,
-    ] = await Promise.all([
-      txSql<{ count: number }[]>`
-        select count(*)::int as count
-        from public.runs
-        where workspace_id = ${input.workspaceId}::uuid
-          and talk_id = ${input.talkId}::uuid
-          and status in ('queued', 'running', 'awaiting')
-      `,
-      txSql<GreenfieldChatRosterAgentRecord[]>`
+    // Promise.all. postgres.js (3.4.9, prepare:false) pipelines concurrent
+    // queries onto the single request connection (max:1 by design — db.ts
+    // `buildRequestPgClient`), so the ~5 Hyperdrive→Postgres round trips
+    // overlap into ~1 instead of being paid serially (~0.37s each on prod).
+    // They run inside this tx, under the lock, at the same RLS scope — the
+    // production route wraps enqueue in `withUserContext`, so
+    // `listUserToolPermissionsForUser`'s `getDbPg()` resolves to this same
+    // transaction. None use `withTrustedDbWrites` — its shared per-tx depth
+    // counter races under concurrency, which is why the per-agent credential
+    // snapshots below stay sequential.
+    const [roster, rounds, toolRows, userToolPermissions, attachedDocuments] =
+      await Promise.all([
+        txSql<GreenfieldChatRosterAgentRecord[]>`
         select
           a.id,
           a.role_key,
@@ -246,7 +249,7 @@ export async function enqueueGreenfieldChatTurn(input: {
           and (a.is_system = false or t.is_system = true)
         order by ta.sort_order asc, a.name asc, a.id asc
       `,
-      txSql<{ round: number }[]>`
+        txSql<{ round: number }[]>`
         select greatest(
           coalesce((
             select max(round)
@@ -262,25 +265,21 @@ export async function enqueueGreenfieldChatTurn(input: {
           ), 0)
         ) + 1 as round
       `,
-      txSql<{ tool_id: string; enabled: boolean }[]>`
+        txSql<{ tool_id: string; enabled: boolean }[]>`
         select tool_id, enabled
         from public.talk_tools
         where workspace_id = ${input.workspaceId}::uuid
           and talk_id = ${input.talkId}::uuid
       `,
-      listUserToolPermissionsForUser(input.userId),
-      txSql<{ id: string }[]>`
+        listUserToolPermissionsForUser(input.userId),
+        txSql<{ id: string }[]>`
         select id
         from public.documents
         where workspace_id = ${input.workspaceId}::uuid
           and primary_talk_id = ${input.talkId}::uuid
         limit 1
       `,
-    ]);
-
-    if ((active[0]?.count ?? 0) > 0) {
-      return { ok: false, reason: 'talk_round_active' } as const;
-    }
+      ]);
 
     const requestedTargetIds = Array.from(
       new Set(
