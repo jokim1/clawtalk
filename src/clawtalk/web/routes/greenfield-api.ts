@@ -1363,7 +1363,6 @@ export function mountGreenfieldApiRoutes(app: GreenfieldApp): void {
         400,
       );
     }
-    const _tEnq0 = Date.now(); // ACCEPT-TIMING (temp)
     const result = await enqueueGreenfieldChatRoute({
       talkId: c.req.param('talkId'),
       workspaceId: requestedWorkspaceId(c),
@@ -1371,7 +1370,6 @@ export function mountGreenfieldApiRoutes(app: GreenfieldApp): void {
       content: parsed.data.content,
       targetAgentIds: parsed.data.targetAgentIds,
     });
-    const _tEnq1 = Date.now(); // ACCEPT-TIMING (temp)
     if (result.statusCode === 202 && result.body.ok) {
       // Every run — single-run included — goes through TALK_RUN_QUEUE.
       // The former T7 in-process bypass ran the executor under
@@ -1382,14 +1380,6 @@ export function mountGreenfieldApiRoutes(app: GreenfieldApp): void {
         await dispatchRun({ runId: run.id });
       }
     }
-    logger.info(
-      {
-        enqueue: _tEnq1 - _tEnq0,
-        dispatch: Date.now() - _tEnq1,
-        status: result.statusCode,
-      },
-      '[accept-timing] route',
-    ); // ACCEPT-TIMING (temp)
     return jsonResponse(result);
   });
 
