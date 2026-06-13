@@ -1214,6 +1214,7 @@ export function mapExecutionEvent(
         ...shared,
         usage: {
           inputTokens: event.inputTokens,
+          cachedInputTokens: event.cachedInputTokens,
           outputTokens: event.outputTokens,
           estimatedCostUsd: event.estimatedCostUsd,
         },
@@ -1462,6 +1463,7 @@ export class GreenfieldTalkExecutor implements TalkExecutor {
       usage: result.usage
         ? {
             inputTokens: result.usage.inputTokens,
+            cachedInputTokens: result.usage.cachedInputTokens,
             outputTokens: result.usage.outputTokens,
             estimatedCostUsd: result.usage.estimatedCostUsd,
           }

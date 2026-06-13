@@ -142,7 +142,12 @@ export interface LlmStreamEvent {
     argumentsDelta?: string;
     arguments?: string;
   };
-  usage?: { inputTokens: number; outputTokens: number };
+  usage?: {
+    inputTokens: number;
+    outputTokens: number;
+    cacheCreationInputTokens?: number;
+    cacheReadInputTokens?: number;
+  };
   stopReason?: string;
   error?: string;
   /**
@@ -205,9 +210,19 @@ interface AnthropicMessage {
 }
 
 type AnthropicCacheControl = { type: 'ephemeral'; ttl?: '5m' | '1h' };
+const ANTHROPIC_MAX_CACHE_BREAKPOINTS = 4;
+const ANTHROPIC_PROVIDER_ID = 'provider.anthropic';
+const ANTHROPIC_OFFICIAL_API_HOST = 'api.anthropic.com';
+const ANTHROPIC_OFFICIAL_HOST_SUFFIX = '.anthropic.com';
+
+type AnthropicSystemContent = {
+  type: 'text';
+  text: string;
+  cache_control?: AnthropicCacheControl;
+};
 
 type AnthropicContent =
-  | { type: 'text'; text: string }
+  | { type: 'text'; text: string; cache_control?: AnthropicCacheControl }
   | {
       type: 'image';
       source: {
@@ -215,6 +230,7 @@ type AnthropicContent =
         media_type: string;
         data: string;
       };
+      cache_control?: AnthropicCacheControl;
     }
   | {
       type: 'document';
@@ -243,6 +259,7 @@ interface AnthropicToolDefinition {
   name: string;
   description: string;
   input_schema: Record<string, unknown>;
+  cache_control?: AnthropicCacheControl;
 }
 
 // =============================================================================
@@ -546,17 +563,21 @@ export function buildAnthropicRequest(
   maxOutputTokens: number | undefined,
   credentialKind: 'api_key' | 'subscription' = 'api_key',
   forceToolUse: boolean = false,
+  enablePromptCaching: boolean = true,
 ): {
   model: string;
   max_tokens: number;
-  system?: string | Array<{ type: 'text'; text: string }>;
+  system?: string | AnthropicSystemContent[];
   messages: AnthropicMessage[];
   tools?: AnthropicToolDefinition[];
+  cache_control?: AnthropicCacheControl;
   tool_choice?: { type: 'any' } | { type: 'auto' };
   stream: boolean;
 } {
   let systemText = '';
   const conversationMessages: AnthropicMessage[] = [];
+  let remainingDocumentBreakpoints = ANTHROPIC_MAX_CACHE_BREAKPOINTS;
+  let emittedFiveMinuteDocumentBreakpoint = false;
 
   for (const msg of messages) {
     if (msg.role === 'system') {
@@ -630,11 +651,20 @@ export function buildAnthropicRequest(
               },
               ...(block.title ? { title: block.title } : {}),
             };
-            if (block.cacheControl) {
-              docBlock.cache_control =
-                block.cacheControl === 'ephemeral_1h'
-                  ? { type: 'ephemeral', ttl: '1h' }
-                  : { type: 'ephemeral' };
+            if (
+              enablePromptCaching &&
+              block.cacheControl &&
+              remainingDocumentBreakpoints > 0
+            ) {
+              const cacheControl = documentBlockCacheControl(
+                block.cacheControl,
+                emittedFiveMinuteDocumentBreakpoint,
+              );
+              docBlock.cache_control = cacheControl;
+              if (cacheControl.ttl !== '1h') {
+                emittedFiveMinuteDocumentBreakpoint = true;
+              }
+              remainingDocumentBreakpoints -= 1;
             }
             content.push(docBlock);
           }
@@ -644,32 +674,82 @@ export function buildAnthropicRequest(
     }
   }
 
-  // OAuth-backed (subscription) requests REQUIRE the system prompt
-  // shaped as a content-block array with the Claude Code identity as
-  // the first block, or Anthropic's OAuth routing returns a minimal-
-  // body 429. API-key requests keep the plain string form.
-  const systemField =
+  const explicitMessageCacheControls =
+    collectMessageCacheControls(conversationMessages);
+  const boundaryCacheControl = longestCacheControl(
+    explicitMessageCacheControls,
+  );
+  let remainingCacheBreakpoints = Math.max(
+    0,
+    ANTHROPIC_MAX_CACHE_BREAKPOINTS - explicitMessageCacheControls.length,
+  );
+
+  // OAuth-backed (subscription) requests REQUIRE the Claude Code identity as
+  // the first system block, or Anthropic's OAuth routing returns a minimal-
+  // body 429. API-key requests use the same block shape so we can attach a
+  // prompt-cache breakpoint at the end of the system prompt.
+  const baseSystemBlocks =
     credentialKind === 'subscription'
       ? buildClaudeCodeSystemBlocks(systemText)
       : systemText
-        ? systemText
+        ? [{ type: 'text' as const, text: systemText }]
         : undefined;
+  const systemCacheControl =
+    enablePromptCaching &&
+    baseSystemBlocks?.some((block) => block.text.trim() !== '') &&
+    remainingCacheBreakpoints > 0
+      ? boundaryCacheControl
+      : undefined;
+  if (systemCacheControl) remainingCacheBreakpoints -= 1;
+  const systemField =
+    credentialKind === 'subscription' && baseSystemBlocks
+      ? withCacheControlOnLastSystemBlock(baseSystemBlocks, systemCacheControl)
+      : baseSystemBlocks && enablePromptCaching
+        ? withCacheControlOnLastSystemBlock(
+            baseSystemBlocks,
+            systemCacheControl,
+          )
+        : systemText
+          ? systemText
+          : undefined;
 
   const hasTools = !!(tools && tools.length > 0);
+  const toolCacheControl =
+    enablePromptCaching && hasTools && remainingCacheBreakpoints > 0
+      ? boundaryCacheControl
+      : undefined;
+  if (toolCacheControl) remainingCacheBreakpoints -= 1;
+  const toolDefinitions = hasTools
+    ? withCacheControlOnLastTool(
+        tools!.map((tool) => ({
+          name: tool.name,
+          description: tool.description,
+          input_schema: tool.inputSchema,
+        })),
+        toolCacheControl,
+      )
+    : undefined;
+  const hasMessageCacheTarget = conversationMessages.some((message) =>
+    message.content.some(isAnthropicCacheableContent),
+  );
+  const lastMessageCacheControl =
+    findLastCacheableContentCacheControl(conversationMessages);
+  const historyCacheControl =
+    enablePromptCaching &&
+    hasMessageCacheTarget &&
+    !lastMessageCacheControl &&
+    !forceToolUse &&
+    remainingCacheBreakpoints > 0
+      ? ephemeralCacheControl()
+      : undefined;
+
   return {
     model: modelId,
     max_tokens: maxOutputTokens || 1024,
     ...(systemField !== undefined ? { system: systemField } : {}),
     messages: conversationMessages,
-    ...(hasTools
-      ? {
-          tools: tools!.map((tool) => ({
-            name: tool.name,
-            description: tool.description,
-            input_schema: tool.inputSchema,
-          })),
-        }
-      : {}),
+    ...(toolDefinitions ? { tools: toolDefinitions } : {}),
+    ...(historyCacheControl ? { cache_control: historyCacheControl } : {}),
     // tool_choice 'any' on Anthropic forces the model to call SOME
     // tool (it picks which). Only emit when both forceToolUse is on
     // and at least one tool is registered — sending tool_choice with
@@ -679,6 +759,111 @@ export function buildAnthropicRequest(
       : {}),
     stream: true,
   };
+}
+
+function documentBlockCacheControl(
+  cacheControl: 'ephemeral' | 'ephemeral_1h',
+  emittedFiveMinuteDocumentBreakpoint: boolean,
+): AnthropicCacheControl {
+  // Anthropic requires 1h cache breakpoints to appear before 5m ones.
+  // Prefer shortening a later 1h request to 5m over extending an earlier 5m doc.
+  if (cacheControl === 'ephemeral_1h' && !emittedFiveMinuteDocumentBreakpoint) {
+    return { type: 'ephemeral', ttl: '1h' };
+  }
+  return ephemeralCacheControl();
+}
+
+function withCacheControlOnLastSystemBlock(
+  blocks: Array<{ type: 'text'; text: string }>,
+  cacheControl: AnthropicCacheControl | undefined,
+): AnthropicSystemContent[] {
+  const cacheIndex = findLastIndex(blocks, (block) => block.text.trim() !== '');
+  return blocks.map((block, index) => ({
+    ...block,
+    ...(cacheControl && index === cacheIndex
+      ? { cache_control: cacheControl }
+      : {}),
+  }));
+}
+
+function withCacheControlOnLastTool(
+  tools: Omit<AnthropicToolDefinition, 'cache_control'>[],
+  cacheControl: AnthropicCacheControl | undefined,
+): AnthropicToolDefinition[] {
+  if (tools.length === 0) return tools;
+  const lastIndex = tools.length - 1;
+  return tools.map((tool, index) => ({
+    ...tool,
+    ...(cacheControl && index === lastIndex
+      ? { cache_control: cacheControl }
+      : {}),
+  }));
+}
+
+function ephemeralCacheControl(): AnthropicCacheControl {
+  return { type: 'ephemeral' };
+}
+
+function findLastIndex<T>(
+  values: T[],
+  predicate: (value: T) => boolean,
+): number {
+  for (let index = values.length - 1; index >= 0; index -= 1) {
+    if (predicate(values[index])) return index;
+  }
+  return -1;
+}
+
+function isAnthropicCacheableContent(block: AnthropicContent): boolean {
+  if (block.type === 'text') return block.text.trim() !== '';
+  if (block.type === 'tool_result') return block.content.length > 0;
+  return true;
+}
+
+function getAnthropicCacheControl(
+  block: AnthropicContent,
+): AnthropicCacheControl | undefined {
+  return 'cache_control' in block ? block.cache_control : undefined;
+}
+
+function collectMessageCacheControls(
+  messages: AnthropicMessage[],
+): AnthropicCacheControl[] {
+  const controls: AnthropicCacheControl[] = [];
+  for (const message of messages) {
+    for (const block of message.content) {
+      const cacheControl = getAnthropicCacheControl(block);
+      if (cacheControl) controls.push(cacheControl);
+    }
+  }
+  return controls;
+}
+
+function longestCacheControl(
+  existingControls: AnthropicCacheControl[],
+): AnthropicCacheControl {
+  return existingControls.some((control) => control.ttl === '1h')
+    ? { type: 'ephemeral', ttl: '1h' }
+    : ephemeralCacheControl();
+}
+
+function findLastCacheableContentCacheControl(
+  messages: AnthropicMessage[],
+): AnthropicCacheControl | undefined {
+  for (
+    let messageIndex = messages.length - 1;
+    messageIndex >= 0;
+    messageIndex -= 1
+  ) {
+    const blocks = messages[messageIndex].content;
+    for (let blockIndex = blocks.length - 1; blockIndex >= 0; blockIndex -= 1) {
+      const block = blocks[blockIndex];
+      if (isAnthropicCacheableContent(block)) {
+        return getAnthropicCacheControl(block);
+      }
+    }
+  }
+  return undefined;
 }
 
 /**
@@ -814,6 +999,31 @@ export function buildOpenAiRequest(
 // RESPONSE PARSING
 // =============================================================================
 
+function numberField(
+  value: Record<string, unknown>,
+  field: string,
+): number | undefined {
+  const raw = value[field];
+  return typeof raw === 'number' && Number.isFinite(raw) ? raw : undefined;
+}
+
+function shouldEnableAnthropicPromptCaching(
+  provider: LlmProviderConfig,
+): boolean {
+  if (provider.providerId && provider.providerId !== ANTHROPIC_PROVIDER_ID) {
+    return false;
+  }
+  try {
+    const hostname = new URL(provider.baseUrl).hostname.toLowerCase();
+    return (
+      hostname === ANTHROPIC_OFFICIAL_API_HOST ||
+      hostname.endsWith(ANTHROPIC_OFFICIAL_HOST_SUFFIX)
+    );
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Parse Anthropic streaming response and yield events.
  */
@@ -840,12 +1050,35 @@ async function* parseAnthropicStream(
   // update so the final output count — not the start placeholder — is what
   // consumers see.
   let usageInputTokens = 0;
+  let usageBaseInputTokens = 0;
+  let usageCacheCreationInputTokens = 0;
+  let usageCacheReadInputTokens = 0;
   let usageOutputTokens = 0;
   let sawUsage = false;
   const eventQueue: LlmStreamEvent[] = [];
 
   const queueEvent = (event: LlmStreamEvent) => {
     eventQueue.push(event);
+  };
+  const updateUsage = (rawUsage: Record<string, unknown>) => {
+    const inputTokens = numberField(rawUsage, 'input_tokens');
+    const cacheCreationTokens = numberField(
+      rawUsage,
+      'cache_creation_input_tokens',
+    );
+    const cacheReadTokens = numberField(rawUsage, 'cache_read_input_tokens');
+    const outputTokens = numberField(rawUsage, 'output_tokens');
+    if (inputTokens != null) usageBaseInputTokens = inputTokens;
+    if (cacheCreationTokens != null) {
+      usageCacheCreationInputTokens = cacheCreationTokens;
+    }
+    if (cacheReadTokens != null) usageCacheReadInputTokens = cacheReadTokens;
+    usageInputTokens =
+      usageBaseInputTokens +
+      usageCacheCreationInputTokens +
+      usageCacheReadInputTokens;
+    if (outputTokens != null) usageOutputTokens = outputTokens;
+    sawUsage = true;
   };
 
   await readSseResponse(
@@ -927,17 +1160,11 @@ async function* parseAnthropicStream(
       ) {
         const rawUsage = (
           payload.message as {
-            usage?: { input_tokens?: number; output_tokens?: number };
+            usage?: Record<string, unknown>;
           }
         ).usage;
         if (rawUsage) {
-          if (rawUsage.input_tokens != null) {
-            usageInputTokens = rawUsage.input_tokens;
-          }
-          if (rawUsage.output_tokens != null) {
-            usageOutputTokens = rawUsage.output_tokens;
-          }
-          sawUsage = true;
+          updateUsage(rawUsage);
         }
       }
 
@@ -948,19 +1175,10 @@ async function* parseAnthropicStream(
       if (payload.type === 'message_delta') {
         const deltaUsage =
           typeof payload.usage === 'object' && payload.usage
-            ? (payload.usage as {
-                input_tokens?: number;
-                output_tokens?: number;
-              })
+            ? (payload.usage as Record<string, unknown>)
             : null;
         if (deltaUsage) {
-          if (deltaUsage.input_tokens != null) {
-            usageInputTokens = deltaUsage.input_tokens;
-          }
-          if (deltaUsage.output_tokens != null) {
-            usageOutputTokens = deltaUsage.output_tokens;
-          }
-          sawUsage = true;
+          updateUsage(deltaUsage);
         }
       }
 
@@ -1012,6 +1230,8 @@ async function* parseAnthropicStream(
       usage: {
         inputTokens: usageInputTokens,
         outputTokens: usageOutputTokens,
+        cacheCreationInputTokens: usageCacheCreationInputTokens,
+        cacheReadInputTokens: usageCacheReadInputTokens,
       },
     });
   }
@@ -1307,6 +1527,7 @@ export async function* streamLlmResponse(
         options?.maxOutputTokens,
         credentialKind,
         options?.forceToolUse ?? false,
+        shouldEnableAnthropicPromptCaching(provider),
       );
 
       // Subscription requests need Claude Code's user-agent + OAuth betas.

@@ -102,6 +102,40 @@ describe('agent-router', () => {
     expect(events.some((event) => event.type === 'completed')).toBe(false);
   });
 
+  it('propagates cache-read usage as cachedInputTokens', async () => {
+    vi.mocked(streamLlmResponse).mockImplementation(async function* () {
+      yield { type: 'text_delta', text: 'cached answer' };
+      yield {
+        type: 'usage',
+        usage: {
+          inputTokens: 830,
+          cacheCreationInputTokens: 300,
+          cacheReadInputTokens: 400,
+          outputTokens: 25,
+        },
+      };
+      yield { type: 'done', stopReason: 'end_turn' };
+    } as typeof streamLlmResponse);
+
+    const events: Array<Record<string, unknown>> = [];
+    const result = await executeWithAgent('agent-1', null, 'Hi', {
+      runId: 'run-cache-usage',
+      userId: 'owner-1',
+      emit: (event) => events.push(event as Record<string, unknown>),
+    });
+
+    expect(events.find((event) => event.type === 'usage')).toMatchObject({
+      inputTokens: 830,
+      cachedInputTokens: 400,
+      outputTokens: 25,
+    });
+    expect(result.usage).toMatchObject({
+      inputTokens: 830,
+      cachedInputTokens: 400,
+      outputTokens: 25,
+    });
+  });
+
   it('retries Codex incomplete responses up to MAX_CODEX_CONTINUATIONS, threading provider_data into the replay', async () => {
     vi.mocked(resolveExecution).mockReturnValue({
       providerConfig: {
