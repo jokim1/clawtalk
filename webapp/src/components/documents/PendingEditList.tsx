@@ -17,6 +17,7 @@ import {
   tabTitleForEdit,
   type PendingRunGroup,
 } from './documentsFormat';
+import { parseDocumentDisplayBlocks } from './documentText';
 
 type Props = {
   doc: NativeDocument;
@@ -38,11 +39,16 @@ function PreviewText({
   label,
   text,
   tone,
+  format,
 }: {
   label: string;
   text: string;
   tone: 'before' | 'after';
+  format: NativeDocument['format'];
 }): JSX.Element {
+  const blocks = parseDocumentDisplayBlocks({ text, format });
+  const visibleBlocks =
+    blocks.length > 0 ? blocks : [{ kind: 'p' as const, text }];
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
       <span
@@ -56,18 +62,38 @@ function PreviewText({
       >
         {label}
       </span>
-      <span
+      <div
         style={{
-          fontSize: 13.5,
-          lineHeight: 1.55,
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 4,
+          fontSize: 13,
+          lineHeight: 1.5,
           color: tone === 'before' ? salon.ink2 : salon.ink,
           textDecoration: tone === 'before' ? 'line-through' : 'none',
-          whiteSpace: 'pre-wrap',
           overflowWrap: 'anywhere',
         }}
       >
-        {text || '—'}
-      </span>
+        {visibleBlocks.length > 0
+          ? visibleBlocks.map((block, index) => (
+              <span
+                key={`${label}-${index}`}
+                style={{
+                  fontFamily:
+                    block.kind === 'h1' || block.kind === 'h2'
+                      ? salonFont.serif
+                      : block.kind === 'code'
+                        ? salonFont.mono
+                        : undefined,
+                  fontWeight:
+                    block.kind === 'h1' || block.kind === 'h2' ? 600 : 400,
+                }}
+              >
+                {block.kind === 'li' ? `• ${block.text}` : block.text}
+              </span>
+            ))
+          : '—'}
+      </div>
     </div>
   );
 }
@@ -122,10 +148,20 @@ function EditCard({
         <span style={{ fontSize: 12, color: salon.ink2 }}>{anchor}</span>
       ) : null}
       {preview.beforeText != null ? (
-        <PreviewText label="Current" text={preview.beforeText} tone="before" />
+        <PreviewText
+          label="Current"
+          text={preview.beforeText}
+          tone="before"
+          format={doc.format}
+        />
       ) : null}
       {preview.afterText != null ? (
-        <PreviewText label="Proposed" text={preview.afterText} tone="after" />
+        <PreviewText
+          label="Proposed"
+          text={preview.afterText}
+          tone="after"
+          format={doc.format}
+        />
       ) : null}
       <div style={{ display: 'flex', gap: 8 }}>
         <Button
