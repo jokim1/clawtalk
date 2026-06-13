@@ -33,6 +33,7 @@ import {
   rejectDocumentEdit,
   rejectDocumentEditRun,
   UnauthorizedError,
+  updateDocumentTab,
   type NativeDocument,
   type NativeDocumentEdit,
   type NativeDocumentTab,
@@ -58,8 +59,14 @@ export interface UseNativeDocumentReviewResult {
   setConflictNotice: (message: string | null) => void;
   busyEditIds: Set<string>;
   busyRunIds: Set<string>;
+  savingTabIds: Set<string>;
   allBusy: boolean;
   reload: (options?: { quiet?: boolean }) => Promise<void>;
+  saveTabText: (input: {
+    tabId: string;
+    text: string;
+    expectedListVersion: number;
+  }) => Promise<boolean>;
   acceptEdit: (edit: NativeDocumentEdit) => Promise<void>;
   rejectEdit: (edit: NativeDocumentEdit) => Promise<void>;
   acceptRun: (group: PendingRunGroup) => Promise<void>;
@@ -96,6 +103,7 @@ export function useNativeDocumentReview(
   const [conflictNotice, setConflictNotice] = useState<string | null>(null);
   const [busyEditIds, setBusyEditIds] = useState<Set<string>>(new Set());
   const [busyRunIds, setBusyRunIds] = useState<Set<string>>(new Set());
+  const [savingTabIds, setSavingTabIds] = useState<Set<string>>(new Set());
   const [allBusy, setAllBusy] = useState(false);
 
   const activeLoad = useRef<{ cancelled: boolean } | null>(null);
@@ -226,6 +234,66 @@ export function useNativeDocumentReview(
       }
     },
     [applyDocument, documentId, handleMutationError, wsArg],
+  );
+
+  const saveTabText = useCallback(
+    async (input: {
+      tabId: string;
+      text: string;
+      expectedListVersion: number;
+    }): Promise<boolean> => {
+      setActionError(null);
+      setConflictNotice(null);
+      setSavingTabIds((set) => addTo(set, input.tabId));
+      try {
+        const { document } = await updateDocumentTab({
+          documentId,
+          tabId: input.tabId,
+          text: input.text,
+          expectedListVersion: input.expectedListVersion,
+          ...wsArg,
+        });
+        applyDocument(document);
+        return true;
+      } catch (err) {
+        if (err instanceof UnauthorizedError && onUnauthorized) {
+          onUnauthorized();
+          return false;
+        }
+        if (err instanceof ApiError && err.status === 409) {
+          if (err.code === 'pending_edits_exist') {
+            setConflictNotice(
+              'Resolve the pending suggestions on this tab before editing it directly.',
+            );
+          } else if (err.code === 'version_conflict') {
+            setConflictNotice(
+              'This tab changed since you started editing. We refreshed the document; your draft is still open.',
+            );
+          } else {
+            await handleMutationError(err);
+            return false;
+          }
+          await load({ quiet: true });
+          return false;
+        }
+        if (err instanceof ApiError && err.status === 404) {
+          await load({ quiet: true });
+          return false;
+        }
+        setActionError('Couldn’t save this document. Try again.');
+        return false;
+      } finally {
+        setSavingTabIds((set) => removeFrom(set, input.tabId));
+      }
+    },
+    [
+      applyDocument,
+      documentId,
+      handleMutationError,
+      load,
+      onUnauthorized,
+      wsArg,
+    ],
   );
 
   const rejectEdit = useCallback(
@@ -368,8 +436,10 @@ export function useNativeDocumentReview(
     setConflictNotice,
     busyEditIds,
     busyRunIds,
+    savingTabIds,
     allBusy,
     reload: load,
+    saveTabText,
     acceptEdit,
     rejectEdit,
     acceptRun,

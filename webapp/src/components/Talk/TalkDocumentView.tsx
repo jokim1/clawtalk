@@ -10,13 +10,14 @@
  * accept/reject console; read-only members still see the document and a pending
  * count, with per-block pending markers from `DocumentBlocks`.
  */
-import { useEffect, useId, useRef } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 
-import { Button, salon, salonFont } from '../../salon';
+import { Button, CTIcon, salon, salonFont, Textarea } from '../../salon';
 import { CopyExportMenu } from '../CopyExportMenu';
 import { DocumentBlocks } from '../documents/DocumentBlocks';
 import { PendingEditList } from '../documents/PendingEditList';
 import { FormatPill } from '../FormatPill';
+import { serializeDocumentBlocksForEditing } from '../documents/documentText';
 import {
   documentSummaryMeta,
   formatDocDate,
@@ -59,8 +60,10 @@ export function TalkDocumentView({
     setConflictNotice,
     busyEditIds,
     busyRunIds,
+    savingTabIds,
     allBusy,
     reload,
+    saveTabText,
     acceptEdit,
     rejectEdit,
     acceptRun,
@@ -83,8 +86,53 @@ export function TalkDocumentView({
   // Tab roving-focus refs for the WAI-ARIA tablist keyboard pattern.
   const tabBaseId = useId();
   const tabButtonsRef = useRef<Map<string, HTMLButtonElement>>(new Map());
+  const [editingTabId, setEditingTabId] = useState<string | null>(null);
+  const [draftText, setDraftText] = useState('');
   const tabIdFor = (tabId: string) => `${tabBaseId}-tab-${tabId}`;
   const tabPanelId = `${tabBaseId}-panel`;
+  const activePendingEdits =
+    doc?.pendingEdits.filter((edit) => edit.tabId === activeTab?.id) ?? [];
+  const isEditingActiveTab =
+    editingTabId !== null && editingTabId === activeTab?.id;
+  const actionLocked =
+    allBusy ||
+    busyEditIds.size > 0 ||
+    busyRunIds.size > 0 ||
+    savingTabIds.size > 0;
+  const activeTabSaving = activeTab ? savingTabIds.has(activeTab.id) : false;
+
+  const cancelEditing = () => {
+    setEditingTabId(null);
+    setDraftText('');
+  };
+
+  const selectTab = (tabId: string) => {
+    if (tabId !== activeTab?.id) cancelEditing();
+    setActiveTabId(tabId);
+  };
+
+  const startEditing = () => {
+    if (
+      !canEditDoc ||
+      !activeTab ||
+      activePendingEdits.length > 0 ||
+      actionLocked
+    ) {
+      return;
+    }
+    setEditingTabId(activeTab.id);
+    setDraftText(serializeDocumentBlocksForEditing(activeTab.blocks));
+  };
+
+  const saveEditing = async () => {
+    if (!activeTab || !isEditingActiveTab || activeTabSaving) return;
+    const saved = await saveTabText({
+      tabId: activeTab.id,
+      text: draftText,
+      expectedListVersion: activeTab.listVersion,
+    });
+    if (saved) cancelEditing();
+  };
 
   const handleTabKeyDown = (
     event: React.KeyboardEvent<HTMLButtonElement>,
@@ -102,7 +150,7 @@ export function TalkDocumentView({
     const nextTab = tabs[nextIndex];
     if (!nextTab) return;
     event.preventDefault();
-    setActiveTabId(nextTab.id);
+    selectTab(nextTab.id);
     tabButtonsRef.current.get(nextTab.id)?.focus();
   };
 
@@ -191,8 +239,50 @@ export function TalkDocumentView({
             {doc.lastEditAt ? ` · edited ${formatDocDate(doc.lastEditAt)}` : ''}
           </p>
         </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'flex-end',
+            gap: 8,
+            flexWrap: 'wrap',
+          }}
+        >
           <DocumentFormatPills format={doc.format} />
+          {canEditDoc && isEditingActiveTab ? (
+            <>
+              <Button
+                variant="primary"
+                disabled={activeTabSaving}
+                onClick={() => void saveEditing()}
+                aria-label="Save document"
+              >
+                <CTIcon name="check" size={14} />
+                {activeTabSaving ? 'Saving' : 'Save'}
+              </Button>
+              <Button
+                variant="secondary"
+                disabled={activeTabSaving}
+                onClick={cancelEditing}
+                aria-label="Cancel editing"
+              >
+                <CTIcon name="x" size={14} />
+                Cancel
+              </Button>
+            </>
+          ) : canEditDoc ? (
+            <Button
+              variant="secondary"
+              disabled={
+                !activeTab || actionLocked || activePendingEdits.length > 0
+              }
+              onClick={startEditing}
+              aria-label="Edit document"
+            >
+              <CTIcon name="edit" size={14} />
+              Edit
+            </Button>
+          ) : null}
           <CopyExportMenu
             source={nativeDocumentToExportSource(doc)}
             documentTitle={doc.title || 'Untitled document'}
@@ -287,7 +377,7 @@ export function TalkDocumentView({
                 aria-selected={active}
                 aria-controls={tabPanelId}
                 tabIndex={active ? 0 : -1}
-                onClick={() => setActiveTabId(tab.id)}
+                onClick={() => selectTab(tab.id)}
                 onKeyDown={(event) => handleTabKeyDown(event, index)}
                 className="salon-btn"
                 style={{
@@ -324,13 +414,29 @@ export function TalkDocumentView({
           padding: '18px 20px',
         }}
       >
-        <DocumentBlocks
-          blocks={activeTab?.blocks ?? []}
-          pendingEdits={doc.pendingEdits.filter(
-            (edit) => edit.tabId === activeTab?.id,
-          )}
-          format={doc.format}
-        />
+        {canEditDoc && isEditingActiveTab ? (
+          <Textarea
+            aria-label={`Edit ${activeTab?.title || 'document tab'}`}
+            value={draftText}
+            onChange={(event) => setDraftText(event.target.value)}
+            disabled={activeTabSaving}
+            style={{
+              minHeight: 520,
+              resize: 'vertical',
+              borderRadius: 12,
+              fontFamily: salonFont.serif,
+              fontSize: 16,
+              lineHeight: 1.6,
+              background: salon.paper,
+            }}
+          />
+        ) : (
+          <DocumentBlocks
+            blocks={activeTab?.blocks ?? []}
+            pendingEdits={activePendingEdits}
+            format={doc.format}
+          />
+        )}
       </article>
 
       {pendingCount > 0 ? (
@@ -339,7 +445,7 @@ export function TalkDocumentView({
             doc={doc}
             busyEditIds={busyEditIds}
             busyRunIds={busyRunIds}
-            allBusy={allBusy}
+            allBusy={allBusy || savingTabIds.size > 0}
             onAcceptEdit={(edit) => void acceptEdit(edit)}
             onRejectEdit={(edit) => void rejectEdit(edit)}
             onAcceptRun={(group) => void acceptRun(group)}

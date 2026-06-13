@@ -1,4 +1,5 @@
 import { getDbPg, withTrustedDbWrites } from '../../db.js';
+import { parseDocumentTextBlocks } from './document-block-text.js';
 import {
   acceptGreenfieldDocumentEdit,
   acceptGreenfieldDocumentEdits,
@@ -105,6 +106,12 @@ export type NativeDocumentResolveResult =
   | { kind: 'anchor_missing'; anchorId: string }
   | { kind: 'invalid_edit'; message: string }
   | { kind: 'edit_set_mismatch'; pendingEditIds: string[] };
+
+export type NativeDocumentTabUpdateResult =
+  | { kind: 'ok'; document: NativeDocumentRecord }
+  | { kind: 'not_found' }
+  | { kind: 'version_conflict'; currentVersion: number }
+  | { kind: 'pending_edits_exist'; pendingEditIds: string[] };
 
 /**
  * True when two edit-id lists describe the same set (order-, duplicate-, and
@@ -335,6 +342,105 @@ export async function createNativeDocumentForTalk(input: {
     throw new Error(`Created document ${created.id} could not load`);
   }
   return document;
+}
+
+export async function updateNativeDocumentTab(input: {
+  workspaceId: string;
+  documentId: string;
+  tabId: string;
+  text: string;
+  expectedListVersion: number;
+}): Promise<NativeDocumentTabUpdateResult> {
+  const result = await withDocumentEditMutationLock(input, async (tx) => {
+    const tabRows = await withTrustedDbWrites(
+      () =>
+        tx<Array<{ list_version: number; format: NativeDocumentFormat }>>`
+        select t.list_version, d.format
+        from public.doc_tabs t
+        join public.documents d
+          on d.workspace_id = t.workspace_id
+         and d.id = t.document_id
+        where t.workspace_id = ${input.workspaceId}::uuid
+          and t.document_id = ${input.documentId}::uuid
+          and t.id = ${input.tabId}::uuid
+        for update of t
+      `,
+    );
+    const tab = tabRows[0];
+    if (!tab) return { kind: 'not_found' as const };
+    if (tab.list_version !== input.expectedListVersion) {
+      return {
+        kind: 'version_conflict' as const,
+        currentVersion: tab.list_version,
+      };
+    }
+
+    const pendingRows = await tx<Array<{ id: string }>>`
+      select id
+      from public.document_edits
+      where workspace_id = ${input.workspaceId}::uuid
+        and document_id = ${input.documentId}::uuid
+        and tab_id = ${input.tabId}::uuid
+        and status = 'pending'
+      order by created_at asc, id asc
+    `;
+    if (pendingRows.length > 0) {
+      return {
+        kind: 'pending_edits_exist' as const,
+        pendingEditIds: pendingRows.map((row) => row.id),
+      };
+    }
+
+    const blocks = parseDocumentTextBlocks({
+      text: input.text,
+      format: tab.format,
+    });
+
+    await withTrustedDbWrites(async () => {
+      await tx`
+        delete from public.doc_blocks
+        where workspace_id = ${input.workspaceId}::uuid
+          and document_id = ${input.documentId}::uuid
+          and tab_id = ${input.tabId}::uuid
+      `;
+      if (blocks.length > 0) {
+        const rows = blocks.map((block, index) => ({
+          workspace_id: input.workspaceId,
+          document_id: input.documentId,
+          tab_id: input.tabId,
+          sort_order: index,
+          kind: block.kind,
+          text: block.text,
+        }));
+        await tx`
+          insert into public.doc_blocks
+          ${tx(rows, 'workspace_id', 'document_id', 'tab_id', 'sort_order', 'kind', 'text')}
+        `;
+      }
+      await tx`
+        update public.doc_tabs
+        set list_version = list_version + 1
+        where workspace_id = ${input.workspaceId}::uuid
+          and document_id = ${input.documentId}::uuid
+          and id = ${input.tabId}::uuid
+      `;
+      await tx`
+        update public.documents
+        set last_edit_at = now()
+        where workspace_id = ${input.workspaceId}::uuid
+          and id = ${input.documentId}::uuid
+      `;
+    });
+
+    return { kind: 'ok' as const };
+  });
+  if (result.kind !== 'ok') return result;
+  const document = await getNativeDocument({
+    workspaceId: input.workspaceId,
+    documentId: input.documentId,
+  });
+  if (!document) return { kind: 'not_found' };
+  return { kind: 'ok', document };
 }
 
 export async function listNativeDocumentEdits(input: {
