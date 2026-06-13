@@ -3836,7 +3836,9 @@ describe('TalkDetailPage', () => {
 
     // The native pane renders its blocks via getDocument.
     const doc = await screen.findByLabelText('Talk document');
-    expect(await within(doc).findByText('# Resync body')).toBeInTheDocument();
+    expect(
+      await within(doc).findByRole('heading', { name: 'Resync body' }),
+    ).toBeInTheDocument();
 
     const fetchMock = globalThis.fetch as unknown as ReturnType<typeof vi.fn>;
     const docFetchCount = () =>

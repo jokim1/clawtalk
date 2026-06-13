@@ -252,8 +252,9 @@ describe('TalkDocumentsPanel', () => {
     );
     renderPanel({ canEditDoc: false });
 
-    // The document still renders read-only with a pending-count notice…
-    expect(await screen.findByText('Original paragraph.')).toBeTruthy();
+    // The document still renders read-only with the inline pending proposal…
+    expect(await screen.findByText('Proposed replacement.')).toBeTruthy();
+    expect(screen.getByText('Strategist · pending')).toBeTruthy();
     expect(screen.getByText(/1 pending edit awaiting review/)).toBeTruthy();
     // …but no accept/reject affordances are offered.
     expect(screen.queryByRole('button', { name: /Accept/ })).toBeNull();
