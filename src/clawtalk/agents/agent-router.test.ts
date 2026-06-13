@@ -37,6 +37,7 @@ import {
   READ_ONLY_TOOL_CONCURRENCY,
   executeWithAgent,
 } from './agent-router.js';
+import { DeadlineBudget } from '../talks/deadline-budget.js';
 
 describe('agent-router', () => {
   beforeEach(() => {
@@ -681,5 +682,54 @@ describe('agent-router', () => {
     // No tool executed; a cancelled event was emitted.
     expect(executeToolCall).not.toHaveBeenCalled();
     expect(events.some((e) => e.type === 'cancelled')).toBe(true);
+  });
+
+  // --- T6: run-scoped budget enforced at the step boundary ----------------
+
+  it('stops at the step boundary with deadline_exceeded when the run budget is exhausted', async () => {
+    vi.mocked(streamLlmResponse).mockClear();
+    vi.mocked(streamLlmResponse).mockImplementation(async function* () {
+      yield { type: 'done', stopReason: 'stop' };
+    } as typeof streamLlmResponse);
+
+    // remainingMs() === 0 from the first iteration.
+    const budget = new DeadlineBudget({ totalMs: 0, defaultStepMs: 20_000 });
+    const events: Array<Record<string, unknown>> = [];
+
+    await expect(
+      executeWithAgent('agent-1', null, 'go', {
+        runId: 'run-budget-exhausted',
+        userId: 'owner-1',
+        budget,
+        emit: (event) => events.push(event as Record<string, unknown>),
+      }),
+    ).rejects.toMatchObject({ code: 'deadline_exceeded' });
+
+    // The loop never started an LLM round, and emitted a failed event.
+    expect(streamLlmResponse).not.toHaveBeenCalled();
+    expect(
+      events.some(
+        (e) => e.type === 'failed' && e.errorCode === 'deadline_exceeded',
+      ),
+    ).toBe(true);
+  });
+
+  it('runs normally when the run budget has time remaining', async () => {
+    vi.mocked(streamLlmResponse).mockImplementation(async function* () {
+      yield { type: 'text_delta', text: 'done' };
+      yield { type: 'done', stopReason: 'stop' };
+    } as typeof streamLlmResponse);
+
+    const budget = new DeadlineBudget({
+      totalMs: 60_000,
+      defaultStepMs: 20_000,
+    });
+    const result = await executeWithAgent('agent-1', null, 'go', {
+      runId: 'run-budget-ok',
+      userId: 'owner-1',
+      budget,
+    });
+
+    expect(result.content).toBe('done');
   });
 });

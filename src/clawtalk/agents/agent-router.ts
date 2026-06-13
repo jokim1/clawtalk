@@ -20,6 +20,7 @@ import {
   LlmClientError,
 } from './llm-client.js';
 import { TalkExecutorError } from '../talks/executor.js';
+import type { DeadlineBudget } from '../talks/deadline-budget.js';
 
 // ---------------------------------------------------------------------------
 // Types: Execution Context and Events
@@ -175,6 +176,13 @@ export interface AgentExecutionOptions {
    * tools are exposed.
    */
   effectiveTools?: EffectiveToolAccess[];
+  /**
+   * Run-scoped deadline budget (T6). When present, the tool loop stops at a
+   * step boundary once the run's external-await budget is exhausted instead of
+   * starting another LLM + tool round. Tool legs (web_search) draw their own
+   * per-step caps from the same budget. Absent for direct/test callers.
+   */
+  budget?: DeadlineBudget;
 }
 
 export const ALWAYS_ALLOWED_CONTEXT_TOOLS = new Set([
@@ -561,6 +569,17 @@ export async function executeWithResolvedAgent(
 
   try {
     for (let iteration = 0; iteration < maxToolIterations; iteration++) {
+      // T6: enforce the run-scoped budget at the step boundary. If the run has
+      // burned its external-await budget — e.g. a dead provider eating tool
+      // timeouts round after round — stop here with a graceful labeled error
+      // instead of starting another LLM + tool round. The queue watchdog is
+      // the harder, detached backstop below this.
+      if (options.budget && options.budget.remainingMs() <= 0) {
+        const errorMessage =
+          'The run exceeded its time budget before producing a final response.';
+        emit({ type: 'failed', errorCode: 'deadline_exceeded', errorMessage });
+        throw new TalkExecutorError('deadline_exceeded', errorMessage);
+      }
       // Force a tool call only on the FIRST iteration. Once the agent
       // has been pushed into picking a tool, subsequent iterations
       // resolve normally (the agent may need to call more tools or
