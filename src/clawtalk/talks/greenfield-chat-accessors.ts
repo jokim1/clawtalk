@@ -10,7 +10,6 @@ import {
 import { resolveCredentialKindSnapshot } from '../agents/execution-resolver.js';
 import { withGreenfieldDocumentEditToolAccess } from './greenfield-document-tools.js';
 import { emitOutboxEventOnSql, enqueueOutboxNotify } from './outbox-emit.js';
-import { logger } from '../../logger.js'; // ACCEPT-TIMING (temp)
 import type { GreenfieldMessageRecord } from './greenfield-detail-accessors.js';
 
 type GreenfieldRunStatus =
@@ -156,7 +155,6 @@ export async function enqueueGreenfieldChatTurn(input: {
   targetAgentIds?: string[] | null;
 }): Promise<EnqueueGreenfieldChatTurnResult> {
   const db = getDbPg();
-  const _t0 = Date.now(); // ACCEPT-TIMING (temp)
   let pendingNotifies: PendingOutboxNotify[] = [];
   const result = await withExistingOrNewTransaction(db, async (txSql) => {
     const talks = await txSql<
@@ -172,7 +170,6 @@ export async function enqueueGreenfieldChatTurn(input: {
         and id = ${input.talkId}::uuid
       for update
     `;
-    const _tLock = Date.now(); // ACCEPT-TIMING (temp)
     const talk = talks[0];
     if (!talk) return { ok: false, reason: 'talk_not_found' } as const;
     if (talk.archived_at) {
@@ -190,16 +187,7 @@ export async function enqueueGreenfieldChatTurn(input: {
         and talk_id = ${input.talkId}::uuid
         and status in ('queued', 'running', 'awaiting')
     `;
-    const _tActive = Date.now(); // ACCEPT-TIMING (temp)
     if ((active[0]?.count ?? 0) > 0) {
-      logger.info(
-        {
-          phase: 'reject_active',
-          lock: _tLock - _t0,
-          active: _tActive - _tLock,
-        },
-        '[accept-timing] tx',
-      ); // ACCEPT-TIMING (temp)
       return { ok: false, reason: 'talk_round_active' } as const;
     }
 
@@ -292,7 +280,6 @@ export async function enqueueGreenfieldChatTurn(input: {
         limit 1
       `,
       ]);
-    const _tBatch = Date.now(); // ACCEPT-TIMING (temp)
 
     const requestedTargetIds = Array.from(
       new Set(
@@ -347,7 +334,6 @@ export async function enqueueGreenfieldChatTurn(input: {
         ),
       );
     }
-    const _tCred = Date.now(); // ACCEPT-TIMING (temp)
 
     const insertedMessages = await withTrustedDbWrites(
       () => txSql<GreenfieldMessageRecord[]>`
@@ -581,19 +567,6 @@ export async function enqueueGreenfieldChatTurn(input: {
       });
     }
     pendingNotifies = localNotifies;
-    logger.info(
-      {
-        phase: 'ok',
-        agents: selectedAgents.length,
-        lock: _tLock - _t0,
-        active: _tActive - _tLock,
-        batch: _tBatch - _tActive,
-        cred: _tCred - _tBatch,
-        write: Date.now() - _tCred,
-        txBody: Date.now() - _t0,
-      },
-      '[accept-timing] tx',
-    ); // ACCEPT-TIMING (temp)
     return { ok: true, talkId: input.talkId, message, runs } as const;
   });
 
