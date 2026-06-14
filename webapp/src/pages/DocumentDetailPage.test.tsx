@@ -261,6 +261,9 @@ describe('DocumentDetailPage', () => {
       screen.getAllByText('Investors & Advisors Update').length,
     ).toBeGreaterThan(0);
     expect(screen.getAllByText('Suggested by Strategist')).toHaveLength(1);
+    expect(
+      view.container.querySelectorAll('[data-pending="true"]'),
+    ).toHaveLength(1);
     expect(view.container.textContent).not.toContain('<h2>');
     expect(view.container.textContent).not.toContain('&amp;');
   });
@@ -287,7 +290,9 @@ describe('DocumentDetailPage', () => {
     await screen.findByText('Pending edits');
 
     fireEvent.click(
-      screen.getByRole('button', { name: 'Accept replace paragraph' }),
+      screen.getByRole('button', {
+        name: 'Accept inline suggested replacement',
+      }),
     );
 
     await waitFor(() =>
@@ -313,7 +318,198 @@ describe('DocumentDetailPage', () => {
     await screen.findByText('Pending edits');
 
     fireEvent.click(
-      screen.getByRole('button', { name: 'Reject replace paragraph' }),
+      screen.getByRole('button', {
+        name: 'Reject inline suggested replacement',
+      }),
+    );
+
+    await waitFor(() =>
+      expect(mockApi.rejectDocumentEdit).toHaveBeenCalledWith({
+        documentId: 'doc-1',
+        editId: 'edit-1',
+      }),
+    );
+    expect(await screen.findByText(/No pending edits/)).toBeTruthy();
+    expect(screen.getByText('Original paragraph.')).toBeTruthy();
+  });
+
+  it('renders multiple inline suggestions that target the same block', async () => {
+    mockApi.getDocument.mockResolvedValue(
+      makeDoc({
+        pendingEditCount: 2,
+        pendingEdits: [
+          edit({ id: 'edit-1', newText: 'First proposal.' }),
+          edit({ id: 'edit-2', newText: 'Second proposal.' }),
+        ],
+      }),
+    );
+    mockApi.acceptDocumentEdit.mockResolvedValue({
+      editId: 'edit-2',
+      runId: 'run-1',
+      document: makeDoc({ pendingEditCount: 0, pendingEdits: [] }),
+    });
+    renderDetail();
+
+    expect(await screen.findAllByText('Suggested replacement')).toHaveLength(2);
+    const inlineAccepts = screen.getAllByRole('button', {
+      name: 'Accept inline suggested replacement',
+    });
+    expect(inlineAccepts).toHaveLength(2);
+
+    fireEvent.click(inlineAccepts[1]);
+
+    await waitFor(() =>
+      expect(mockApi.acceptDocumentEdit).toHaveBeenCalledWith({
+        documentId: 'doc-1',
+        editId: 'edit-2',
+      }),
+    );
+  });
+
+  it('accepts an inline insert suggestion at its document location', async () => {
+    mockApi.getDocument.mockResolvedValue(
+      makeDoc({
+        pendingEditCount: 1,
+        pendingEdits: [
+          edit({
+            op: 'insert',
+            blockId: null,
+            baseBlockVersion: null,
+            baseListVersion: 1,
+            afterBlockId: 'block-1',
+            newKind: 'p',
+            newText: 'Inserted paragraph.',
+          }),
+        ],
+      }),
+    );
+    mockApi.acceptDocumentEdit.mockResolvedValue({
+      editId: 'edit-1',
+      runId: 'run-1',
+      document: makeDoc({
+        pendingEditCount: 0,
+        pendingEdits: [],
+        tabs: [
+          tab({
+            listVersion: 2,
+            blocks: [
+              block(),
+              block({
+                id: 'block-2',
+                sortOrder: 1,
+                version: 1,
+                text: 'Inserted paragraph.',
+              }),
+            ],
+          }),
+        ],
+      }),
+    });
+    renderDetail();
+
+    expect(await screen.findByText('Suggested insertion')).toBeTruthy();
+    expect(screen.getByText('Insert here')).toBeTruthy();
+
+    fireEvent.click(
+      screen.getByRole('button', {
+        name: 'Accept inline suggested insertion',
+      }),
+    );
+
+    await waitFor(() =>
+      expect(mockApi.acceptDocumentEdit).toHaveBeenCalledWith({
+        documentId: 'doc-1',
+        editId: 'edit-1',
+      }),
+    );
+    expect(await screen.findByText(/No pending edits/)).toBeTruthy();
+    expect(screen.getAllByText('Inserted paragraph.').length).toBeGreaterThan(
+      0,
+    );
+  });
+
+  it('renders a stale anchored insert inline without an accept action', async () => {
+    mockApi.getDocument.mockResolvedValue(
+      makeDoc({
+        blockCount: 0,
+        pendingEditCount: 1,
+        tabs: [tab({ blocks: [] })],
+        pendingEdits: [
+          edit({
+            op: 'insert',
+            blockId: null,
+            baseBlockVersion: null,
+            baseListVersion: 1,
+            afterBlockId: 'missing-block',
+            newKind: 'p',
+            newText: 'Inserted paragraph.',
+          }),
+        ],
+      }),
+    );
+    mockApi.rejectDocumentEdit.mockResolvedValue({
+      editId: 'edit-1',
+      runId: 'run-1',
+      document: makeDoc({
+        blockCount: 0,
+        pendingEditCount: 0,
+        tabs: [tab({ blocks: [] })],
+        pendingEdits: [],
+      }),
+    });
+    renderDetail();
+
+    expect(await screen.findByText('Suggested insertion')).toBeTruthy();
+    expect(
+      screen.getByText('Original insertion point no longer exists.'),
+    ).toBeTruthy();
+    expect(screen.getByText('Proposed text')).toBeTruthy();
+    expect(screen.getAllByText('Inserted paragraph.').length).toBeGreaterThan(
+      0,
+    );
+    expect(screen.queryByText('Insert here')).toBeNull();
+    expect(screen.queryByText('This tab is empty')).toBeNull();
+    expect(
+      screen.queryByRole('button', {
+        name: 'Accept inline suggested insertion',
+      }),
+    ).toBeNull();
+
+    fireEvent.click(
+      screen.getByRole('button', {
+        name: 'Reject inline suggested insertion',
+      }),
+    );
+
+    await waitFor(() =>
+      expect(mockApi.rejectDocumentEdit).toHaveBeenCalledWith({
+        documentId: 'doc-1',
+        editId: 'edit-1',
+      }),
+    );
+  });
+
+  it('rejects an inline delete suggestion and keeps the block', async () => {
+    mockApi.getDocument.mockResolvedValue(
+      makeDoc({
+        pendingEditCount: 1,
+        pendingEdits: [edit({ op: 'delete', newKind: null, newText: null })],
+      }),
+    );
+    mockApi.rejectDocumentEdit.mockResolvedValue({
+      editId: 'edit-1',
+      runId: 'run-1',
+      document: makeDoc({ pendingEditCount: 0, pendingEdits: [] }),
+    });
+    renderDetail();
+
+    expect(await screen.findByText('Suggested deletion')).toBeTruthy();
+    expect(screen.getByText('Will be removed')).toBeTruthy();
+
+    fireEvent.click(
+      screen.getByRole('button', {
+        name: 'Reject inline suggested deletion',
+      }),
     );
 
     await waitFor(() =>
@@ -538,8 +734,9 @@ describe('DocumentDetailPage', () => {
     expect(await screen.findByText(/New edits arrived/)).toBeTruthy();
     await waitFor(() => expect(mockApi.getDocument).toHaveBeenCalledTimes(2));
     expect(
-      await screen.findByText('A second proposal you had not seen.'),
-    ).toBeTruthy();
+      (await screen.findAllByText('A second proposal you had not seen.'))
+        .length,
+    ).toBeGreaterThan(0);
     expect(screen.getAllByText('Proposed replacement.').length).toBeGreaterThan(
       0,
     );

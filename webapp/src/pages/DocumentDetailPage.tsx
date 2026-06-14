@@ -519,6 +519,10 @@ export function DocumentDetailPage(): JSX.Element {
                 blocks={activeTab?.blocks ?? []}
                 pendingEdits={activePendingEdits}
                 format={doc.format}
+                busyEditIds={busyEditIds}
+                reviewDisabled={actionLocked}
+                onAcceptEdit={(edit) => void acceptEdit(edit)}
+                onRejectEdit={(edit) => void rejectEdit(edit)}
               />
             )}
           </article>
