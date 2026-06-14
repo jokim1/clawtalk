@@ -334,6 +334,38 @@ describe('TalkDetailPage', () => {
     expect(screen.queryByRole('complementary', { name: 'Context' })).toBeNull();
   });
 
+  it('restores and persists the Context side panel width', async () => {
+    window.localStorage.setItem('clawtalk.sidePanelWidth:context', '512');
+    installTalkDetailFetch();
+
+    renderDetailPage('/app/talks/talk-1?panel=context');
+
+    const contextPanel = await screen.findByRole('complementary', {
+      name: 'Context',
+    });
+    expect(contextPanel).toHaveAttribute(
+      'style',
+      expect.stringContaining('--talk-side-panel-width: 512px'),
+    );
+
+    const resizeHandle = screen.getByRole('separator', {
+      name: 'Resize Context panel',
+    });
+    expect(resizeHandle).toHaveAttribute('aria-valuenow', '512');
+
+    fireEvent.keyDown(resizeHandle, { key: 'ArrowRight' });
+
+    await waitFor(() =>
+      expect(
+        window.localStorage.getItem('clawtalk.sidePanelWidth:context'),
+      ).toBe('488'),
+    );
+    expect(contextPanel).toHaveAttribute(
+      'style',
+      expect.stringContaining('--talk-side-panel-width: 488px'),
+    );
+  });
+
   it('closes the side panel and opens the document pane from Documents', async () => {
     const user = userEvent.setup();
     installTalkDetailFetch({

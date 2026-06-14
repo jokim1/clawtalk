@@ -1110,6 +1110,7 @@ export function TalkDetailPage({
   const sidePanelMeta =
     sidePanel === 'agents'
       ? {
+          panelKey: sidePanel,
           title: 'The Room',
           subtitle: `${effectiveAgents.length} ${
             effectiveAgents.length === 1 ? 'agent' : 'agents'
@@ -1119,6 +1120,7 @@ export function TalkDetailPage({
         }
       : sidePanel === 'context'
         ? {
+            panelKey: sidePanel,
             title: 'Context',
             subtitle: `${activeRuleCount} active ${
               activeRuleCount === 1 ? 'rule' : 'rules'
@@ -1128,6 +1130,7 @@ export function TalkDetailPage({
           }
         : sidePanel === 'jobs'
           ? {
+              panelKey: sidePanel,
               title: 'Jobs',
               subtitle: 'Placeholder',
               icon: 'clock' as const,
@@ -1357,6 +1360,7 @@ export function TalkDetailPage({
                   title={sidePanelMeta.title}
                   subtitle={sidePanelMeta.subtitle}
                   icon={sidePanelMeta.icon}
+                  resizeStorageKey={sidePanelMeta.panelKey}
                   onClose={handleCloseSidePanel}
                 >
                   {sidePanelMeta.content}
