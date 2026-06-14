@@ -879,11 +879,19 @@ export class TalkRunner {
         )
         .toArray()[0];
       if (deadline != null && deadline.deadline_ms <= Date.now()) {
-        // RETRY if budget remains AND the plan can be rebuilt; otherwise FAIL.
-        // A3 is DO-LOCAL: planProvider is null in prod, so this is always the
-        // FAIL path (the A2 behavior) until PR-B wires the rebuild — tests inject
-        // planProvider to exercise the retry + the cross-attempt fence.
-        if (active.attempt < MAX_STEP_ATTEMPTS && this.planProvider) {
+        // RETRY only a wedged RUNNING attempt (the case retryRun/claimRetry is
+        // built for — a provider stuck on an await), and only with budget left
+        // AND a rebuildable plan. A 'pending' expired step (a restart caught it
+        // mid-claim) is NOT retryable: claimRetry CASes on status='running', so
+        // routing it to retryRun would bail without clearing the deadline and the
+        // watchdog would spin — fail it like A2 instead. A3 is DO-LOCAL:
+        // planProvider is null in prod, so this is always the FAIL path until
+        // PR-B wires the rebuild; tests inject planProvider to exercise retry.
+        if (
+          active.status === 'running' &&
+          active.attempt < MAX_STEP_ATTEMPTS &&
+          this.planProvider
+        ) {
           await this.retryRun(runId, active.idx, active.attempt);
         } else {
           // CAS on (attempt, status in running|pending) so a step that just

@@ -311,6 +311,64 @@ describe('TalkRunner stale-attempt fencing (PR-A3)', () => {
     blk.release();
     expect(await p).toEqual({ status: 'cancelled' });
   });
+
+  it('fails (does not spin) an expired PENDING step even when a planProvider is set', async () => {
+    // Regression guard: an expired 'pending' step (a restart caught it mid-claim)
+    // is NOT retryable — claimRetry CASes on status='running', so routing it to
+    // retryRun would bail without clearing the deadline and the watchdog would
+    // spin. The retry branch is gated on status='running'; a pending-expired step
+    // fails like A2 (this is the A2 resume-pending-expired case + a planProvider).
+    const stub = getRunner('pending-expired-retry');
+    const runId = 'run-pend-retry';
+    const result = await runInDurableObject(stub, async (instance, state) => {
+      const now = Date.now();
+      state.storage.sql.exec(
+        `insert into runs_local (run_id, status, started_at, updated_at) values (?, 'running', ?, ?)`,
+        runId,
+        now,
+        now,
+      );
+      state.storage.sql.exec(
+        `insert into steps (run_id, idx, kind, status, attempt, checkpoint_json, deadline_ms)
+         values (?, 0, 'llm', 'pending', 1, null, ?)`,
+        runId,
+        now - 1_000,
+      );
+      state.storage.sql.exec(
+        `insert into step_deadlines (run_id, idx, deadline_ms) values (?, 0, ?)`,
+        runId,
+        now - 1_000,
+      );
+      let providerCalls = 0;
+      instance.planProvider = async () => {
+        providerCalls += 1;
+        return [
+          {
+            kind: 'llm' as StepKind,
+            execute: async () => ({ checkpoint: {} }),
+          },
+        ];
+      };
+      await instance.alarm(); // must FAIL the pending step, not route to retry
+      const run = state.storage.sql
+        .exec('select status from runs_local where run_id=?', runId)
+        .one() as { status: string };
+      const step = state.storage.sql
+        .exec('select status from steps where run_id=? and idx=0', runId)
+        .one() as { status: string };
+      const openDeadlines = state.storage.sql
+        .exec('select count(*) as n from step_deadlines where run_id=?', runId)
+        .one().n as number;
+      const alarm = await state.storage.getAlarm();
+      return { run, step, openDeadlines, alarm, providerCalls };
+    });
+
+    expect(result.run.status).toBe('failed');
+    expect(result.step.status).toBe('failed');
+    expect(result.openDeadlines).toBe(0); // cleared → no re-fire/spin
+    expect(result.alarm).toBeNull();
+    expect(result.providerCalls).toBe(0); // never routed to the retry path
+  });
 });
 
 describe('TalkRunner cancel RPC (PR-A3)', () => {
