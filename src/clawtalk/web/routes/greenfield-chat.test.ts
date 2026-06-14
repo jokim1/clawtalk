@@ -696,9 +696,10 @@ describe('greenfield chat routes', () => {
       talkId,
     });
     expect(cancelled.statusCode).toBe(200);
-    expect(cancelled.body).toEqual({
+    expect(cancelled.body).toMatchObject({
       ok: true,
-      data: { talkId, cancelledRuns: 2 },
+      // Queue-path cancel: no do-path runs to notify (stored runtime='queue').
+      data: { talkId, cancelledRuns: 2, doCancelledRunIds: [] },
     });
   });
 
@@ -837,9 +838,10 @@ describe('greenfield chat routes', () => {
       workspaceId,
       talkId,
     });
-    expect(cancelled.body).toEqual({
+    expect(cancelled.body).toMatchObject({
       ok: true,
-      data: { talkId, cancelledRuns: 2 },
+      // Queue-path cancel: no do-path runs to notify (stored runtime='queue').
+      data: { talkId, cancelledRuns: 2, doCancelledRunIds: [] },
     });
 
     const retried = await enqueueGreenfieldChatRoute({
@@ -873,6 +875,7 @@ describe('greenfield chat routes', () => {
     expect(directCancelled).toEqual({
       cancelledRuns: 0,
       cancelledRunIds: [],
+      doCancelledRunIds: [],
     });
 
     const cancelled = await withUserContext(OTHER_USER_ID, () =>
@@ -884,7 +887,11 @@ describe('greenfield chat routes', () => {
       }),
     );
 
-    expect(cancelled).toEqual({ cancelledRuns: 0, cancelledRunIds: [] });
+    expect(cancelled).toEqual({
+      cancelledRuns: 0,
+      cancelledRunIds: [],
+      doCancelledRunIds: [],
+    });
     const db = getDbPg();
     const activeRuns = await db<Array<{ count: number }>>`
       select count(*)::int as count
@@ -951,6 +958,7 @@ describe('greenfield chat routes', () => {
     expect(directCancelled).toEqual({
       cancelledRuns: 0,
       cancelledRunIds: [],
+      doCancelledRunIds: [],
     });
 
     const routeCancelled = await cancelGreenfieldChatRoute({

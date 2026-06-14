@@ -167,6 +167,8 @@ async function insertGreenfieldRunBatchOnSql(input: {
   responseGroupId: string;
   snapshotGroupId: string;
   rows: GreenfieldChatAgentWriteRow[];
+  // Talk Runtime v2 PR-B: the dispatch-runtime marker for these runs.
+  runtime: 'queue' | 'do';
 }): Promise<GreenfieldChatRunRecord[]> {
   if (input.rows.length === 0) return [];
   const rows = await input.sql<GreenfieldChatRunRecord[]>`
@@ -252,7 +254,8 @@ async function insertGreenfieldRunBatchOnSql(input: {
         response_group_id,
         sequence_index,
         prompt_snapshot_id,
-        status
+        status,
+        runtime
       )
       select
         ${input.workspaceId}::uuid,
@@ -267,7 +270,8 @@ async function insertGreenfieldRunBatchOnSql(input: {
         ${input.responseGroupId},
         i.ordinal,
         i.prompt_snapshot_id,
-        'queued'
+        'queued',
+        ${input.runtime}
       from input_rows i
       join inserted_snapshots s
         on s.source_agent_id = i.source_agent_id
@@ -417,6 +421,10 @@ export async function enqueueGreenfieldChatTurn(input: {
   userId: string;
   content: string;
   targetAgentIds?: string[] | null;
+  // Talk Runtime v2 PR-B: which runtime the runs are dispatched to ('queue' v1
+  // path, 'do' TalkRunner DO). Recorded on each run so the reconciliation cron
+  // stays path-aware. Default 'queue' (flag OFF); PR-C flips the flag.
+  runtime?: 'queue' | 'do';
 }): Promise<EnqueueGreenfieldChatTurnResult> {
   const db = getDbPg();
   let pendingNotifies: PendingOutboxNotify[] = [];
@@ -650,6 +658,7 @@ export async function enqueueGreenfieldChatTurn(input: {
         responseGroupId,
         snapshotGroupId,
         rows: agentWriteRows,
+        runtime: input.runtime ?? 'queue',
       });
 
       await txSql`
@@ -723,6 +732,11 @@ export async function cancelGreenfieldTalkRuns(input: {
 }): Promise<{
   cancelledRuns: number;
   cancelledRunIds: string[];
+  // Talk Runtime v2 PR-B: the subset of cancelled runs that were dispatched to
+  // the TalkRunner DO (runs.runtime='do'). The caller pings those DOs so they
+  // observe the cancel and stop streaming. Derived from the STORED marker, not a
+  // fresh flag read — so a do→queue rollback mid-run still notifies the DO.
+  doCancelledRunIds: string[];
 }> {
   const db = getDbPg();
   let pendingNotify: PendingOutboxNotify | null = null;
@@ -748,7 +762,9 @@ export async function cancelGreenfieldTalkRuns(input: {
     const canCancelOwnedJobRuns = input.includeJobRuns === true;
 
     return withTrustedDbWrites(async () => {
-      const rows = await txSql<{ id: string; job_id: string | null }[]>`
+      const rows = await txSql<
+        { id: string; job_id: string | null; runtime: string }[]
+      >`
       update public.runs r
       set
         status = 'cancelled',
@@ -773,7 +789,7 @@ export async function cancelGreenfieldTalkRuns(input: {
             )
           )
         )
-      returning r.id, r.job_id
+      returning r.id, r.job_id, r.runtime
     `;
       const runIds = rows.map((row) => row.id);
       for (const run of rows) {
@@ -818,8 +834,12 @@ export async function cancelGreenfieldTalkRuns(input: {
     enqueueOutboxNotify(pendingNotify);
   }
   const cancelledRunIds = updated.map((row) => row.id);
+  const doCancelledRunIds = updated
+    .filter((row) => row.runtime === 'do')
+    .map((row) => row.id);
   return {
     cancelledRuns: cancelledRunIds.length,
     cancelledRunIds,
+    doCancelledRunIds,
   };
 }

@@ -19,6 +19,12 @@ import {
 } from './greenfield-run-accessors.js';
 import { buildOwnerEmailWorkspaceFilter } from './scheduler-owner-filter.js';
 import { dispatchRun } from './queue-producer.js';
+import {
+  createTalkRunnerReconcileProbe,
+  createTalkRunnerRedispatch,
+  runTalkRunnerReconciliation,
+  type ReconciliationEnv,
+} from './talk-runner-reconciliation.js';
 
 // Number of due jobs to claim per tick. Keeps the scheduled hot path bounded.
 const JOB_CLAIM_BATCH_SIZE = 10;
@@ -32,7 +38,8 @@ const STRANDED_SIBLING_SWEEP_LIMIT = 100;
 let warnedAboutAppliedTestOnlyOwnerFilter = false;
 let warnedAboutIgnoredTestOnlyOwnerFilter = false;
 
-export interface ScheduledTickEnv extends DbScopeEnvBindings {
+export interface ScheduledTickEnv
+  extends DbScopeEnvBindings, ReconciliationEnv {
   DB: { connectionString: string };
   TEST_ONLY_OWNER_EMAIL_PATTERN?: string;
 }
@@ -58,9 +65,23 @@ export async function runScheduledTick(
     withNotifyQueueScope(env, ctx, async () => {
       const ownerEmailPattern = resolveTestOnlyOwnerEmailPattern(env);
       await processClaimableJobs(ownerEmailPattern);
+      // Queue-path sweeps (runtime='queue' only — see each query). Do-path runs
+      // are owned by the reconciliation pass below, so a completed-but-unsynced
+      // do-path run is never false-failed by the 1h sweep, and a do-path queued
+      // run is never re-dispatched onto the QUEUE.
       await sweepStuckRunningRuns(ownerEmailPattern);
       await sweepStrandedOrderedSiblings(ownerEmailPattern);
       await sweepStuckQueuedRuns(ownerEmailPattern);
+      // Talk Runtime v2 PR-B: path-aware reconciliation of do-path runs. A no-op
+      // during the flag-OFF soak (no runtime='do' rows). Best-effort.
+      try {
+        await runTalkRunnerReconciliation({
+          probe: createTalkRunnerReconcileProbe(env),
+          redispatch: createTalkRunnerRedispatch(env),
+        });
+      } catch (err) {
+        logger.error({ err }, 'scheduler: talk-runner reconciliation failed');
+      }
     }),
   );
 }
@@ -156,6 +177,9 @@ async function sweepStuckRunningRuns(
         on t.workspace_id = r.workspace_id
        and t.id = r.talk_id
       where r.status = 'running'
+        -- PR-B: queue-path only. Do-path runs are reconciled against DO truth;
+        -- a completed-but-unsynced do-path run must NOT be false-failed here.
+        and r.runtime = 'queue'
         and r.started_at is not null
         and r.started_at < ${threshold}::timestamptz
         ${ownerFilter}
@@ -217,6 +241,9 @@ async function sweepStrandedOrderedSiblings(
         on t.workspace_id = r.workspace_id
        and t.id = r.talk_id
       where r.status = 'queued'
+        -- PR-B: queue-path only. A do-path stranded sibling is the DO's job, not
+        -- the queue's (re-dispatching it onto TALK_RUN_QUEUE would bypass the DO).
+        and r.runtime = 'queue'
         and t.mode = 'ordered'
         and r.sequence_index > 0
         ${ownerFilter}
@@ -276,6 +303,9 @@ async function sweepStuckQueuedRuns(ownerEmailPattern?: string): Promise<void> {
         on t.workspace_id = r.workspace_id
        and t.id = r.talk_id
       where r.status = 'queued'
+        -- PR-B: queue-path only (do-path queued runs are re-driven by the DO /
+        -- reconciliation, not re-dispatched onto TALK_RUN_QUEUE).
+        and r.runtime = 'queue'
         ${ownerFilter}
         and (
           t.mode = 'parallel'

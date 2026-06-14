@@ -798,6 +798,15 @@ export async function failGreenfieldRun(input: {
   errorCode: string;
   errorMessage: string;
   metadataPatch?: Record<string, unknown> | null;
+  // Queue path (default true): if the failure-finalization tx itself throws,
+  // reset the row to 'queued' so CF Queues redelivery retries it. The
+  // TalkRunner DO path (Talk Runtime v2 PR-B) passes false: the DO owns the run
+  // and retries the persist IN PLACE via bounded retry, so re-queueing it would
+  // (a) hand it to a runtime it no longer belongs to and (b) make the very next
+  // bounded retry no-op against the now-'queued' row (the guard is
+  // `status='running'`), silently dropping the failure. Leave it 'running' and
+  // rethrow so the DO's next retry attempt can finalize it.
+  requeueOnError?: boolean;
 }): Promise<{ applied: boolean; talkId: string | null }> {
   const db = getDbPg();
   const run = await getGreenfieldQueueRunById(input.runId);
@@ -854,6 +863,15 @@ export async function failGreenfieldRun(input: {
       }),
     );
   } catch (err) {
+    if (input.requeueOnError === false) {
+      // DO path: keep the row 'running' so the caller's bounded retry can
+      // re-finalize it; do NOT re-queue (the run is not on the queue).
+      logger.warn(
+        { err, runId: run.id },
+        'failGreenfieldRun: failure finalization threw (DO path); left running for in-place retry',
+      );
+      throw err;
+    }
     const reset = await withTrustedDbWrites(
       () => db<{ id: string }[]>`
         update public.runs
@@ -882,6 +900,137 @@ export async function failGreenfieldRun(input: {
     );
     throw err;
   }
+  if (!pendingNotify) return { applied: false, talkId: run.talk_id };
+  enqueueOutboxNotify(pendingNotify);
+  return { applied: true, talkId: run.talk_id };
+}
+
+/**
+ * Single-run cancel for the TalkRunner DO write-behind path (Talk Runtime v2
+ * PR-B). The DO's cancel RPC (A3) flips the run terminal in DO SQLite; this
+ * mirrors that decision into Postgres (the system of record) and emits the SAME
+ * `talk_run_cancelled` outbox event shape the Talk-bulk cancel route uses
+ * (`{ talkId, cancelledBy, runIds }`), so the frontend needs ZERO changes.
+ *
+ * Monotonic + idempotent: only a non-terminal run flips (the `status in
+ * ('queued','running','awaiting')` guard), so a completed/failed run is never
+ * regressed to cancelled and a re-flush after success is a no-op (applied:
+ * false, no second event). Never re-queues on error — the DO retries in place.
+ */
+export async function cancelGreenfieldRunForDo(input: {
+  runId: string;
+  cancelledBy?: string | null;
+}): Promise<{ applied: boolean; talkId: string | null }> {
+  const db = getDbPg();
+  const run = await getGreenfieldQueueRunById(input.runId);
+  if (!run) return { applied: false, talkId: null };
+  if (terminalStatuses().includes(run.status)) {
+    return { applied: false, talkId: run.talk_id };
+  }
+  const cancelledBy = input.cancelledBy ?? run.requested_by;
+
+  const pendingNotify = await withTrustedDbWrites(() =>
+    db.begin(async (tx) => {
+      const txSql = tx as unknown as Sql;
+      const cancelled = await txSql<{ id: string }[]>`
+        update public.runs
+        set
+          status = 'cancelled',
+          finished_at = coalesce(finished_at, now()),
+          error_json = coalesce(error_json, '{}'::jsonb) || jsonb_build_object(
+            'code', 'cancelled_by_user',
+            'cancelledBy', ${cancelledBy}::text
+          )
+        where id = ${input.runId}::uuid
+          and status in ('queued', 'running', 'awaiting')
+        returning id
+      `;
+      if (cancelled.length !== 1) return null;
+      await updateJobTerminalBookkeepingOnSql(txSql, run, 'cancelled');
+
+      const eventId = await emitOutboxEventOnSql(txSql, {
+        topic: `talk:${run.talk_id}`,
+        eventType: 'talk_run_cancelled',
+        payload: {
+          talkId: run.talk_id,
+          cancelledBy,
+          runIds: [run.id],
+        },
+        ownerIds: run.owner_ids,
+      });
+      return {
+        topic: `talk:${run.talk_id}`,
+        eventId,
+        ownerIds: run.owner_ids,
+      } satisfies PendingOutboxNotify;
+    }),
+  );
+  if (!pendingNotify) return { applied: false, talkId: run.talk_id };
+  enqueueOutboxNotify(pendingNotify);
+  return { applied: true, talkId: run.talk_id };
+}
+
+/**
+ * Flag a do-path run the reconciliation cron found ORPHANED — Postgres shows it
+ * queued/running but its TalkRunner DO has no record of it (the run was
+ * dispatched to the DO but the DO never created/kept its step log, e.g. eviction
+ * between the claim and the first checkpoint). Flips queued|running → failed +
+ * emits talk_run_failed so the UI moves on and the divergence is visible
+ * (docs/13 §6.1 reconciliation). Monotonic + idempotent (the
+ * `status in ('queued','running')` guard); never re-queues.
+ */
+export async function failGreenfieldRunOrphaned(input: {
+  runId: string;
+}): Promise<{ applied: boolean; talkId: string | null }> {
+  const db = getDbPg();
+  const run = await getGreenfieldQueueRunById(input.runId);
+  if (!run) return { applied: false, talkId: null };
+  if (run.status !== 'queued' && run.status !== 'running') {
+    return { applied: false, talkId: run.talk_id };
+  }
+  const errorCode = 'do_run_orphaned';
+  const errorMessage =
+    'Run was dispatched to its TalkRunner DO but the DO has no record of it; failed by the reconciliation cron.';
+  const pendingNotify = await withTrustedDbWrites(() =>
+    db.begin(async (tx) => {
+      const txSql = tx as unknown as Sql;
+      const updated = await txSql<{ id: string }[]>`
+        update public.runs
+        set
+          status = 'failed',
+          finished_at = now(),
+          error_json = ${txSql.json(errorJson({ code: errorCode, message: errorMessage }) as never)}
+        where id = ${input.runId}::uuid
+          and status in ('queued', 'running')
+        returning id
+      `;
+      if (updated.length !== 1) return null;
+      await updateJobTerminalBookkeepingOnSql(txSql, run, 'failed');
+      const eventId = await emitOutboxEventOnSql(txSql, {
+        topic: `talk:${run.talk_id}`,
+        eventType: 'talk_run_failed',
+        payload: {
+          talkId: run.talk_id,
+          runId: run.id,
+          runKind: run.run_kind,
+          triggerMessageId: run.trigger_message_id,
+          responseGroupId: run.response_group_id,
+          sequenceIndex: run.sequence_index,
+          errorCode,
+          errorMessage,
+          executorAlias: run.target_agent_name,
+          executorModel: run.model_id,
+          providerId: run.provider_id,
+        },
+        ownerIds: run.owner_ids,
+      });
+      return {
+        topic: `talk:${run.talk_id}`,
+        eventId,
+        ownerIds: run.owner_ids,
+      } satisfies PendingOutboxNotify;
+    }),
+  );
   if (!pendingNotify) return { applied: false, talkId: run.talk_id };
   enqueueOutboxNotify(pendingNotify);
   return { applied: true, talkId: run.talk_id };
