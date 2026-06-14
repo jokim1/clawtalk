@@ -2,10 +2,10 @@
  * Presentational renderer for a native document tab's blocks.
  *
  * Native storage is still block-kind + text. This view expands Markdown/HTML-ish
- * text into readable blocks and overlays pending edits inline so accepting a run
- * removes the accent treatment instead of leaving a disconnected review card.
+ * text into readable blocks and renders pending edits as inline review regions
+ * at their document location.
  */
-import { salon, salonFont } from '../../salon';
+import { Button, salon, salonFont } from '../../salon';
 import type {
   NativeDocumentBlock,
   NativeDocumentEdit,
@@ -13,12 +13,53 @@ import type {
 } from '../../lib/api';
 import { parseDocumentDisplayBlocks } from './documentText';
 
-type RenderBlock = {
+type DisplayBlock = {
   key: string;
   kind: NativeDocumentBlock['kind'];
   text: string;
-  pendingLabel: string | null;
-  pendingMode: 'replace' | 'insert' | 'delete' | null;
+};
+
+type SuggestionMode = 'replace' | 'insert' | 'delete';
+
+type RenderItem =
+  | {
+      type: 'block';
+      key: string;
+      block: DisplayBlock;
+    }
+  | {
+      type: 'suggestion';
+      key: string;
+      edit: NativeDocumentEdit;
+      mode: SuggestionMode;
+      label: string;
+      anchorMissing?: boolean;
+      currentBlocks: DisplayBlock[];
+      proposedBlocks: DisplayBlock[];
+    };
+
+type SuggestionTone = {
+  accent: string;
+  badgeBackground: string;
+  containerBackground: string;
+  currentBackground: string;
+  proposedBackground: string;
+};
+
+const DELETE_TONE: SuggestionTone = {
+  accent: '#7b2a30',
+  badgeBackground: '#7b2a30',
+  containerBackground: 'rgba(123,42,48,0.07)',
+  currentBackground: 'rgba(123,42,48,0.045)',
+  proposedBackground: 'rgba(255,255,255,0.42)',
+};
+
+const PROPOSE_TONE: SuggestionTone = {
+  accent: salon.accent,
+  badgeBackground: salon.accentStrong,
+  containerBackground: 'rgba(200,100,58,0.08)',
+  currentBackground: 'rgba(123,42,48,0.045)',
+  proposedBackground: 'rgba(255,255,255,0.42)',
 };
 
 const BASE_TEXT_STYLE: React.CSSProperties = {
@@ -42,9 +83,7 @@ function expandedBlocks(input: {
   kind: NativeDocumentBlock['kind'];
   text: string;
   format: NativeDocumentFormat;
-  pendingLabel: string | null;
-  pendingMode: RenderBlock['pendingMode'];
-}): RenderBlock[] {
+}): DisplayBlock[] {
   const parsed = parseDocumentDisplayBlocks({
     text: input.text,
     fallbackKind: input.kind,
@@ -56,16 +95,14 @@ function expandedBlocks(input: {
     key: `${input.keyBase}:${index}`,
     kind: block.kind,
     text: block.text,
-    pendingLabel: index === 0 ? input.pendingLabel : null,
-    pendingMode: input.pendingMode,
   }));
 }
 
-function buildRenderBlocks(input: {
+function buildRenderItems(input: {
   blocks: NativeDocumentBlock[];
   pendingEdits: NativeDocumentEdit[];
   format: NativeDocumentFormat;
-}): RenderBlock[] {
+}): RenderItem[] {
   const pendingByBlock = new Map<string, NativeDocumentEdit[]>();
   const insertsByAnchor = new Map<string, NativeDocumentEdit[]>();
   const topInserts: NativeDocumentEdit[] = [];
@@ -88,50 +125,108 @@ function buildRenderBlocks(input: {
     }
   }
 
-  const renderInsert = (edit: NativeDocumentEdit): RenderBlock[] => {
-    if (edit.newText === null) return [];
-    return expandedBlocks({
-      keyBase: `edit:${edit.id}`,
-      kind: edit.newKind ?? 'p',
-      text: edit.newText,
+  const renderBlock = (block: NativeDocumentBlock): RenderItem[] =>
+    expandedBlocks({
+      keyBase: `block:${block.id}`,
+      kind: block.kind,
+      text: block.text,
       format: input.format,
-      pendingLabel: pendingLabel(edit),
-      pendingMode: 'insert',
-    });
+    }).map((entry) => ({
+      type: 'block',
+      key: entry.key,
+      block: entry,
+    }));
+
+  const renderInsert = (
+    edit: NativeDocumentEdit,
+    options: { anchorMissing?: boolean } = {},
+  ): RenderItem[] => {
+    if (edit.newText === null) return [];
+    return [
+      {
+        type: 'suggestion',
+        key: `edit:${edit.id}`,
+        edit,
+        mode: 'insert',
+        label: pendingLabel(edit),
+        anchorMissing: options.anchorMissing,
+        currentBlocks: [],
+        proposedBlocks: expandedBlocks({
+          keyBase: `edit:${edit.id}:proposed`,
+          kind: edit.newKind ?? 'p',
+          text: edit.newText,
+          format: input.format,
+        }),
+      },
+    ];
   };
 
-  const renderBlocks = topInserts.flatMap(renderInsert);
+  const renderBlockEdit = (
+    block: NativeDocumentBlock,
+    edit: NativeDocumentEdit,
+  ): RenderItem[] => {
+    if (edit.op === 'replace' && edit.newText !== null) {
+      return [
+        {
+          type: 'suggestion',
+          key: `edit:${edit.id}`,
+          edit,
+          mode: 'replace',
+          label: pendingLabel(edit),
+          currentBlocks: expandedBlocks({
+            keyBase: `block:${block.id}:current`,
+            kind: block.kind,
+            text: block.text,
+            format: input.format,
+          }),
+          proposedBlocks: expandedBlocks({
+            keyBase: `edit:${edit.id}:proposed`,
+            kind: edit.newKind ?? block.kind,
+            text: edit.newText,
+            format: input.format,
+          }),
+        },
+      ];
+    }
+
+    if (edit.op === 'delete') {
+      return [
+        {
+          type: 'suggestion',
+          key: `edit:${edit.id}`,
+          edit,
+          mode: 'delete',
+          label: pendingLabel(edit),
+          currentBlocks: expandedBlocks({
+            keyBase: `block:${block.id}:current`,
+            kind: block.kind,
+            text: block.text,
+            format: input.format,
+          }),
+          proposedBlocks: [],
+        },
+      ];
+    }
+
+    return [];
+  };
+
+  const renderItems = topInserts.flatMap((edit) => renderInsert(edit));
   const renderedInsertIds = new Set(topInserts.map((edit) => edit.id));
 
   for (const block of input.blocks) {
     const blockEdits = pendingByBlock.get(block.id) ?? [];
-    const overlay = blockEdits[0] ?? null;
-    if (overlay?.op === 'replace' && overlay.newText !== null) {
-      renderBlocks.push(
-        ...expandedBlocks({
-          keyBase: `edit:${overlay.id}`,
-          kind: overlay.newKind ?? block.kind,
-          text: overlay.newText,
-          format: input.format,
-          pendingLabel: pendingLabel(overlay),
-          pendingMode: 'replace',
-        }),
-      );
+    const blockEditItems = blockEdits.flatMap((edit) =>
+      renderBlockEdit(block, edit),
+    );
+    if (blockEditItems.length > 0) {
+      renderItems.push(...blockEditItems);
     } else {
-      renderBlocks.push(
-        ...expandedBlocks({
-          keyBase: `block:${block.id}`,
-          kind: block.kind,
-          text: block.text,
-          format: input.format,
-          pendingLabel: overlay?.op === 'delete' ? pendingLabel(overlay) : null,
-          pendingMode: overlay?.op === 'delete' ? 'delete' : null,
-        }),
-      );
+      renderItems.push(...renderBlock(block));
     }
 
     const anchoredInserts = insertsByAnchor.get(block.id) ?? [];
-    renderBlocks.push(...anchoredInserts.flatMap(renderInsert));
+    renderItems.push(...anchoredInserts.flatMap((edit) => renderInsert(edit)));
     for (const edit of anchoredInserts) renderedInsertIds.add(edit.id);
   }
 
@@ -139,51 +234,265 @@ function buildRenderBlocks(input: {
     (edit) =>
       edit.op === 'insert' &&
       !renderedInsertIds.has(edit.id) &&
-      edit.tabId === input.blocks[0]?.tabId,
+      Boolean(edit.afterBlockId),
   );
-  renderBlocks.push(...orphanInserts.flatMap(renderInsert));
-  return renderBlocks;
+  renderItems.push(
+    ...orphanInserts.flatMap((edit) =>
+      renderInsert(edit, { anchorMissing: true }),
+    ),
+  );
+  return renderItems;
 }
 
-function PendingBadge({
-  label,
+function suggestionTitle(mode: SuggestionMode): string {
+  if (mode === 'insert') return 'Suggested insertion';
+  if (mode === 'delete') return 'Suggested deletion';
+  return 'Suggested replacement';
+}
+
+function suggestionTone(mode: SuggestionMode): SuggestionTone {
+  return mode === 'delete' ? DELETE_TONE : PROPOSE_TONE;
+}
+
+function SuggestionHeader({
+  edit,
   mode,
+  tone,
+  label,
+  busy,
+  disabled,
+  canAccept = true,
+  onAcceptEdit,
+  onRejectEdit,
+}: {
+  edit: NativeDocumentEdit;
+  mode: SuggestionMode;
+  tone: SuggestionTone;
+  label: string;
+  busy: boolean;
+  disabled: boolean;
+  canAccept?: boolean;
+  onAcceptEdit?: (edit: NativeDocumentEdit) => void;
+  onRejectEdit?: (edit: NativeDocumentEdit) => void;
+}): JSX.Element {
+  const canAcceptEdit = Boolean(canAccept && onAcceptEdit);
+  const canRejectEdit = Boolean(onRejectEdit);
+  const canReview = canAcceptEdit || canRejectEdit;
+  const title = suggestionTitle(mode);
+  return (
+    <div
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        gap: 10,
+        flexWrap: 'wrap',
+      }}
+    >
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'baseline',
+          gap: 8,
+          flexWrap: 'wrap',
+        }}
+      >
+        <span
+          style={{
+            fontSize: 12,
+            fontWeight: 700,
+            color: salon.ink,
+          }}
+        >
+          {title}
+        </span>
+        <span
+          style={{
+            display: 'inline-flex',
+            alignItems: 'center',
+            minHeight: 16,
+            padding: '2px 6px',
+            borderRadius: 4,
+            background: tone.badgeBackground,
+            color: '#fff',
+            fontFamily: salonFont.mono,
+            fontSize: 10,
+            fontWeight: 700,
+            letterSpacing: 0,
+          }}
+        >
+          {label}
+        </span>
+      </div>
+      {canReview ? (
+        <div style={{ display: 'flex', gap: 6 }}>
+          {canAcceptEdit ? (
+            <Button
+              variant="primary"
+              disabled={disabled || busy}
+              onClick={() => onAcceptEdit?.(edit)}
+              aria-label={`Accept inline ${title.toLowerCase()}`}
+            >
+              {busy ? 'Working...' : 'Accept'}
+            </Button>
+          ) : null}
+          {canRejectEdit ? (
+            <Button
+              variant="secondary"
+              disabled={disabled || busy}
+              onClick={() => onRejectEdit?.(edit)}
+              aria-label={`Reject inline ${title.toLowerCase()}`}
+            >
+              Reject
+            </Button>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function SuggestionNotice(): JSX.Element {
+  return (
+    <div
+      style={{
+        padding: '8px 10px',
+        borderLeft: `2px solid ${DELETE_TONE.accent}`,
+        borderRadius: 5,
+        background: DELETE_TONE.currentBackground,
+        color: salon.ink,
+        fontSize: 13,
+        lineHeight: 1.45,
+      }}
+    >
+      Original insertion point no longer exists.
+    </div>
+  );
+}
+
+function SuggestionSection({
+  label,
+  tone,
+  reviewTone,
+  blocks,
 }: {
   label: string;
-  mode: Exclude<RenderBlock['pendingMode'], null>;
+  tone: 'current' | 'proposed';
+  reviewTone: SuggestionTone;
+  blocks: DisplayBlock[];
 }): JSX.Element {
+  const deleted = tone === 'current';
   return (
-    <span
+    <div
       style={{
-        display: 'inline-flex',
-        alignItems: 'center',
-        minHeight: 16,
-        marginLeft: 8,
-        padding: '2px 6px',
-        borderRadius: 4,
-        background: mode === 'delete' ? '#7b2a30' : salon.accent,
-        color: '#fff',
-        fontFamily: salonFont.mono,
-        fontSize: 10,
-        fontWeight: 700,
-        letterSpacing: 0,
-        verticalAlign: 'middle',
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 6,
+        padding: '8px 10px',
+        borderLeft: `2px solid ${deleted ? DELETE_TONE.accent : reviewTone.accent}`,
+        background: deleted
+          ? reviewTone.currentBackground
+          : reviewTone.proposedBackground,
+        borderRadius: 5,
       }}
-      title={`${label}; review this proposal in Pending edits.`}
     >
-      {label}
-    </span>
+      <span
+        style={{
+          fontSize: 10.5,
+          fontWeight: 700,
+          letterSpacing: 0.3,
+          textTransform: 'uppercase',
+          color: salon.ink2,
+        }}
+      >
+        {label}
+      </span>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+        {blocks.map((block) => (
+          <BlockBody key={block.key} block={block} deleted={deleted} />
+        ))}
+      </div>
+    </div>
   );
 }
 
-function BlockBody({ block }: { block: RenderBlock }): JSX.Element {
-  const deleted = block.pendingMode === 'delete';
+function SuggestionItem({
+  item,
+  busy,
+  disabled,
+  onAcceptEdit,
+  onRejectEdit,
+}: {
+  item: Extract<RenderItem, { type: 'suggestion' }>;
+  busy: boolean;
+  disabled: boolean;
+  onAcceptEdit?: (edit: NativeDocumentEdit) => void;
+  onRejectEdit?: (edit: NativeDocumentEdit) => void;
+}): JSX.Element {
+  const tone = suggestionTone(item.mode);
+  return (
+    <div
+      data-pending="true"
+      data-pending-edit-id={item.edit.id}
+      style={{
+        position: 'relative',
+        marginLeft: -12,
+        padding: '10px 12px 12px 14px',
+        borderLeft: `2px solid ${tone.accent}`,
+        borderRadius: 6,
+        background: tone.containerBackground,
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 10,
+      }}
+    >
+      <SuggestionHeader
+        edit={item.edit}
+        mode={item.mode}
+        tone={tone}
+        label={item.label}
+        busy={busy}
+        disabled={disabled}
+        canAccept={!item.anchorMissing}
+        onAcceptEdit={onAcceptEdit}
+        onRejectEdit={onRejectEdit}
+      />
+      {item.anchorMissing ? <SuggestionNotice /> : null}
+      {item.currentBlocks.length > 0 ? (
+        <SuggestionSection
+          label={item.mode === 'delete' ? 'Will be removed' : 'Current'}
+          tone="current"
+          reviewTone={tone}
+          blocks={item.currentBlocks}
+        />
+      ) : null}
+      {item.proposedBlocks.length > 0 ? (
+        <SuggestionSection
+          label={
+            item.anchorMissing
+              ? 'Proposed text'
+              : item.mode === 'insert'
+                ? 'Insert here'
+                : 'Proposed'
+          }
+          tone="proposed"
+          reviewTone={tone}
+          blocks={item.proposedBlocks}
+        />
+      ) : null}
+    </div>
+  );
+}
+
+function BlockBody({
+  block,
+  deleted = false,
+}: {
+  block: DisplayBlock;
+  deleted?: boolean;
+}): JSX.Element {
   const textDecoration = deleted ? 'line-through' : 'none';
   const color = deleted ? salon.ink2 : salon.ink;
-  const badge =
-    block.pendingLabel && block.pendingMode ? (
-      <PendingBadge label={block.pendingLabel} mode={block.pendingMode} />
-    ) : null;
 
   if (block.kind === 'li') {
     return (
@@ -206,10 +515,7 @@ function BlockBody({ block }: { block: RenderBlock }): JSX.Element {
         >
           •
         </span>
-        <span style={{ flex: 1 }}>
-          {block.text}
-          {badge}
-        </span>
+        <span style={{ flex: 1 }}>{block.text}</span>
       </div>
     );
   }
@@ -250,7 +556,6 @@ function BlockBody({ block }: { block: RenderBlock }): JSX.Element {
         }}
       >
         {block.text}
-        {badge}
       </h1>
     );
   }
@@ -269,7 +574,6 @@ function BlockBody({ block }: { block: RenderBlock }): JSX.Element {
         }}
       >
         {block.text}
-        {badge}
       </h2>
     );
   }
@@ -289,7 +593,6 @@ function BlockBody({ block }: { block: RenderBlock }): JSX.Element {
         }}
       >
         {block.text}
-        {badge}
       </div>
     );
   }
@@ -306,7 +609,6 @@ function BlockBody({ block }: { block: RenderBlock }): JSX.Element {
       }}
     >
       {block.text}
-      {badge}
     </p>
   );
 }
@@ -315,13 +617,21 @@ export function DocumentBlocks({
   blocks,
   pendingEdits = [],
   format,
+  busyEditIds = new Set<string>(),
+  reviewDisabled = false,
+  onAcceptEdit,
+  onRejectEdit,
 }: {
   blocks: NativeDocumentBlock[];
   pendingEdits?: NativeDocumentEdit[];
   format: NativeDocumentFormat;
+  busyEditIds?: Set<string>;
+  reviewDisabled?: boolean;
+  onAcceptEdit?: (edit: NativeDocumentEdit) => void;
+  onRejectEdit?: (edit: NativeDocumentEdit) => void;
 }): JSX.Element {
-  const renderBlocks = buildRenderBlocks({ blocks, pendingEdits, format });
-  if (renderBlocks.length === 0) {
+  const renderItems = buildRenderItems({ blocks, pendingEdits, format });
+  if (renderItems.length === 0) {
     return (
       <div
         style={{
@@ -360,29 +670,33 @@ export function DocumentBlocks({
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-      {renderBlocks.map((block) => {
-        const pending = block.pendingMode !== null;
+      {renderItems.map((item) => {
+        if (item.type === 'suggestion') {
+          return (
+            <SuggestionItem
+              key={item.key}
+              item={item}
+              busy={busyEditIds.has(item.edit.id)}
+              disabled={reviewDisabled}
+              onAcceptEdit={onAcceptEdit}
+              onRejectEdit={onRejectEdit}
+            />
+          );
+        }
         return (
           <div
-            key={block.key}
-            data-block-kind={block.kind}
-            data-pending={pending ? 'true' : undefined}
+            key={item.key}
+            data-block-kind={item.block.kind}
             style={{
               position: 'relative',
-              marginLeft: pending ? -12 : 0,
-              padding: pending ? '8px 10px 8px 14px' : 0,
-              borderLeft: pending
-                ? `2px solid ${block.pendingMode === 'delete' ? '#7b2a30' : salon.accent}`
-                : '2px solid transparent',
-              borderRadius: pending ? 5 : 0,
-              background: pending
-                ? block.pendingMode === 'delete'
-                  ? 'rgba(123,42,48,0.08)'
-                  : 'rgba(200,100,58,0.08)'
-                : 'transparent',
+              marginLeft: 0,
+              padding: 0,
+              borderLeft: '2px solid transparent',
+              borderRadius: 0,
+              background: 'transparent',
             }}
           >
-            <BlockBody block={block} />
+            <BlockBody block={item.block} />
           </div>
         );
       })}

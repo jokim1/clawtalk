@@ -235,7 +235,9 @@ describe('TalkDocumentsPanel', () => {
     expect(screen.getByText('Replace paragraph')).toBeTruthy();
 
     fireEvent.click(
-      screen.getByRole('button', { name: 'Accept replace paragraph' }),
+      screen.getByRole('button', {
+        name: 'Accept inline suggested replacement',
+      }),
     );
 
     await waitFor(() =>

@@ -204,7 +204,9 @@ describe('TalkDocPane', () => {
 
     await screen.findByText('Pending edits');
     fireEvent.click(
-      screen.getByRole('button', { name: 'Accept replace paragraph' }),
+      screen.getByRole('button', {
+        name: 'Accept inline suggested replacement',
+      }),
     );
 
     await waitFor(() =>

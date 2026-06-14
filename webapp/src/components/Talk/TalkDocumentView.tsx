@@ -435,6 +435,14 @@ export function TalkDocumentView({
             blocks={activeTab?.blocks ?? []}
             pendingEdits={activePendingEdits}
             format={doc.format}
+            busyEditIds={busyEditIds}
+            reviewDisabled={actionLocked}
+            onAcceptEdit={
+              canEditDoc ? (edit) => void acceptEdit(edit) : undefined
+            }
+            onRejectEdit={
+              canEditDoc ? (edit) => void rejectEdit(edit) : undefined
+            }
           />
         )}
       </article>
