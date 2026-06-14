@@ -55,6 +55,27 @@ describe('8A reference checkpoints (multi-page-PDF fixture)', () => {
     );
   });
 
+  it('rejects a checkpoint that inlines binary bytes instead of an R2 ref', () => {
+    // ArrayBuffer JSON.stringifies to "{}" and a typed array to an index map, so
+    // an inlined-binary checkpoint could SILENTLY pass the size assert while
+    // dropping the bytes on resume. 8A requires an R2 ref — reject the binary.
+    expect(() =>
+      serializeCheckpoint({ page: new Uint8Array([1, 2, 3]) }),
+    ).toThrow(/inlined binary/);
+    expect(() => serializeCheckpoint({ page: new ArrayBuffer(8) })).toThrow(
+      /inlined binary/,
+    );
+    expect(() =>
+      serializeCheckpoint({ nested: [{ buf: new Uint8Array(4) }] }),
+    ).toThrow(/inlined binary/);
+    // A reference (storageKey string) is fine.
+    expect(() =>
+      serializeCheckpoint({
+        page: { type: 'pdf_page_image_ref', storageKey: 'k', pageIndex: 0 },
+      }),
+    ).not.toThrow();
+  });
+
   it('accepts the reference shape — text/structure + R2 keys, well under 1MB', () => {
     const json = serializeCheckpoint(reference); // does not throw
     const refBytes = byteLen(json);

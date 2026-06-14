@@ -169,6 +169,65 @@ describe('TalkRunner stale-attempt fencing (PR-A3)', () => {
     expect(after.openDeadlines).toBe(0);
   });
 
+  it('fences the expired attempt even when it resolves DURING the plan rebuild (the retry claim is synchronous, before the await)', async () => {
+    // Regression guard: the retry fence (the attempt bump) MUST be established
+    // synchronously before the planProvider await. If it is not, a wedged attempt
+    // that resolves while the plan is rebuilding writes through. Here the rebuild
+    // is held open and attempt 1 is released mid-rebuild — it must still fence.
+    const stub = getRunner('fence-during-rebuild');
+    const runId = 'run-rebuild';
+    const a1 = gateStep({ deadlineMs: 30_000, checkpoint: { attempt: 1 } });
+    const a2 = gateStep({ deadlineMs: 30_000, checkpoint: { attempt: 2 } });
+    const planGate = deferred(); // holds the rebuild open
+
+    let p1!: Promise<unknown>;
+    let p2!: Promise<unknown>;
+    const mid = await runInDurableObject(stub, async (instance, state) => {
+      p1 = instance.executeRun(runId, [a1.step]);
+      await a1.ready;
+      instance.planProvider = async () => {
+        await planGate.promise; // rebuild is slow
+        return [a2.step];
+      };
+      state.storage.sql.exec(
+        'update step_deadlines set deadline_ms=? where run_id=?',
+        Date.now() - 1_000,
+        runId,
+      );
+      // alarm() runs retryRun: claimRetry (synchronous attempt bump) happens, then
+      // it suspends at the planProvider await — the rebuild is now in flight.
+      const alarmP = instance.alarm();
+      // Resolve attempt 1 WHILE the rebuild is still pending. The synchronous
+      // claim must already have fenced it.
+      a1.release();
+      const o1 = await p1;
+      const stepDuringRebuild = readStep0(state, runId);
+      // Let the rebuild finish; attempt 2 starts.
+      planGate.resolve();
+      await alarmP;
+      await a2.ready;
+      p2 = instance.executeRun(runId, [a2.step]);
+      return { o1, stepDuringRebuild };
+    });
+
+    // Attempt 1 fenced mid-rebuild — wrote NOTHING.
+    expect(mid.o1).toEqual({ status: 'abandoned', abandonedStepIdx: 0 });
+    expect(mid.stepDuringRebuild.attempt).toBe(2);
+    expect(mid.stepDuringRebuild.checkpoint_json).toBeNull();
+
+    a2.release();
+    expect(await p2).toEqual({ status: 'completed', steps: 1 });
+    const after = await runInDurableObject(stub, async (_i, state) => ({
+      run: state.storage.sql
+        .exec('select status from runs_local where run_id=?', runId)
+        .one() as { status: string },
+      step: readStep0(state, runId),
+    }));
+    expect(after.run.status).toBe('completed');
+    expect(after.step.attempt).toBe(2);
+    expect(after.step.checkpoint_json).toBe('{"attempt":2}');
+  });
+
   it('falls back to FAIL (no retry) when the attempt budget is exhausted', async () => {
     // attempt already at MAX_STEP_ATTEMPTS → the watchdog must fail, not retry,
     // even though a planProvider is available. (Guards the retry budget.)
@@ -209,6 +268,48 @@ describe('TalkRunner stale-attempt fencing (PR-A3)', () => {
 
     blk.release();
     expect(await runP).toEqual({ status: 'abandoned', abandonedStepIdx: 0 });
+  });
+
+  it('a retry whose rebuild returns null does not fail a step on a run cancelled mid-rebuild', async () => {
+    // Regression guard (failStepAndRun run-status fence): a watchdog retry claims
+    // the step (pending, bumped attempt), then the rebuild returns null while a
+    // cancel races in. The fallback FAIL must fence on the run status — a
+    // cancelled run must NOT pick up a stale 'failed' step.
+    const stub = getRunner('retry-null-cancel');
+    const runId = 'run-rnc';
+    const blk = gateStep({ deadlineMs: 30_000, checkpoint: { late: true } });
+    const planGate = deferred();
+    let p!: Promise<unknown>;
+
+    const result = await runInDurableObject(stub, async (instance, state) => {
+      p = instance.executeRun(runId, [blk.step]);
+      await blk.ready;
+      instance.planProvider = async () => {
+        await planGate.promise;
+        return null; // rebuild fails
+      };
+      state.storage.sql.exec(
+        'update step_deadlines set deadline_ms=? where run_id=?',
+        Date.now() - 1_000,
+        runId,
+      );
+      const alarmP = instance.alarm(); // retryRun: claimRetry, then blocks on rebuild
+      const cancelRes = await instance.cancel(runId); // run → cancelled mid-rebuild
+      planGate.resolve(); // rebuild returns null → failStepAndRun (must fence)
+      await alarmP;
+      const run = state.storage.sql
+        .exec('select status from runs_local where run_id=?', runId)
+        .one() as { status: string };
+      return { cancelRes, run, step: readStep0(state, runId) };
+    });
+
+    expect(result.cancelRes).toEqual({ cancelled: true, status: 'cancelled' });
+    expect(result.run.status).toBe('cancelled');
+    // The fallback FAIL was fenced: the step is NOT 'failed' on the cancelled run.
+    expect(result.step.status).not.toBe('failed');
+
+    blk.release();
+    expect(await p).toEqual({ status: 'cancelled' });
   });
 });
 

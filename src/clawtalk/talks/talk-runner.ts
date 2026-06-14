@@ -414,8 +414,12 @@ export class TalkRunner {
     for (let idx = 0; idx < plan.length; idx += 1) {
       const outcome = await this.runStep(runId, idx, plan[idx]!, signal);
       if (outcome === 'failed') {
-        this.markRunTerminal(runId, 'failed');
-        return { status: 'failed', failedStepIdx: idx };
+        // Monotonic: if a cancel raced and already flipped the run terminal, our
+        // 'failed' loses — report the durable truth, don't claim a failure.
+        if (this.markRunTerminal(runId, 'failed')) {
+          return { status: 'failed', failedStepIdx: idx };
+        }
+        return this.fencedOutcome(runId, idx);
       }
       if (outcome === 'fenced') {
         // A competing writer won the CAS race on this step — the alarm watchdog,
@@ -581,9 +585,13 @@ export class TalkRunner {
       )
       .toArray()[0];
     if (prior?.status === 'checkpoint') return null;
-    const attempt = (prior?.attempt ?? 0) + 1;
-    // → PENDING for THIS attempt (replaces any interrupted prior attempt's row;
-    // the prior attempt's eventual CAS writes now miss on the bumped attempt).
+    // ADOPT a pre-claimed 'pending' attempt (retryRun's synchronous claim already
+    // bumped it — don't bump again); otherwise bump past the prior attempt
+    // (fresh ⇒ 1, an interrupted 'running'/'failed' attempt ⇒ prior+1). Bumping
+    // is what fences the prior attempt's eventual CAS writes.
+    const attempt =
+      prior?.status === 'pending' ? prior.attempt : (prior?.attempt ?? 0) + 1;
+    // → PENDING for THIS attempt (replaces any interrupted prior attempt's row).
     this.sql.exec(
       `insert into steps (run_id, idx, kind, status, attempt, checkpoint_json, deadline_ms)
        values (?, ?, ?, 'pending', ?, null, ?)
@@ -910,16 +918,20 @@ export class TalkRunner {
     await this.executeRun(runId, plan);
   }
 
-  // Fail an expired step and, if WE won the CAS (the step was still running),
-  // the run. Always clears the step's deadline so the alarm won't re-fire on
-  // it. Returns whether this call failed a live step (false ⇒ already settled).
+  // Fail an expired step and, if WE won the CAS (the step was still in-flight on
+  // a still-running run), the run. The run-status guard makes a watchdog fail a
+  // no-op once cancel (or any terminal write) has won — so a cancelled run can't
+  // pick up a stale failed step. Always clears the step's deadline so the alarm
+  // won't re-fire on it. Returns whether this call failed a live step.
   private failStepAndRun(runId: string, idx: number, attempt: number): boolean {
     const written = this.sql.exec(
       `update steps set status='failed'
-       where run_id=? and idx=? and attempt=? and status in ('running','pending')`,
+       where run_id=? and idx=? and attempt=? and status in ('running','pending')
+         and (select status from runs_local where run_id=?)='running'`,
       runId,
       idx,
       attempt,
+      runId,
     ).rowsWritten;
     this.clearDeadline(runId, idx);
     if (written > 0) {
@@ -933,41 +945,84 @@ export class TalkRunner {
     return false;
   }
 
+  // Synchronous, durable RETRY CLAIM — the fence that must be in place before any
+  // await. Moves the expired RUNNING attempt to a fresh PENDING attempt+1 and
+  // re-arms its deadline, all in one await-free CAS keyed on (idx, attempt,
+  // status='running'). Two effects:
+  //   • the wedged attempt's eventual write now misses BOTH on the bumped attempt
+  //     AND on status (no longer 'running') — so it fences even while we go on to
+  //     rebuild the plan over an await;
+  //   • exactly ONE caller wins (rowsWritten>0), so concurrent watchdog/resume
+  //     callers can't double-drive or blow past MAX_STEP_ATTEMPTS.
+  // Returns the new attempt, or null if we lost the claim (already superseded).
+  private claimRetry(
+    runId: string,
+    idx: number,
+    attempt: number,
+  ): number | null {
+    const next = attempt + 1;
+    const kind = (this.sql
+      .exec<{
+        kind: StepKind;
+      }>(`select kind from steps where run_id=? and idx=?`, runId, idx)
+      .toArray()[0]?.kind ?? 'llm') as StepKind;
+    const deadlineMs = Date.now() + DEFAULT_STEP_DEADLINE_MS[kind];
+    const won =
+      this.sql.exec(
+        `update steps set status='pending', attempt=?, checkpoint_json=null, deadline_ms=?
+         where run_id=? and idx=? and attempt=? and status='running'`,
+        next,
+        deadlineMs,
+        runId,
+        idx,
+        attempt,
+      ).rowsWritten > 0;
+    if (!won) return null;
+    this.sql.exec(
+      `insert into step_deadlines (run_id, idx, deadline_ms) values (?, ?, ?)
+       on conflict(run_id, idx) do update set deadline_ms=excluded.deadline_ms`,
+      runId,
+      idx,
+      deadlineMs,
+    );
+    return next;
+  }
+
   // Watchdog RETRY (bounded by MAX_STEP_ATTEMPTS). The expired attempt may be
   // wedged on an await that ignores its abort (a provider that never unwinds), so
-  // we cannot wait for it. Instead: rebuild the plan, then DISOWN the wedged
-  // invocation and re-drive on a fresh attempt. The re-drive's claimStep bumps
-  // the step attempt, fencing the wedged attempt's eventual write.
-  //
-  // The rebuild happens BEFORE the disown so the disown → re-drive → attempt-bump
-  // window stays await-free: executeRun runs driveRun synchronously up to the
-  // expired step's claimStep (the bump), so the wedged attempt cannot slip a
-  // write in before the fence is live. The re-drive itself is DETACHED so a fresh
-  // alarm invocation returns promptly (PR-B inherits this detached-resume rule).
+  // we cannot wait for it. Order is load-bearing: FENCE FIRST (claimRetry, fully
+  // synchronous), THEN abort/disown, THEN rebuild + re-drive. Establishing the
+  // fence before the planProvider await is what stops the wedged attempt from
+  // slipping a write through while the plan rebuilds. The re-drive is DETACHED so
+  // a fresh alarm invocation returns promptly (PR-B inherits this rule).
   private async retryRun(
     runId: string,
     idx: number,
     attempt: number,
   ): Promise<void> {
-    const plan = this.planProvider ? await this.planProvider(runId) : null;
-    if (!plan) {
-      // Can't rebuild → fall back to FAIL so the step isn't left armed forever.
-      const failed = this.failStepAndRun(runId, idx, attempt);
-      if (failed) this.inFlight.get(runId)?.controller.abort();
-      await this.reconcileAlarm();
-      return;
-    }
-    // Disown the wedged invocation (abort + drop from inFlight) so the re-drive
-    // below does not dedup to it. Synchronous from here through executeRun's
-    // claimStep, so the attempt bump lands before the wedged attempt resolves.
+    // FENCE (synchronous). null ⇒ another retry/cancel already moved past this
+    // attempt — bow out (single-winner, budget-safe).
+    const next = this.claimRetry(runId, idx, attempt);
+    if (next == null) return;
+    await this.reconcileAlarm(); // re-point the alarm at the re-armed deadline
+    // Disown the wedged invocation so the re-drive below doesn't dedup to it.
     const wedged = this.inFlight.get(runId);
     if (wedged) {
       wedged.controller.abort('superseded_by_retry');
       this.inFlight.delete(runId);
     }
+    const plan = this.planProvider ? await this.planProvider(runId) : null;
+    if (!plan) {
+      // Can't rebuild → fail the now-pending attempt (run-status-fenced, so a
+      // cancel that raced the rebuild leaves the run cancelled, not failed).
+      const failed = this.failStepAndRun(runId, idx, next);
+      if (failed) this.inFlight.get(runId)?.controller.abort();
+      await this.reconcileAlarm();
+      return;
+    }
     // Re-drive detached; errors logged. executeRun's terminal gate drops a run
-    // cancelled during the rebuild (and the run-status fence covers a wedged
-    // write even when the re-drive is gated out).
+    // cancelled during the rebuild; claimStep ADOPTS the pending attempt (no
+    // re-bump). The fence from claimRetry already holds regardless of timing.
     void this.executeRun(runId, plan).catch((err) =>
       logger.error(
         { err, runId, idx, talkId: this.state.id.name },
@@ -1234,6 +1289,14 @@ function isTerminalRunStatus(status: RunStatus): boolean {
 }
 
 export function serializeCheckpoint(checkpoint: unknown): string {
+  // Reject inlined binary BEFORE the size check. A raw ArrayBuffer/Blob
+  // JSON.stringifies to `{}` and a typed array to an index map — so a checkpoint
+  // that inlines bytes can SILENTLY pass the <1MB assert while dropping the bytes
+  // on resume. 8A requires R2 refs, never inlined binary, so this is a bug, not a
+  // big payload: fail it loudly. (Base64-STRING inlining under the cap stays the
+  // executor's reference-shape contract — not detectable here without false
+  // positives on legitimate text.)
+  assertNoInlinedBinary(checkpoint);
   const json = JSON.stringify(checkpoint ?? null);
   const bytes = new TextEncoder().encode(json).length;
   if (bytes > MAX_CHECKPOINT_BYTES) {
@@ -1243,6 +1306,28 @@ export function serializeCheckpoint(checkpoint: unknown): string {
     );
   }
   return json;
+}
+
+function assertNoInlinedBinary(checkpoint: unknown): void {
+  const visit = (node: unknown): void => {
+    if (node == null || typeof node !== 'object') return;
+    if (
+      node instanceof ArrayBuffer ||
+      ArrayBuffer.isView(node) || // typed arrays + DataView + Node Buffer
+      (typeof Blob !== 'undefined' && node instanceof Blob)
+    ) {
+      throw new TalkRunnerError(
+        'checkpoint_inlined_binary',
+        'Step checkpoint contains an inlined binary value (ArrayBuffer/typed array/Blob); store an R2 ref (8A), not bytes',
+      );
+    }
+    if (Array.isArray(node)) {
+      for (const child of node) visit(child);
+      return;
+    }
+    for (const value of Object.values(node)) visit(value);
+  };
+  visit(checkpoint);
 }
 
 // 8A reference-checkpoint rehydration. A reference checkpoint stores text +
