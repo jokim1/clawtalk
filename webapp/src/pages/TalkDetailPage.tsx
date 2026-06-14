@@ -1166,15 +1166,7 @@ export function TalkDetailPage({
             (isNarrowViewport ? mobilePane === 'doc' : !docPaneHidden)
           }
           activeRuleCount={activeRuleCount}
-          showOrchestrationSelector={showOrchestrationSelector}
-          orchestrationMenuRef={orchestrationMenuRef}
-          orchestrationMenuOpen={orchestrationMenuOpen}
-          setOrchestrationMenuOpen={setOrchestrationMenuOpen}
           orchestrationMode={orchestrationMode}
-          orchestrationState={orchestrationState}
-          onOrchestrationModeChange={(mode) => {
-            void handleOrchestrationModeChange(mode);
-          }}
           currentConversationHasContent={currentConversationHasContent}
           effectiveAgents={effectiveAgents}
           talkAgentExecutionGuardrailsById={talkAgentExecutionGuardrailsById}
@@ -1322,11 +1314,15 @@ export function TalkDetailPage({
                 handleToggleTarget={composerSend.handleToggleTarget}
                 sendState={state.sendState}
                 composerTargetHelp={composerTargetHelp}
-                composerModeLabel={
-                  pageTalk?.orchestrationMode === 'panel'
-                    ? 'Parallel'
-                    : 'Ordered'
-                }
+                showOrchestrationSelector={showOrchestrationSelector}
+                orchestrationMenuRef={orchestrationMenuRef}
+                orchestrationMenuOpen={orchestrationMenuOpen}
+                setOrchestrationMenuOpen={setOrchestrationMenuOpen}
+                orchestrationMode={orchestrationMode}
+                orchestrationState={orchestrationState}
+                onOrchestrationModeChange={(mode) => {
+                  void handleOrchestrationModeChange(mode);
+                }}
                 composerRoundsLabel={
                   latestOrderedRound
                     ? `${Math.max(1, latestOrderedRound.steps.length)} rounds`
