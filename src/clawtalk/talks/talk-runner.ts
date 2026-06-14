@@ -26,20 +26,34 @@
 //     recovers each through resumeRun, the ONE idempotent recovery function
 //     the alarm also uses. Resume re-runs at most the one interrupted step.
 //                                                                      [A2]
+//   • Cancel RPC (F8): a direct method (no DB polling) that flips the run
+//     terminal in the same isolate that owns it, aborts the live attempt, and
+//     clears its deadlines.                                            [A3]
+//   • Per-attempt fencing: claimStep bumps the step attempt on every (re)entry,
+//     and every post-await step write CAS-guards on (run_id, idx, attempt,
+//     step.status='running', run.status='running'). An abandoned attempt — one
+//     the watchdog retried, or whose run was cancelled — that resolves late
+//     writes NOTHING (the durable analog of #609's runAbandoned guard).  [A3]
+//   • Watchdog RETRY: on an expired step the alarm re-drives a fresh attempt
+//     (bounded by MAX_STEP_ATTEMPTS) instead of only failing; the wedged
+//     attempt is disowned and fenced. Needs a rebuildable plan, so in prod it
+//     is inert until PR-B wires planProvider (A3 keeps the A2 fail behavior
+//     when planProvider is null; tests inject it to exercise the fence). [A3]
 //
 // EXPLICITLY NOT here yet (do not read this as production-complete):
-//   • Cancel RPC + per-attempt retry/bump + the adversarial stale-attempt
-//     fencing TEST — A3. A2 keeps attempt=1; the alarm neutralises a wedged
-//     attempt by failing its step (status flips off 'running'), so the
-//     fence holds without a competing attempt yet.
-//   • A rebuildable plan for resume after a real eviction — A2 is DO-LOCAL:
-//     planProvider stays null until PR-B wires the Postgres rebuild. Resume
-//     of a run it cannot rebuild no-ops and logs (alarm/reconciliation
-//     backstop).
+//   • A rebuildable plan for resume/retry after a real eviction — A3 is
+//     DO-LOCAL: planProvider stays null until PR-B wires the Postgres rebuild.
+//     Resume/retry of a run it cannot rebuild fails or no-ops and logs
+//     (alarm/reconciliation backstop).
+//   • Cancel/fencing DURABILITY beyond DO SQLite: cancel correctness here is
+//     DO-LOCAL. Visibility to Postgres / UI / the hub / reconciliation is PR-B,
+//     and the real /chat route is PR-C — do NOT read A3 as production cancel.
 //   • Write-behind batching + insert-before-push hub streaming (3A) — PR-B.
 //     The /dev/run route persists run lifecycle SYNCHRONOUSLY via the same
 //     v1 accessors the queue consumer uses (markGreenfieldRunRunning /
-//     completeGreenfieldRun); that is NOT the v2 write-behind contract.
+//     completeGreenfieldRun); that is NOT the v2 write-behind contract. The
+//     "event emission" leg of the fence (docs/13 §6.4 PR-A) lands with the
+//     emission itself in PR-B, guarded by the same per-attempt CAS pattern.
 //
 // Mirrors the production DO precedent in user-event-hub.ts: local CF type
 // shims (no repo-wide @cloudflare/workers-types), schema + recovery under
@@ -123,7 +137,7 @@ export interface TalkRunnerEnv extends DbScopeEnvBindings {
 // 8A: serialized checkpoint hard ceiling. DO SQLite caps a single value at
 // 2MB; checkpoints are reference-based (text/structure + R2 keys, never
 // inlined binary), so 1MB is a generous structural guard with headroom.
-const MAX_CHECKPOINT_BYTES = 1_000_000;
+export const MAX_CHECKPOINT_BYTES = 1_000_000;
 
 // Per-step deadline defaults (recorded into step_deadlines; A2 arms the
 // alarm off min(deadline_ms)). An LLM streaming step can be long; a tool
@@ -134,13 +148,21 @@ const DEFAULT_STEP_DEADLINE_MS: Record<StepKind, number> = {
   tools: 60 * 1000,
 };
 
+// Max executions of a single step before the watchdog gives up and fails the
+// run (1 = the original attempt + 1 retry). Bounds the alarm RETRY path so a
+// step that wedges every attempt can't loop forever. A3 keeps this small; the
+// right per-kind retry budget is an open PR-B question (docs/13 §9).
+const MAX_STEP_ATTEMPTS = 2;
+
 // ─── Step / run model ───────────────────────────────────────────────────
 
 export type StepKind = 'llm' | 'tools';
 export type StepStatus = 'pending' | 'running' | 'checkpoint' | 'failed';
 // A run is created 'running' and moves straight to a terminal state. ('pending'
-// is a STEP state, not a run state.) 'cancelled' is reserved for the A3 cancel
-// RPC — markRunTerminal already accepts it so A3 needs no signature change.
+// is a STEP state, not a run state.) 'cancelled' is the A3 cancel RPC's terminal
+// status; markRunTerminal applies every terminal transition monotonically
+// (running → terminal only), so cancel can't be overwritten by a late
+// completed/failed, nor vice-versa.
 export type RunStatus = 'running' | 'completed' | 'failed' | 'cancelled';
 
 /**
@@ -182,10 +204,14 @@ export type TalkRunnerPlanProvider = (
 export type RunOutcome =
   | { status: 'completed'; steps: number }
   | { status: 'failed'; failedStepIdx: number }
-  // A step's post-await write lost the CAS race: the alarm watchdog (A2) — or
-  // in A3 a competing retry attempt — already settled the step, so this
-  // invocation abandons the run to whoever owns the terminal state.
-  | { status: 'abandoned'; abandonedStepIdx: number };
+  // A step's post-await write lost the CAS race: the alarm watchdog, or a
+  // competing retry attempt (A3), already settled the step, so this invocation
+  // abandons the run to whoever owns the terminal state.
+  | { status: 'abandoned'; abandonedStepIdx: number }
+  // The run was cancelled out from under this invocation (A3 cancel RPC). Like
+  // 'abandoned' (this invocation stops writing) but names the cause, so the
+  // caller persists a cancel rather than a failure.
+  | { status: 'cancelled' };
 
 // Persisted row shapes (mirror the schema below).
 interface RunLocalRow {
@@ -358,7 +384,11 @@ export class TalkRunner {
       try {
         return await this.driveRun(runId, plan, controller.signal);
       } finally {
-        this.inFlight.delete(runId);
+        // Disown only if still OUR entry. A watchdog RETRY (retryRun) disowns a
+        // wedged invocation by replacing this map slot with a fresh re-drive;
+        // an unguarded delete here would evict that new owner when the wedged
+        // attempt finally unwinds.
+        if (this.inFlight.get(runId) === entry) this.inFlight.delete(runId);
       }
     })();
     return entry.done;
@@ -388,15 +418,28 @@ export class TalkRunner {
         return { status: 'failed', failedStepIdx: idx };
       }
       if (outcome === 'fenced') {
-        // A competing writer (the alarm watchdog, or in A3 a retry attempt)
-        // won the CAS race on this step; this invocation writes nothing more
-        // and abandons the run to whoever owns the terminal state.
-        return { status: 'abandoned', abandonedStepIdx: idx };
+        // A competing writer won the CAS race on this step — the alarm watchdog,
+        // a retry attempt that bumped the attempt, or cancel flipping the run
+        // terminal. This invocation writes nothing more; report the durable
+        // truth (cancelled vs abandoned) so the caller persists the right thing.
+        return this.fencedOutcome(runId, idx);
       }
     }
 
-    this.markRunTerminal(runId, 'completed');
-    return { status: 'completed', steps: plan.length };
+    // Every step checkpointed. CAS the terminal so a cancel that raced the last
+    // step can't be clobbered by 'completed' (markRunTerminal is monotonic).
+    if (this.markRunTerminal(runId, 'completed')) {
+      return { status: 'completed', steps: plan.length };
+    }
+    return this.fencedOutcome(runId, plan.length - 1);
+  }
+
+  // Map a fenced step (this invocation lost ownership) to the run's durable
+  // outcome: a cancelled run reports 'cancelled', anything else 'abandoned'.
+  private fencedOutcome(runId: string, idx: number): RunOutcome {
+    if (this.readRun(runId)?.status === 'cancelled')
+      return { status: 'cancelled' };
+    return { status: 'abandoned', abandonedStepIdx: idx };
   }
 
   private readRun(runId: string): RunLocalRow | null {
@@ -413,6 +456,7 @@ export class TalkRunner {
     status: RunStatus,
     planLength: number,
   ): RunOutcome {
+    if (status === 'cancelled') return { status: 'cancelled' };
     if (status === 'failed') {
       const failed = this.sql
         .exec<{
@@ -439,9 +483,10 @@ export class TalkRunner {
     };
   }
 
-  // One step: PENDING → arm deadline → RUNNING → (CHECKPOINT | FAILED).
-  // Every post-await write is CAS-guarded on (run_id, idx, attempt,
-  // status='running') so a late-resolving abandoned attempt writes nothing.
+  // One step: claim an attempt → arm deadline → RUNNING → (CHECKPOINT | FAILED).
+  // Every post-await write goes through casStepWrite, which fences on (attempt,
+  // step.status='running', run.status='running') so a late-resolving abandoned
+  // attempt — retried, watchdog-failed, or cancelled — writes nothing.
   private async runStep(
     runId: string,
     idx: number,
@@ -457,17 +502,88 @@ export class TalkRunner {
       .toArray()[0];
     if (prior?.status === 'checkpoint') return 'checkpoint';
 
-    // A1 runs only attempt 1; A3 bumps this when the alarm retries a step.
-    const attempt = 1;
+    // Prompt cancel: if the run was aborted between steps (cancel, or a watchdog
+    // that disowned this invocation), do no work and write nothing. This is the
+    // in-isolate fast path — the run-status CAS in casStepWrite is the DURABLE
+    // guarantee that survives even when this check is skipped (e.g. cancel lands
+    // mid-execute, after the check).
+    if (signal.aborted) return 'fenced';
+
     const deadlineMs =
       Date.now() + (step.deadlineMs ?? DEFAULT_STEP_DEADLINE_MS[step.kind]);
+    // Claim the step under a fresh attempt (fences any prior attempt's writes).
+    // null ⇒ it checkpointed between the read above and here (resume race) — done.
+    const attempt = this.claimStep(runId, idx, step.kind, deadlineMs);
+    if (attempt == null) return 'checkpoint';
+    // Re-point the single DO alarm at the new min(deadline_ms) (1A). The claim
+    // above ran with no await, so the alarm is computed against this step's
+    // freshly-armed deadline (race analysis in reconcileAlarm).
+    await this.reconcileAlarm();
 
-    // → PENDING. Already-checkpointed steps were skipped above, so this only
-    // (re)writes a not-yet-done step: fresh on first entry, or re-arming a
-    // step interrupted mid-flight (re-run is correct — it never checkpointed).
-    // A2/A3 add the live-attempt fencing for a step still 'running' on a
-    // concurrent attempt; the CAS-guarded writes below already make a stale
-    // attempt's late write a no-op.
+    try {
+      const result = await step.execute(signal);
+      // Serialize + assert BEFORE the CAS write so an oversized checkpoint
+      // surfaces as a failed step (visible), never a silent truncation.
+      const checkpointJson = serializeCheckpoint(result.checkpoint);
+      const written = this.casStepWrite(
+        runId,
+        idx,
+        attempt,
+        'checkpoint',
+        checkpointJson,
+      );
+      // Fenced (written===0): a competing writer settled this step first (retry
+      // bump, watchdog fail, or cancel). Do NOT touch the deadline — the winner
+      // already cleared it; re-clearing/re-arming here would race its alarm
+      // bookkeeping.
+      if (written === 0) return 'fenced';
+      await this.settleDeadline(runId, idx);
+      return 'checkpoint';
+    } catch (err) {
+      const written = this.casStepWrite(runId, idx, attempt, 'failed', null);
+      logger.warn(
+        {
+          err,
+          runId,
+          idx,
+          kind: step.kind,
+          attempt,
+          talkId: this.state.id.name,
+        },
+        'TalkRunner step failed',
+      );
+      // A late abandoned attempt that lost the CAS race must not be treated as
+      // this run's failure, and must not touch the winner's deadline/alarm.
+      if (written === 0) return 'fenced';
+      await this.settleDeadline(runId, idx);
+      return 'failed';
+    }
+  }
+
+  // Claim a step for execution under a FRESH attempt, atomically (no await), so a
+  // late write from a prior attempt fences on the attempt mismatch. A fresh step
+  // claims attempt 1; a retry / re-drive of an interrupted step claims prior+1.
+  // Returns the claimed attempt, or null if the step is already checkpointed.
+  private claimStep(
+    runId: string,
+    idx: number,
+    kind: StepKind,
+    deadlineMs: number,
+  ): number | null {
+    const prior = this.sql
+      .exec<{
+        status: StepStatus;
+        attempt: number;
+      }>(
+        `select status, attempt from steps where run_id=? and idx=?`,
+        runId,
+        idx,
+      )
+      .toArray()[0];
+    if (prior?.status === 'checkpoint') return null;
+    const attempt = (prior?.attempt ?? 0) + 1;
+    // → PENDING for THIS attempt (replaces any interrupted prior attempt's row;
+    // the prior attempt's eventual CAS writes now miss on the bumped attempt).
     this.sql.exec(
       `insert into steps (run_id, idx, kind, status, attempt, checkpoint_json, deadline_ms)
        values (?, ?, ?, 'pending', ?, null, ?)
@@ -476,15 +592,11 @@ export class TalkRunner {
          checkpoint_json=null, deadline_ms=excluded.deadline_ms`,
       runId,
       idx,
-      step.kind,
+      kind,
       attempt,
       deadlineMs,
     );
-    // Arm the deadline (1A table). The single DO alarm targets min(deadline_ms)
-    // across ALL in-flight steps; reconcileAlarm() re-points it after this
-    // insert. The insert + the 'running' update + the reconcile read run with
-    // no await between them, so the alarm value is computed atomically against
-    // this step's freshly-armed deadline (race analysis in reconcileAlarm).
+    // Arm the deadline (1A table) for the claimed attempt.
     this.sql.exec(
       `insert into step_deadlines (run_id, idx, deadline_ms) values (?, ?, ?)
        on conflict(run_id, idx) do update set deadline_ms=excluded.deadline_ms`,
@@ -501,60 +613,48 @@ export class TalkRunner {
       idx,
       attempt,
     );
-    await this.reconcileAlarm();
-
-    try {
-      const result = await step.execute(signal);
-      // Serialize + assert BEFORE the CAS write so an oversized checkpoint
-      // surfaces as a failed step (visible), never a silent truncation.
-      const checkpointJson = serializeCheckpoint(result.checkpoint);
-      const written = this.sql.exec(
-        `update steps set status='checkpoint', checkpoint_json=?
-         where run_id=? and idx=? and attempt=? and status='running'`,
-        checkpointJson,
-        runId,
-        idx,
-        attempt,
-      ).rowsWritten;
-      // Fenced (written===0): a competing writer (the alarm watchdog, or in A3
-      // a retry attempt) settled this step first. Do NOT touch the deadline —
-      // the winner already cleared it; re-clearing/re-arming here would race
-      // its alarm bookkeeping.
-      if (written === 0) return 'fenced';
-      await this.settleDeadline(runId, idx);
-      return 'checkpoint';
-    } catch (err) {
-      const written = this.sql.exec(
-        `update steps set status='failed'
-         where run_id=? and idx=? and attempt=? and status='running'`,
-        runId,
-        idx,
-        attempt,
-      ).rowsWritten;
-      logger.warn(
-        {
-          err,
-          runId,
-          idx,
-          kind: step.kind,
-          talkId: this.state.id.name,
-        },
-        'TalkRunner step failed',
-      );
-      // A late abandoned attempt that lost the CAS race must not be treated as
-      // this run's failure, and must not touch the winner's deadline/alarm.
-      if (written === 0) return 'fenced';
-      await this.settleDeadline(runId, idx);
-      return 'failed';
-    }
+    return attempt;
   }
 
-  private markRunTerminal(runId: string, status: RunStatus): void {
-    this.sql.exec(
-      `update runs_local set status=?, updated_at=? where run_id=?`,
+  // The fence. A post-await step write lands only while ALL THREE hold:
+  //   • the step row is still on THIS attempt   → fences a retried attempt (A3)
+  //   • the step is still 'running'             → fences a watchdog-failed step
+  //   • the run is still 'running'              → fences a cancelled run (A3)
+  // Any abandoned attempt — one the watchdog retried/failed, or whose run was
+  // cancelled — writes 0 rows. Returns rowsWritten (0 ⇒ fenced). The run-status
+  // guard is bound by runId rather than correlated so the predicate is explicit.
+  private casStepWrite(
+    runId: string,
+    idx: number,
+    attempt: number,
+    status: 'checkpoint' | 'failed',
+    checkpointJson: string | null,
+  ): number {
+    return this.sql.exec(
+      `update steps set status=?, checkpoint_json=?
+       where run_id=? and idx=? and attempt=? and status='running'
+         and (select status from runs_local where run_id=?)='running'`,
       status,
-      Date.now(),
+      checkpointJson,
       runId,
+      idx,
+      attempt,
+      runId,
+    ).rowsWritten;
+  }
+
+  // Monotonic terminal transition: a run moves running → terminal exactly once
+  // and never terminal → terminal. So cancel can't be clobbered by a late
+  // completed/failed (and vice-versa). Returns whether THIS call won.
+  private markRunTerminal(runId: string, status: RunStatus): boolean {
+    return (
+      this.sql.exec(
+        `update runs_local set status=?, updated_at=?
+         where run_id=? and status='running'`,
+        status,
+        Date.now(),
+        runId,
+      ).rowsWritten > 0
     );
   }
 
@@ -564,6 +664,39 @@ export class TalkRunner {
       runId,
       idx,
     );
+  }
+
+  // ─── Cancel RPC (F8) ─────────────────────────────────────────────────────
+  //
+  // The direct, poll-free replacement for v1's DB-polled cooperative cancel
+  // (queue-consumer.ts). Runs in the same isolate that owns the run:
+  //   • flips the run terminal ('cancelled') — every in-flight step's post-await
+  //     write then fences on the run-status guard in casStepWrite, so a wedged
+  //     provider that ignores the abort corrupts nothing;
+  //   • aborts the live attempt's signal for a prompt cooperative stop;
+  //   • clears the run's deadlines so the watchdog won't fire on a cancelled run.
+  // Monotonic + idempotent: cancelling a terminal run is a no-op (a completed run
+  // stays completed). DO-LOCAL in A3 — Postgres / UI / hub visibility is PR-B and
+  // the real route is PR-C, so this is not yet production cancel.
+  async cancel(
+    runId: string,
+  ): Promise<{ cancelled: boolean; status: RunStatus | null }> {
+    const run = this.readRun(runId);
+    if (!run) return { cancelled: false, status: null };
+    if (isTerminalRunStatus(run.status)) {
+      return { cancelled: run.status === 'cancelled', status: run.status };
+    }
+    // No await between the read above and this CAS, so the status can't drift
+    // out from under us (single-threaded isolate, interleaves only at awaits).
+    const won = this.markRunTerminal(runId, 'cancelled');
+    // Abort the live attempt + drop deadlines regardless of who won the CAS: this
+    // only tears down our own bookkeeping, and the run-status guard already does
+    // the durable fencing.
+    this.inFlight.get(runId)?.controller.abort('cancelled');
+    this.sql.exec(`delete from step_deadlines where run_id=?`, runId);
+    await this.reconcileAlarm();
+    const status = this.readRun(runId)?.status ?? null;
+    return { cancelled: won && status === 'cancelled', status };
   }
 
   // ─── Alarm watchdog + resume (1A / 4A) ──────────────────────────────────
@@ -738,14 +871,22 @@ export class TalkRunner {
         )
         .toArray()[0];
       if (deadline != null && deadline.deadline_ms <= Date.now()) {
-        // CAS on (attempt, status in running|pending) so a step that just
-        // settled to 'checkpoint' wins the race (then failed===false and the
-        // run is NOT failed). Abort the live attempt's signal — even if its
-        // await never unwinds, the CAS fence already makes its eventual
-        // checkpoint write a no-op.
-        const failed = this.failStepAndRun(runId, active.idx, active.attempt);
-        if (failed) this.inFlight.get(runId)?.controller.abort();
-        await this.reconcileAlarm();
+        // RETRY if budget remains AND the plan can be rebuilt; otherwise FAIL.
+        // A3 is DO-LOCAL: planProvider is null in prod, so this is always the
+        // FAIL path (the A2 behavior) until PR-B wires the rebuild — tests inject
+        // planProvider to exercise the retry + the cross-attempt fence.
+        if (active.attempt < MAX_STEP_ATTEMPTS && this.planProvider) {
+          await this.retryRun(runId, active.idx, active.attempt);
+        } else {
+          // CAS on (attempt, status in running|pending) so a step that just
+          // settled to 'checkpoint' wins the race (then failed===false and the
+          // run is NOT failed). Abort the live attempt's signal — even if its
+          // await never unwinds, the CAS fence already makes its eventual
+          // checkpoint write a no-op.
+          const failed = this.failStepAndRun(runId, active.idx, active.attempt);
+          if (failed) this.inFlight.get(runId)?.controller.abort();
+          await this.reconcileAlarm();
+        }
         return;
       }
     }
@@ -790,6 +931,49 @@ export class TalkRunner {
       return true;
     }
     return false;
+  }
+
+  // Watchdog RETRY (bounded by MAX_STEP_ATTEMPTS). The expired attempt may be
+  // wedged on an await that ignores its abort (a provider that never unwinds), so
+  // we cannot wait for it. Instead: rebuild the plan, then DISOWN the wedged
+  // invocation and re-drive on a fresh attempt. The re-drive's claimStep bumps
+  // the step attempt, fencing the wedged attempt's eventual write.
+  //
+  // The rebuild happens BEFORE the disown so the disown → re-drive → attempt-bump
+  // window stays await-free: executeRun runs driveRun synchronously up to the
+  // expired step's claimStep (the bump), so the wedged attempt cannot slip a
+  // write in before the fence is live. The re-drive itself is DETACHED so a fresh
+  // alarm invocation returns promptly (PR-B inherits this detached-resume rule).
+  private async retryRun(
+    runId: string,
+    idx: number,
+    attempt: number,
+  ): Promise<void> {
+    const plan = this.planProvider ? await this.planProvider(runId) : null;
+    if (!plan) {
+      // Can't rebuild → fall back to FAIL so the step isn't left armed forever.
+      const failed = this.failStepAndRun(runId, idx, attempt);
+      if (failed) this.inFlight.get(runId)?.controller.abort();
+      await this.reconcileAlarm();
+      return;
+    }
+    // Disown the wedged invocation (abort + drop from inFlight) so the re-drive
+    // below does not dedup to it. Synchronous from here through executeRun's
+    // claimStep, so the attempt bump lands before the wedged attempt resolves.
+    const wedged = this.inFlight.get(runId);
+    if (wedged) {
+      wedged.controller.abort('superseded_by_retry');
+      this.inFlight.delete(runId);
+    }
+    // Re-drive detached; errors logged. executeRun's terminal gate drops a run
+    // cancelled during the rebuild (and the run-status fence covers a wedged
+    // write even when the re-drive is gated out).
+    void this.executeRun(runId, plan).catch((err) =>
+      logger.error(
+        { err, runId, idx, talkId: this.state.id.name },
+        'TalkRunner retry re-drive failed',
+      ),
+    );
   }
 
   // Clear a settled step's deadline and re-point the alarm at the next-earliest
@@ -1025,6 +1209,16 @@ export class TalkRunner {
         errorMessage:
           'Run step exceeded its deadline and was failed by the TalkRunner watchdog',
       });
+    } else if (outcome.status === 'cancelled') {
+      // Unreachable on the dev route (it never calls cancel), but the union is
+      // exhaustive: a cancelled run must not strand the Greenfield row 'running'.
+      // Real cancel persistence (status='cancelled', not a failure) is PR-B/PR-C;
+      // here we record a terminal failure so the dev row doesn't leak.
+      await failGreenfieldRun({
+        runId: run.id,
+        errorCode: 'talk_runner_cancelled',
+        errorMessage: 'Run was cancelled via the TalkRunner cancel RPC',
+      });
     }
 
     return { devStatus: outcome.status, outcome };
@@ -1039,7 +1233,7 @@ function isTerminalRunStatus(status: RunStatus): boolean {
   );
 }
 
-function serializeCheckpoint(checkpoint: unknown): string {
+export function serializeCheckpoint(checkpoint: unknown): string {
   const json = JSON.stringify(checkpoint ?? null);
   const bytes = new TextEncoder().encode(json).length;
   if (bytes > MAX_CHECKPOINT_BYTES) {
@@ -1049,6 +1243,54 @@ function serializeCheckpoint(checkpoint: unknown): string {
     );
   }
   return json;
+}
+
+// 8A reference-checkpoint rehydration. A reference checkpoint stores text +
+// structure plus R2 keys for binary blocks (PDF page images) instead of inlining
+// the bytes — that is what keeps it under the 1MB cap. On resume, the rebuilt
+// plan must pull those bytes back from R2. This walker collects every page-image
+// ref so the resume path can load each (PR-B binds the loader to
+// attachment-storage's loadAttachmentFile / loadPageImage; the byte round-trip
+// is what `talk-runner-checkpoint.test.ts` proves against the multi-page-PDF
+// fixture).
+export interface CheckpointImageRef {
+  storageKey: string;
+  pageIndex?: number;
+  byteLength?: number;
+  sha256?: string;
+  mimeType?: string;
+}
+
+export function collectCheckpointImageRefs(
+  checkpoint: unknown,
+): CheckpointImageRef[] {
+  const out: CheckpointImageRef[] = [];
+  const visit = (node: unknown): void => {
+    if (Array.isArray(node)) {
+      for (const child of node) visit(child);
+      return;
+    }
+    if (node && typeof node === 'object') {
+      const rec = node as Record<string, unknown>;
+      if (
+        rec.type === 'pdf_page_image_ref' &&
+        typeof rec.storageKey === 'string'
+      ) {
+        out.push({
+          storageKey: rec.storageKey,
+          pageIndex:
+            typeof rec.pageIndex === 'number' ? rec.pageIndex : undefined,
+          byteLength:
+            typeof rec.byteLength === 'number' ? rec.byteLength : undefined,
+          sha256: typeof rec.sha256 === 'string' ? rec.sha256 : undefined,
+          mimeType: typeof rec.mimeType === 'string' ? rec.mimeType : undefined,
+        });
+      }
+      for (const value of Object.values(rec)) visit(value);
+    }
+  };
+  visit(checkpoint);
+  return out;
 }
 
 function jsonResponse(body: unknown, status = 200): Response {
