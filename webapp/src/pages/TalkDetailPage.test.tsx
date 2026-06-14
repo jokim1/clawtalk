@@ -268,7 +268,15 @@ describe('TalkDetailPage', () => {
       within(statusPills).getByText('GPT-5 Mini (Critic)').parentElement
         ?.className,
     ).toContain('talk-status-pill-invalid');
-    const responseModeButton = screen.getByRole('button', {
+    const composerTargets = screen.getByRole('group', {
+      name: 'Selected agents',
+    });
+    expect(
+      screen.getAllByRole('button', {
+        name: /Response mode, Ordered/i,
+      }),
+    ).toHaveLength(1);
+    const responseModeButton = within(composerTargets).getByRole('button', {
       name: /Response mode, Ordered/i,
     });
     expect(responseModeButton).toBeTruthy();
@@ -1079,7 +1087,6 @@ describe('TalkDetailPage', () => {
     renderDetailPage('/app/talks/talk-1');
     await screen.findByPlaceholderText(/^Send a message to this conversation/);
 
-    const targetGroup = screen.getByRole('group', { name: 'Selected agents' });
     const refreshedTargetGroup = screen.getByRole('group', {
       name: 'Selected agents',
     });

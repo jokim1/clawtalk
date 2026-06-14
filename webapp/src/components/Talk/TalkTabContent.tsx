@@ -18,6 +18,7 @@ import { ToolChipsBar } from '../ToolChipsBar';
 import type {
   ContextSource,
   SessionUser,
+  Talk,
   TalkAgent,
   TalkMessage,
   TalkMessageSearchResult,
@@ -40,6 +41,7 @@ type ConversationListState = {
   loading: boolean;
   error: string | null;
 };
+type TalkOrchestrationMode = Talk['orchestrationMode'];
 
 type RetryRunState = {
   runId: string;
@@ -177,7 +179,16 @@ type TalkTabContentProps = {
   handleToggleTarget: (agentId: string) => void;
   sendState: SendState;
   composerTargetHelp: string;
-  composerModeLabel: string;
+  showOrchestrationSelector: boolean;
+  orchestrationMenuRef: RefObject<HTMLDivElement>;
+  orchestrationMenuOpen: boolean;
+  setOrchestrationMenuOpen: Dispatch<SetStateAction<boolean>>;
+  orchestrationMode: TalkOrchestrationMode;
+  orchestrationState: {
+    status: 'idle' | 'saving' | 'error';
+    message?: string;
+  };
+  onOrchestrationModeChange: (mode: TalkOrchestrationMode) => void;
   composerRoundsLabel: string;
   draft: string;
   TALK_MESSAGE_MAX_CHARS: number;
@@ -283,7 +294,13 @@ export function TalkTabContent({
   handleToggleTarget,
   sendState,
   composerTargetHelp,
-  composerModeLabel,
+  showOrchestrationSelector,
+  orchestrationMenuRef,
+  orchestrationMenuOpen,
+  setOrchestrationMenuOpen,
+  orchestrationMode,
+  orchestrationState,
+  onOrchestrationModeChange,
   composerRoundsLabel,
   draft,
   TALK_MESSAGE_MAX_CHARS,
@@ -575,7 +592,13 @@ export function TalkTabContent({
               handleToggleTarget={handleToggleTarget}
               sendState={sendState}
               composerTargetHelp={composerTargetHelp}
-              composerModeLabel={composerModeLabel}
+              showOrchestrationSelector={showOrchestrationSelector}
+              orchestrationMenuRef={orchestrationMenuRef}
+              orchestrationMenuOpen={orchestrationMenuOpen}
+              setOrchestrationMenuOpen={setOrchestrationMenuOpen}
+              orchestrationMode={orchestrationMode}
+              orchestrationState={orchestrationState}
+              onOrchestrationModeChange={onOrchestrationModeChange}
               composerRoundsLabel={composerRoundsLabel}
               draft={draft}
               TALK_MESSAGE_MAX_CHARS={TALK_MESSAGE_MAX_CHARS}

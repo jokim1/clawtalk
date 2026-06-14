@@ -9,7 +9,7 @@ import {
   type SetStateAction,
 } from 'react';
 
-import type { ContextSource, TalkAgent } from '../lib/api';
+import type { ContextSource, Talk, TalkAgent } from '../lib/api';
 import {
   TALK_CONTEXT_SOURCE_ALLOWED_FILE_EXTENSIONS,
   type TalkContextSourceUploadController,
@@ -42,6 +42,22 @@ type ComposerHistoryEditState = {
   message?: string;
 };
 type ComposerMentionState = { atIndex: number; selectedIndex: number } | null;
+type ComposerOrchestrationMode = Talk['orchestrationMode'];
+
+const ORCHESTRATION_MODE_OPTIONS: ReadonlyArray<{
+  value: ComposerOrchestrationMode;
+  label: string;
+}> = [
+  { value: 'ordered', label: 'Ordered' },
+  { value: 'panel', label: 'Parallel' },
+];
+
+const ORCHESTRATION_MODE_TOOLTIP =
+  'Ordered is turn based synthesis focused multi-agent response. Parallel is fast independent response.';
+
+function getOrchestrationModeLabel(mode: ComposerOrchestrationMode): string {
+  return mode === 'ordered' ? 'Ordered' : 'Parallel';
+}
 
 function ComposerCancelRunsIcon(): JSX.Element {
   return (
@@ -92,7 +108,16 @@ type TalkComposerProps = {
   handleToggleTarget: (agentId: string) => void;
   sendState: ComposerSendState;
   composerTargetHelp: string;
-  composerModeLabel: string;
+  showOrchestrationSelector: boolean;
+  orchestrationMenuRef: RefObject<HTMLDivElement>;
+  orchestrationMenuOpen: boolean;
+  setOrchestrationMenuOpen: Dispatch<SetStateAction<boolean>>;
+  orchestrationMode: ComposerOrchestrationMode;
+  orchestrationState: {
+    status: 'idle' | 'saving' | 'error';
+    message?: string;
+  };
+  onOrchestrationModeChange: (mode: ComposerOrchestrationMode) => void;
   composerRoundsLabel: string;
   draft: string;
   TALK_MESSAGE_MAX_CHARS: number;
@@ -135,7 +160,13 @@ export function TalkComposer({
   handleToggleTarget,
   sendState,
   composerTargetHelp,
-  composerModeLabel,
+  showOrchestrationSelector,
+  orchestrationMenuRef,
+  orchestrationMenuOpen,
+  setOrchestrationMenuOpen,
+  orchestrationMode,
+  orchestrationState,
+  onOrchestrationModeChange,
   composerRoundsLabel,
   draft,
   TALK_MESSAGE_MAX_CHARS,
@@ -160,6 +191,7 @@ export function TalkComposer({
   sourceUpload,
 }: TalkComposerProps): JSX.Element {
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const composerModeLabel = getOrchestrationModeLabel(orchestrationMode);
 
   const composerInputDisabled =
     sendState.status === 'posting' ||
@@ -256,9 +288,62 @@ export function TalkComposer({
               </button>
             );
           })}
-          <span className="composer-chip composer-mode-chip">
-            {composerModeLabel}
-          </span>
+          {showOrchestrationSelector ? (
+            <div className="composer-mode-menu" ref={orchestrationMenuRef}>
+              <button
+                type="button"
+                className={`composer-chip composer-mode-chip composer-mode-trigger${
+                  orchestrationMenuOpen ? ' composer-mode-trigger-open' : ''
+                }`}
+                onClick={() =>
+                  setOrchestrationMenuOpen((current) => !current)
+                }
+                aria-expanded={orchestrationMenuOpen}
+                aria-haspopup="menu"
+                aria-label={`Response mode, ${composerModeLabel}`}
+                title={ORCHESTRATION_MODE_TOOLTIP}
+                disabled={orchestrationState.status === 'saving'}
+              >
+                <span>{composerModeLabel}</span>
+                <CTIcon name="chevron-d" size={10} strokeWidth={1.9} />
+              </button>
+              {orchestrationMenuOpen ? (
+                <div
+                  className="composer-mode-dropdown"
+                  role="menu"
+                  aria-label="Response mode options"
+                >
+                  {ORCHESTRATION_MODE_OPTIONS.map((option) => {
+                    const selected = orchestrationMode === option.value;
+                    return (
+                      <button
+                        type="button"
+                        key={option.value}
+                        className={`composer-mode-option${
+                          selected ? ' composer-mode-option-selected' : ''
+                        }`}
+                        role="menuitemradio"
+                        aria-checked={selected}
+                        onClick={() => {
+                          setOrchestrationMenuOpen(false);
+                          onOrchestrationModeChange(option.value);
+                        }}
+                      >
+                        <span>{option.label}</span>
+                        {selected ? (
+                          <CTIcon name="check" size={12} strokeWidth={2} />
+                        ) : null}
+                      </button>
+                    );
+                  })}
+                </div>
+              ) : null}
+            </div>
+          ) : (
+            <span className="composer-chip composer-mode-chip">
+              {composerModeLabel}
+            </span>
+          )}
           <span className="composer-chip composer-rounds-chip">
             {composerRoundsLabel}
           </span>
@@ -269,6 +354,11 @@ export function TalkComposer({
             {draft.length}/{TALK_MESSAGE_MAX_CHARS}
           </span>
         </div>
+        {orchestrationState.status === 'error' ? (
+          <div className="inline-banner inline-banner-error" role="alert">
+            {orchestrationState.message}
+          </div>
+        ) : null}
         {composerGuardrailMessage ? (
           <div
             className="inline-banner inline-banner-warning"

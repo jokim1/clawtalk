@@ -9195,6 +9195,84 @@ a {
   margin-left: auto;
 }
 
+.composer-mode-menu {
+  position: relative;
+  display: inline-flex;
+  margin-left: auto;
+}
+
+.composer-mode-trigger {
+  gap: 0.26rem;
+  font: inherit;
+  cursor: pointer;
+}
+
+.composer-mode-trigger:hover:not(:disabled),
+.composer-mode-trigger-open {
+  border-color: #d8cbb6;
+  background: var(--salon-paper-2, #f4ecdb);
+  color: var(--salon-ink, #1f1b16);
+}
+
+.composer-mode-trigger:focus-visible {
+  outline: 2px solid #8fb1ff;
+  outline-offset: 2px;
+}
+
+.composer-mode-trigger:disabled {
+  opacity: 0.7;
+  cursor: wait;
+}
+
+.composer-mode-trigger svg {
+  flex: 0 0 auto;
+  transition: transform 140ms ease;
+}
+
+.composer-mode-trigger-open svg {
+  transform: rotate(180deg);
+}
+
+.composer-mode-dropdown {
+  position: absolute;
+  top: calc(100% + 0.35rem);
+  right: 0;
+  z-index: 12;
+  min-width: 8.5rem;
+  padding: 0.25rem;
+  border: 1px solid var(--salon-line, #e6e0d1);
+  border-radius: 0.45rem;
+  background: var(--salon-card, #ffffff);
+  box-shadow: 0 14px 32px rgba(31, 27, 22, 0.14);
+}
+
+.composer-mode-option {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+  border: 0;
+  border-radius: 0.35rem;
+  background: transparent;
+  padding: 0.45rem 0.55rem;
+  color: var(--salon-ink-2, #6b6660);
+  font: inherit;
+  font-size: 0.76rem;
+  text-align: left;
+  cursor: pointer;
+}
+
+.composer-mode-option:hover:not(:disabled),
+.composer-mode-option-selected {
+  background: var(--salon-paper-2, #f4ecdb);
+  color: var(--salon-ink, #1f1b16);
+}
+
+.composer-mode-option-selected {
+  font-weight: 600;
+}
+
 .composer-meta-row {
   margin-bottom: 0.2rem;
 }
@@ -9469,6 +9547,10 @@ a {
   }
 
   .composer-mode-chip {
+    margin-left: 0;
+  }
+
+  .composer-mode-menu {
     margin-left: 0;
   }
 
