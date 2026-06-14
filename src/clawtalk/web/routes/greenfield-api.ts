@@ -1371,13 +1371,27 @@ export function mountGreenfieldApiRoutes(app: GreenfieldApp): void {
       targetAgentIds: parsed.data.targetAgentIds,
     });
     if (result.statusCode === 202 && result.body.ok) {
-      // Every run — single-run included — goes through TALK_RUN_QUEUE.
-      // The former T7 in-process bypass ran the executor under
-      // ctx.waitUntil, which Cloudflare kills ~30s after the 202; the
-      // #609 run watchdog died with that isolate, so >30s single-agent
-      // tool turns wedged silently (Talk Runtime v2 decision 6A).
-      for (const run of result.body.data.runs) {
-        await dispatchRun({ runId: run.id });
+      const data = result.body.data;
+      if (data.runtime === 'do') {
+        // Talk Runtime v2 PR-B: dispatch the round to the per-Talk TalkRunner
+        // DO. DORMANT until PR-C flips the per-account flag (resolveDispatchRuntime
+        // defaults 'queue'). Wired here so PR-C is just the flag flip. The DO
+        // returns fast (it kicks runs off detached); a missing binding / failed
+        // start leaves the runs durable for the reconciliation cron.
+        await dispatchRunsToTalkRunner(
+          c,
+          data.talkId,
+          data.runs.map((run) => run.id),
+        );
+      } else {
+        // v1 queue path. Every run — single-run included — goes through
+        // TALK_RUN_QUEUE (the former T7 in-process bypass ran the executor under
+        // ctx.waitUntil, which Cloudflare kills ~30s after the 202; the #609 run
+        // watchdog died with that isolate, so >30s single-agent tool turns
+        // wedged silently — Talk Runtime v2 decision 6A).
+        for (const run of data.runs) {
+          await dispatchRun({ runId: run.id });
+        }
       }
     }
     return jsonResponse(result);
@@ -1396,15 +1410,27 @@ export function mountGreenfieldApiRoutes(app: GreenfieldApp): void {
         400,
       );
     }
-    // Cooperative cancellation: the route just flips the DB status.
-    // The queue consumer polls run.status during execution and bails
-    // when it sees 'cancelled'. No in-process AbortController wake
-    // needed — the cancelledRunning flag is discarded.
+    // Cooperative cancellation. Queue path: the route flips the DB status and
+    // the queue consumer's poller bails when it sees 'cancelled'. Do path
+    // (Talk Runtime v2 PR-B): the DB flip alone is NOT enough — the TalkRunner
+    // DO's streaming guard reads DO SQLite, so we also ping the DO to observe
+    // the cancel and stop streaming. Dormant until PR-C (the flag is OFF).
     const result = await cancelGreenfieldChatRoute({
       talkId: c.req.param('talkId'),
       workspaceId: requestedWorkspaceId(c),
       auth,
     });
+    if (
+      result.statusCode === 200 &&
+      result.body.ok &&
+      result.body.data.doCancelledRunIds.length > 0
+    ) {
+      await cancelRunsViaTalkRunner(
+        c,
+        result.body.data.talkId,
+        result.body.data.doCancelledRunIds,
+      );
+    }
     return jsonResponse(result);
   });
 }
@@ -1416,6 +1442,91 @@ function requestedWorkspaceId(c: Context): string | null {
     c.req.query('workspaceId') ??
     null
   );
+}
+
+// Resolve the per-Talk TalkRunner DO stub (idFromName(talkId)). Null when the
+// binding is absent (logged by the caller). Talk Runtime v2 PR-B.
+function getTalkRunnerStub(
+  c: Context,
+  talkId: string,
+): { fetch(input: string, init?: RequestInit): Promise<Response> } | null {
+  const env = c.env as {
+    TALK_RUNNER?: {
+      idFromName(name: string): unknown;
+      get(id: unknown): {
+        fetch(input: string, init?: RequestInit): Promise<Response>;
+      };
+    };
+  };
+  if (!env.TALK_RUNNER) return null;
+  return env.TALK_RUNNER.get(env.TALK_RUNNER.idFromName(talkId));
+}
+
+// Dispatch a round's runs to the per-Talk DO. The DO's /start kicks the runs off
+// DETACHED and returns fast, so this never holds the /chat request open for the
+// run's duration. A missing binding or a failed start leaves the runs durable
+// (queued in Postgres) for the reconciliation cron. Dormant in PR-B (flag OFF);
+// PR-C makes this the only dispatch path.
+async function dispatchRunsToTalkRunner(
+  c: Context,
+  talkId: string,
+  runIds: string[],
+): Promise<void> {
+  const stub = getTalkRunnerStub(c, talkId);
+  if (!stub) {
+    logger.error(
+      { talkId },
+      'dispatchRunsToTalkRunner: TALK_RUNNER binding missing; runs durable, await reconciliation',
+    );
+    return;
+  }
+  try {
+    await stub.fetch('https://talk-runner.internal/start', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ runIds }),
+    });
+  } catch (err) {
+    logger.warn(
+      { err, talkId },
+      'dispatchRunsToTalkRunner: DO start failed; runs durable, reconciliation will recover',
+    );
+  }
+}
+
+// Tell the per-Talk DO to cancel do-path runs. The /chat/cancel route already
+// flipped Postgres → cancelled; this makes the DO observe it (its streaming
+// guard reads DO SQLite, not Postgres) so it stops streaming and abandons the
+// work. Best-effort: on a failed ping the DO keeps streaming for at most the
+// rest of THIS turn, then its terminal flush no-ops against the already-cancelled
+// PG row — so the system of record stays correctly cancelled, only the live
+// stream is briefly stale. A durable cron re-ping backstop for that rare case is
+// PR-C cancel-route hardening. Dormant in PR-B (flag OFF).
+async function cancelRunsViaTalkRunner(
+  c: Context,
+  talkId: string,
+  runIds: string[],
+): Promise<void> {
+  const stub = getTalkRunnerStub(c, talkId);
+  if (!stub) {
+    logger.warn(
+      { talkId },
+      'cancelRunsViaTalkRunner: TALK_RUNNER binding missing; DO not notified of cancel',
+    );
+    return;
+  }
+  try {
+    await stub.fetch('https://talk-runner.internal/cancel', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ runIds }),
+    });
+  } catch (err) {
+    logger.warn(
+      { err, talkId },
+      'cancelRunsViaTalkRunner: DO cancel ping failed; DO stays correctly cancelled in PG, live stream may be briefly stale (PR-C adds a cron re-ping backstop)',
+    );
+  }
 }
 
 function jsonResponse(result: { statusCode: number; body: unknown }): Response {

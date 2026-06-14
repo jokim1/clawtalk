@@ -36,24 +36,35 @@
 //     writes NOTHING (the durable analog of #609's runAbandoned guard).  [A3]
 //   • Watchdog RETRY: on an expired step the alarm re-drives a fresh attempt
 //     (bounded by MAX_STEP_ATTEMPTS) instead of only failing; the wedged
-//     attempt is disowned and fenced. Needs a rebuildable plan, so in prod it
-//     is inert until PR-B wires planProvider (A3 keeps the A2 fail behavior
-//     when planProvider is null; tests inject it to exercise the fence). [A3]
+//     attempt is disowned and fenced. Needs a rebuildable plan — now wired in
+//     PR-B (planProvider → buildResumePlan); A3 kept the A2 fail behavior when
+//     planProvider was null, tests still inject stub plans.               [A3]
+//   • Write-behind to Postgres (the system of record): the DO mirrors its
+//     durable terminal truth via an injectable RunStatePersister
+//     (talk-runner-write-behind.ts). Terminal flush is AWAITED with bounded
+//     retry and reads runs_local.status, so a cancel that won the DO CAS
+//     flushes 'cancelled', never a stale 'completed'. Idempotent + monotonic
+//     (accessor `where status='running'` CAS), durable across eviction via the
+//     run_sync table (markRunTerminal marks synced=0; flush sets 1; restart /
+//     alarm / reconciliation re-flush). The completed payload lives in the
+//     reference-based checkpoint, so a re-flush needs no executor re-run.  [B]
+//   • 3A hub streaming: runOne forwards the executor's events to the hub via
+//     emitOutboxEventOutsideTx (insert-before-push), gated on the run still
+//     'running' so post-cancel zombie deltas are dropped. Streaming events are
+//     NOT batched — replay stays gap-free.                                 [B]
+//   • Production plan rebuild (planProvider → buildResumePlan) for cross-
+//     eviction resume/retry, with 8A R2-ref rehydration via attachment-storage;
+//     the re-drive is DETACHED so DO startup never blocks on a whole run.  [B]
+//   • start(runIds): the production dispatch entry PR-C flips /chat to; the
+//     reconcileRun() / flushPendingSync() backstops.                       [B]
 //
 // EXPLICITLY NOT here yet (do not read this as production-complete):
-//   • A rebuildable plan for resume/retry after a real eviction — A3 is
-//     DO-LOCAL: planProvider stays null until PR-B wires the Postgres rebuild.
-//     Resume/retry of a run it cannot rebuild fails or no-ops and logs
-//     (alarm/reconciliation backstop).
-//   • Cancel/fencing DURABILITY beyond DO SQLite: cancel correctness here is
-//     DO-LOCAL. Visibility to Postgres / UI / the hub / reconciliation is PR-B,
-//     and the real /chat route is PR-C — do NOT read A3 as production cancel.
-//   • Write-behind batching + insert-before-push hub streaming (3A) — PR-B.
-//     The /dev/run route persists run lifecycle SYNCHRONOUSLY via the same
-//     v1 accessors the queue consumer uses (markGreenfieldRunRunning /
-//     completeGreenfieldRun); that is NOT the v2 write-behind contract. The
-//     "event emission" leg of the fence (docs/13 §6.4 PR-A) lands with the
-//     emission itself in PR-B, guarded by the same per-attempt CAS pattern.
+//   • The /chat dispatch flip to start(runIds) + the cancel-route flip to the
+//     cancel RPC — PR-C. PR-B lands start()/the persister/the flag plumbing but
+//     leaves dispatch on the queue (the per-account flag defaults OFF).
+//   • Finer 8A step granularity (per-LLM-call / per-tool-batch). The executor
+//     is still ONE opaque step; resume re-runs that one step.
+//   • Retiring the queue path + #609 watchdog + shrinking the sweeps — PR-D.
 //
 // Mirrors the production DO precedent in user-event-hub.ts: local CF type
 // shims (no repo-wide @cloudflare/workers-types), schema + recovery under
@@ -68,23 +79,27 @@ import { logger } from '../../logger.js';
 
 import { GreenfieldTalkExecutor } from './greenfield-executor.js';
 import {
-  completeGreenfieldRun,
-  failGreenfieldRun,
   getGreenfieldQueueRunById,
   getGreenfieldRunPromptSnapshotText,
   getGreenfieldTriggerMessageById,
-  markGreenfieldRunRunning,
+  type GreenfieldQueueRunRecord,
 } from './greenfield-run-accessors.js';
 import {
+  createTalkResponseStreamSanitizer,
   stripInternalTalkResponseText,
   stripLeadingAgentLabel,
+  type TalkResponseStreamSanitizer,
 } from './internal-tags.js';
+import { emitOutboxEventOutsideTx } from './outbox-emit.js';
+import { loadAttachmentFile } from './attachment-storage.js';
+import {
+  createDefaultRunStatePersister,
+  withBoundedRetry,
+  type RunCompletedPayload,
+  type RunStatePersister,
+} from './talk-runner-write-behind.js';
 import { TalkExecutorError } from './executor.js';
-import type {
-  TalkExecutionEvent,
-  TalkExecutorInput,
-  TalkExecutorOutput,
-} from './executor.js';
+import type { TalkExecutionEvent, TalkExecutorInput } from './executor.js';
 
 // ─── Cloudflare DO surface types (minimal local shims) ──────────────────
 //
@@ -117,6 +132,13 @@ interface DurableObjectStateLike {
   readonly id: { readonly name?: string };
   blockConcurrencyWhile<T>(fn: () => Promise<T>): Promise<T>;
   readonly storage: DurableObjectStorageLike;
+  // Keeps the DO alive until `promise` settles, past the response that started
+  // it. start() detaches runs so /chat returns fast (the run must NOT be tied to
+  // the caller's lifetime — that would re-impose the 30s ceiling 6A removed); we
+  // hand those detached runs to waitUntil so the runtime doesn't evict the DO
+  // mid-run. Optional in the shim so older test harnesses without it degrade to
+  // a plain detached promise.
+  waitUntil?(promise: Promise<unknown>): void;
 }
 
 // The DO env carries the same bindings the main Worker env does — Hyperdrive
@@ -153,6 +175,22 @@ const DEFAULT_STEP_DEADLINE_MS: Record<StepKind, number> = {
 // step that wedges every attempt can't loop forever. A3 keeps this small; the
 // right per-kind retry budget is an open PR-B question (docs/13 §9).
 const MAX_STEP_ATTEMPTS = 2;
+
+// PR-B write-behind: bounded retries for the AWAITED terminal Postgres persist
+// (docs/13 §6.3 "terminal persist AWAITED with bounded retry"). A transient
+// Postgres blip during the terminal flush is retried this many times before the
+// DO gives up and leaves the run unsynced (run_sync.synced=0) for the
+// reconciliation cron / next-invocation re-flush backstop. The terminal event
+// is emitted ONLY on a successful persist, so a failed flush never makes the
+// snapshot lie.
+const TERMINAL_FLUSH_ATTEMPTS = 4;
+
+// The checkpoint `kind` for a completed executor run. The checkpoint doubles as
+// the DURABLE terminal-flush payload (reference-based: text/metadata + a stable
+// response message id), so a restart re-flushes a completed run from SQLite
+// without re-running the executor. Exported for the workers-pool write-behind
+// test (it builds completed-payload checkpoints via stub plans).
+export const COMPLETED_PAYLOAD_KIND = 'completed_run_payload_v2';
 
 // ─── Step / run model ───────────────────────────────────────────────────
 
@@ -213,6 +251,17 @@ export type RunOutcome =
   // caller persists a cancel rather than a failure.
   | { status: 'cancelled' };
 
+// Diagnostic result of runOne (the production single-run path). `devStatus` is
+// the outcome status or an early-exit reason; the rest is context for the dev
+// route response / start() aggregation.
+type RunOneResult = {
+  devStatus: string;
+  outcome?: RunOutcome;
+  claim?: string;
+  expectedTalkId?: string;
+  actualTalkId?: string;
+};
+
 // Persisted row shapes (mirror the schema below).
 interface RunLocalRow {
   run_id: string;
@@ -263,13 +312,37 @@ export class TalkRunner {
     { controller: AbortController; done: Promise<RunOutcome> }
   >();
 
-  // 4A resume seam. Null in A1/A2 (DO-local); PR-B sets it to the Postgres
-  // rebuild. The resume path no-ops (and logs) a run it cannot rebuild.
+  // 4A resume seam. PR-B sets it (in the constructor) to the Postgres-backed
+  // rebuild so a resumed/retried run re-enters the executor; tests inject stub
+  // plans. The resume path no-ops (and logs) a run it cannot rebuild.
   public planProvider: TalkRunnerPlanProvider | null = null;
+
+  // PR-B write-behind seam (docs/13 §6.3). The DO mirrors its durable terminal
+  // truth to Postgres ONLY through this. Null → the default accessor-backed
+  // persister (lazily built, needs a request scope). Tests inject a fake so the
+  // workers pool (no Postgres) can drive the DO orchestration end-to-end.
+  public persister: RunStatePersister | null = null;
+
+  // Test seam: base backoff for the bounded terminal-flush retry. Undefined →
+  // the withBoundedRetry default. Tests set 0 so retry cases don't add wall-clock.
+  public flushRetryDelayMs?: number;
 
   constructor(state: DurableObjectStateLike, env: TalkRunnerEnv) {
     this.state = state;
     this.env = env;
+    // PR-B: wire the production plan rebuild for cross-eviction resume/retry.
+    // Loads the run + prompt from Postgres and returns a one-step executor plan
+    // (the same shape runOne builds), opening its own request scope (resume/alarm
+    // callers have none) plus a fresh scope inside the step for the executor.
+    // GATED on a DB binding: the rebuild needs Postgres, so it stays null when
+    // there is none (the workers test pool) — exactly the DO-local fallback the
+    // alarm watchdog already handles (fail an expired step it can't rebuild).
+    // Tests with their own stub plans overwrite this after construction.
+    if (
+      (this.env as { DB?: { connectionString?: string } }).DB?.connectionString
+    ) {
+      this.planProvider = (runId) => this.buildResumePlan(runId);
+    }
     // Schema must exist before any method touches storage, and the 4A startup
     // resume scan must run before any incoming fetch()/RPC sees stale in-flight
     // rows. blockConcurrencyWhile defers all delivery (including alarm()) until
@@ -279,6 +352,18 @@ export class TalkRunner {
       this.ensureSchema();
       await this.recoverInFlightRuns();
     });
+    // PR-B: best-effort re-flush of any run that reached terminal in DO SQLite
+    // but whose Postgres write didn't confirm before the eviction/restart
+    // (run_sync.synced=0). DETACHED — never block constructor delivery on a
+    // Postgres round-trip (the §6.3 liveness rule). flushPendingSync no-ops
+    // without opening a scope when nothing is pending; the reconciliation cron
+    // is the durable backstop if this is cut short by another eviction.
+    void this.flushPendingSync().catch((err) =>
+      logger.error(
+        { err, talkId: this.state.id.name },
+        'TalkRunner startup re-flush failed',
+      ),
+    );
   }
 
   // DO SQLite schema — verbatim from the plan sketch (encapsulated-plotting-mist.md):
@@ -314,12 +399,38 @@ export class TalkRunner {
          primary key (run_id, idx)
        )`,
     );
+    // PR-B write-behind durability: tracks whether a run that reached terminal
+    // in DO SQLite has had its terminal state CONFIRMED in Postgres. markRunTerminal
+    // inserts synced=0 on the winning transition; the terminal flush sets synced=1
+    // on a confirmed persist. A restart / reconciliation re-flushes synced=0 rows
+    // (the completed-run payload lives durably in the last step checkpoint, so a
+    // re-flush needs no executor re-run).
+    this.sql.exec(
+      `create table if not exists run_sync (
+         run_id text primary key,
+         synced integer not null default 0,
+         updated_at integer not null
+       )`,
+    );
   }
 
   // ─── HTTP surface ──────────────────────────────────────────────────────
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
     switch (url.pathname) {
+      case '/start':
+        // PR-B: the production dispatch entry. PR-C flips /chat to call this
+        // (replacing the queue send); dormant until then (the flag is OFF).
+        return this.handleStart(request);
+      case '/reconcile':
+        // PR-B: the reconciliation cron pings this for a do-path run that
+        // Postgres still shows queued/running, to flush any pending DO terminal.
+        return this.handleReconcile(url.searchParams.get('runId') ?? '');
+      case '/cancel':
+        // PR-B: /chat/cancel pings this for a do-path run so the DO (whose
+        // streaming guard reads DO SQLite, not Postgres) observes the cancel and
+        // stops streaming. Dormant until PR-C routes cancels here.
+        return this.handleCancel(request);
       case '/dev/run':
         return this.handleDevRun(request);
       case '/debug/state':
@@ -654,16 +765,32 @@ export class TalkRunner {
   // Monotonic terminal transition: a run moves running → terminal exactly once
   // and never terminal → terminal. So cancel can't be clobbered by a late
   // completed/failed (and vice-versa). Returns whether THIS call won.
+  //
+  // PR-B: the SINGLE terminal chokepoint (driveRun, cancel, failStepAndRun,
+  // resumeRun all flip terminal here), so it is also where a run is registered
+  // as needing a Postgres write-behind flush. On the winning transition it
+  // upserts run_sync(synced=0); the terminal flush later sets synced=1. Done
+  // synchronously with the status flip so a crash immediately after still leaves
+  // a durable "needs flush" marker for the restart/reconciliation backstop.
   private markRunTerminal(runId: string, status: RunStatus): boolean {
-    return (
+    const now = Date.now();
+    const won =
       this.sql.exec(
         `update runs_local set status=?, updated_at=?
          where run_id=? and status='running'`,
         status,
-        Date.now(),
+        now,
         runId,
-      ).rowsWritten > 0
-    );
+      ).rowsWritten > 0;
+    if (won) {
+      this.sql.exec(
+        `insert into run_sync (run_id, synced, updated_at) values (?, 0, ?)
+         on conflict(run_id) do nothing`,
+        runId,
+        now,
+      );
+    }
+    return won;
   }
 
   private clearDeadline(runId: string, idx: number): void {
@@ -760,6 +887,15 @@ export class TalkRunner {
           );
         }
       }
+      // PR-B: a watchdog-failed run is now terminal-in-DO but unsynced — push it
+      // to Postgres so the UI/snapshot reflects the failure promptly rather than
+      // waiting for the reconciliation cron. Best-effort (the cron backstops).
+      await this.flushPendingSync().catch((err) =>
+        logger.error(
+          { err, talkId: this.state.id.name },
+          'TalkRunner alarm flush failed',
+        ),
+      );
     } finally {
       // ALWAYS re-point the alarm — even if the scan threw — so a transient
       // error can't strand the watchdog with no future alarm (the remaining
@@ -782,13 +918,12 @@ export class TalkRunner {
   // triggered. Runs inside the constructor's blockConcurrencyWhile; per-run
   // errors are swallowed so one bad run can't reset the DO.
   //
-  // A2 is DO-LOCAL: planProvider is null, so every resumeRun here either FAILS
-  // an expired step or DEFERS (logs) a resumable one — both are O(1), so the
-  // constructor stays brief. PR-B WIRES planProvider; when it does it MUST make
-  // the resume RE-RUN path detached (don't `await` a full executeRun inside
-  // blockConcurrencyWhile, or DO startup blocks on the whole run, up to the 30s
-  // ceiling). The dedup in executeRun makes a detached resume safe against
-  // racing inbound traffic.
+  // PR-B WIRES planProvider, so a resumable run here can RE-DRIVE. The re-drive
+  // is DETACHED (detachRedrive:true): an expired step still fails O(1) inline,
+  // but a full re-run must NOT block the constructor's blockConcurrencyWhile (it
+  // would stall DO startup on the whole run, up to the 30s ceiling). The dedup
+  // in executeRun makes a detached resume safe against racing inbound traffic;
+  // the detached re-drive re-flushes Postgres when it lands.
   async recoverInFlightRuns(): Promise<void> {
     const runs = this.sql
       .exec<{
@@ -799,7 +934,7 @@ export class TalkRunner {
       .toArray();
     for (const { run_id } of runs) {
       try {
-        await this.resumeRun(run_id);
+        await this.resumeRun(run_id, { detachRedrive: true });
       } catch (err) {
         logger.error(
           { err, runId: run_id, talkId: this.state.id.name },
@@ -828,7 +963,17 @@ export class TalkRunner {
   //               between-steps eviction can never strand a run.
   // Idempotent under concurrency: a live invocation owns the run (inFlight) so
   // the re-drive branch defers to it rather than double-executing a step.
-  async resumeRun(runId: string): Promise<void> {
+  //
+  // PR-B: `detachRedrive` makes the RE-DRIVE branch fire-and-forget. The
+  // constructor (recoverInFlightRuns) passes true so DO startup never blocks its
+  // blockConcurrencyWhile on a whole re-run (the rule the A2 header flagged for
+  // when PR-B wires planProvider). The alarm/direct callers leave it false: the
+  // alarm only ever hits the FAIL/RETRY branches for an expired step (never the
+  // awaited RE-DRIVE), and the A2 tests await the re-drive to assert completion.
+  async resumeRun(
+    runId: string,
+    opts?: { detachRedrive?: boolean },
+  ): Promise<void> {
     const run = this.readRun(runId);
     if (!run || isTerminalRunStatus(run.status)) return;
 
@@ -917,12 +1062,30 @@ export class TalkRunner {
     if (!plan) {
       logger.warn(
         { runId, talkId: this.state.id.name },
-        'TalkRunner resume: no plan provider (DO-local A2); deferring to alarm/reconciliation',
+        'TalkRunner resume: plan rebuild returned null; deferring to alarm/reconciliation',
       );
       return;
     }
     // Re-check after the await: a live invocation may have started meanwhile.
     if (this.inFlight.has(runId)) return;
+    if (opts?.detachRedrive) {
+      // Constructor path: do NOT await the whole re-run (it would block DO
+      // startup). keepAlive (not bare void) so a short instantiating invocation
+      // (e.g. a reconcile probe) can't have the runtime evict this recovery
+      // re-drive after its response. Re-flush the terminal state once it lands;
+      // errors are the reconciliation cron's problem, not the constructor's.
+      this.keepAlive(
+        this.executeRun(runId, plan)
+          .then(() => this.flushPendingSync())
+          .catch((err) =>
+            logger.error(
+              { err, runId, talkId: this.state.id.name },
+              'TalkRunner detached resume re-drive failed',
+            ),
+          ),
+      );
+      return;
+    }
     await this.executeRun(runId, plan);
   }
 
@@ -1031,11 +1194,17 @@ export class TalkRunner {
     // Re-drive detached; errors logged. executeRun's terminal gate drops a run
     // cancelled during the rebuild; claimStep ADOPTS the pending attempt (no
     // re-bump). The fence from claimRetry already holds regardless of timing.
-    void this.executeRun(runId, plan).catch((err) =>
-      logger.error(
-        { err, runId, idx, talkId: this.state.id.name },
-        'TalkRunner retry re-drive failed',
-      ),
+    // PR-B: re-flush Postgres once the retried run lands terminal, and keepAlive
+    // so the alarm invocation doesn't let the DO evict the re-drive mid-flight.
+    this.keepAlive(
+      this.executeRun(runId, plan)
+        .then(() => this.flushPendingSync())
+        .catch((err) =>
+          logger.error(
+            { err, runId, idx, talkId: this.state.id.name },
+            'TalkRunner retry re-drive failed',
+          ),
+        ),
     );
   }
 
@@ -1067,11 +1236,666 @@ export class TalkRunner {
     return { run, steps, deadlines };
   }
 
-  // ─── Dev-only route: real executor, one step, end-to-end ─────────────────
+  // ─── Request scope + persister seams (PR-B) ─────────────────────────────
+
+  private dbScopeBindings(): DbScopeEnvBindings {
+    return {
+      DB_EVENT_HUB_URL: this.env.DB_EVENT_HUB_URL,
+      USER_EVENT_HUB: this.env.USER_EVENT_HUB,
+      TALK_RUN_QUEUE: this.env.TALK_RUN_QUEUE,
+      ATTACHMENTS: this.env.ATTACHMENTS,
+    };
+  }
+
+  // The DO establishes its OWN request scope from the script-wide Hyperdrive
+  // binding — there is no inbound HTTP request scope to inherit. ctx is null, so
+  // withRequestScopedDb awaits its closes/flushes inline at scope end.
+  private withDoRequestScope<T>(fn: () => Promise<T>): Promise<T> {
+    const bindings = this.dbScopeBindings();
+    return withRequestScopedDb(
+      this.env.DB.connectionString,
+      null,
+      bindings,
+      () => withNotifyQueueScope(bindings, null, fn),
+    );
+  }
+
+  private getPersister(): RunStatePersister {
+    return this.persister ?? createDefaultRunStatePersister();
+  }
+
+  // Run `fn` where the persister can reach Postgres. An INJECTED persister
+  // (tests) needs no scope — run inline (the workers pool has no DB binding).
+  // The default persister uses getDbPg, so open the DO request scope.
+  private withPersisterScope<T>(fn: () => Promise<T>): Promise<T> {
+    if (this.persister) return fn();
+    return this.withDoRequestScope(fn);
+  }
+
+  // The AWAITED terminal persist wrapper (docs/13 §6.3 "bounded retry").
+  private boundedFlush<T>(fn: () => Promise<T>, label: string): Promise<T> {
+    return withBoundedRetry(fn, {
+      attempts: TERMINAL_FLUSH_ATTEMPTS,
+      baseDelayMs: this.flushRetryDelayMs,
+      label,
+    });
+  }
+
+  // ─── Production dispatch entry (PR-B) ─────────────────────────────────────
   //
-  // Proves the DO can host GreenfieldTalkExecutor UNCHANGED and drive it to a
-  // terminal step. The Worker-side route that forwards here is auth + env
-  // gated; this second env check is defence in depth.
+  // start(runIds): what PR-C flips /chat to call instead of the queue send
+  // (docs/13 §6.1 — "TalkRunner.start(runIds) replaces dispatch"). Dormant in
+  // PR-B (the per-account flag is OFF).
+  //
+  // DECOUPLED FROM THE CALLER (critical): runs are kicked off DETACHED and start
+  // returns fast. /chat (or PR-C's dispatch) must NOT hold the DO invocation
+  // open for the run's duration — that would re-impose the ~30s caller ceiling
+  // 6A removed. The DO keeps each run alive via its inFlight promise + the step
+  // alarm; if an eviction cuts a run short, startup recovery (4A) re-drives it
+  // and the reconciliation cron backstops. Parallel-mode runs run concurrently
+  // (the DO interleaves at awaits, §6.3); ordered-mode runs run sequentially.
+  // Each run gets its own request scope; runOne flushes its own terminal. (The
+  // full /chat-during-eviction retry contract is the PR-C smoke — docs/13 §9.)
+  async start(runIds: string[]): Promise<{ started: string[] }> {
+    if (runIds.length === 0) return { started: [] };
+    const first = await this.withDoRequestScope(() =>
+      getGreenfieldQueueRunById(runIds[0]!),
+    );
+    const mode = first?.talk_mode ?? 'ordered';
+    const runDetached = (runId: string): Promise<void> =>
+      this.withDoRequestScope(() => this.runOne(runId))
+        .then(() => undefined)
+        .catch((err) =>
+          logger.error(
+            { err, runId, talkId: this.state.id.name },
+            'TalkRunner start: run failed',
+          ),
+        );
+    // keepAlive (not bare void): the runtime must not evict the DO while these
+    // detached runs are in flight, or a run is cut short before its terminal
+    // flush (startup recovery / reconciliation would then backstop, but at the
+    // cost of a wasted turn). waitUntil keeps the DO awake for the run's life
+    // without holding the /start response open.
+    if (mode === 'parallel') {
+      for (const runId of runIds) this.keepAlive(runDetached(runId));
+    } else {
+      this.keepAlive(
+        (async () => {
+          for (const runId of runIds) await runDetached(runId);
+        })(),
+      );
+    }
+    return { started: runIds };
+  }
+
+  // Keep the DO alive until `promise` settles (waitUntil when the runtime
+  // exposes it; a bare detached promise otherwise — e.g. test harnesses).
+  private keepAlive(promise: Promise<unknown>): void {
+    if (this.state.waitUntil) this.state.waitUntil(promise);
+    else void promise;
+  }
+
+  private async handleStart(request: Request): Promise<Response> {
+    let runIds: string[] = [];
+    try {
+      const body = (await request.json()) as { runIds?: unknown };
+      if (Array.isArray(body.runIds)) {
+        runIds = body.runIds.filter((r): r is string => typeof r === 'string');
+      }
+    } catch {
+      /* fall through to the empty guard */
+    }
+    if (runIds.length === 0) {
+      return jsonResponse(
+        {
+          ok: false,
+          error: { code: 'invalid_request', message: 'runIds required' },
+        },
+        400,
+      );
+    }
+    const result = await this.start(runIds);
+    return jsonResponse({ ok: true, data: result });
+  }
+
+  private async handleReconcile(runId: string): Promise<Response> {
+    if (!runId) {
+      return jsonResponse(
+        {
+          ok: false,
+          error: { code: 'invalid_request', message: 'runId required' },
+        },
+        400,
+      );
+    }
+    const result = await this.reconcileRun(runId);
+    return jsonResponse({ ok: true, data: result });
+  }
+
+  // PR-B: cancel do-path runs from the /chat/cancel route. The cancel route
+  // already flips Postgres → cancelled + emits talk_run_cancelled; this makes the
+  // DO observe it (its streaming guard reads DO SQLite, not Postgres) so it stops
+  // streaming and abandons the work. cancel() is the A3 RPC; flushPendingSync
+  // then reconciles run_sync (persistCancelled no-ops against the already-cancelled
+  // PG row, so there is NO duplicate cancel event).
+  private async handleCancel(request: Request): Promise<Response> {
+    let runIds: string[] = [];
+    try {
+      const body = (await request.json()) as { runIds?: unknown };
+      if (Array.isArray(body.runIds)) {
+        runIds = body.runIds.filter((r): r is string => typeof r === 'string');
+      }
+    } catch {
+      /* fall through to the empty guard */
+    }
+    if (runIds.length === 0) {
+      return jsonResponse(
+        {
+          ok: false,
+          error: { code: 'invalid_request', message: 'runIds required' },
+        },
+        400,
+      );
+    }
+    const results: Array<{
+      runId: string;
+      cancelled: boolean;
+      status: RunStatus | null;
+    }> = [];
+    for (const runId of runIds) {
+      results.push({ runId, ...(await this.cancel(runId)) });
+    }
+    // Persist the DO cancellations (clears run_sync; PG is already cancelled by
+    // the route, so this is a no-op flush — no double event).
+    await this.flushPendingSync().catch((err) =>
+      logger.error(
+        { err, talkId: this.state.id.name },
+        'TalkRunner cancel flush failed',
+      ),
+    );
+    return jsonResponse({ ok: true, data: { results } });
+  }
+
+  // The production single-run path: claim queued→running (+ talk_run_started) →
+  // stream the executor's events live to the hub (3A) → execute the executor as
+  // ONE step → flush the terminal state to Postgres (awaited, bounded retry),
+  // which emits the terminal event. Assumes the CALLER opened the request scope
+  // (handleDevRun / start). Reuses GreenfieldTalkExecutor unchanged.
+  private async runOne(runId: string): Promise<RunOneResult> {
+    // Cross-talk guard (this DO is idFromName(talkId)): never run another talk's
+    // run under this DO and strand its step log here.
+    const doTalkId = this.state.id.name;
+    const pre = await getGreenfieldQueueRunById(runId);
+    if (!pre) return { devStatus: 'not_found' };
+    if (doTalkId !== undefined && pre.talk_id !== doTalkId) {
+      return {
+        devStatus: 'talk_mismatch',
+        expectedTalkId: doTalkId,
+        actualTalkId: pre.talk_id,
+      };
+    }
+
+    // Eager running write (claim) — done before streaming so talk_run_started
+    // precedes the response deltas (matches v1 ordering; zero frontend changes).
+    const claim = await this.getPersister().claimRunning(runId);
+    if (claim.status !== 'claimed') {
+      return { devStatus: 'not_claimable', claim: claim.status };
+    }
+    const run = claim.run;
+
+    const promptInput = run.trigger_message_id
+      ? await getGreenfieldTriggerMessageById(run.trigger_message_id)
+      : {
+          id: null,
+          body: await getGreenfieldRunPromptSnapshotText(run.id),
+        };
+    if (!promptInput?.body) {
+      await this.boundedFlush(
+        () =>
+          this.getPersister().persistFailed({
+            runId: run.id,
+            errorCode: 'prompt_snapshot_missing',
+            errorMessage: 'Run missing trigger message / prompt snapshot text',
+          }),
+        'persistFailed(prompt)',
+      ).catch((err) =>
+        logger.error(
+          { err, runId: run.id, talkId: this.state.id.name },
+          'TalkRunner: failed to persist prompt-missing failure',
+        ),
+      );
+      return { devStatus: 'prompt_missing' };
+    }
+
+    const { emit, drain } = this.buildStreamingEmit(run);
+    const { plan, getCapturedError } = this.buildExecutorPlan(
+      run,
+      promptInput.id ?? '',
+      promptInput.body,
+      emit,
+      drain,
+      false,
+    );
+    // The step drains the streamed inserts in its finally (before the run goes
+    // terminal), so by here every delta's event_id is below the terminal event's.
+    const outcome = await this.executeRun(run.id, plan);
+    await this.flushTerminal(run.id, {
+      capturedError: getCapturedError(),
+      outcomeStatus: outcome.status,
+    });
+    return { devStatus: outcome.status, outcome };
+  }
+
+  // Build the one-step executor plan. The step's checkpoint IS the durable
+  // terminal-flush payload (text/metadata + a stable response message id, never
+  // inlined binary), so a restart re-flushes a completed run from SQLite without
+  // re-running the executor. selfScope=true wraps the executor in its OWN request
+  // scope (the resume path has no ambient scope); false assumes the caller's.
+  private buildExecutorPlan(
+    run: GreenfieldQueueRunRecord,
+    triggerMessageId: string,
+    triggerContent: string,
+    emit: (event: TalkExecutionEvent) => void,
+    drain: () => Promise<void>,
+    selfScope: boolean,
+  ): { plan: TalkRunnerRunPlan; getCapturedError: () => unknown } {
+    const input: TalkExecutorInput = {
+      runId: run.id,
+      talkId: run.talk_id,
+      requestedBy: run.requested_by,
+      triggerMessageId,
+      triggerContent,
+      jobId: run.job_id ?? null,
+      targetAgentId: run.target_agent_id,
+      responseGroupId: run.response_group_id ?? null,
+      sequenceIndex: run.sequence_index ?? null,
+    };
+    let capturedError: unknown = null;
+    const runStep = async (
+      signal: AbortSignal,
+    ): Promise<TalkRunnerStepResult> => {
+      // 8A honesty: the whole opaque executor.execute() is ONE step. Per-LLM /
+      // per-tool-batch decomposition (finer 8A granularity) needs the executor
+      // to surface step boundaries — later Phase 2 work.
+      const startedAt = Date.now();
+      try {
+        const output = await new GreenfieldTalkExecutor().execute(
+          input,
+          signal,
+          emit,
+        );
+        const responseContent = stripLeadingAgentLabel(
+          stripInternalTalkResponseText(output.content),
+          output.agentNickname,
+        );
+        const responseMetadata = output.metadataJson
+          ? (JSON.parse(output.metadataJson) as Record<string, unknown>)
+          : null;
+        const payload: RunCompletedPayload = {
+          runId: run.id,
+          // Stable across re-flush-from-checkpoint; a re-RUN gets a new id but
+          // the persister's status CAS prevents a duplicate message either way.
+          responseMessageId: crypto.randomUUID(),
+          responseContent,
+          responseMetadata,
+          agentId: output.agentId ?? null,
+          agentNickname: output.agentNickname ?? null,
+          providerId: output.providerId ?? null,
+          modelId: output.modelId ?? null,
+          latencyMs: Date.now() - startedAt,
+          usage: output.usage ?? null,
+          responseSequenceInRun: output.responseSequenceInRun ?? null,
+        };
+        // Reference-based (8A): text/metadata only. serializeCheckpoint rejects
+        // inlined binary, so a base64-bytes regression fails loudly here.
+        return { checkpoint: { kind: COMPLETED_PAYLOAD_KIND, payload } };
+      } catch (err) {
+        capturedError = err;
+        throw err; // let the state machine record the step failure
+      } finally {
+        // Drain the streamed outbox inserts INSIDE the step — before the run can
+        // go terminal and the terminal event is emitted — so the terminal
+        // event_id is always above every delta's (gap-free replay, 3A). In the
+        // finally so it covers BOTH success and failure, and BOTH the runOne and
+        // resume/retry paths (whose terminal flush is a separate flushPendingSync
+        // that can't see this emit's pending set).
+        await drain();
+      }
+    };
+    const plan: TalkRunnerRunPlan = [
+      {
+        kind: 'llm',
+        execute: selfScope
+          ? (signal) => this.withDoRequestScope(() => runStep(signal))
+          : runStep,
+      },
+    ];
+    return { plan, getCapturedError: () => capturedError };
+  }
+
+  // 3A: forward the executor's stream events to the hub via the SAME
+  // insert-before-push path the queue consumer uses (emitOutboxEventOutsideTx —
+  // durable INSERT then coalesced notify). Streaming events are NOT
+  // write-behind-batched: each is inserted immediately so replay stays gap-free
+  // (only run/message STATE is batched). Each emit is GATED on the run still
+  // being 'running' in DO SQLite, so after cancel/watchdog flips it terminal a
+  // zombie provider's late deltas are dropped — the durable analog of the queue
+  // consumer's runAbandoned guard (same run-status fence as casStepWrite).
+  //
+  // Returns `drain`: each emit's outbox INSERT is fire-and-forget (the executor
+  // emits synchronously), but they run on the out-of-band connection while the
+  // terminal flush runs on the request-scoped one — different connections, so a
+  // pending delta could otherwise commit a HIGHER event_id than the terminal
+  // event, reordering replay. runOne awaits drain() before flushTerminal so every
+  // streamed event's event_id is below the terminal event's (gap-free replay).
+  private buildStreamingEmit(run: GreenfieldQueueRunRecord): {
+    emit: (event: TalkExecutionEvent) => void;
+    drain: () => Promise<void>;
+  } {
+    let sanitizer: TalkResponseStreamSanitizer | null = null;
+    const pending: Promise<unknown>[] = [];
+    const emit = (event: TalkExecutionEvent): void => {
+      if (this.readRun(run.id)?.status !== 'running') return;
+      let routed: TalkExecutionEvent = event;
+      if (event.type === 'talk_response_started') {
+        sanitizer = createTalkResponseStreamSanitizer(run.target_agent_name);
+      } else if (event.type === 'talk_response_delta') {
+        if (!sanitizer) {
+          sanitizer = createTalkResponseStreamSanitizer(run.target_agent_name);
+        }
+        const deltaText = sanitizer.push(event.deltaText);
+        if (!deltaText) return;
+        routed = { ...event, deltaText };
+      } else if (
+        event.type === 'talk_response_completed' ||
+        event.type === 'talk_response_failed' ||
+        event.type === 'talk_response_cancelled'
+      ) {
+        sanitizer = null;
+      }
+      pending.push(
+        emitOutboxEventOutsideTx({
+          topic: `talk:${routed.talkId}`,
+          eventType: routed.type,
+          payload: routed as unknown as Record<string, unknown>,
+          ownerIds: run.owner_ids,
+        }).catch((err) =>
+          logger.warn(
+            { err, eventType: routed.type },
+            'TalkRunner outbox emit failed',
+          ),
+        ),
+      );
+    };
+    return {
+      emit,
+      drain: async () => void (await Promise.allSettled(pending)),
+    };
+  }
+
+  // ─── Write-behind terminal flush (PR-B) ─────────────────────────────────
+
+  // Mirror the DO's durable terminal truth into Postgres (awaited, bounded
+  // retry). Reads runs_local.status — NOT the in-memory outcome — so a cancel
+  // that won the DO CAS flushes 'cancelled', never a stale 'completed'. The
+  // accessors are idempotent + monotonic (their `where status='running'` CAS),
+  // so a re-flush after a committed terminal is a no-op with NO duplicate event.
+  // On success, mark synced=1; on exhaustion, leave it 0 for the backstop.
+  // Assumes an ambient persister scope (the caller provides it).
+  private async flushTerminal(
+    runId: string,
+    hint?: { capturedError?: unknown; outcomeStatus?: string },
+  ): Promise<void> {
+    const run = this.readRun(runId);
+    if (!run || !isTerminalRunStatus(run.status)) return;
+    const persister = this.getPersister();
+    try {
+      if (run.status === 'completed') {
+        const payload = this.readCompletedPayload(runId);
+        if (!payload) {
+          // A 'completed' run with no durable response payload (checkpoint
+          // corruption / an unexpected plan shape — the production plan always
+          // writes one). We cannot persist it as completed, and returning would
+          // leave it unsynced forever → a per-minute reconciliation poison-spin.
+          // Fail it in Postgres instead so the run reaches a terminal state, the
+          // UI moves on, and run_sync is marked (no spin).
+          logger.error(
+            { runId, talkId: this.state.id.name },
+            'TalkRunner: completed run has no payload checkpoint; failing it in PG to avoid a reconciliation poison-spin',
+          );
+          await this.boundedFlush(
+            () =>
+              persister.persistFailed({
+                runId,
+                errorCode: 'talk_runner_missing_payload',
+                errorMessage:
+                  'Completed run had no durable response payload to persist',
+              }),
+            'persistFailed(missing-payload)',
+          );
+          this.markSynced(runId);
+          return;
+        }
+        await this.boundedFlush(
+          () => persister.persistCompleted(payload),
+          'persistCompleted',
+        );
+      } else if (run.status === 'failed') {
+        const { code, message } = failureReason(
+          hint?.capturedError,
+          hint?.outcomeStatus,
+        );
+        await this.boundedFlush(
+          () =>
+            persister.persistFailed({
+              runId,
+              errorCode: code,
+              errorMessage: message,
+            }),
+          'persistFailed',
+        );
+      } else if (run.status === 'cancelled') {
+        await this.boundedFlush(
+          () => persister.persistCancelled({ runId }),
+          'persistCancelled',
+        );
+      }
+      this.markSynced(runId);
+    } catch (err) {
+      logger.error(
+        { err, runId, status: run.status, talkId: this.state.id.name },
+        'TalkRunner terminal flush exhausted retries; left unsynced for reconciliation',
+      );
+    }
+  }
+
+  private readCompletedPayload(runId: string): RunCompletedPayload | null {
+    const row = this.sql
+      .exec<{
+        checkpoint_json: string | null;
+      }>(
+        `select checkpoint_json from steps where run_id=? and status='checkpoint' order by idx desc limit 1`,
+        runId,
+      )
+      .toArray()[0];
+    if (!row?.checkpoint_json) return null;
+    try {
+      const parsed = JSON.parse(row.checkpoint_json) as {
+        kind?: string;
+        payload?: RunCompletedPayload;
+      };
+      if (
+        parsed?.kind === COMPLETED_PAYLOAD_KIND &&
+        parsed.payload?.runId === runId
+      ) {
+        return parsed.payload;
+      }
+    } catch {
+      /* fall through → null */
+    }
+    return null;
+  }
+
+  private markSynced(runId: string): void {
+    this.sql.exec(
+      `update run_sync set synced=1, updated_at=? where run_id=?`,
+      Date.now(),
+      runId,
+    );
+  }
+
+  // Re-flush every run terminal-in-DO but unconfirmed in Postgres
+  // (run_sync.synced=0): the DO eviction/restart backstop + the alarm/retry/cron
+  // follow-up. Idempotent (the persister no-ops an already-terminal PG row).
+  // Cheap: opens NO scope when nothing is pending, and skips entirely when no
+  // Postgres is reachable (workers tests without an injected persister) — the
+  // reconciliation cron is the durable backstop.
+  async flushPendingSync(): Promise<void> {
+    const pending = this.sql
+      .exec<{ run_id: string }>(
+        `select rs.run_id from run_sync rs
+         join runs_local r on r.run_id = rs.run_id
+         where rs.synced = 0 and r.status in ('completed','failed','cancelled')`,
+      )
+      .toArray();
+    if (pending.length === 0) return;
+    const conn = (this.env as { DB?: { connectionString?: string } }).DB
+      ?.connectionString;
+    if (!this.persister && !conn) {
+      logger.debug(
+        { talkId: this.state.id.name, pending: pending.length },
+        'TalkRunner flushPendingSync: no Postgres reachable; deferring to reconciliation',
+      );
+      return;
+    }
+    await this.withPersisterScope(async () => {
+      for (const { run_id } of pending) {
+        try {
+          await this.flushTerminal(run_id);
+        } catch (err) {
+          logger.error(
+            { err, runId: run_id, talkId: this.state.id.name },
+            'TalkRunner pending flush failed',
+          );
+        }
+      }
+    });
+  }
+
+  // Reconciliation entry for the PATH-AWARE cron (it pings this for a do-path run
+  // Postgres still shows queued/running). Returns the action so the cron can
+  // decide whether to flag a genuinely stuck run (no_record after the grace).
+  async reconcileRun(runId: string): Promise<{
+    action:
+      | 'flushed'
+      | 'noop_synced'
+      | 'noop_running'
+      | 'flush_failed'
+      | 'no_record';
+    status: RunStatus | null;
+  }> {
+    const run = this.readRun(runId);
+    if (!run) return { action: 'no_record', status: null };
+    if (!isTerminalRunStatus(run.status)) {
+      return { action: 'noop_running', status: run.status };
+    }
+    const synced = this.sql
+      .exec<{
+        synced: number;
+      }>(`select synced from run_sync where run_id=?`, runId)
+      .toArray()[0]?.synced;
+    if (synced === 1) return { action: 'noop_synced', status: run.status };
+    await this.withPersisterScope(() => this.flushTerminal(runId));
+    const after = this.sql
+      .exec<{
+        synced: number;
+      }>(`select synced from run_sync where run_id=?`, runId)
+      .toArray()[0]?.synced;
+    return {
+      action: after === 1 ? 'flushed' : 'flush_failed',
+      status: run.status,
+    };
+  }
+
+  // PR-B production plan rebuild (the planProvider seam). Loads the run + prompt
+  // from Postgres in its OWN scope (resume/alarm callers have none) and returns a
+  // one-step executor plan whose step opens a FRESH scope (selfScope). Rehydrates
+  // any R2 page-image refs the latest checkpoint carries via attachment-storage
+  // before re-drive (a no-op for the current text-only output checkpoints; the
+  // 8A seam the multi-page-PDF round-trip exercises). null ⇒ can't rebuild
+  // (missing row / wrong talk / no prompt) → resumeRun defers to the cron.
+  private async buildResumePlan(
+    runId: string,
+  ): Promise<TalkRunnerRunPlan | null> {
+    const built = await this.withDoRequestScope(async () => {
+      const run = await getGreenfieldQueueRunById(runId);
+      if (!run) return null;
+      if (
+        this.state.id.name !== undefined &&
+        run.talk_id !== this.state.id.name
+      ) {
+        return null;
+      }
+      const promptInput = run.trigger_message_id
+        ? await getGreenfieldTriggerMessageById(run.trigger_message_id)
+        : { id: null, body: await getGreenfieldRunPromptSnapshotText(run.id) };
+      if (!promptInput?.body) return null;
+      await this.rehydrateCheckpointImageRefs(runId);
+      return {
+        run,
+        triggerMessageId: promptInput.id ?? '',
+        triggerContent: promptInput.body,
+      };
+    });
+    if (!built) return null;
+    // Resume re-streams: the step's finally drains these inserts before the run
+    // goes terminal, so the resume path's terminal flush (flushPendingSync) is
+    // also gap-free — same guarantee as runOne.
+    const { emit, drain } = this.buildStreamingEmit(built.run);
+    return this.buildExecutorPlan(
+      built.run,
+      built.triggerMessageId,
+      built.triggerContent,
+      emit,
+      drain,
+      true,
+    ).plan;
+  }
+
+  // 8A resume rehydration: load (and thereby confirm the presence of) every R2
+  // page-image ref the latest checkpoint carries, via attachment-storage's
+  // loadAttachmentFile (the production loader the checkpoint test stands in for
+  // with a fake). No-op for text-only output checkpoints. Failures throw → the
+  // plan rebuild returns null and resumeRun defers rather than re-driving over
+  // missing blobs. Must run inside a request scope (loadAttachmentFile needs the
+  // ATTACHMENTS binding).
+  private async rehydrateCheckpointImageRefs(runId: string): Promise<void> {
+    const row = this.sql
+      .exec<{
+        checkpoint_json: string | null;
+      }>(
+        `select checkpoint_json from steps where run_id=? and status='checkpoint' order by idx desc limit 1`,
+        runId,
+      )
+      .toArray()[0];
+    if (!row?.checkpoint_json) return;
+    let checkpoint: unknown;
+    try {
+      checkpoint = JSON.parse(row.checkpoint_json);
+    } catch {
+      return;
+    }
+    for (const ref of collectCheckpointImageRefs(checkpoint)) {
+      await loadAttachmentFile(ref.storageKey);
+    }
+  }
+
+  // ─── Dev-only route ──────────────────────────────────────────────────────
+  //
+  // Drives ONE run end-to-end through the production runOne path (write-behind +
+  // 3A streaming). Auth + env gated by the Worker route; this env check is
+  // defence in depth. The manual "full streamed turn against the local stack"
+  // smoke (docs/13 §6.4 PR-B) runs through here.
   private async handleDevRun(request: Request): Promise<Response> {
     if (this.env.CLAWTALK_DEV_TALK_RUNNER !== '1') {
       return new Response('not found', { status: 404 });
@@ -1092,199 +1916,8 @@ export class TalkRunner {
         400,
       );
     }
-
-    const envBindings: DbScopeEnvBindings = {
-      DB_EVENT_HUB_URL: this.env.DB_EVENT_HUB_URL,
-      USER_EVENT_HUB: this.env.USER_EVENT_HUB,
-      TALK_RUN_QUEUE: this.env.TALK_RUN_QUEUE,
-      ATTACHMENTS: this.env.ATTACHMENTS,
-    };
-
-    // The DO establishes its OWN request scope from the script-wide Hyperdrive
-    // binding — there is no inbound HTTP request scope to inherit. ctx is null,
-    // so withRequestScopedDb awaits its closes/flushes inline at scope end.
-    const data = await withRequestScopedDb(
-      this.env.DB.connectionString,
-      null,
-      envBindings,
-      () =>
-        withNotifyQueueScope(envBindings, null, () =>
-          this.runRealExecutor(runId),
-        ),
-    );
+    const data = await this.withDoRequestScope(() => this.runOne(runId));
     return jsonResponse({ ok: true, data });
-  }
-
-  private async runRealExecutor(
-    runId: string,
-  ): Promise<Record<string, unknown>> {
-    // Per-Talk DO isolation: this DO is idFromName(talkId), so id.name IS the
-    // talkId. Verify the run belongs to THIS talk BEFORE claiming — a wrong
-    // talkId in the dev request would otherwise flip another talk's run to
-    // 'running' under this DO and strand its step log here (mirrors the D8
-    // cross-DO guard in user-event-hub.ts).
-    const doTalkId = this.state.id.name;
-    const pre = await getGreenfieldQueueRunById(runId);
-    if (!pre) return { devStatus: 'not_found' };
-    if (doTalkId !== undefined && pre.talk_id !== doTalkId) {
-      return {
-        devStatus: 'talk_mismatch',
-        expectedTalkId: doTalkId,
-        actualTalkId: pre.talk_id,
-      };
-    }
-
-    // Reuse the v1 claim accessor verbatim — the executor refuses to run
-    // unless the row is 'running'. (Synchronous PG lifecycle here mirrors the
-    // queue consumer; it is NOT the v2 write-behind contract — that is PR-B.
-    // NB: A1's dev path has NO watchdog — a wedged executor here is not failed
-    // until A2 adds the alarm; do not read this route as proof the production
-    // DO path inherits the queue consumer's wedge containment.)
-    const claim = await markGreenfieldRunRunning(runId);
-    if (claim.status !== 'claimed') {
-      return { devStatus: 'not_claimable', claim: claim.status };
-    }
-    const run = claim.run;
-
-    const promptInput = run.trigger_message_id
-      ? await getGreenfieldTriggerMessageById(run.trigger_message_id)
-      : {
-          id: null,
-          workspace_id: run.workspace_id,
-          talk_id: run.talk_id,
-          body: await getGreenfieldRunPromptSnapshotText(run.id),
-        };
-    if (!promptInput?.body) {
-      await failGreenfieldRun({
-        runId: run.id,
-        errorCode: 'prompt_snapshot_missing',
-        errorMessage: 'Run missing trigger message / prompt snapshot text',
-      });
-      return { devStatus: 'prompt_missing' };
-    }
-
-    const input: TalkExecutorInput = {
-      runId: run.id,
-      talkId: run.talk_id,
-      requestedBy: run.requested_by,
-      triggerMessageId: promptInput.id ?? '',
-      triggerContent: promptInput.body,
-      jobId: run.job_id ?? null,
-      targetAgentId: run.target_agent_id,
-      responseGroupId: run.response_group_id ?? null,
-      sequenceIndex: run.sequence_index ?? null,
-    };
-
-    const executor = new GreenfieldTalkExecutor();
-    // A1 does not wire live streaming through the hub (3A is PR-B); deltas are
-    // logged, not emitted. Run lifecycle (started/completed) still reaches the
-    // UI via the reused accessors' own outbox events.
-    const emit = (event: TalkExecutionEvent): void => {
-      logger.debug(
-        { runId: run.id, eventType: event.type },
-        'TalkRunner dev emit (not forwarded to hub in A1)',
-      );
-    };
-
-    let captured: TalkExecutorOutput | null = null;
-    // Capture the executor's real error so the failure persist below records
-    // the executor's code/message (like the queue consumer) instead of a
-    // generic one. runStep stays executor-agnostic — it only sees the throw.
-    let capturedError: unknown = null;
-    const startedAt = Date.now();
-    const plan: TalkRunnerRunPlan = [
-      {
-        kind: 'llm',
-        execute: async (signal) => {
-          // A1 honesty: the whole opaque executor.execute() is ONE step. True
-          // per-LLM-call / per-tool-batch decomposition (8A granularity) needs
-          // the executor to surface step boundaries — later Phase 2 work.
-          try {
-            const output = await executor.execute(input, signal, emit);
-            captured = output;
-            return {
-              checkpoint: {
-                kind: 'executor_output',
-                // Reference-based: text/structure only, no inlined binary.
-                text: output.content,
-                agentId: output.agentId ?? null,
-                providerId: output.providerId ?? null,
-                modelId: output.modelId ?? null,
-              },
-            };
-          } catch (err) {
-            capturedError = err;
-            throw err; // let the state machine record the step failure
-          }
-        },
-      },
-    ];
-
-    const outcome = await this.executeRun(run.id, plan);
-
-    if (outcome.status === 'completed' && captured) {
-      const output: TalkExecutorOutput = captured;
-      const responseContent = stripLeadingAgentLabel(
-        stripInternalTalkResponseText(output.content),
-        output.agentNickname,
-      );
-      const responseMetadata = output.metadataJson
-        ? (JSON.parse(output.metadataJson) as Record<string, unknown>)
-        : null;
-      await completeGreenfieldRun({
-        runId: run.id,
-        responseMessageId: crypto.randomUUID(),
-        responseContent,
-        responseMetadata,
-        agentId: output.agentId,
-        agentNickname: output.agentNickname,
-        providerId: output.providerId,
-        modelId: output.modelId,
-        latencyMs: Date.now() - startedAt,
-        usage: output.usage,
-        responseSequenceInRun: output.responseSequenceInRun,
-      });
-    } else if (outcome.status === 'failed') {
-      await failGreenfieldRun({
-        runId: run.id,
-        errorCode:
-          capturedError instanceof TalkExecutorError
-            ? capturedError.code
-            : 'talk_runner_step_failed',
-        errorMessage:
-          capturedError instanceof Error
-            ? capturedError.message
-            : 'Step failed under the TalkRunner dev route',
-      });
-    } else if (outcome.status === 'abandoned') {
-      // The alarm watchdog (A2) failed this run's step out from under the live
-      // executor — the step's CAS write then lost the race, so executeRun
-      // returned 'abandoned' while the LOCAL run is already 'failed'. Fail the
-      // outer Postgres run too, or the Greenfield queue row is stranded
-      // 'running'. (A1 deemed 'abandoned' unreachable; the A2 watchdog makes it
-      // reachable on the dev path.) The durable cause is ALWAYS the watchdog —
-      // capturedError, if any, is the late executor unwind (an aborted/cleaning-
-      // up provider), a red herring — so record watchdog semantics
-      // unconditionally rather than a misleading provider error.
-      await failGreenfieldRun({
-        runId: run.id,
-        errorCode: 'talk_runner_watchdog_abandoned',
-        errorMessage:
-          'Run step exceeded its deadline and was failed by the TalkRunner watchdog',
-      });
-    } else if (outcome.status === 'cancelled') {
-      // Unreachable on the dev route (it never calls cancel), but the union is
-      // exhaustive: a cancelled run must not strand the Greenfield row 'running'.
-      // Real cancel persistence (status='cancelled', not a failure) is PR-B/PR-C;
-      // here we record a terminal failure so the dev row doesn't leak.
-      await failGreenfieldRun({
-        runId: run.id,
-        errorCode: 'talk_runner_cancelled',
-        errorMessage: 'Run was cancelled via the TalkRunner cancel RPC',
-      });
-    }
-
-    return { devStatus: outcome.status, outcome };
   }
 }
 
@@ -1294,6 +1927,34 @@ function isTerminalRunStatus(status: RunStatus): boolean {
   return (
     status === 'completed' || status === 'failed' || status === 'cancelled'
   );
+}
+
+// Map a DO 'failed' run to the Postgres failure code/message for the flush. An
+// 'abandoned' outcome means the alarm watchdog won the CAS, so the durable cause
+// is the watchdog — capturedError (a late executor unwind) is a red herring and
+// is ignored. A re-flush after a restart has no in-memory error → a generic
+// code. Mirrors the queue consumer's failRun semantics.
+function failureReason(
+  capturedError: unknown,
+  outcomeStatus?: string,
+): { code: string; message: string } {
+  if (outcomeStatus === 'abandoned') {
+    return {
+      code: 'talk_runner_watchdog_abandoned',
+      message:
+        'Run step exceeded its deadline and was failed by the TalkRunner watchdog',
+    };
+  }
+  if (capturedError instanceof TalkExecutorError) {
+    return { code: capturedError.code, message: capturedError.message };
+  }
+  if (capturedError instanceof Error && capturedError.message) {
+    return { code: 'talk_runner_step_failed', message: capturedError.message };
+  }
+  return {
+    code: 'talk_runner_step_failed',
+    message: 'Run step failed under the TalkRunner',
+  };
 }
 
 export function serializeCheckpoint(checkpoint: unknown): string {

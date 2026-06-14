@@ -205,6 +205,10 @@ describe('deadline timer grep gate', () => {
       'source-ingestion.ts': 2, // source-fetch abort timers
       'mock-executor.ts': 1, // mock sleep
       'user-event-hub.ts': 1, // DO RPC timeout
+      // PR-B: bounded-retry BACKOFF sleep for the write-behind terminal flush —
+      // a delay between retries, NOT a deadline race over DB-owning work (the
+      // #608/#609 trap). The terminal persist's bound is the alarm/retry budget.
+      'talk-runner-write-behind.ts': 1,
     };
 
     const offenders: string[] = [];

@@ -2238,6 +2238,7 @@ describe('greenfield jobs compatibility routes', () => {
     expect(directDeniedCancel).toEqual({
       cancelledRuns: 0,
       cancelledRunIds: [],
+      doCancelledRunIds: [],
     });
 
     const deniedCancel = await cancelGreenfieldChatRoute({
@@ -2311,6 +2312,7 @@ describe('greenfield jobs compatibility routes', () => {
     expect(directDeniedCancel).toEqual({
       cancelledRuns: 0,
       cancelledRunIds: [],
+      doCancelledRunIds: [],
     });
 
     const deniedCancel = await cancelGreenfieldChatRoute({

@@ -14,6 +14,10 @@ import {
   type WorkspaceSummaryRecord,
 } from '../../workspaces/accessors.js';
 import { ensureWorkspaceBootstrapForUser } from '../../workspaces/bootstrap.js';
+import {
+  resolveDispatchRuntime,
+  type DispatchRuntime,
+} from '../../talks/talk-dispatch-flag.js';
 import type { ApiEnvelope, AuthContext } from '../types.js';
 
 type RouteResult<T> = {
@@ -252,6 +256,11 @@ export async function enqueueGreenfieldChatRoute(input: {
     message: ReturnType<typeof toMessageApi>;
     runs: ReturnType<typeof toRunApi>[];
     forcedSerialReason: null;
+    // Talk Runtime v2 PR-B: which runtime these runs were dispatched to. The
+    // caller (greenfield-api) branches its dispatch on this; the runs are
+    // marked with it so the reconciliation cron stays path-aware. Default
+    // 'queue' until PR-C flips the per-account flag.
+    runtime: DispatchRuntime;
   }>
 > {
   const talkError = assertTalkId(input.talkId);
@@ -293,12 +302,19 @@ export async function enqueueGreenfieldChatRoute(input: {
     async (ctx) => {
       const writerError = requireWorkspaceWriter(ctx.workspace);
       if (writerError) return writerError;
+      // Resolve the per-account dispatch flag ONCE: it both marks the runs
+      // (runs.runtime → reconciliation path-awareness) and tells the caller
+      // which dispatch path to take. Default 'queue' (flag OFF) in PR-B.
+      const runtime = await resolveDispatchRuntime({
+        workspaceId: ctx.workspace.id,
+      });
       const result = await enqueueGreenfieldChatTurn({
         workspaceId: ctx.workspace.id,
         talkId: input.talkId,
         userId: input.auth.userId,
         content,
         targetAgentIds,
+        runtime,
       });
       if (!result.ok) {
         if (result.reason === 'talk_not_found') {
@@ -337,6 +353,7 @@ export async function enqueueGreenfieldChatRoute(input: {
           message: toMessageApi(result.message),
           runs: result.runs.map(toRunApi),
           forcedSerialReason: null,
+          runtime,
         },
         202,
       );
@@ -352,6 +369,11 @@ export async function cancelGreenfieldChatRoute(input: {
   RouteResult<{
     talkId: string;
     cancelledRuns: number;
+    // Talk Runtime v2 PR-B: the cancelled runs that were dispatched to the DO
+    // (from each run's STORED runtime, not a fresh flag read — so a do→queue
+    // rollback mid-run still notifies the DO). The caller pings those DOs so
+    // they observe the cancel and stop streaming.
+    doCancelledRunIds: string[];
   }>
 > {
   const talkError = assertTalkId(input.talkId);
@@ -389,6 +411,7 @@ export async function cancelGreenfieldChatRoute(input: {
       return ok({
         talkId: input.talkId,
         cancelledRuns: cancelled.cancelledRuns,
+        doCancelledRunIds: cancelled.doCancelledRunIds,
       });
     },
   );
